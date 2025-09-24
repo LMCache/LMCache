@@ -169,8 +169,12 @@ key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
                  const int num_tokens, const int num_layers, const int num_kv) {
   if (transpose) {
     // [2LTD->TD2L]
-    return token_idx * scalars_per_token * num_kv * num_layers +
-           scalar_offset * num_kv * num_layers + k_or_v * num_layers +
+    // return token_idx * scalars_per_token * num_kv * num_layers +
+    //        scalar_offset * num_kv * num_layers + k_or_v * num_layers +
+    //        layer_idx;
+    // Trial: [2LTD->DT2L], T is full chunk
+    return scalar_offset * num_kv * num_layers * num_tokens +
+           token_idx * num_kv * num_layers + k_or_v * num_layers +
            layer_idx;
   }
   return k_or_v * num_layers * num_tokens * scalars_per_token +
@@ -398,7 +402,9 @@ void multi_layer_kv_transfer(
     k_or_v_size = 1;
   }
 
-  dim3 grid(key_value.size(2), num_layers, k_or_v_size);
+  assert(transpose or (num_tokens == (int)key_value.size(2)));
+
+  dim3 grid(num_tokens, num_layers, k_or_v_size);
   dim3 block(std::min(num_qwords, 128));
 
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
@@ -408,13 +414,13 @@ void multi_layer_kv_transfer(
     if (not direction) {
       lmc::load_and_reshape_multi_layer_kernel<int64_t, false, true>
           <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                       slot_mapping_ptr, num_qwords, num_tokens,
+                                       slot_mapping_ptr, num_qwords, (int)key_value.size(2),
                                        num_layers, page_buffer_size);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else {
       lmc::load_and_reshape_multi_layer_kernel<int64_t, true, true>
           <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                       slot_mapping_ptr, num_qwords, num_tokens,
+                                       slot_mapping_ptr, num_qwords, (int)key_value.size(2),
                                        num_layers, page_buffer_size);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     }

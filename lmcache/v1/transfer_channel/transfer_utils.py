@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from enum import Enum
 from typing import Union
 
 # Third Party
@@ -55,6 +56,13 @@ class P2PInitSideRetMsg(InitSideRetMsgBase):
     """P2P specific initialization return message"""
 
     peer_lookup_url: str
+
+
+class PDRole(Enum):
+    SENDER = "sender"
+    RECEIVER = "receiver"
+    # TODO(novahow): for role switch
+    BOTH = "both"
 
 
 SideMsg = Union[

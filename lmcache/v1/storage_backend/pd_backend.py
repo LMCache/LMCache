@@ -3,7 +3,6 @@
 # Standard
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Union
-from enum import Enum
 import asyncio
 import concurrent.futures as cf
 import threading
@@ -30,9 +29,8 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-from lmcache.v1.transfer_channel import CreateTransferChannel, BaseTransferChannel
-from lmcache.v1.transfer_channel.nixl_channel import TPWorkerInfo
-from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
+from lmcache.v1.transfer_channel import CreateTransferChannel, NixlChannel
+from lmcache.v1.transfer_channel.transfer_utils import PDRole, get_correct_device
 
 logger = init_logger(__name__)
 
@@ -91,7 +89,7 @@ class NixlReceiverInfo:
         self.receiver_init_port = receiver_init_port
         self.receiver_alloc_port = receiver_alloc_port
 
-    def get_world_receivers(self) -> list[TPRankRecvInfo]:
+    def get_group_receivers(self) -> list[TPRankRecvInfo]:
         assert len(self.receiver_ids) == len(self.receiver_init_port)
         assert len(self.receiver_ids) == len(self.receiver_alloc_port)
         return [
@@ -103,13 +101,6 @@ class NixlReceiverInfo:
             )
             for tp_rank in range(len(self.receiver_ids))
         ]
-
-
-class PDRole(Enum):
-    SENDER = "sender"
-    RECEIVER = "receiver"
-    # TODO(novahow): for role switch
-    BOTH = "both"
 
 
 @dataclass
@@ -237,15 +228,13 @@ class PDBackend(AllocatorBackendInterface):
                 self.pd_config.peer_init_port
             )
 
-        self.transfer_channel: BaseTransferChannel = CreateTransferChannel(
+        self.transfer_channel: NixlChannel = CreateTransferChannel(
             async_mode=False,
             channel_type=config.transfer_channel,
             role=self.pd_config.role,
             allocator_meta=self.memory_allocator.gpu_allocator.metadata,
-            tp_info=TPWorkerInfo(
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_world_size,
-            ),
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_world_size,
             peer_init_url=peer_init_url,
             backends=config.nixl_backends,
             enable_asym_tp=config.enable_asym_tp,
@@ -365,7 +354,7 @@ class PDBackend(AllocatorBackendInterface):
         # First Party
 
         # ForkedPdb().set_trace()
-        for receiver in receiver_info.get_world_receivers():
+        for receiver in receiver_info.get_group_receivers():
             receiver_id = receiver.receiver_id
             receiver_init_url = receiver.receiver_init_url
             receiver_mem_alloc_url = receiver.receiver_mem_alloc_url
@@ -450,6 +439,7 @@ class PDBackend(AllocatorBackendInterface):
         # Third Party
         from vllm.distributed.utils import divide
 
+        # TODO(novahow): is there better way to obtain receiver tp_size?
         self.dp_ratio = divide(
             len(transfer_spec.receiver_init_port), self.tp_world_size
         )
@@ -461,10 +451,13 @@ class PDBackend(AllocatorBackendInterface):
         receiver_alloc_port = transfer_spec.receiver_alloc_port[
             self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
         ]
+        receiver_ids = transfer_spec.receiver_id[
+            self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
+        ]
         # receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
         # receiver_host = transfer_spec.receiver_host
         receiver_info = NixlReceiverInfo(
-            receiver_ids=transfer_spec.receiver_id,
+            receiver_ids=receiver_ids,
             receiver_host=transfer_spec.receiver_host,
             receiver_init_port=receiver_init_port,
             receiver_alloc_port=receiver_alloc_port,
@@ -482,7 +475,7 @@ class PDBackend(AllocatorBackendInterface):
         with cf.ThreadPoolExecutor(self.dp_ratio) as executor:
             blocking_send_tasks = []
             for receiver_rank, receiver in enumerate(
-                receiver_info.get_world_receivers()
+                receiver_info.get_group_receivers()
             ):
                 alloc_response = self._remote_allocate(
                     receiver.receiver_id, alloc_request
@@ -523,7 +516,8 @@ class PDBackend(AllocatorBackendInterface):
                     )
                 else:
                     logger.debug(
-                        f"All memory objects have been already sent to the remote peer {receiver}."
+                        f"All memory objects have been already sent"
+                        f" to the remote peer {receiver}."
                         " Skipping transfer."
                     )
 

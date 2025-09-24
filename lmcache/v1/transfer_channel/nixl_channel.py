@@ -34,6 +34,7 @@ from lmcache.v1.transfer_channel.transfer_utils import (
 
 logger = init_logger(__name__)
 
+
 class NixlMsgBase(msgspec.Struct, tag=True):
     """Base class for all nixl-related messages"""
 
@@ -63,10 +64,12 @@ class NixlMemRegResponse(NixlMsgBase):
 NixlMsg = Union[
     NixlInitRequest, NixlInitResponse, NixlMemRegRequest, NixlMemRegResponse
 ]
+
+
 @dataclass
 class TPWorkerInfo:
     tp_rank: int
-    tp_size: int
+    tp_size: Optional[int] = None
 
 
 class NixlChannel(BaseTransferChannel):
@@ -127,8 +130,8 @@ class NixlChannel(BaseTransferChannel):
         local_id: str,
         peer_id: str,
         peer_init_url: str,
-        peer_tp_size: int,
         init_side_msg: Optional[InitSideMsgBase] = None,
+        peer_tp_size: Optional[int] = None,
     ) -> Optional[InitSideRetMsgBase]:
         # Initialize temporary socket for nixl initialization
         init_tmp_socket = get_zmq_socket(
@@ -152,10 +155,12 @@ class NixlChannel(BaseTransferChannel):
         )
         remote_meta_bytes = nixl_init_resp.remote_meta_bytes
         remote_agent_name = self.nixl_agent.add_remote_agent(remote_meta_bytes)
-        remote_tp_size = nixl_init_resp.remote_tp_size
-        assert peer_tp_size == remote_tp_size, (
-            f"Peer tp size {peer_tp_size} does not match remote agent tp size {remote_tp_size}"
-        )
+        # TODO(novahow): stricter checking
+        # remote_tp_size = nixl_init_resp.remote_tp_size
+        # assert peer_tp_size == remote_tp_size, (
+        #     f"Peer tp size {peer_tp_size} does not match"
+        #     f" remote agent tp size {remote_tp_size}"
+        # )
 
         # Register remote memory
         local_xfer_dlist_bytes = self.nixl_agent.get_serialized_descs(
@@ -273,6 +278,7 @@ class NixlChannel(BaseTransferChannel):
             resp = NixlInitResponse(
                 remote_agent_name=agent_name,
                 remote_meta_bytes=self.nixl_agent.get_agent_metadata(),
+                remote_tp_size=self.tp_info.tp_size or -1,
             )
 
             logger.info("Replying initialization response")
@@ -448,11 +454,17 @@ class NixlChannel(BaseTransferChannel):
         :return: Number of successfully transferred objects.
         """
         assert transfer_spec is not None
+        # First Party
 
+        local_indexes = self._to_ranged_indices(self.get_local_mem_indices(objects))
+        remote_indexes = self._to_ranged_indices(transfer_spec["remote_indexes"])
+        logger.debug(
+            f"HOWDY local_indexes: {local_indexes}, remote_indexes: {remote_indexes}"
+        )
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handlers[transfer_spec["receiver_id"]],
-            self._to_ranged_indices(self._get_local_mem_indices(objects)),
+            self._to_ranged_indices(self.get_local_mem_indices(objects)),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             self._to_ranged_indices(transfer_spec["remote_indexes"]),
         )
@@ -500,13 +512,11 @@ class NixlChannel(BaseTransferChannel):
         """
 
         assert transfer_spec is not None
-        # First Party
 
-        # ForkedPdb().set_trace()
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handlers[transfer_spec["receiver_id"]],
-            self._get_local_mem_indices(objects),
+            self.get_local_mem_indices(objects),
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
@@ -595,8 +605,8 @@ class NixlChannel(BaseTransferChannel):
         assert remote_tp_group_rank < dp_ratio
         # TODO(novahow) add this check back
         # assert self.remote_page_size == remote_page_size, (
-        #     f"remote page size {self.remote_page_size} != calculated remote page size "
-        #     f"{remote_page_size}"
+        #     f"remote page size {self.remote_page_size} != "
+        #     f"calculated remote page size {remote_page_size}"
         # )
         blocks_data: list[tuple[int, ...]] = []
         base_ptr = self.allocator_meta.buffer_ptr
@@ -679,14 +689,14 @@ class NixlAgentWrapper:
                 // allocator_meta.shape[allocator_meta.fmt.token_dim()]
                 * allocator_meta.dtype.itemsize
             )
-            if enable_asym_tp
+            if False  # enable_asym_tp
             else page_size
         )
         self.per_chunk_range = (
             torch.arange(
                 allocator_meta.shape[allocator_meta.fmt.token_dim()], dtype=torch.long
             )
-            if enable_asym_tp
+            if False  # enable_asym_tp
             else torch.arange(1)
         )
         # Create xfer handlers
@@ -712,6 +722,3 @@ class NixlAgentWrapper:
 
         # ForkedPdb().set_trace()
         self.xfer_handlers[receiver_id] = xfer_handler
-
-
-

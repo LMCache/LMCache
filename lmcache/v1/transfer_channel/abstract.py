@@ -27,6 +27,7 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         peer_id: str,
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
+        peer_tp_size: Optional[int] = None,
     ) -> Optional[InitSideRetMsgBase]:
         """
         Lazily initialize the connection to a peer.

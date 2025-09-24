@@ -359,6 +359,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return MixedMemoryAllocator(
                 int(cpu_size * 1024**3),
                 numa_mapping=numa_mapping,
+                transpose=config.enable_asym_tp and config.enable_pd,
             )
 
     @_lmcache_nvtx_annotate

@@ -230,7 +230,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
         # First Party
-
+        from lmcache.integration.vllm.utils import ForkedPdb
         # ForkedPdb().set_trace()
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
@@ -285,6 +285,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+                from lmcache.integration.vllm.utils import ForkedPdb
+                # ForkedPdb().set_trace()
                 lmc_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,  # .permute(*permutation),
                     kv_cache_pointers,
