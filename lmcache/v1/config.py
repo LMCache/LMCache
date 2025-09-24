@@ -71,6 +71,62 @@ def _to_bool(
     return str(value).strip().lower() in ["true", "1"]
 
 
+def _parse_quoted_string(value: str) -> str:
+    """Parse a string that may be surrounded by quotes and handle escape characters.
+
+    Args:
+        value: The input string that may be quoted
+
+    Returns:
+        The unquoted string with escape characters properly handled
+    """
+    if not value:
+        return value
+
+    value = value.strip()
+
+    # Check if the string is surrounded by quotes (single or double)
+    if len(value) >= 2:
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            # Remove the surrounding quotes
+            quoted_content = value[1:-1]
+
+            # Handle escape sequences
+            # Use json.loads for proper escape sequence handling if it's double-quoted
+            if value.startswith('"'):
+                try:
+                    # Wrap in quotes again for json.loads to work properly
+                    return json.loads(f'"{quoted_content}"')
+                except json.JSONDecodeError:
+                    # If json.loads fails, manually handle common escape sequences
+                    return _manual_unescape(quoted_content)
+            else:
+                # For single-quoted strings, manually handle escape sequences
+                return _manual_unescape(quoted_content)
+
+    return value
+
+
+def _manual_unescape(s: str) -> str:
+    """Manually handle common escape sequences."""
+    replacements = {
+        "\\n": "\n",
+        "\\t": "\t",
+        "\\r": "\r",
+        "\\\\": "\\",
+        '\\"': '"',
+        "\\'": "'",
+    }
+
+    result = s
+    for escaped, unescaped in replacements.items():
+        result = result.replace(escaped, unescaped)
+
+    return result
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -632,11 +688,15 @@ def _update_config_from_env(self):
     for name, config in _CONFIG_DEFINITIONS.items():
         if name in resolved_config:
             try:
-                value = resolved_config[name]
+                # Parse quoted strings and handle escape characters
+                raw_value = resolved_config[name]  # Keep original value for logging
+                value = _parse_quoted_string(raw_value)
                 converted_value = config["env_converter"](value)
                 setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
-                logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
+                logger.warning(
+                    f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
+                )
                 # Keep existing value if conversion fails
 
     return self
