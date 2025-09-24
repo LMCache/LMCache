@@ -33,6 +33,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
+from lmcache.observability import add_h2d, add_h2d_raw, add_h2d_coalesced
 
 if TYPE_CHECKING:
     # First Party
@@ -95,7 +96,6 @@ def allocate_and_copy_objects(
             except Exception:
                 gran = 0
             if gran > 0 and hasattr(memory_obj, "tensor") and hasattr(src_memory_obj, "tensor"):
-                from lmcache.observability import add_h2d, add_h2d_raw, add_h2d_coalesced
                 import lmcache.c_ops as ext
                 # Build one ChunkEx for the contiguous region
                 ChunkEx = ext.ChunkEx
@@ -116,7 +116,14 @@ def allocate_and_copy_objects(
                 add_h2d(ce.len)
                 add_h2d_coalesced(ce.len)
             else:
-                memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+                # OFF path: still record total H2D as one call per tensor.copy_
+                try:
+                    sz = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+                    add_h2d_raw(sz)
+                    memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+                    add_h2d(sz)
+                except Exception:
+                    memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
     stream.synchronize()
