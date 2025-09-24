@@ -140,10 +140,11 @@ def run_case(name: str, gran_bytes: int, sizes: List[int], streams_n: int) -> di
     bytes_total = int(snap.get("h2d_bytes", 0))
     calls = int(snap.get("h2d_calls", 0))
     bpc = bytes_total / max(calls, 1)
+    gbs = (bytes_total / (1 << 30)) / elapsed
 
     print(
         f"[{name}] gran={gran_bytes} | total={_human(bytes_total)} | calls={calls} | "
-        f"bytes/call={_human(int(bpc))} | time={elapsed*1000:.2f} ms | streams={streams_n}"
+        f"bytes/call={_human(int(bpc))} | H2D={gbs:.2f} GB/s | time={elapsed*1000:.2f} ms | streams={streams_n}"
     )
     return {
         "name": name,
@@ -151,6 +152,7 @@ def run_case(name: str, gran_bytes: int, sizes: List[int], streams_n: int) -> di
         "total": bytes_total,
         "calls": calls,
         "bpc": bpc,
+        "gbps": gbs,
         "elapsed_ms": elapsed * 1000.0,
     }
 
