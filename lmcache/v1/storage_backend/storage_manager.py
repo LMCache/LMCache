@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
 import asyncio
 import functools
 import threading
+import os
 
 # Third Party
 import torch
@@ -87,7 +88,35 @@ def allocate_and_copy_objects(
             break
 
         with torch.cuda.stream(stream):
-            memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+            # Thin coalescing layer (ENV-gated, default OFF)
+            gran_env = os.getenv("LMCACHE_KV_IO_GRANULARITY_BYTES", "0")
+            try:
+                gran = int(gran_env)
+            except Exception:
+                gran = 0
+            if gran > 0 and hasattr(memory_obj, "tensor") and hasattr(src_memory_obj, "tensor"):
+                from lmcache.observability import add_h2d, add_h2d_raw, add_h2d_coalesced
+                import lmcache.c_ops as ext
+                # Build one ChunkEx for the contiguous region
+                ChunkEx = ext.ChunkEx
+                ce = ChunkEx()
+                ce.src = int(src_memory_obj.tensor.data_ptr())
+                ce.len = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+                base = int(memory_obj.tensor.data_ptr())
+                ce.dst = int(base)
+                ce.dst_off = 0
+                add_h2d_raw(ce.len)
+                # Initialize per-stream staging once (best-effort)
+                try:
+                    ext.init_stream_staging(max(gran, 2 * 1024 * 1024), 2)
+                except Exception:
+                    pass
+                # Launch coalesced H2D (single group)
+                ext.build_pack_and_h2d_batches(int(base), [ce], int(gran), int(max(gran, 64 * 1024 * 1024)), 8)
+                add_h2d(ce.len)
+                add_h2d_coalesced(ce.len)
+            else:
+                memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
     stream.synchronize()
