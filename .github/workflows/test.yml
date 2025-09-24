@@ -38,8 +38,6 @@ jobs:
     strategy:
       matrix:
         python:
-          # Disable 3.9 until code supports it in https://github.com/LMCache/LMCache/pull/1584
-          # - "3.9"
           - "3.10"
           - "3.11"
           - "3.12"
@@ -80,5 +78,5 @@ jobs:
 
       - name: "Run non-CUDA unit tests (v1/storage_backend)"
         run: |
-          pytest tests/v1/storage_backend/
+          pytest
 
