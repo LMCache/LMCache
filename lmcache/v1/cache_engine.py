@@ -98,7 +98,11 @@ class LMCacheEngine:
         )
 
         if self.save_only_first_rank:
-            self.broadcast_stream = self.gpu_connector.load_stream if hasattr(self.gpu_connector,"load_stream") else torch.cuda.Stream()
+            self.broadcast_stream = (
+                self.gpu_connector.load_stream
+                if hasattr(self.gpu_connector, "load_stream")
+                else torch.cuda.Stream()
+            )
 
         self.enable_controller = config.enable_controller
 
