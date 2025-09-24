@@ -74,6 +74,16 @@ def allocate_and_copy_objects(
         - list of the memory objects that has been successfully allocated
     """
     allocated_objects = []
+    # ENV-gated coalescing toggle (default OFF)
+    gran_env = os.getenv("LMCACHE_KV_IO_GRANULARITY_BYTES", "0")
+    try:
+        gran = int(gran_env)
+    except Exception:
+        gran = 0
+    # When gran>0, accumulate per-base chunks for a single coalesced launch
+    # plan_map: base_ptr(int) -> list of (src_ptr, len, dst_off)
+    plan_map: dict[int, list[tuple[int, int, int]]] = {} if gran > 0 else {}
+
     for key, src_memory_obj in zip(keys, src_memory_objs, strict=False):
         if allocator_backend.contains(key):
             continue
@@ -88,43 +98,58 @@ def allocate_and_copy_objects(
         if memory_obj is None or memory_obj.tensor is None:
             break
 
-        with torch.cuda.stream(stream):
-            # Thin coalescing layer (ENV-gated, default OFF)
-            gran_env = os.getenv("LMCACHE_KV_IO_GRANULARITY_BYTES", "0")
+        if gran > 0 and hasattr(memory_obj, "tensor") and hasattr(src_memory_obj, "tensor"):
+            # Build plan entry for this object; copy will be launched after allocation loop
+            dst_ptr = int(memory_obj.tensor.data_ptr())
+            # Infer base pointer from metadata address (byte offset)
             try:
-                gran = int(gran_env)
+                dst_off = int(memory_obj.meta.address)
+                dst_base = int(dst_ptr - dst_off)
             except Exception:
-                gran = 0
-            if gran > 0 and hasattr(memory_obj, "tensor") and hasattr(src_memory_obj, "tensor"):
-                import lmcache.c_ops as ext
-                # Build one ChunkEx for the contiguous region
-                ChunkEx = ext.ChunkEx
-                ce = ChunkEx()
-                ce.src = int(src_memory_obj.tensor.data_ptr())
-                ce.len = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
-                base = int(memory_obj.tensor.data_ptr())
-                ce.dst = int(base)
-                ce.dst_off = 0
-                add_h2d_raw(ce.len)
-                # Initialize per-stream staging once (best-effort)
-                try:
-                    ext.init_stream_staging(max(gran, 2 * 1024 * 1024), 2)
-                except Exception:
-                    pass
-                # Launch coalesced H2D (single group)
-                ext.build_pack_and_h2d_batches(int(base), [ce], int(gran), int(max(gran, 64 * 1024 * 1024)), 8)
-                add_h2d(ce.len)
-                add_h2d_coalesced(ce.len)
-            else:
-                # OFF path: still record total H2D as one call per tensor.copy_
-                try:
-                    sz = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
-                    add_h2d_raw(sz)
-                    memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
-                    add_h2d(sz)
-                except Exception:
-                    memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+                # Fallback: treat each as standalone base (no cross-object coalescing)
+                dst_base = int(dst_ptr)
+                dst_off = 0
+            src_ptr = int(src_memory_obj.tensor.data_ptr())
+            size_b = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+            plan_map.setdefault(dst_base, []).append((src_ptr, size_b, dst_off))
+            # Raw metric per incoming chunk
+            add_h2d_raw(size_b)
+        else:
+            with torch.cuda.stream(stream):
+                # OFF path: record metrics and do per-object copy
+                sz = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+                add_h2d_raw(sz)
+                memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+                add_h2d(sz)
         allocated_objects.append(memory_obj)
+
+    # If gran>0, launch coalesced copies per base buffer once
+    if gran > 0 and plan_map:
+        with torch.cuda.stream(stream):
+            import lmcache.c_ops as ext
+            try:
+                ext.init_stream_staging(max(gran, 2 * 1024 * 1024), 2)
+            except Exception:
+                pass
+            for base, items in plan_map.items():
+                # Build ChunkEx list sorted by dst_off
+                ChunkEx = ext.ChunkEx
+                chunk_list = []
+                total_bytes = 0
+                for src_ptr, size_b, dst_off in items:
+                    ce = ChunkEx()
+                    ce.src = int(src_ptr)
+                    ce.len = int(size_b)
+                    ce.dst = int(base)
+                    ce.dst_off = int(dst_off)
+                    chunk_list.append(ce)
+                    total_bytes += int(size_b)
+                # Single call will internally batch contiguous ranges
+                ext.build_pack_and_h2d_batches(
+                    int(base), chunk_list, int(gran), int(max(gran, 64 * 1024 * 1024)), 8
+                )
+                add_h2d(total_bytes)
+                add_h2d_coalesced(total_bytes)
 
     stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
