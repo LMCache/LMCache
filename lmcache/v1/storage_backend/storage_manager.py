@@ -110,16 +110,22 @@ def allocate_and_copy_objects(
                 dst_base = int(dst_ptr)
                 dst_off = 0
             src_ptr = int(src_memory_obj.tensor.data_ptr())
-            size_b = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+            size_b = int(
+                src_memory_obj.tensor.numel()
+                * src_memory_obj.tensor.element_size()
+            )
             plan_map.setdefault(dst_base, []).append((src_ptr, size_b, dst_off))
-            # Raw metric per incoming chunk
             add_h2d_raw(size_b)
         else:
             with torch.cuda.stream(stream):
-                # OFF path: record metrics and do per-object copy
-                sz = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+                sz = int(
+                    src_memory_obj.tensor.numel()
+                    * src_memory_obj.tensor.element_size()
+                )
                 add_h2d_raw(sz)
-                memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+                memory_obj.tensor.copy_(
+                    src_memory_obj.tensor, non_blocking=True
+                )
                 add_h2d(sz)
         allocated_objects.append(memory_obj)
 
@@ -146,7 +152,11 @@ def allocate_and_copy_objects(
                     total_bytes += int(size_b)
                 # Single call will internally batch contiguous ranges
                 ext.build_pack_and_h2d_batches(
-                    int(base), chunk_list, int(gran), int(max(gran, 64 * 1024 * 1024)), 8
+                    int(base),
+                    chunk_list,
+                    int(gran),
+                    int(max(gran, 64 * 1024 * 1024)),
+                    8,
                 )
                 add_h2d(total_bytes)
                 add_h2d_coalesced(total_bytes)

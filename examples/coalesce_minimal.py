@@ -94,7 +94,7 @@ def _plan_sizes(total_bytes: int, mode: str) -> List[int]:
 
 def _partition(lst: List, parts: int) -> List[List]:
     parts = max(1, int(parts))
-    out = [[] for _ in range(parts)]
+    out: List[List] = [[] for _ in range(parts)]
     for i, v in enumerate(lst):
         out[i % parts].append(v)
     return out
@@ -143,8 +143,12 @@ def run_case(name: str, gran_bytes: int, sizes: List[int], streams_n: int) -> di
     gbs = (bytes_total / (1 << 30)) / elapsed
 
     print(
-        f"[{name}] gran={gran_bytes} | total={_human(bytes_total)} | calls={calls} | "
-        f"bytes/call={_human(int(bpc))} | H2D={gbs:.2f} GB/s | time={elapsed*1000:.2f} ms | streams={streams_n}"
+        (
+            f"[{name}] gran={gran_bytes} | total={_human(bytes_total)} | "
+            f"calls={calls} | bytes/call={_human(int(bpc))} | "
+            f"H2D={gbs:.2f} GB/s | time={elapsed*1000:.2f} ms | "
+            f"streams={streams_n}"
+        )
     )
     return {
         "name": name,
