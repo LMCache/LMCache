@@ -100,9 +100,16 @@ def _partition(lst: List, parts: int) -> List[List]:
     return out
 
 
-def run_case(name: str, gran_bytes: int, sizes: List[int], streams_n: int) -> dict:
+def run_case(name: str, gran_bytes: int, sizes: List[int], streams_n: int,
+             latency_profile: bool = False) -> dict:
     os.environ["LMCACHE_KV_IO_GRANULARITY_BYTES"] = str(int(gran_bytes))
     os.environ.setdefault("LMCACHE_USE_THP", "auto")  # no-op if unsupported
+    if latency_profile:
+        # Recommended latency-friendly profile
+        os.environ.setdefault("LMCACHE_COALESCE_MAX_ITEMS", "4")
+        os.environ.setdefault("LMCACHE_COALESCE_MAX_GROUP_BYTES", str(16 * 1024 * 1024))
+        os.environ.setdefault("LMCACHE_STAGING_BUFFERS", "4")
+        os.environ.setdefault("LMCACHE_STAGING_SPIN_US", "0")
 
     src_objs, total, _ = _make_src_objs(len(sizes), sizes)
     dst_alloc = _make_dst_allocator(total)
@@ -148,6 +155,7 @@ def run_case(name: str, gran_bytes: int, sizes: List[int], streams_n: int) -> di
             f"calls={calls} | bytes/call={_human(int(bpc))} | "
             f"H2D={gbs:.2f} GB/s | time={elapsed*1000:.2f} ms | "
             f"streams={streams_n}"
+            + (" | profile=latency" if latency_profile else "")
         )
     )
     return {
@@ -158,6 +166,7 @@ def run_case(name: str, gran_bytes: int, sizes: List[int], streams_n: int) -> di
         "bpc": bpc,
         "gbps": gbs,
         "elapsed_ms": elapsed * 1000.0,
+        "latency_profile": latency_profile,
     }
 
 
@@ -180,7 +189,10 @@ def main():
     parser.add_argument("--mode", type=str, default="many_smalls", choices=["many_smalls", "mixed"], help="Size pattern")
     parser.add_argument("--total-mib", type=int, default=256, help="Total data per run in MiB")
     parser.add_argument("--streams", type=int, default=4, help="Concurrent CUDA streams")
-    parser.add_argument("--gran-on", type=str, default="2MiB", help="Granularity when ON (bytes)")
+    parser.add_argument("--gran-on", type=str, default="2MiB",
+                        help="Granularity when ON (bytes)")
+    parser.add_argument("--latency-profile", action="store_true",
+                        help="Apply recommended latency-friendly ENV settings")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -194,8 +206,8 @@ def main():
     print("--- LMCache Coalescing Minimal Demo ---")
     print("Note: Toggle via LMCACHE_KV_IO_GRANULARITY_BYTES; default OFF(0)")
 
-    off = run_case("OFF", 0, sizes, args.streams)
-    on = run_case("ON", gran_on, sizes, args.streams)
+    off = run_case("OFF", 0, sizes, args.streams, args.latency_profile)
+    on = run_case("ON", gran_on, sizes, args.streams, args.latency_profile)
 
     if off["calls"] > 0 and on["calls"] > 0:
         improved_calls = on["calls"] <= off["calls"]
@@ -210,6 +222,9 @@ def main():
     print("- Increase --total-mib or --streams for stronger effect.")
     print("- You can set LMCACHE_USE_THP=true to hint hugepages (no-op if unsupported).")
     print("- As Linux GPU ZONE_DEVICE/HMM matures, the same design benefits more.")
+    if args.latency_profile:
+        print("- Latency profile: MAX_ITEMS=4, MAX_GROUP_BYTES=16MiB, "
+              "STAGING_BUFFERS=4, STAGING_SPIN_US=0")
 
 
 if __name__ == "__main__":
