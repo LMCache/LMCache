@@ -78,7 +78,7 @@ def allocate_and_copy_objects(
     gran_env = os.getenv("LMCACHE_KV_IO_GRANULARITY_BYTES", "0")
     try:
         gran = int(gran_env)
-    except Exception:
+    except ValueError:
         gran = 0
     # Latency-sensitive knobs
     try:

@@ -109,7 +109,6 @@ static StagingBuf* acquire_buf(cudaStream_t s) {
           return &b;
         }
         if (cudaEventQuery(b.done) == cudaSuccess) {
-          b.in_flight = false;
           b.in_flight = true;
           return &b;
         }
@@ -125,7 +124,6 @@ static StagingBuf* acquire_buf(cudaStream_t s) {
       auto& ss = g_staging.at(key);
       auto& b = ss.ring[ss.idx];
       check_cuda(cudaEventSynchronize(b.done), "cudaEventSynchronize(staging)");
-      b.in_flight = false;
       b.in_flight = true;
       return &b;
     }
