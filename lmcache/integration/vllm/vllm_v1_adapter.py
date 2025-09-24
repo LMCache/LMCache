@@ -422,7 +422,6 @@ def _calculate_mtp_layers(vllm_config, model_config):
                     "falling back to 1"
                 )
                 num_mtp_layers = 1
-            logger.info(f"EAGLE detected, adding {num_mtp_layers} extra layer(s)")
     return num_mtp_layers
 
 
