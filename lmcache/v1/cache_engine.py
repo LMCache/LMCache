@@ -97,6 +97,9 @@ class LMCacheEngine:
             and metadata.use_mla
         )
 
+        if self.save_only_first_rank:
+            self.broadcast_stream = self.gpu_connector.load_stream if hasattr(self.gpu_connector,"load_stream") else torch.cuda.Stream()
+
         self.enable_controller = config.enable_controller
 
         # NOTE: Unix systems use fork by default
@@ -463,10 +466,20 @@ class LMCacheEngine:
                     **kwargs,
                 )
         if self.save_only_first_rank:
-            self._broadcast_or_receive_memory_objs(
-                reordered_chunks,
-                ret_mask,
-            )
+            with torch.cuda.stream(self.broadcast_stream):
+                self._broadcast_or_receive_memory_objs(
+                    reordered_chunks,
+                    ret_mask,
+                )
+
+            # if self.gpu_connector has load_stream, self.broadcast_stream is equals
+            # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
+            # will execute sequentially within the stream.
+            # if self.gpu_connector does not have load_stream, self.broadcast_stream
+            # is created by torch.cuda.Stream(), we need to synchronize broadcast
+            # operation, and then process to_cpu operation.
+            if not hasattr(self.gpu_connector, "load_stream"):
+                self.broadcast_stream.synchronize()
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
