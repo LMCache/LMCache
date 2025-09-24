@@ -44,7 +44,9 @@ class HitLimitLookupClient(LookupClientInterface):
         if result is not None:
             total_tokens_length = len(token_ids)
             assert result <= total_tokens_length
-            current_hit_rate = result / total_tokens_length
+            current_hit_rate = 0.0
+            if total_tokens_length > 0:
+                current_hit_rate = result / total_tokens_length
             # limit the hit tokens
             if current_hit_rate > self.hit_limit_upper:
                 origin_result = result
