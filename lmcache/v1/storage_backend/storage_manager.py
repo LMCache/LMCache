@@ -183,6 +183,8 @@ class StorageManager:
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
+        self.config = config
+        self.metadata = metadata
         self.loop = asyncio.new_event_loop()
 
         self.thread = threading.Thread(
@@ -230,6 +232,10 @@ class StorageManager:
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
+            assert not self.config.save_unfull_chunk, (
+                "save_unfull_chunk should be automatically set to False when using "
+                "async loading."
+            )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
             self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
