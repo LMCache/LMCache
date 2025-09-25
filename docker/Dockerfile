@@ -123,7 +123,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
             --extra-index-url https://wheels.vllm.ai/nightly \
             --index-strategy unsafe-best-match ; \
     else \
-        uv pip install --prerelease=allow "vllm[runai,tensorizer]==${VLLM_VERSION}" ; \
+        uv pip install --prerelease=allow "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
