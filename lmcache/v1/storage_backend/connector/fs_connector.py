@@ -208,8 +208,8 @@ class FSConnector(RemoteConnector):
         try:
             os.remove(file_path)
             return True
-        except Exception as e:
-            logger.error(f"Failed to remove file {file_path}: {str(e)}")
+        except OSError as e:
+            logger.error(f"Failed to remove file {file_path}: {e}")
             return False
 
     @no_type_check
