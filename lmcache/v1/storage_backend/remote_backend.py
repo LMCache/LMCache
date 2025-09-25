@@ -466,8 +466,8 @@ class RemoteBackend(StorageBackendInterface):
 
         try:
             return self.connection.remove_sync(key)
-        except Exception as e:
-            logger.error(f"Failed to remove key {key}: {str(e)}")
+        except Exception:
+            logger.exception(f"Failed to remove key {key}")
             return False
 
     def get_allocator_backend(self):
