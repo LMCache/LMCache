@@ -82,6 +82,7 @@ struct StreamStaging {
   std::vector<StagingBuf> ring;
   size_t idx = 0;
   size_t bytes = 0;
+  std::mutex mu;  // Per-stream mutex for fine-grained locking
 };
 
 static std::unordered_map<uint64_t, StreamStaging> g_staging;
@@ -93,17 +94,23 @@ static StagingBuf* acquire_buf(cudaStream_t s) {
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::microseconds(g_staging_spin_us);
 
+  // Get reference to StreamStaging with global lock, then use per-stream lock
+  StreamStaging* ss_ptr = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_staging_mu);
+    auto it = g_staging.find(key);
+    if (it == g_staging.end() || it->second.ring.empty()) {
+      throw std::runtime_error("staging not initialized for stream");
+    }
+    ss_ptr = &it->second;
+  }
+
   for (;;) {
     {
-      std::lock_guard<std::mutex> lock(g_staging_mu);
-      auto it = g_staging.find(key);
-      if (it == g_staging.end() || it->second.ring.empty()) {
-        throw std::runtime_error("staging not initialized for stream");
-      }
-      auto& ss = it->second;
-      size_t n = ss.ring.size();
+      std::lock_guard<std::mutex> lock(ss_ptr->mu);  // Per-stream lock
+      size_t n = ss_ptr->ring.size();
       for (size_t tries = 0; tries < n; ++tries) {
-        auto& b = ss.ring[ss.idx];
+        auto& b = ss_ptr->ring[ss_ptr->idx];
         if (!b.in_flight) {
           b.in_flight = true;
           return &b;
@@ -112,18 +119,28 @@ static StagingBuf* acquire_buf(cudaStream_t s) {
           b.in_flight = true;
           return &b;
         }
-        ss.idx = (ss.idx + 1) % n;
+        ss_ptr->idx = (ss_ptr->idx + 1) % n;
       }
     }
     if (g_staging_spin_us > 0 && std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::microseconds(10));
       continue;
     }
+    // Extract event to sync outside of the per-stream lock
+    cudaEvent_t event_to_sync;
     {
-      std::lock_guard<std::mutex> lock(g_staging_mu);
-      auto& ss = g_staging.at(key);
-      auto& b = ss.ring[ss.idx];
-      check_cuda(cudaEventSynchronize(b.done), "cudaEventSynchronize(staging)");
+      std::lock_guard<std::mutex> lock(ss_ptr->mu);
+      auto& b = ss_ptr->ring[ss_ptr->idx];
+      event_to_sync = b.done;
+    }
+    // Synchronize outside of any lock to avoid blocking other threads
+    check_cuda(cudaEventSynchronize(event_to_sync),
+               "cudaEventSynchronize(staging)");
+
+    // Re-acquire per-stream lock to mark buffer as in_flight and return it
+    {
+      std::lock_guard<std::mutex> lock(ss_ptr->mu);
+      auto& b = ss_ptr->ring[ss_ptr->idx];
       b.in_flight = true;
       return &b;
     }

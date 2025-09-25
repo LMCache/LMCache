@@ -78,17 +78,8 @@ def allocate_and_copy_objects(
         gran = int(gran_env)
     except ValueError:
         gran = 0
-    # Latency-sensitive knobs
-    try:
-        max_items_env = os.getenv("LMCACHE_COALESCE_MAX_ITEMS", "8")
-        max_items = int(max_items_env)
-    except Exception:
-        max_items = 8
-    try:
-        max_group_bytes_env = os.getenv("LMCACHE_COALESCE_MAX_GROUP_BYTES", "0")
-        max_group_bytes = int(max_group_bytes_env)
-    except Exception:
-        max_group_bytes = 0
+    # Note: max_items and max_group_bytes are now handled by C++ function
+    # for optimal batching performance
 
     # Staging buffer configuration
     try:
@@ -219,9 +210,10 @@ def allocate_and_copy_objects(
                     continue
 
                 if ext is not None:
-                    # Build ChunkEx list sorted by dst_off
+                    # Build ChunkEx list - let C++ function handle sorting and batching
                     ChunkEx = ext.ChunkEx
                     chunk_list = []
+                    total_bytes = 0
                     for src_ptr, size_b, dst_off in items:
                         ce = ChunkEx()
                         ce.src = int(src_ptr)
@@ -229,53 +221,34 @@ def allocate_and_copy_objects(
                         ce.dst = int(base)
                         ce.dst_off = int(dst_off)
                         chunk_list.append(ce)
-                    chunk_list.sort(key=lambda ce: int(ce.dst_off))
+                        total_bytes += int(size_b)
 
-                    # Window by max_items and optional max_group_bytes for latency
-                    start_idx = 0
-                    n = len(chunk_list)
-                    while start_idx < n:
-                        end_idx = min(n, start_idx + max(1, max_items))
-                        if max_group_bytes and max_group_bytes > 0:
-                            # shrink window to respect max_group_bytes
-                            acc = 0
-                            cut = start_idx
-                            while (
-                                cut < end_idx
-                                and (acc + int(chunk_list[cut].len)) <= max_group_bytes
-                            ):
-                                acc += int(chunk_list[cut].len)
-                                cut += 1
-                            if cut == start_idx:
-                                # single very large item, send as is
-                                cut = start_idx + 1
-                            end_idx = cut
-
-                        window = chunk_list[start_idx:end_idx]
-                        win_bytes = sum(int(ce.len) for ce in window)
-                        try:
-                            ext.build_pack_and_h2d_batches(
-                                int(base),
-                                window,
-                                int(gran),
-                                int(max(gran, gran_max)),
-                                lookahead,
-                            )
-                        except Exception as e:
-                            logger.critical(
-                                "Coalesced H2D copy failed for batch transfer. "
-                                "Data will be missing on device. "
-                                "base=%s, window_size=%s, gran=%s: %s",
-                                hex(base),
-                                len(window),
-                                gran,
-                                str(e),
-                                exc_info=True,
-                            )
-                            raise
-                        add_h2d(int(win_bytes))
-                        add_h2d_coalesced(int(win_bytes))
-                        start_idx = end_idx
+                    # Pass entire chunk list to C++ for optimal batching
+                    # C++ function will handle sorting, windowing, and batching
+                    # internally
+                    try:
+                        ext.build_pack_and_h2d_batches(
+                            int(base),
+                            chunk_list,
+                            int(gran),
+                            int(max(gran, gran_max)),
+                            lookahead,
+                        )
+                    except Exception as e:
+                        logger.critical(
+                            "Coalesced H2D copy failed for batch transfer. "
+                            "Data will be missing on device. "
+                            "base=%s, total_chunks=%s, total_bytes=%s, gran=%s: %s",
+                            hex(base),
+                            len(chunk_list),
+                            total_bytes,
+                            gran,
+                            str(e),
+                            exc_info=True,
+                        )
+                        raise
+                    add_h2d(int(total_bytes))
+                    add_h2d_coalesced(int(total_bytes))
 
     stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
