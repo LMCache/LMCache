@@ -401,6 +401,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
             0,
             False,
             True,
+            False,
         )
 
     for left_kv, right_kv in zip(kv_cache, kv_cache_new, strict=False):
