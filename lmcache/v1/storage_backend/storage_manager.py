@@ -89,6 +89,26 @@ def allocate_and_copy_objects(
         max_group_bytes = int(max_group_bytes_env)
     except Exception:
         max_group_bytes = 0
+    
+    # Staging buffer configuration
+    try:
+        staging_buffers_env = os.getenv("LMCACHE_STAGING_BUFFERS", "2")
+        staging_buffers = int(staging_buffers_env)
+    except Exception:
+        staging_buffers = 2
+    
+    # Coalescing configuration constants
+    try:
+        lookahead_env = os.getenv("LMCACHE_COALESCE_LOOKAHEAD", "8")
+        lookahead = int(lookahead_env)
+    except Exception:
+        lookahead = 8
+    
+    try:
+        gran_max_env = os.getenv("LMCACHE_COALESCE_GRAN_MAX_BYTES", str(64 * 1024 * 1024))
+        gran_max = int(gran_max_env)
+    except Exception:
+        gran_max = 64 * 1024 * 1024
     # When gran>0, accumulate per-base chunks for a single coalesced launch
     # plan_map: base_ptr(int) -> list of (src_ptr, len, dst_off)
     plan_map: dict[int, list[tuple[int, int, int]]] = {} if gran > 0 else {}
@@ -143,9 +163,14 @@ def allocate_and_copy_objects(
                 ext = None
             if ext is not None:
                 try:
-                    ext.init_stream_staging(max(gran, 2 * 1024 * 1024), 2)
-                except Exception:
-                    pass
+                    ext.init_stream_staging(max(gran, 2 * 1024 * 1024), staging_buffers)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to initialize staging buffers for coalesced H2D transfers: %s. "
+                        "Falling back to individual transfers.", 
+                        str(e),
+                        exc_info=True
+                    )
             for base, items in plan_map.items():
                 # Heuristic bypass for small batches to reduce latency
                 total_bytes_all = sum(int(sz) for _, sz, _ in items)
@@ -156,8 +181,14 @@ def allocate_and_copy_objects(
                         if ext is not None:
                             try:
                                 ext.memcpy_h2d_async(int(base + dst_off), int(src_ptr), int(size_b))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.critical(
+                                    "H2D copy failed for individual transfer. Data will be missing on device. "
+                                    "src_ptr=%s, dst_ptr=%s, size=%s: %s",
+                                    hex(src_ptr), hex(base + dst_off), size_b, str(e),
+                                    exc_info=True,
+                                )
+                                raise
                         else:
                             # Build temporary tensors only as a last resort
                             dst_tensor = torch.empty((size_b,), dtype=torch.uint8, device="cuda")
@@ -204,12 +235,17 @@ def allocate_and_copy_objects(
                                 int(base),
                                 window,
                                 int(gran),
-                                int(max(gran, 64 * 1024 * 1024)),
-                                8,
+                                int(max(gran, gran_max)),
+                                lookahead,
                             )
-                        except Exception:
-                            # best effort: still count bytes
-                            pass
+                        except Exception as e:
+                            logger.critical(
+                                "Coalesced H2D copy failed for batch transfer. Data will be missing on device. "
+                                "base=%s, window_size=%s, gran=%s: %s",
+                                hex(base), len(window), gran, str(e),
+                                exc_info=True,
+                            )
+                            raise
                         add_h2d(int(win_bytes))
                         add_h2d_coalesced(int(win_bytes))
                         start_idx = end_idx
