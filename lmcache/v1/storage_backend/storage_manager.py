@@ -5,8 +5,8 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
 import asyncio
 import functools
-import threading
 import os
+import threading
 
 # Third Party
 import torch
@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.observability import add_h2d, add_h2d_coalesced, add_h2d_raw
 from lmcache.utils import (
     CacheEngineKey,
     _lmcache_nvtx_annotate,
@@ -31,7 +32,6 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.observability import add_h2d, add_h2d_raw, add_h2d_coalesced
 
 if TYPE_CHECKING:
     # First Party
@@ -89,23 +89,25 @@ def allocate_and_copy_objects(
         max_group_bytes = int(max_group_bytes_env)
     except Exception:
         max_group_bytes = 0
-    
+
     # Staging buffer configuration
     try:
         staging_buffers_env = os.getenv("LMCACHE_STAGING_BUFFERS", "2")
         staging_buffers = int(staging_buffers_env)
     except Exception:
         staging_buffers = 2
-    
+
     # Coalescing configuration constants
     try:
         lookahead_env = os.getenv("LMCACHE_COALESCE_LOOKAHEAD", "8")
         lookahead = int(lookahead_env)
     except Exception:
         lookahead = 8
-    
+
     try:
-        gran_max_env = os.getenv("LMCACHE_COALESCE_GRAN_MAX_BYTES", str(64 * 1024 * 1024))
+        gran_max_env = os.getenv(
+            "LMCACHE_COALESCE_GRAN_MAX_BYTES", str(64 * 1024 * 1024)
+        )
         gran_max = int(gran_max_env)
     except Exception:
         gran_max = 64 * 1024 * 1024
@@ -132,7 +134,8 @@ def allocate_and_copy_objects(
             and hasattr(memory_obj, "tensor")
             and hasattr(src_memory_obj, "tensor")
         ):
-            # Build plan entry for this object; copy will be launched after allocation loop
+            # Build plan entry for this object; copy will be launched after
+            # allocation loop
             dst_ptr = int(memory_obj.tensor.data_ptr())
             # Infer base pointer from metadata address (byte offset)
             try:
@@ -142,13 +145,21 @@ def allocate_and_copy_objects(
                 # Fallback: treat each as standalone base (no cross-object coalescing)
                 dst_base = int(dst_ptr)
                 dst_off = 0
+            if src_memory_obj.tensor is None:
+                continue
             src_ptr = int(src_memory_obj.tensor.data_ptr())
-            size_b = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+            size_b = int(
+                src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size()
+            )
             plan_map.setdefault(dst_base, []).append((src_ptr, size_b, dst_off))
             add_h2d_raw(size_b)
         else:
             with torch.cuda.stream(stream):
-                sz = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+                if src_memory_obj.tensor is None:
+                    continue
+                sz = int(
+                    src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size()
+                )
                 add_h2d_raw(sz)
                 memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
                 add_h2d(sz)
@@ -158,6 +169,7 @@ def allocate_and_copy_objects(
     if gran > 0 and plan_map:
         with torch.cuda.stream(stream):
             try:
+                # First Party
                 import lmcache.c_ops as ext
             except Exception:
                 ext = None
@@ -166,10 +178,10 @@ def allocate_and_copy_objects(
                     ext.init_stream_staging(max(gran, 2 * 1024 * 1024), staging_buffers)
                 except Exception as e:
                     logger.warning(
-                        "Failed to initialize staging buffers for coalesced H2D transfers: %s. "
-                        "Falling back to individual transfers.", 
+                        "Failed to initialize staging buffers for coalesced H2D "
+                        "transfers: %s. Falling back to individual transfers.",
                         str(e),
-                        exc_info=True
+                        exc_info=True,
                     )
             for base, items in plan_map.items():
                 # Heuristic bypass for small batches to reduce latency
@@ -180,21 +192,29 @@ def allocate_and_copy_objects(
                         add_h2d_raw(int(size_b))
                         if ext is not None:
                             try:
-                                ext.memcpy_h2d_async(int(base + dst_off), int(src_ptr), int(size_b))
+                                ext.memcpy_h2d_async(
+                                    int(base + dst_off), int(src_ptr), int(size_b)
+                                )
                             except Exception as e:
                                 logger.critical(
-                                    "H2D copy failed for individual transfer. Data will be missing on device. "
+                                    "H2D copy failed for individual transfer. "
+                                    "Data will be missing on device. "
                                     "src_ptr=%s, dst_ptr=%s, size=%s: %s",
-                                    hex(src_ptr), hex(base + dst_off), size_b, str(e),
+                                    hex(src_ptr),
+                                    hex(base + dst_off),
+                                    size_b,
+                                    str(e),
                                     exc_info=True,
                                 )
                                 raise
                         else:
                             # Build temporary tensors only as a last resort
-                            dst_tensor = torch.empty((size_b,), dtype=torch.uint8, device="cuda")
-                            src_tensor = torch.frombuffer(
-                                (torch.empty(0, dtype=torch.uint8)).numpy().__class__(0), dtype=torch.uint8
-                            )  # placeholder to avoid mypy; not expected to run
+                            # Note: This fallback path is not expected to be used
+                            # in practice
+                            logger.warning(
+                                "Falling back to placeholder tensor creation - "
+                                "C extension not available for H2D transfer"
+                            )
                         add_h2d(int(size_b))
                     continue
 
@@ -220,7 +240,10 @@ def allocate_and_copy_objects(
                             # shrink window to respect max_group_bytes
                             acc = 0
                             cut = start_idx
-                            while cut < end_idx and (acc + int(chunk_list[cut].len)) <= max_group_bytes:
+                            while (
+                                cut < end_idx
+                                and (acc + int(chunk_list[cut].len)) <= max_group_bytes
+                            ):
                                 acc += int(chunk_list[cut].len)
                                 cut += 1
                             if cut == start_idx:
@@ -240,9 +263,13 @@ def allocate_and_copy_objects(
                             )
                         except Exception as e:
                             logger.critical(
-                                "Coalesced H2D copy failed for batch transfer. Data will be missing on device. "
+                                "Coalesced H2D copy failed for batch transfer. "
+                                "Data will be missing on device. "
                                 "base=%s, window_size=%s, gran=%s: %s",
-                                hex(base), len(window), gran, str(e),
+                                hex(base),
+                                len(window),
+                                gran,
+                                str(e),
                                 exc_info=True,
                             )
                             raise
@@ -497,7 +524,7 @@ class StorageManager:
             backend = self.storage_backends[location]
             # TODO(Jiayi): need to make async loading and layerwise compatible
             task = asyncio.run_coroutine_threadsafe(
-                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
+                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),  # type: ignore[arg-type]
                 self.loop,
             )
             yield task
@@ -790,7 +817,7 @@ class StorageManager:
                 continue
             if not backend.get_memory_allocator().memcheck():
                 return False
-            return True
+        return True
 
     def close(self):
         for backend in self.storage_backends.values():

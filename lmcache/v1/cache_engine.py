@@ -588,7 +588,7 @@ class LMCacheEngine:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
-            get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)
+            get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)  # type: ignore[arg-type]
 
             assert isinstance(
                 self.gpu_connector,

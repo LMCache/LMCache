@@ -145,7 +145,8 @@ void init_stream_staging(size_t bytes, int N) {
   ss.ring.resize(static_cast<size_t>(N));
   for (int i = 0; i < N; ++i) {
     void* p = nullptr;
-    check_cuda(cudaHostAlloc(&p, bytes, cudaHostAllocPortable), "cudaHostAlloc");
+    check_cuda(cudaHostAlloc(&p, bytes, cudaHostAllocPortable),
+               "cudaHostAlloc");
     ss.ring[i].host = p;
     ss.ring[i].bytes = bytes;
     check_cuda(
@@ -241,26 +242,26 @@ void build_pack_and_h2d_batches(uint64_t dst_base,
     i = end;
   }
 }
- 
+
 namespace py = pybind11;
- 
- PYBIND11_MODULE(c_ops, m) {
-   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
-   m.def("multi_layer_kv_transfer_unilateral",
-         &multi_layer_kv_transfer_unilateral);
-   m.def("single_layer_kv_transfer", &single_layer_kv_transfer);
-   m.def("load_and_reshape_flash", &load_and_reshape_flash);
-   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
-   m.def("encode_fast_new", &encode_cuda_new);
-   m.def("decode_fast_new", &decode_cuda_new);
-   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
-   m.def("calculate_cdf", &calculate_cdf);
-   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused);
-   m.def("alloc_pinned_ptr", &alloc_pinned_ptr);
-   m.def("free_pinned_ptr", &free_pinned_ptr);
-   m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr);
-   m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
-   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
+
+PYBIND11_MODULE(c_ops, m) {
+  m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
+  m.def("multi_layer_kv_transfer_unilateral",
+        &multi_layer_kv_transfer_unilateral);
+  m.def("single_layer_kv_transfer", &single_layer_kv_transfer);
+  m.def("load_and_reshape_flash", &load_and_reshape_flash);
+  m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
+  m.def("encode_fast_new", &encode_cuda_new);
+  m.def("decode_fast_new", &decode_cuda_new);
+  m.def("decode_fast_prefsum", &decode_cuda_prefsum);
+  m.def("calculate_cdf", &calculate_cdf);
+  m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused);
+  m.def("alloc_pinned_ptr", &alloc_pinned_ptr);
+  m.def("free_pinned_ptr", &free_pinned_ptr);
+  m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr);
+  m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
+  m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
 
   // Added: CUDA IO bindings (thin coalescing helpers)
   py::class_<Chunk>(m, "Chunk")
@@ -284,6 +285,7 @@ namespace py = pybind11;
         "Set optional spin (microseconds) for acquiring staging buffers");
   m.def("pack_and_h2d_group", &pack_and_h2d_group,
         "Acquire ring buffer, pack chunks, and issue one H2D with event");
-  m.def("build_pack_and_h2d_batches", &build_pack_and_h2d_batches,
-        "Build groups and launch pack+H2D per group with bypass for big chunks");
- }
+  m.def(
+      "build_pack_and_h2d_batches", &build_pack_and_h2d_batches,
+      "Build groups and launch pack+H2D per group with bypass for big chunks");
+}
