@@ -9,7 +9,6 @@ import uuid
 
 # Third Party
 import msgspec
-import torch
 import zmq
 
 # First Party
@@ -155,12 +154,8 @@ class NixlChannel(BaseTransferChannel):
         )
         remote_meta_bytes = nixl_init_resp.remote_meta_bytes
         remote_agent_name = self.nixl_agent.add_remote_agent(remote_meta_bytes)
-        # TODO(novahow): stricter checking
+        # TODO(novahow): stricter checking with remote tp size
         # remote_tp_size = nixl_init_resp.remote_tp_size
-        # assert peer_tp_size == remote_tp_size, (
-        #     f"Peer tp size {peer_tp_size} does not match"
-        #     f" remote agent tp size {remote_tp_size}"
-        # )
 
         # Register remote memory
         local_xfer_dlist_bytes = self.nixl_agent.get_serialized_descs(
@@ -428,16 +423,6 @@ class NixlChannel(BaseTransferChannel):
     ############################################################
     # Read/Write functions
     ############################################################
-    def _to_ranged_indices(self, indices: list[int]) -> list[int]:
-        per_chunk_tokens = len(self.nixl_wrapper.per_chunk_range)
-        expanded_indexes = [
-            expanded_idx
-            for idx in indices
-            for expanded_idx in (
-                self.nixl_wrapper.per_chunk_range + (idx * per_chunk_tokens)
-            ).tolist()
-        ]
-        return expanded_indexes
 
     ### Read and Write only need to be called on one side ###
     def batched_write(
@@ -456,17 +441,14 @@ class NixlChannel(BaseTransferChannel):
         assert transfer_spec is not None
         # First Party
 
-        local_indexes = self._to_ranged_indices(self.get_local_mem_indices(objects))
-        remote_indexes = self._to_ranged_indices(transfer_spec["remote_indexes"])
-        logger.debug(
-            f"HOWDY local_indexes: {local_indexes}, remote_indexes: {remote_indexes}"
-        )
+        local_indexes = self.get_local_mem_indices(objects)
+        remote_indexes = transfer_spec["remote_indexes"]
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handlers[transfer_spec["receiver_id"]],
-            self._to_ranged_indices(self.get_local_mem_indices(objects)),
+            local_indexes,
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
-            self._to_ranged_indices(transfer_spec["remote_indexes"]),
+            remote_indexes,
         )
 
         self.nixl_agent.transfer(handle)
@@ -683,22 +665,7 @@ class NixlAgentWrapper:
         reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
         nixl_agent.register_memory(reg_descs)
 
-        self.page_size = (
-            (
-                allocator_meta.shape.numel()
-                // allocator_meta.shape[allocator_meta.fmt.token_dim()]
-                * allocator_meta.dtype.itemsize
-            )
-            if False  # enable_asym_tp
-            else page_size
-        )
-        self.per_chunk_range = (
-            torch.arange(
-                allocator_meta.shape[allocator_meta.fmt.token_dim()], dtype=torch.long
-            )
-            if False  # enable_asym_tp
-            else torch.arange(1)
-        )
+        self.page_size = page_size
         # Create xfer handlers
         xfer_desc = []
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, self.page_size):
@@ -718,7 +685,4 @@ class NixlAgentWrapper:
         xfer_handler = self.agent.prep_xfer_dlist(
             "NIXL_INIT_AGENT", xfer_descs, mem_type="cuda"
         )
-        # First Party
-
-        # ForkedPdb().set_trace()
         self.xfer_handlers[receiver_id] = xfer_handler

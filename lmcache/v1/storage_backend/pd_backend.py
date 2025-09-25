@@ -189,7 +189,7 @@ class PDBackend(AllocatorBackendInterface):
         self.running = True
 
         self.tp_rank = metadata.worker_id
-        # TODO: verify if this is needed
+        # TODO(novahow): verify if this is needed, will metadata.world_size suffice?
         # Third Party
         from vllm.distributed.parallel_state import (
             get_tensor_model_parallel_world_size,
@@ -277,7 +277,7 @@ class PDBackend(AllocatorBackendInterface):
             metadata.kv_dtype,
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
             corrected_device,
-            transpose=config.enable_asym_tp,
+            transpose=config.enable_asym_tp and config.enable_pd,
         )
 
         return paged_mem_allocator
@@ -325,9 +325,11 @@ class PDBackend(AllocatorBackendInterface):
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         assert isinstance(key, CacheEngineKey)
         with self.data_lock:
-            if mem_obj := self.data.get(key, None):
-                if pin:
-                    mem_obj.ref_count_up()
+            if self.data.get(key, None):
+                # NOTE(novahow): pin causes failed to allocate in L40S in TP=(2,2),
+                # disable for now
+                # if pin:
+                #     mem_obj.ref_count_up()
                 return True
             return False
 
@@ -351,9 +353,6 @@ class PDBackend(AllocatorBackendInterface):
         self,
         receiver_info: NixlReceiverInfo,
     ) -> None:
-        # First Party
-
-        # ForkedPdb().set_trace()
         for receiver in receiver_info.get_group_receivers():
             receiver_id = receiver.receiver_id
             receiver_init_url = receiver.receiver_init_url
@@ -454,8 +453,6 @@ class PDBackend(AllocatorBackendInterface):
         receiver_ids = transfer_spec.receiver_id[
             self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
         ]
-        # receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
-        # receiver_host = transfer_spec.receiver_host
         receiver_info = NixlReceiverInfo(
             receiver_ids=receiver_ids,
             receiver_host=transfer_spec.receiver_host,
@@ -469,7 +466,7 @@ class PDBackend(AllocatorBackendInterface):
 
         # Allocate remote memory objects
         alloc_request = self._get_remote_alloc_request(keys, memory_objs)
-        all_sent_indexes = set(range(len(alloc_request.keys)))
+        all_sent_indexes: list[set[int]] = [set() for _ in range(self.dp_ratio)]
         any_remote_indexes: set[int] = set()
 
         with cf.ThreadPoolExecutor(self.dp_ratio) as executor:
@@ -482,7 +479,7 @@ class PDBackend(AllocatorBackendInterface):
                 )
                 already_sent_indexes = alloc_response.already_sent_indexes
                 remote_indexes = alloc_response.remote_indexes
-                all_sent_indexes.difference_update(set(remote_indexes))
+                all_sent_indexes[receiver_rank] = set(already_sent_indexes)
                 mem_objs_to_send = []
                 for idx, mem_obj in enumerate(memory_objs):
                     if idx not in already_sent_indexes:
@@ -523,8 +520,10 @@ class PDBackend(AllocatorBackendInterface):
 
                 # Filter out already sent memory objects and free them
             mem_objs_to_send = []
+            # take intersection of all_sent_indexes
+            already_sent = set.intersection(*all_sent_indexes)
             for idx, mem_obj in enumerate(memory_objs):
-                if idx in all_sent_indexes:
+                if idx in already_sent:
                     mem_obj.ref_count_down()
 
             for task in cf.as_completed(blocking_send_tasks):

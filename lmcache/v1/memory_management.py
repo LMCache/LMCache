@@ -1136,9 +1136,10 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             )
             return None
 
-
-        # NOTE(novahow): this is not an ideal call for token_dim
+        # TODO(novahow): this is not a clean call for token_dim
         # since self.shape may be [KV_2LTHD] while fmt is [KV_2LTD].
+        # NOTE(novahow): when transpose is True, we always allocate
+        # the full chunk size for proper sharding in asymmetric TP.
         if self.transpose:
             shape = list(shape)
             token_dim = fmt.token_dim()
@@ -1197,11 +1198,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
             # FIXME: think about whether pareant_allocator
             # should be updated here.
-            free_block.meta.shape = shape if not self.transpose else self.shape
+            if self.transpose:
+                shape = list(shape)
+                token_dim = fmt.token_dim()
+                shape[token_dim] = self.shape[token_dim]
+                shape = torch.Size(shape)
+
+            free_block.meta.shape = shape
             free_block.meta.fmt = fmt
             free_block.meta.ref_count = 1
 
-            if shape != self.shape and not self.transpose:
+            if shape != self.shape:
                 size_in_bytes = shape.numel() * self.bytes_per_element
                 free_block.raw_data = free_block.raw_data[:size_in_bytes]
 

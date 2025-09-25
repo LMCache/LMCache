@@ -71,14 +71,6 @@ def cuda_extension() -> tuple[list, dict]:
     else:
         flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=0"
 
-    cxx_args = [flag_cxx_abi]
-    nvcc_args = [flag_cxx_abi]
-
-    if os.environ.get("DEBUG", "0") == "1":
-        print("Building with debug flags")
-        cxx_args.append("-g")
-        nvcc_args.extend(["-g", "-G"])
-
     cuda_sources = [
         "csrc/pybind.cpp",
         "csrc/mem_kernels.cu",
@@ -94,8 +86,8 @@ def cuda_extension() -> tuple[list, dict]:
             "lmcache.c_ops",
             sources=cuda_sources,
             extra_compile_args={
-                "cxx": cxx_args,
-                "nvcc": nvcc_args,
+                "cxx": [flag_cxx_abi],
+                "nvcc": [flag_cxx_abi],
             },
         ),
     ]

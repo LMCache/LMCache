@@ -168,14 +168,9 @@ key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
                  const int scalar_offset, const int scalars_per_token,
                  const int num_tokens, const int num_layers, const int num_kv) {
   if (transpose) {
-    // [2LTD->TD2L]
-    // return token_idx * scalars_per_token * num_kv * num_layers +
-    //        scalar_offset * num_kv * num_layers + k_or_v * num_layers +
-    //        layer_idx;
-    // Trial: [2LTD->DT2L], T is full chunk
+    // [2LTD->DT2L], T is full chunk size
     return scalar_offset * num_kv * num_layers * num_tokens +
-           token_idx * num_kv * num_layers + k_or_v * num_layers +
-           layer_idx;
+           token_idx * num_kv * num_layers + k_or_v * num_layers + layer_idx;
   }
   return k_or_v * num_layers * num_tokens * scalars_per_token +
          layer_idx * num_tokens * scalars_per_token +
@@ -413,15 +408,15 @@ void multi_layer_kv_transfer(
   if (transpose) {
     if (not direction) {
       lmc::load_and_reshape_multi_layer_kernel<int64_t, false, true>
-          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                       slot_mapping_ptr, num_qwords, (int)key_value.size(2),
-                                       num_layers, page_buffer_size);
+          <<<grid, block, 0, stream>>>(
+              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
+              (int)key_value.size(2), num_layers, page_buffer_size);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     } else {
       lmc::load_and_reshape_multi_layer_kernel<int64_t, true, true>
-          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                       slot_mapping_ptr, num_qwords, (int)key_value.size(2),
-                                       num_layers, page_buffer_size);
+          <<<grid, block, 0, stream>>>(
+              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
+              (int)key_value.size(2), num_layers, page_buffer_size);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
   } else {

@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
         pref_hosts, pref_ports, global_args.num_prefillers
     )
 
-    for host, port in prefill_pairs[:1]:
+    for host, port in prefill_pairs:
         prefiller_base_url = f"http://{host}:{int(port)}"
         prefill_client = httpx.AsyncClient(timeout=None, base_url=prefiller_base_url)
         app.state.prefill_clients.append(
@@ -294,7 +294,6 @@ async def handle_completions(request: Request):
         req_data = await request.json()
 
         tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
-        await asyncio.sleep(1)
         tokenize_output = await send_request_to_service(
             tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
         )
@@ -409,7 +408,6 @@ async def handle_chat_completions(request: Request):
         )
         tokenize_output = tokenize_output.json()
 
-        await asyncio.sleep(1)
         org_max_tokens = req_data["max_tokens"]
         req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1
