@@ -19,6 +19,115 @@ from lmcache.utils import thread_safe
 logger = init_logger(__name__)
 
 
+# --- Minimal memcpy transfer counters (H2D/D2H) ---
+_transfer_lock = threading.Lock()
+_h2d_calls = 0
+_h2d_bytes = 0
+_d2h_calls = 0
+_d2h_bytes = 0
+
+_h2d_raw_calls = 0
+_h2d_raw_bytes = 0
+_h2d_co_calls = 0
+_h2d_co_bytes = 0
+
+_d2h_raw_calls = 0
+_d2h_raw_bytes = 0
+_d2h_co_calls = 0
+_d2h_co_bytes = 0
+
+
+def reset_transfer_metrics() -> None:
+    global _h2d_calls, _h2d_bytes, _d2h_calls, _d2h_bytes
+    global _h2d_raw_calls, _h2d_raw_bytes, _h2d_co_calls, _h2d_co_bytes
+    global _d2h_raw_calls, _d2h_raw_bytes, _d2h_co_calls, _d2h_co_bytes
+    with _transfer_lock:
+        _h2d_calls = 0
+        _h2d_bytes = 0
+        _d2h_calls = 0
+        _d2h_bytes = 0
+        _h2d_raw_calls = 0
+        _h2d_raw_bytes = 0
+        _h2d_co_calls = 0
+        _h2d_co_bytes = 0
+        _d2h_raw_calls = 0
+        _d2h_raw_bytes = 0
+        _d2h_co_calls = 0
+        _d2h_co_bytes = 0
+
+
+def add_h2d(bytes_n: int) -> None:
+    if bytes_n < 0:
+        return
+    global _h2d_calls, _h2d_bytes
+    with _transfer_lock:
+        _h2d_calls += 1
+        _h2d_bytes += int(bytes_n)
+
+
+def add_d2h(bytes_n: int) -> None:
+    if bytes_n < 0:
+        return
+    global _d2h_calls, _d2h_bytes
+    with _transfer_lock:
+        _d2h_calls += 1
+        _d2h_bytes += int(bytes_n)
+
+
+def add_h2d_raw(bytes_n: int) -> None:
+    if bytes_n < 0:
+        return
+    global _h2d_raw_calls, _h2d_raw_bytes
+    with _transfer_lock:
+        _h2d_raw_calls += 1
+        _h2d_raw_bytes += int(bytes_n)
+
+
+def add_h2d_coalesced(bytes_n: int) -> None:
+    if bytes_n < 0:
+        return
+    global _h2d_co_calls, _h2d_co_bytes
+    with _transfer_lock:
+        _h2d_co_calls += 1
+        _h2d_co_bytes += int(bytes_n)
+
+
+def add_d2h_raw(bytes_n: int) -> None:
+    if bytes_n < 0:
+        return
+    global _d2h_raw_calls, _d2h_raw_bytes
+    with _transfer_lock:
+        _d2h_raw_calls += 1
+        _d2h_raw_bytes += int(bytes_n)
+
+
+def add_d2h_coalesced(bytes_n: int) -> None:
+    if bytes_n < 0:
+        return
+    global _d2h_co_calls, _d2h_co_bytes
+    with _transfer_lock:
+        _d2h_co_calls += 1
+        _d2h_co_bytes += int(bytes_n)
+
+
+def get_transfer_metrics_snapshot() -> Dict[str, int]:
+    with _transfer_lock:
+        return {
+            "h2d_calls": _h2d_calls,
+            "h2d_bytes": _h2d_bytes,
+            "d2h_calls": _d2h_calls,
+            "d2h_bytes": _d2h_bytes,
+            "h2d_raw_calls": _h2d_raw_calls,
+            "h2d_raw_bytes": _h2d_raw_bytes,
+            "h2d_coalesced_calls": _h2d_co_calls,
+            "h2d_coalesced_bytes": _h2d_co_bytes,
+            "d2h_raw_calls": _d2h_raw_calls,
+            "d2h_raw_bytes": _d2h_raw_bytes,
+            "d2h_coalesced_calls": _d2h_co_calls,
+            "d2h_coalesced_bytes": _d2h_co_bytes,
+        }
+
+
 @dataclass
 class LMCacheStats:
     # Counter (Note that these are incremental values,
