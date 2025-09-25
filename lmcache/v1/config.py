@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Optional, Union
+import ast
 import json
 import os
 import re
@@ -85,26 +86,15 @@ def _parse_quoted_string(value: str) -> str:
 
     value = value.strip()
 
-    # Check if the string is surrounded by quotes (single or double)
-    if len(value) >= 2:
-        if (value.startswith('"') and value.endswith('"')) or (
-            value.startswith("'") and value.endswith("'")
-        ):
-            # Remove the surrounding quotes
-            quoted_content = value[1:-1]
-
-            # Handle escape sequences
-            # Use json.loads for proper escape sequence handling if it's double-quoted
-            if value.startswith('"'):
-                try:
-                    # Wrap in quotes again for json.loads to work properly
-                    return json.loads(f'"{quoted_content}"')
-                except json.JSONDecodeError:
-                    # If json.loads fails, manually handle common escape sequences
-                    return _manual_unescape(quoted_content)
-            else:
-                # For single-quoted strings, manually handle escape sequences
-                return _manual_unescape(quoted_content)
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        try:
+            evaluated = ast.literal_eval(value)
+            if isinstance(evaluated, str):
+                return evaluated
+        except (ValueError, SyntaxError):
+            # If ast.literal_eval fails, it's not a valid Python literal.
+            # Fall back to simply stripping the outer quotes.
+            return value[1:-1]
 
     return value
 
