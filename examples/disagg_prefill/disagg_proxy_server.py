@@ -314,6 +314,8 @@ async def handle_completions(request: Request):
             "receiver_init_port": decode_client.init_port,
             "receiver_alloc_port": decode_client.alloc_port,
         }
+        logger.info("[Chat] req=%s disagg_spec=%s", req_id, disagg_spec)
+        logger.info("[Completions] req=%s disagg_spec=%s", req_id, disagg_spec)
         num_tp_rank = len(decode_client.init_port)
 
         req_data["kv_transfer_params"] = {
@@ -326,18 +328,42 @@ async def handle_completions(request: Request):
 
         # Send request to prefill service round robin, ignore the response
         prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
+        logger.info(
+            "[Completions] req=%s sending prefill to %s",
+            req_id,
+            prefill_client.client.base_url,
+        )
         prefill_output = await send_request_to_service(
             prefill_client.client, "/v1/completions", req_data
         )
 
         prefill_output = prefill_output.json()
+        prefill_kv_params = prefill_output.get("kv_transfer_params", {})
+        logger.info(
+            "[Completions] req=%s received prefill kv params=%s",
+            req_id,
+            prefill_kv_params,
+        )
 
         et = time.time()
         stats_calculator.add(et - st)
 
         req_data["max_tokens"] = org_max_tokens - 1
-        req_data["prompt"].append(prefill_output["kv_transfer_params"]["first_tok"])
-        req_data.pop("kv_transfer_params")
+        prefill_kv_params = prefill_output.get("kv_transfer_params", {})
+        first_tok = prefill_kv_params.get("first_tok")
+        if first_tok is not None:
+            logger.info("[Completions] req=%s forwarding first token", req_id)
+            req_data["prompt"].append(first_tok)
+        decoder_kv_params = {
+            k: v for k, v in prefill_kv_params.items() if k != "first_tok"
+        }
+        decoder_kv_params["disagg_spec"] = disagg_spec
+        req_data["kv_transfer_params"] = decoder_kv_params
+        logger.info(
+            "[Completions] req=%s forwarded kv_transfer_params=%s",
+            req_id,
+            decoder_kv_params,
+        )
         req_data["stream"] = True
         if stream_options is not None:
             req_data["stream_options"] = stream_options
@@ -435,11 +461,21 @@ async def handle_chat_completions(request: Request):
 
         # Send request to prefill service round robin, get the response
         prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
+        logger.info(
+            "[Chat] req=%s sending prefill to %s",
+            req_id,
+            prefill_client.client.base_url,
+        )
         prefill_output = await send_request_to_service(
             prefill_client.client, "/v1/completions", req_data
         )
 
         prefill_output = prefill_output.json()
+        logger.info(
+            "[Chat] req=%s received prefill kv params=%s",
+            req_id,
+            prefill_output.get("kv_transfer_params", {}),
+        )
 
         et = time.time()
         stats_calculator.add(et - st)
@@ -449,9 +485,23 @@ async def handle_chat_completions(request: Request):
             req_data["max_completion_tokens"] = org_max_completion_tokens - 1
 
         # Add the first token from prefill to the tokenized messages for decode
-        req_data["prompt"].append(prefill_output["kv_transfer_params"]["first_tok"])
+        prefill_kv_params = prefill_output.get("kv_transfer_params", {})
+        first_tok = prefill_kv_params.get("first_tok")
+        if first_tok is not None:
+            logger.info("[Chat] req=%s forwarding first token", req_id)
+            req_data["prompt"].append(first_tok)
 
-        req_data.pop("kv_transfer_params")
+        decoder_kv_params = {
+            k: v for k, v in prefill_kv_params.items() if k != "first_tok"
+        }
+        decoder_kv_params["disagg_spec"] = disagg_spec
+
+        req_data["kv_transfer_params"] = decoder_kv_params
+        logger.info(
+            "[Chat] req=%s forwarded kv_transfer_params=%s",
+            req_id,
+            decoder_kv_params,
+        )
         req_data["stream"] = True
         if stream_options is not None:
             req_data["stream_options"] = stream_options

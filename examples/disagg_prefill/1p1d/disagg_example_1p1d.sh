@@ -100,10 +100,8 @@ wait_for_server() {
 
 
 main() {
-    check_hf_token
     check_num_gpus
     ensure_python_library_installed lmcache
-    ensure_python_library_installed nixl
     ensure_python_library_installed pandas
     ensure_python_library_installed datasets
     ensure_python_library_installed vllm

@@ -1,10 +1,21 @@
 local_cpu: False
 
 enable_pd: True
-transfer_channel: "nixl"
+transfer_channel: "nixl"  # placeholder; PD backend uses Mooncake instead of NIXL
 pd_role: "sender"
 pd_proxy_host: "localhost"
 pd_proxy_port: 7500
-pd_buffer_size: 1073741824 # 1GB
+pd_buffer_size: 1468006400  # 700 MiB staging buffer aligned to 14,680,064
 pd_buffer_device: "cuda"
-nixl_backends: [UCX]
+pre_caching_hash_algorithm: sha256_cbor_64bit
+
+extra_config:
+  # Mooncake connection parameters; adjust to your deployment
+  local_hostname: "localhost"
+  metadata_server: "P2PHANDSHAKE"
+  master_server_address: "localhost:50055"
+  global_segment_size: 17179869184  # 16 GB
+  local_buffer_size: 134217728     # 128 MB
+  protocol: "rdma"
+  device_name: ""
+  mooncake_prefer_local_alloc: false

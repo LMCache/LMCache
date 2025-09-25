@@ -9,10 +9,13 @@ if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <prefiller | decoder> [model]"
     exit 1
 fi
+export PYTHONHASHSEED=0
+
+
 
 if [[ $# -eq 1 ]]; then
-    echo "Using default model: meta-llama/Llama-3.1-8B-Instruct"
-    MODEL="meta-llama/Llama-3.1-8B-Instruct"
+    echo "Using default model: /root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    MODEL="/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 else
     echo "Using model: $2"
     MODEL=$2
@@ -30,6 +33,7 @@ if [[ $1 == "prefiller" ]]; then
         CUDA_VISIBLE_DEVICES=4 \
         vllm serve $MODEL \
         --port 7100 \
+        --max_model_len 104752 \
         --disable-log-requests \
         --enforce-eager \
         --no-enable-prefix-caching \
@@ -52,6 +56,7 @@ elif [[ $1 == "decoder" ]]; then
         --port 7200 \
         --disable-log-requests \
         --enforce-eager \
+        --max_model_len 104752 \
         --no-enable-prefix-caching \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}'
