@@ -8,6 +8,7 @@ from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
 import math
+import os
 import threading
 
 # Third Party
@@ -323,6 +324,36 @@ def _allocate_cpu_memory(
     buffer = torch.frombuffer(buf, dtype=torch.uint8)
 
     return buffer
+
+
+def _free_cpu_memory(
+    buffer: torch.Tensor,
+    size: int | None = None,
+    numa_mapping: Optional[NUMAMapping] = None,
+) -> torch.Tensor:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    if numa_mapping:
+        lmc_ops.free_pinned_numa_ptr(buffer.data_ptr(), size)
+    else:
+        lmc_ops.free_pinned_ptr(buffer.data_ptr())
+
+
+def _allocate_gpu_memory(
+    size: int,
+    device: str,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    page_size = os.sysconf("SC_PAGESIZE")
+
+    # Over-allocate
+    base_buffer = torch.empty(size + page_size, dtype=torch.uint8, device=device)
+    offset = -base_buffer.data_ptr() % page_size
+
+    # Make aligned view
+    aligned_buffer = base_buffer[offset : offset + size]
+
+    # Need to return the base buffer as well in order to prevent GC
+    return base_buffer, aligned_buffer
 
 
 class TensorMemoryObj(MemoryObj):
