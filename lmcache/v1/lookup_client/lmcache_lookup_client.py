@@ -139,19 +139,46 @@ class LMCacheLookupClient(LookupClientInterface):
 
         results = []
         try:
+            # Send requests to all sockets first
             for i in range(ranks):
                 self.sockets[i].send_multipart(msg_buf, copy=False)
 
-            # TODO(Jiayi): we can use zmq poll to optimize a bit
-            for i in range(ranks):
-                resp = self.sockets[i].recv()
-                result = int.from_bytes(resp, "big")
-                results.append(result)
+            # Use ZMQ Poller to handle responses as they arrive
+            poller = zmq.Poller()
+            # Monitor for incoming messages
+            for socket in self.sockets:
+                poller.register(socket, zmq.POLLIN)
+
+            remaining_responses = ranks
+            while remaining_responses > 0:
+                # Wait for activity on any socket with timeout
+                # Returns list of (socket, event_mask) tuples for ready sockets
+                events = poller.poll(self.config.lookup_timeout_ms)
+
+                if not events:
+                    logger.error(f"Timeout waiting for {remaining_responses} responses")
+                    return 0
+
+                # Process all ready sockets
+                for socket, _ in events:
+                    try:
+                        # Receive response from ready socket
+                        resp = socket.recv()
+                        result = int.from_bytes(resp, "big")
+                        results.append(result)
+
+                        # Stop monitoring this socket
+                        poller.unregister(socket)
+                        remaining_responses -= 1
+                    except zmq.ZMQError as e:
+                        logger.error(f"ZMQ error receiving response: {str(e)}")
+                        return 0
+
         except zmq.Again:
-            logger.error(f"Timeout occurred for rank {i}")
+            logger.error("Timeout occurred during request processing")
             return 0
         except zmq.ZMQError as e:
-            logger.error(f"ZMQ error for rank {i}: {str(e)}")
+            logger.error(f"ZMQ error during request processing: {str(e)}")
             return 0
 
         assert len(results) == ranks
