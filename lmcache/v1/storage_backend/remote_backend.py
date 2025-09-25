@@ -455,7 +455,7 @@ class RemoteBackend(StorageBackendInterface):
 
         Args:
             key: The key to remove.
-            force: Whether to force removal even if the key is pinned.
+            force: Whether to force removal. This backend does not support pinning, so this parameter is currently ignored.
 
         Returns:
             bool: True if the key was successfully removed, False otherwise.
