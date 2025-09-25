@@ -36,6 +36,7 @@ extensions = [
     "sphinxcontrib.mermaid",
     # "sphinx_copybutton",
     "sphinx_multiversion",
+    "sphinxcontrib.images",
 ]
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
@@ -114,6 +115,11 @@ theme_options = ThemeOptions(  # Add your theme options.
         }
     },
 )
+
+images_config = {
+    "default_image_width": "80%",
+    "default_image_target": "_blank",
+}
 
 html_theme_options = asdict(theme_options)
 

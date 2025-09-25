@@ -111,6 +111,7 @@ Documentation
 
    kv_cache_optimizations/compression/index
    kv_cache_optimizations/blending
+   kv_cache_optimizations/layerwise
 
 :raw-html:`<br />`
 

@@ -11,4 +11,5 @@ sphinxawesome_theme==5.3.2
 sphinx-copybutton==0.5.2
 sphinxcontrib-mermaid==1.0.0
 sphinx-multiversion==0.2.4
+sphinxcontrib-images
 msgspec
