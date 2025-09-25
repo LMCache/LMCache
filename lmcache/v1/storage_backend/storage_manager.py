@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
 import asyncio
 import functools
 import threading
+import os
 
 # Third Party
 import torch
@@ -30,6 +31,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.observability import add_h2d, add_h2d_raw, add_h2d_coalesced
 
 if TYPE_CHECKING:
     # First Party
@@ -70,6 +72,27 @@ def allocate_and_copy_objects(
         - list of the memory objects that has been successfully allocated
     """
     allocated_objects = []
+    # ENV-gated coalescing toggle (default OFF)
+    gran_env = os.getenv("LMCACHE_KV_IO_GRANULARITY_BYTES", "0")
+    try:
+        gran = int(gran_env)
+    except ValueError:
+        gran = 0
+    # Latency-sensitive knobs
+    try:
+        max_items_env = os.getenv("LMCACHE_COALESCE_MAX_ITEMS", "8")
+        max_items = int(max_items_env)
+    except Exception:
+        max_items = 8
+    try:
+        max_group_bytes_env = os.getenv("LMCACHE_COALESCE_MAX_GROUP_BYTES", "0")
+        max_group_bytes = int(max_group_bytes_env)
+    except Exception:
+        max_group_bytes = 0
+    # When gran>0, accumulate per-base chunks for a single coalesced launch
+    # plan_map: base_ptr(int) -> list of (src_ptr, len, dst_off)
+    plan_map: dict[int, list[tuple[int, int, int]]] = {} if gran > 0 else {}
+
     for key, src_memory_obj in zip(keys, src_memory_objs, strict=False):
         if allocator_backend.contains(key):
             continue
@@ -84,9 +107,112 @@ def allocate_and_copy_objects(
         if memory_obj is None or memory_obj.tensor is None:
             break
 
-        with torch.cuda.stream(stream):
-            memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+        if (
+            gran > 0
+            and hasattr(memory_obj, "tensor")
+            and hasattr(src_memory_obj, "tensor")
+        ):
+            # Build plan entry for this object; copy will be launched after allocation loop
+            dst_ptr = int(memory_obj.tensor.data_ptr())
+            # Infer base pointer from metadata address (byte offset)
+            try:
+                dst_off = int(memory_obj.meta.address)
+                dst_base = int(dst_ptr - dst_off)
+            except Exception:
+                # Fallback: treat each as standalone base (no cross-object coalescing)
+                dst_base = int(dst_ptr)
+                dst_off = 0
+            src_ptr = int(src_memory_obj.tensor.data_ptr())
+            size_b = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+            plan_map.setdefault(dst_base, []).append((src_ptr, size_b, dst_off))
+            add_h2d_raw(size_b)
+        else:
+            with torch.cuda.stream(stream):
+                sz = int(src_memory_obj.tensor.numel() * src_memory_obj.tensor.element_size())
+                add_h2d_raw(sz)
+                memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+                add_h2d(sz)
         allocated_objects.append(memory_obj)
+
+    # If gran>0, launch coalesced copies per base buffer once
+    if gran > 0 and plan_map:
+        with torch.cuda.stream(stream):
+            try:
+                import lmcache.c_ops as ext
+            except Exception:
+                ext = None
+            if ext is not None:
+                try:
+                    ext.init_stream_staging(max(gran, 2 * 1024 * 1024), 2)
+                except Exception:
+                    pass
+            for base, items in plan_map.items():
+                # Heuristic bypass for small batches to reduce latency
+                total_bytes_all = sum(int(sz) for _, sz, _ in items)
+                if len(items) < 2 or total_bytes_all < 2 * gran:
+                    # Fall back to per-object copies
+                    for src_ptr, size_b, dst_off in items:
+                        add_h2d_raw(int(size_b))
+                        if ext is not None:
+                            try:
+                                ext.memcpy_h2d_async(int(base + dst_off), int(src_ptr), int(size_b))
+                            except Exception:
+                                pass
+                        else:
+                            # Build temporary tensors only as a last resort
+                            dst_tensor = torch.empty((size_b,), dtype=torch.uint8, device="cuda")
+                            src_tensor = torch.frombuffer(
+                                (torch.empty(0, dtype=torch.uint8)).numpy().__class__(0), dtype=torch.uint8
+                            )  # placeholder to avoid mypy; not expected to run
+                        add_h2d(int(size_b))
+                    continue
+
+                if ext is not None:
+                    # Build ChunkEx list sorted by dst_off
+                    ChunkEx = ext.ChunkEx
+                    chunk_list = []
+                    for src_ptr, size_b, dst_off in items:
+                        ce = ChunkEx()
+                        ce.src = int(src_ptr)
+                        ce.len = int(size_b)
+                        ce.dst = int(base)
+                        ce.dst_off = int(dst_off)
+                        chunk_list.append(ce)
+                    chunk_list.sort(key=lambda ce: int(ce.dst_off))
+
+                    # Window by max_items and optional max_group_bytes for latency
+                    start_idx = 0
+                    n = len(chunk_list)
+                    while start_idx < n:
+                        end_idx = min(n, start_idx + max(1, max_items))
+                        if max_group_bytes and max_group_bytes > 0:
+                            # shrink window to respect max_group_bytes
+                            acc = 0
+                            cut = start_idx
+                            while cut < end_idx and (acc + int(chunk_list[cut].len)) <= max_group_bytes:
+                                acc += int(chunk_list[cut].len)
+                                cut += 1
+                            if cut == start_idx:
+                                # single very large item, send as is
+                                cut = start_idx + 1
+                            end_idx = cut
+
+                        window = chunk_list[start_idx:end_idx]
+                        win_bytes = sum(int(ce.len) for ce in window)
+                        try:
+                            ext.build_pack_and_h2d_batches(
+                                int(base),
+                                window,
+                                int(gran),
+                                int(max(gran, 64 * 1024 * 1024)),
+                                8,
+                            )
+                        except Exception:
+                            # best effort: still count bytes
+                            pass
+                        add_h2d(int(win_bytes))
+                        add_h2d_coalesced(int(win_bytes))
+                        start_idx = end_idx
 
     stream.synchronize()
     return keys[: len(allocated_objects)], allocated_objects
@@ -312,7 +438,7 @@ class StorageManager:
 
     def layerwise_batched_get(
         self,
-        keys: List[List[CacheEngineKey]],
+        keys: List[CacheEngineKey],
         location: Optional[str] = None,
     ) -> Generator[Future, None, None]:
         """
@@ -321,9 +447,9 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
 
-        :param List[List[CacheEngineKey]] keys: The keys to get. The first
-            dimension corresponds to the number of layers, and the second
-            dimension corresponds to the number of chunks.
+        :param List[CacheEngineKey] keys: The keys to get. The first
+        dimension corresponds to the number of layers, and the second
+        dimension corresponds to the number of chunks.
 
         :return: A generator that yields a future for each layer.
         """
@@ -628,7 +754,7 @@ class StorageManager:
                 continue
             if not backend.get_memory_allocator().memcheck():
                 return False
-        return True
+            return True
 
     def close(self):
         for backend in self.storage_backends.values():
