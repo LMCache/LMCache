@@ -21,8 +21,8 @@ import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
-    NixlMsg,
+from lmcache.v1.storage_backend.pd_backend import (
+    PDMsg,
 )
 
 logger = init_logger(__name__)
@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
             raise ValueError(
                 "Length mismatch between hosts and ports lists for pairing"
             )
-        return list(zip(hosts, ports))
+        return list(zip(hosts, ports, strict=False))
 
     prefill_pairs = pair_hosts_and_ports(
         pref_hosts, pref_ports, global_args.num_prefillers
@@ -153,7 +153,7 @@ class StatsCalculator:
 
     def _log_stats(self):
         # Print average, median, and 99th percentile
-        np_arr = np.array(self._stats)
+        np_arr = np.array(self._stats) * 1000
         output_str = (
             f"\nNum requests: {len(self._stats)}"
             + "\nPrefill node TTFT stats:"
@@ -231,7 +231,7 @@ async def zmq_pull_server():
     while run_proxy:
         try:
             msg_bytes = await socket.recv()
-            msg = msgspec.msgpack.decode(msg_bytes, type=NixlMsg)
+            msg = msgspec.msgpack.decode(msg_bytes, type=PDMsg)
             req_id = msg.req_id
             app.state.finished_reqs[req_id] += 1
             logger.debug(f"Prefill of req {req_id} done.")

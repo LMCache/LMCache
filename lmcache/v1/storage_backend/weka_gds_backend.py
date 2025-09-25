@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 import asyncio
 import ctypes
 import os
@@ -134,7 +134,7 @@ class WekaGdsBackend(AllocatorBackendInterface):
         self.cufile = cufile
 
         assert dst_device.startswith("cuda")
-        super().__init__(dst_device)
+        super().__init__(dst_device=dst_device)
 
         self.config = config
         self.loop = loop
@@ -306,7 +306,7 @@ class WekaGdsBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)

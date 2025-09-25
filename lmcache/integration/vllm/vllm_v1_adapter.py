@@ -40,7 +40,7 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
 from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
@@ -54,9 +54,6 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
-from lmcache.v1.storage_backend.connector.nixl_connector_v3 import (
-    NixlReceiverInfo,
-)
 
 if TYPE_CHECKING:
     # Third Party
@@ -91,7 +88,10 @@ class SaveSpec:
 @dataclass
 class DisaggSpec:
     req_id: str
-    receiver_info: NixlReceiverInfo
+    receiver_id: str
+    receiver_host: str
+    receiver_init_port: int
+    receiver_alloc_port: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
 
@@ -415,7 +415,7 @@ class ReqMeta:
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.enable_nixl:
+    if lmcache_config.enable_pd:
         return False
     else:
         return True
@@ -607,13 +607,30 @@ class LMCacheConnectorV1Impl:
         parent: KVConnectorBase_V1,
     ):
         self._parent = parent
+        self._vllm_config = vllm_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
         config = lmcache_get_or_create_config()
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
+        # Put the leading with "lmcache." and matched configs from
+        # vllm extra_config to the config
+        kv_connector_extra_config = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+        )
+        if kv_connector_extra_config:
+            for key, value in kv_connector_extra_config.items():
+                if key.startswith("lmcache."):
+                    config_key = key[8:]  # Remove "lmcache." prefix
+                    if _validate_and_set_config_value(config, config_key, value):
+                        logger.info(
+                            f"Updated config {config_key} from vLLM "
+                            f"extra config: {value}"
+                        )
+
         self.config = config
+
         self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
@@ -657,7 +674,8 @@ class LMCacheConnectorV1Impl:
                 get_tensor_model_parallel_rank(),
             )
 
-            if self.async_loading:
+            # In case of MLA, the lookup server is only created on worker 0
+            if self.async_loading and self.lookup_server is not None:
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
                 self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
 
@@ -698,10 +716,7 @@ class LMCacheConnectorV1Impl:
         self._requests_priority: dict[str, int] = {}
 
         # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
-        if (
-            vllm_config.parallel_config.data_parallel_size_local == 1
-            or vllm_config.parallel_config.data_parallel_rank_local == 0
-        ):
+        if vllm_config.parallel_config.data_parallel_rank_local == 0:
             # Start internal API server if enabled
             # The enabled check is in the InternalAPIServer constructor
             self.api_server = InternalAPIServer(self)
@@ -725,6 +740,65 @@ class LMCacheConnectorV1Impl:
             "lmcache cache_engine metadata: "
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
+
+    def get_inference_info(self) -> dict:
+        """Get inference information including vLLM config and related details.
+
+        Returns:
+            dict: Dictionary containing inference information
+        """
+        # Get vLLM config information
+        vllm_config = self._vllm_config
+
+        # Use vLLM config's string representation and add specific configs
+        inference_info = {
+            "vllm_version": VLLM_VERSION,
+            "lmcache_version": utils.get_version(),
+            "vllm_config": str(vllm_config),
+            "model_config": {
+                "model": getattr(vllm_config.model_config, "model", None),
+                "dtype": str(getattr(vllm_config.model_config, "dtype", None)),
+                "max_model_len": getattr(
+                    vllm_config.model_config, "max_model_len", None
+                ),
+                "vocab_size": getattr(vllm_config.model_config, "vocab_size", None),
+                "num_layers": getattr(
+                    vllm_config.model_config, "get_num_layers", lambda _: None
+                )(vllm_config.parallel_config),
+                "num_attention_heads": getattr(
+                    vllm_config.model_config, "get_num_attention_heads", lambda _: None
+                )(vllm_config.parallel_config),
+                "num_kv_heads": getattr(
+                    vllm_config.model_config, "get_num_kv_heads", lambda _: None
+                )(vllm_config.parallel_config),
+                "head_size": getattr(
+                    vllm_config.model_config, "get_head_size", lambda: None
+                )(),
+            },
+            "cache_config": {
+                "block_size": getattr(vllm_config.cache_config, "block_size", None),
+                "cache_dtype": str(
+                    getattr(vllm_config.cache_config, "cache_dtype", None)
+                ),
+                "gpu_memory_utilization": getattr(
+                    vllm_config.cache_config, "gpu_memory_utilization", None
+                ),
+                "swap_space": getattr(vllm_config.cache_config, "swap_space", None),
+                "enable_prefix_caching": getattr(
+                    vllm_config.cache_config, "enable_prefix_caching", None
+                ),
+            },
+        }
+
+        return inference_info
+
+    def get_inference_version(self) -> str:
+        """Get vLLM version information.
+
+        Returns:
+            str: vLLM version string
+        """
+        return VLLM_VERSION
 
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
@@ -1116,7 +1190,7 @@ class LMCacheConnectorV1Impl:
         ):
             return 0
 
-        self._requests_priority[request.request_id] = request.priority
+        self._requests_priority[request.request_id] = getattr(request, "priority", 0)
 
         token_ids = request.prompt_token_ids
 
@@ -1206,16 +1280,13 @@ class LMCacheConnectorV1Impl:
             receiver_id = req_disagg_spec["receiver_host"] + str(
                 req_disagg_spec["receiver_init_port"]
             )
-            receiver_info = NixlReceiverInfo(
+
+            disagg_spec = DisaggSpec(
+                req_id=req_disagg_spec["req_id"],
                 receiver_id=receiver_id,
                 receiver_host=req_disagg_spec["receiver_host"],
                 receiver_init_port=req_disagg_spec["receiver_init_port"],
                 receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
-            )
-
-            disagg_spec = DisaggSpec(
-                req_id=req_disagg_spec["req_id"],
-                receiver_info=receiver_info,
             )
 
             tmp_disagg_tracker[request.request_id] = disagg_spec

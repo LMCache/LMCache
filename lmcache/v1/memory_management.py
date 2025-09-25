@@ -18,7 +18,15 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
-import lmcache.c_ops as lmc_ops
+from lmcache.v1.system_detection import NUMAMapping
+
+if torch.cuda.is_available():
+    # First Party
+    import lmcache.c_ops as lmc_ops
+else:
+    # First Party
+    import lmcache.non_cuda_equivalents as lmc_ops
+
 
 logger = init_logger(__name__)
 
@@ -287,6 +295,31 @@ class MemoryObj(metaclass=abc.ABCMeta):
         Check whether the memory obj can be evicted.
         """
         raise NotImplementedError
+
+
+def _allocate_cpu_memory(
+    size: int,
+    numa_mapping: Optional[NUMAMapping] = None,
+) -> torch.Tensor:
+    if numa_mapping:
+        if torch.cuda.is_available():
+            current_device_id = torch.cuda.current_device()
+        else:
+            current_device_id = 0
+        gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
+        assert current_device_id in gpu_to_numa_mapping, (
+            f"Current device {current_device_id} is not in the GPU NUMA mapping."
+        )
+        numa_id = gpu_to_numa_mapping[current_device_id]
+        ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+    else:
+        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+
+    array_type = ctypes.c_uint8 * size
+    buf = array_type.from_address(ptr)
+    buffer = torch.frombuffer(buf, dtype=torch.uint8)
+
+    return buffer
 
 
 class TensorMemoryObj(MemoryObj):
@@ -1378,7 +1411,6 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         array_type = ctypes.c_uint8 * size
         buf = array_type.from_address(ptr)
         self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
-
         self._unregistered = False
 
         self.allocator: MemoryAllocatorInterface
@@ -1447,7 +1479,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
@@ -1470,19 +1503,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.size = size
 
-        if self.numa_mapping:
-            current_device_id = torch.cuda.current_device()
-            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
-            assert current_device_id in gpu_to_numa_mapping, (
-                f"Current device {current_device_id} is not in the GPU NUMA mapping."
-            )
-            numa_id = gpu_to_numa_mapping[current_device_id]
-            ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
-        else:
-            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(ptr)
-        self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+        self.buffer = _allocate_cpu_memory(size, self.numa_mapping)
+
         self._unregistered = False
 
         self.pin_allocator: MemoryAllocatorInterface
@@ -1596,7 +1618,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             if self.numa_mapping:
                 lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
             else:
@@ -1622,6 +1645,9 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the GPU memory in bytes.
         :param Optional[int] align_bytes: The byte alignment for allocations.
         """
+        if not torch.cuda.is_available():
+            device = "cpu"
+
         self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
 
         self.allocator: MemoryAllocatorInterface
@@ -1703,7 +1729,10 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         """
         :param str device: The device of the ad hoc memory allocator.
         """
-        self.device = device
+        if not torch.cuda.is_available():
+            self.device = "cpu"
+        else:
+            self.device = device
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -1787,7 +1816,10 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         if device is None:
             # TODO(Serapheim): Ideally we'd get the device from the upper
             # layer - for now just use the current device.
-            device = f"cuda:{torch.cuda.current_device()}"
+            if torch.cuda.is_available():
+                device = f"cuda:{torch.cuda.current_device()}"
+            else:
+                device = "cpu:0"
         super().__init__(size, device, align_bytes=4096)
         self.base_pointer = self.tensor.data_ptr()
         cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
@@ -1799,24 +1831,31 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         return "CuFileMemoryAllocator"
 
 
-class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
+class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
     """
-    NIXL + CPU Memory Allocator
-    This is a special allocator makes pd and cpu compatible.
+    Paged Memory Allocator for both CPU and GPU memory.
+    This is a paged memory allocator for PD and P2P sharing
+    when NIXL is enabled as NIXL relies on the paging abstraction.
     """
 
     def __init__(self):
         pass
 
-    def init_nixl_memory_allocator(
+    def init_gpu_memory_allocator(
         self,
-        tensor: torch.Tensor,
+        size: int,
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        device: str = "cuda",
     ):
-        self.nixl_allocator = PagedTensorMemoryAllocator(
-            tensor,
+        self.gpu_buffer = torch.empty(
+            size,
+            dtype=torch.uint8,
+            device=device,
+        )
+        self.gpu_allocator = PagedTensorMemoryAllocator(
+            self.gpu_buffer,
             shape,
             dtype,
             fmt,
@@ -1825,8 +1864,18 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
     def init_cpu_memory_allocator(
         self,
         size: int,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        numa_mapping: Optional[NUMAMapping] = None,
     ):
-        self.cpu_allocator = MixedMemoryAllocator(size)
+        self.cpu_buffer = _allocate_cpu_memory(size, numa_mapping)
+        self.cpu_allocator = PagedTensorMemoryAllocator(
+            self.cpu_buffer,
+            shape,
+            dtype,
+            fmt,
+        )
 
     def allocate(
         self,
@@ -1835,8 +1884,8 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = "cpu",
     ) -> Optional[MemoryObj]:
-        if allocator_type == "nixl":
-            return self.nixl_allocator.allocate(shape, dtype, fmt)
+        if allocator_type == "gpu":
+            return self.gpu_allocator.allocate(shape, dtype, fmt)
         elif allocator_type == "cpu":
             return self.cpu_allocator.allocate(shape, dtype, fmt)
         else:
@@ -1848,18 +1897,18 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-        allocator_type: Optional[str] = "cpu",
+        allocator_type: Optional[str] = "gpu",
     ) -> Optional[List[MemoryObj]]:
-        if allocator_type == "nixl":
-            return self.nixl_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        if allocator_type == "gpu":
+            return self.gpu_allocator.batched_allocate(shape, dtype, batch_size, fmt)
         elif allocator_type == "cpu":
             return self.cpu_allocator.batched_allocate(shape, dtype, batch_size, fmt)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"):
-        if allocator_type == "nixl":
-            self.nixl_allocator.free(memory_obj)
+        if allocator_type == "gpu":
+            self.gpu_allocator.free(memory_obj)
         elif allocator_type == "cpu":
             self.cpu_allocator.free(memory_obj)
         else:
@@ -1871,12 +1920,12 @@ class NixlCPUMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ):
-        if allocator_type == "nixl":
-            self.nixl_allocator.batched_free(memory_objs, update_stats=update_stats)
+        if allocator_type == "gpu":
+            self.gpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         elif allocator_type == "cpu":
             self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
     def __str__(self):
-        return "NixlCPUMemoryAllocator"
+        return "PDMemoryAllocator"

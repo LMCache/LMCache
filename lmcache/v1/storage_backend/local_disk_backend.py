@@ -101,7 +101,11 @@ class LocalDiskBackend(StorageBackendInterface):
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
-        super().__init__(dst_device)
+        if torch.cuda.is_available():
+            super().__init__(dst_device)
+        else:
+            super().__init__("cpu")
+
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 
@@ -301,9 +305,6 @@ class LocalDiskBackend(StorageBackendInterface):
             if evict_success:
                 self.current_cache_size += required_size
 
-        if all_evict_keys:
-            self._on_evict(all_evict_keys)
-
         if not evict_success:
             return None
 
@@ -325,7 +326,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
@@ -369,6 +370,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
@@ -562,10 +564,4 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
-        self.disk_worker.close()
-        with self.disk_lock:
-            keys = list(self.dict.keys())
-        if keys:
-            super()._on_evict(keys)
-        # Close worker executor
         self.disk_worker.close()

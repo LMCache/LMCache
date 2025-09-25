@@ -28,8 +28,12 @@ First, create a yaml file ``example.yaml`` to configure the lmcache instance:
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
     controller_url: "localhost:9001"
-    lmcache_worker_port: 8001
-    distributed_url: "localhost:8002"
+    lmcache_worker_ports: 8001
+
+    # Peer identifiers
+    p2p_host: "localhost"
+    p2p_init_ports: 8200
+
 
 Start the vllm/lmcache instance at port 8000:
 

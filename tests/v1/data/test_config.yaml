@@ -4,12 +4,12 @@ extra_config:
   key1: value1
   key2: value2
 
-enable_nixl: True
-enable_xpyd: True
-nixl_role: "receiver"
-nixl_peer_host: "localhost"
-nixl_peer_init_port: 7300
-nixl_peer_alloc_port: 7400
-nixl_buffer_size: 2147483648
-nixl_buffer_device: "cuda"
+enable_pd: True
+transfer_channel: "nixl"
+pd_role: "receiver"
+pd_peer_host: "localhost"
+pd_peer_init_port: 7300
+pd_peer_alloc_port: 7400
+pd_buffer_size: 2147483648
+pd_buffer_device: "cuda"
 nixl_backends: [UCX, GDS]

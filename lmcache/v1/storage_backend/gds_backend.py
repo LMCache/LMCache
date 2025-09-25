@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
 import json
@@ -184,7 +184,7 @@ class GdsBackend(AllocatorBackendInterface):
         dst_device: str = "cuda",
     ):
         assert dst_device.startswith("cuda")
-        super().__init__(dst_device)
+        super().__init__(dst_device=dst_device)
 
         self.config = config
         self.loop = loop
@@ -407,10 +407,13 @@ class GdsBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
-    ) -> None:
+        transfer_spec: Any = None,
+    ) -> Union[List[Future], None]:
+        futures = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            future = self.submit_put_task(key, memory_obj)
+            futures.append(future)
+        return futures
 
     async def _async_save_bytes_to_disk(
         self,
@@ -648,7 +651,7 @@ class GdsBackend(AllocatorBackendInterface):
                 fd,
                 file_size,
                 prot=mmap.PROT_READ,
-                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,
+                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
             )
             os.close(fd)
 

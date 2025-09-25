@@ -12,12 +12,12 @@ docker-prefiller:
   env:
     - "LMCACHE_LOCAL_CPU=False"
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
-    - "LMCACHE_ENABLE_NIXL=True"
-    - "LMCACHE_ENABLE_XPYD=True"
-    - "LMCACHE_NIXL_ROLE=sender"
-    - "LMCACHE_NIXL_PROXY_HOST=localhost"
-    - "LMCACHE_NIXL_BUFFER_SIZE=1073741824" # 1GB
-    - "LMCACHE_NIXL_BUFFER_DEVICE=cuda"
+    - "LMCACHE_ENABLE_PD=True"
+    - "LMCACHE_TRANSFER_CHANNEL=nixl"
+    - "LMCACHE_PD_ROLE=sender"
+    - "LMCACHE_PD_PROXY_HOST=localhost"
+    - "LMCACHE_PD_BUFFER_SIZE=1073741824" # 1GB
+    - "LMCACHE_PD_BUFFER_DEVICE=cuda"
     - "PYTHONHASHSEED=0"
   proxy-port: 7500
 
@@ -25,12 +25,12 @@ docker-decoder:
   env:
     - "LMCACHE_LOCAL_CPU=False"
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=0"
-    - "LMCACHE_ENABLE_NIXL=True"
-    - "LMCACHE_ENABLE_XPYD=True"
-    - "LMCACHE_NIXL_ROLE=receiver"
-    - "LMCACHE_NIXL_PEER_HOST=localhost"
-    - "LMCACHE_NIXL_BUFFER_SIZE=2147483648" # 2GB
-    - "LMCACHE_NIXL_BUFFER_DEVICE=cuda"
+    - "LMCACHE_ENABLE_PD=True"
+    - "LMCACHE_TRANSFER_CHANNEL=nixl"
+    - "LMCACHE_PD_ROLE=receiver"
+    - "LMCACHE_PD_PEER_HOST=localhost"
+    - "LMCACHE_PD_BUFFER_SIZE=2147483648" # 2GB
+    - "LMCACHE_PD_BUFFER_DEVICE=cuda"
     - "PYTHONHASHSEED=0"
   init-port: 7300
   alloc-port: 7400

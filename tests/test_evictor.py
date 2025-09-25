@@ -75,6 +75,10 @@ def get_tensor_size(tensor):
 
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Requires CUDA for test_lru",
+)
 def test_lru(backend, dst_device, autorelease):
     fmt = "vllm"
     num_tokens = 256
@@ -125,6 +129,10 @@ def test_lru(backend, dst_device, autorelease):
 # no matter how big the cache is.
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu"])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Requires CUDA for test_lru_fragmentation",
+)
 def test_lru_fragmentation(backend, dst_device, autorelease):
     fmt = "vllm"
     num_tokens = 1

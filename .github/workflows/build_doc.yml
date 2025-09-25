@@ -10,6 +10,7 @@ on:
      - 'docs/**'
      - 'lmcache/**'
      - 'examples/**'
+     - '.github/workflows/build_doc.yml'
 jobs:
   build-docs:
     name: Build docs
@@ -43,9 +44,13 @@ jobs:
           sphinx-multiversion docs/source output
         continue-on-error: false
 
-      - name: Add .nojekyll
+      - name: Setup root docs and .nojekyll
         run: |
           touch output/.nojekyll
+          # Copy dev docs to root (latest docs at root URL)
+          cp -r output/dev/* output/
+          # Remove dev directory to avoid duplication
+          rm -rf output/dev
 
       - name: Upload doc artifacts to GHA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

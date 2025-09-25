@@ -139,7 +139,10 @@ class RedisConnector(RemoteConnector):
     ):
         # calling self.put will create a circular dependency
         await asyncio.gather(
-            *(self._put(key, memory_obj) for key, memory_obj in zip(keys, memory_objs))
+            *(
+                self._put(key, memory_obj)
+                for key, memory_obj in zip(keys, memory_objs, strict=False)
+            )
         )
 
     async def batched_put(

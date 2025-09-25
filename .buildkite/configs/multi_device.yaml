@@ -10,6 +10,7 @@ docker:
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
     - "LMCACHE_GDS_PATH=/tmp/"
     - "LMCACHE_CUFILE_BUFFER_SIZE=4096"
+    - "LMCACHE_EXTRA_CONFIG={\"use_direct_io\": true}"
 
 vllm:
   model: "meta-llama/Llama-3.2-1B-Instruct"

@@ -15,7 +15,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set
+from typing import Any, List, Optional, Sequence, Set, cast
 import asyncio
 import os
 import threading
@@ -43,7 +43,7 @@ from lmcache.v1.memory_management import (
     PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-from lmcache.v1.storage_backend.connector.nixl_utils import get_correct_nixl_device
+from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
 
@@ -83,7 +83,7 @@ class NixlStorageConfig:
             extra_config.get("nixl_backend"), config.nixl_buffer_device
         ), "Invalid NIXL backend & device combination"
 
-        corrected_device = get_correct_nixl_device(
+        corrected_device = get_correct_device(
             config.nixl_buffer_device, metadata.worker_id
         )
 
@@ -326,36 +326,48 @@ class NixlStorageBackend(AllocatorBackendInterface):
             with self.progress_lock:
                 self.progress_set.discard(key.chunk_hash)
 
-    async def file_to_gpu(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def file_to_gpu(
+        self, keys: list[CacheEngineKey]
+    ) -> list[Optional[MemoryObj]]:
+        obj_list: list[Optional[MemoryObj]] = []
+        mem_indices = []
+        file_indices = []
         with self.key_lock:
-            metadata = self.key_dict.get(key.chunk_hash)
-            if metadata is None:
-                return None
+            for key in keys:
+                metadata = self.key_dict.get(key.chunk_hash)
+                if metadata is None:
+                    obj_list.append(None)
+                    continue
 
-        dtype = metadata.dtype
-        shape = metadata.shape
-        fmt = metadata.fmt
-        assert dtype is not None
-        assert shape is not None
-        assert fmt is not None
+                dtype = metadata.dtype
+                shape = metadata.shape
+                fmt = metadata.fmt
+                assert dtype is not None
+                assert shape is not None
+                assert fmt is not None
 
-        obj = self.memory_allocator.allocate(shape, dtype, fmt)
-        if obj is None:
-            return None
+                obj = self.memory_allocator.allocate(shape, dtype, fmt)
+                assert obj is not None
 
-        handle = self.agent.get_file_to_gpu_handle(
-            [obj.metadata.address], [metadata.address]
-        )
+                obj_list.append(obj)
+
+                mem_indices.append(obj.metadata.address)
+                file_indices.append(metadata.address)
+
+        if not mem_indices:
+            return obj_list
+
+        handle = self.agent.get_file_to_gpu_handle(mem_indices, file_indices)
         self.agent.post_blocking(handle)
         self.agent.release_handle(handle)
 
-        return obj
+        return obj_list
 
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         with self.progress_lock:
             for key in keys:
@@ -372,12 +384,23 @@ class NixlStorageBackend(AllocatorBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
-        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu(key), self.loop)
+        future = asyncio.run_coroutine_threadsafe(self.file_to_gpu([key]), self.loop)
 
         if future is None:
             return None
 
-        return future.result()
+        obj_list = future.result()
+        return obj_list[0]
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
+    ) -> list[MemoryObj]:
+        obj_list = await self.file_to_gpu(keys)
+        assert None not in obj_list
+        return cast(list[MemoryObj], obj_list)
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """
@@ -420,12 +443,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
             "enable_nixl_storage"
         )
         assert enable_nixl_storage
-        # First Party
-        from lmcache.v1.storage_backend.connector.nixl_utils import (
-            get_correct_nixl_device,
-        )
-
-        corrected_device = get_correct_nixl_device(
+        corrected_device = get_correct_device(
             config.nixl_buffer_device,
             metadata.worker_id,
         )

@@ -30,6 +30,8 @@ from lmcache.v1.cache_controller.message import (
     PinWorkerRetMsg,
     RegisterMsg,
     WorkerMsg,
+    WorkerReqMsg,
+    WorkerReqRetMsg,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.rpc_utils import (
@@ -70,27 +72,36 @@ class LMCacheWorker:
 
         self.context = get_zmq_context()
 
-        assert config.controller_url is not None
+        assert config.controller_pull_url is not None
 
+        controller_pull_url = config.controller_pull_url
         self.push_socket = get_zmq_socket(
             self.context,
-            config.controller_url,
+            controller_pull_url,
             protocol="tcp",
             role=zmq.PUSH,  # type: ignore[attr-defined]
             bind_or_connect="connect",
         )
 
-        # TODO(Jiayi): Make this less hard-coded
-        lmcache_worker_port = config.lmcache_worker_port
-        assert lmcache_worker_port is not None
-        # TODO(Jiayi): Make this port assignment smarter
-        lmcache_worker_port += self.worker_id
+        if config.controller_reply_url is not None:
+            controller_rep_url = config.controller_reply_url
+            self.req_socket = get_zmq_socket(
+                self.context,
+                controller_rep_url,
+                protocol="tcp",
+                role=zmq.REQ,  # type: ignore[attr-defined]
+                bind_or_connect="connect",
+            )
+
+        lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
 
         self.lmcache_worker_internal_url = f"*:{lmcache_worker_port}"
         self.lmcache_worker_ip = get_ip()
         self.lmcache_worker_port = lmcache_worker_port
 
-        self.distributed_url = config.distributed_url
+        self.p2p_host = config.p2p_host
+        self.p2p_init_port = config.p2p_init_ports[self.worker_id]
+        self.p2p_init_url = f"{self.p2p_host}:{self.p2p_init_port}"
 
         self.reply_socket = get_zmq_socket(
             self.context,
@@ -126,7 +137,7 @@ class LMCacheWorker:
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
-                distributed_url=self.distributed_url,
+                distributed_url=self.p2p_init_url,
             )
         )
 
@@ -144,10 +155,26 @@ class LMCacheWorker:
             )
         )
 
+    async def async_put_and_wait_msg(
+        self,
+        msg: WorkerReqMsg,
+    ) -> WorkerReqRetMsg:
+        """
+        Send a message to the controller and wait for the response.
+        """
+
+        self.req_socket.send(msgspec.msgpack.encode(msg))
+        serialized_ret_msg = await self.req_socket.recv()
+        ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
+        return ret_msg
+
     def put_msg(self, msg: WorkerMsg):
         """
         Put a message into the message queue.
         """
+        # TODO(Jiayi): This might introduce ~0.05ms latency than
+        # a normal function call.
+        # Not sure how much overhead is blocking though.
         self.loop.call_soon_threadsafe(self.msg_queue.put_nowait, msg)
 
     async def batched_get_msg(self, max_bsz: int = 50) -> list[WorkerMsg]:
@@ -190,7 +217,7 @@ class LMCacheWorker:
                         worker_id=self.worker_id,
                         ip=self.lmcache_worker_ip,
                         port=self.lmcache_worker_port,
-                        distributed_url=self.distributed_url,
+                        distributed_url=self.p2p_init_url,
                     )
                 )
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
@@ -227,8 +254,8 @@ class LMCacheWorker:
                     if new_position[0] == self.lmcache_worker_internal_url:
                         # TODO(Jiayi): currently we only support moving from
                         # local disk to local cpu.
-                        assert old_position[1] == "disk"
-                        assert new_position[1] == "cpu"
+                        assert old_position[1] == "LocalDiskBackend"
+                        assert new_position[1] == "LocalCPUBackend"
                         assert do_copy
 
                         # TODO(Jiayi): We need to align prefetch and move.
@@ -237,7 +264,9 @@ class LMCacheWorker:
                             "Prefetch from controller is not implemented yet."
                         )
                     else:
-                        assert self.lmcache_engine.distributed_server is not None
+                        assert new_position[1] == "LocalCPUBackend", (
+                            "Only support moving to cpu for now."
+                        )
                         logger.debug("Executing cross-node move operation.")
                         num_tokens = self.lmcache_engine.move(
                             tokens=tokens,

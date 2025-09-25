@@ -6,8 +6,10 @@ from typing import Optional
 # Third Party
 import torch
 
+if torch.cuda.is_available():
+    from lmcache.c_ops import get_gpu_pci_bus_id
+
 # First Party
-from lmcache.c_ops import get_gpu_pci_bus_id
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 

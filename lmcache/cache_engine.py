@@ -38,7 +38,9 @@ class LMCacheEngine:
         self.hit_tokens_count = 0
         self.hit_rate = 0.0
 
-        self.engine_ = CreateStorageBackend(config, metadata)
+        self.engine_ = CreateStorageBackend(
+            config, metadata, "cuda" if torch.cuda.is_available() else "cpu"
+        )
         logger.debug(f"Current storage backend type {type(self.engine_)}")
 
         InitializeUsageContext(config, metadata)

@@ -111,16 +111,18 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
-    # Pick the GPU with the largest free memory
-    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" ""
+    # Pick the GPUs based on config
+    gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" "" "$gpu_count"
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
     # docker args
     docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=${best_gpu}"
+        --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )
@@ -179,7 +181,7 @@ run_pd_lmcache() {
         [[ -n $e ]] && prefiller_docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$prefiller_docker")
     proxy=$(yq -er '."proxy-port"' <<<"$prefiller_docker" 2>/dev/null)
-    prefiller_docker_args+=(--env "LMCACHE_NIXL_PROXY_PORT=$proxy")
+    prefiller_docker_args+=(--env "LMCACHE_PD_PROXY_PORT=$proxy")
 
     # vllm args
     prefiller_vllm_model="$(yq -r '.model' <<<"$prefiller_vllm")"
@@ -222,9 +224,9 @@ run_pd_lmcache() {
         [[ -n $e ]] && decoder_docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$decoder_docker")
     init=$(yq -er '."init-port"' <<<"$decoder_docker" 2>/dev/null)
-    decoder_docker_args+=(--env "LMCACHE_NIXL_PEER_INIT_PORT=$init")
+    decoder_docker_args+=(--env "LMCACHE_PD_PEER_INIT_PORT=$init")
     alloc=$(yq -er '."alloc-port"' <<<"$decoder_docker" 2>/dev/null)
-    decoder_docker_args+=(--env "LMCACHE_NIXL_PEER_ALLOC_PORT=$alloc")
+    decoder_docker_args+=(--env "LMCACHE_PD_PEER_ALLOC_PORT=$alloc")
 
     # vllm args
     decoder_vllm_model="$(yq -r '.model' <<<"$decoder_vllm")"
