@@ -103,6 +103,7 @@ def allocate_and_copy_objects(
 class WeightedSemaphore:
     def __init__(self, chunk_budget: int):
         # it is physically impossible to have more fragmentation than 50%
+        # when all of the chunks are of the same size (save_unfull_chunk=False)
         # so we can safely allocate half of the chunk budget for concurrent requests
         self._concurrent_budget_cap = chunk_budget // 2
         self._chunk_budget_cap = chunk_budget
