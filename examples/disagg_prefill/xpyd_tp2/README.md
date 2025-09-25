@@ -6,21 +6,21 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 
 - Install [LMCache](https://github.com/LMCache/LMCache). You can simply run `pip install lmcache`.
 - Install [NIXL](https://github.com/ai-dynamo/nixl).
-- At least 3 GPUs
+- At least 4 GPUs
 - Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B Instruct.
 
 ### Usage
 
 Run
 ```bash
-bash disagg_example_asym_tp.sh
+bash disagg_example_xpyd.sh
 ```
 
 to start disaggregated prefill and benchmark the performance.
 
 The script will:
 
-1. Launch 1 decoder instances listening on port 7200 with TP=1
+1. Launch 1 decoder instances listening on port 7200 with TP=2
 2. Launch 1 prefill instances listening on ports 7100, with TP=2
 3. Launch a proxy server that uses round-robin to distribute requests between the prefill instances and decode instances, listening on port 9100
 
