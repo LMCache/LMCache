@@ -209,17 +209,17 @@ class LMCacheEngine:
         elif tokens is not None:
             num_to_store_tokens = len(tokens)
         elif hashes is not None:
-            assert offsets is not None, (
-                "Offsets should be set when hashes are provided during store"
-            )
+            if offsets is None:
+                raise ValueError(
+                    "Offsets should be set when hashes are provided during store."
+                )
             num_to_store_tokens = sum(offsets)
             kwargs["slot_mapping"] = torch.tensor(
                 kwargs["slot_mapping"], dtype=torch.long, device="cuda"
             )
 
-        assert tokens is not None or hashes is not None, (
-            "Either 'tokens' or 'hashes' must be provided."
-        )
+        if tokens is None and hashes is None:
+            raise ValueError("Either 'tokens' or 'hashes' must be provided.")
 
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
@@ -236,7 +236,11 @@ class LMCacheEngine:
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
-            assert isinstance(request_configs, dict)
+            if not isinstance(request_configs, dict):
+                raise TypeError(
+                    f"Expected 'request_configs' to be a dict, "
+                    f"got {type(request_configs).__name__}."
+                )
 
         for start, end, key in self.token_database.process_tokens(
             tokens,
@@ -245,7 +249,11 @@ class LMCacheEngine:
             mask,
             request_configs=request_configs,
         ):
-            assert isinstance(key, CacheEngineKey)
+            if not isinstance(key, CacheEngineKey):
+                raise TypeError(
+                    f"Expected 'key' to be a CacheEngineKey, got {type(key).__name__}."
+                )
+
             # Allocate the memory object
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
@@ -342,12 +350,19 @@ class LMCacheEngine:
         kv_dtype = self.metadata.kv_dtype
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
-            assert isinstance(request_configs, dict)
+            if not isinstance(request_configs, dict):
+                raise TypeError(
+                    f"Expected 'request_configs' to be a dict, "
+                    f"got {type(request_configs).__name__}."
+                )
 
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask, request_configs=request_configs
         ):
-            assert isinstance(key, CacheEngineKey)
+            if not isinstance(key, CacheEngineKey):
+                raise TypeError(
+                    f"Expected 'key' to be a CacheEngineKey, got {type(key).__name__}."
+                )
 
             keys_multi_layer = key.split_layers(self.num_layers)
             # Only check the first layer
@@ -384,14 +399,21 @@ class LMCacheEngine:
             memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
             keys = [list(row) for row in zip(*keys, strict=False)]
 
-            assert isinstance(
+            if not isinstance(
                 self.gpu_connector,
                 (
                     VLLMPagedMemLayerwiseGPUConnector,
                     VLLMBufferLayerwiseGPUConnector,
                     SGLangLayerwiseGPUConnector,
                 ),
-            )
+            ):
+                raise TypeError(
+                    f"Expected 'gpu_connector' to be "
+                    f"VLLMPagedMemLayerwiseGPUConnector, "
+                    f"VLLMBufferLayerwiseGPUConnector or "
+                    f"SGLangLayerwiseGPUConnector, "
+                    f"but got {type(self.gpu_connector).__name__}."
+                )
 
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
                 memory_objs, starts, ends, **kwargs
@@ -564,13 +586,21 @@ class LMCacheEngine:
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
-            assert isinstance(request_configs, dict)
+            if not isinstance(request_configs, dict):
+                raise TypeError(
+                    f"Expected 'request_configs' to be a dict, "
+                    f"got {type(request_configs).__name__}."
+                )
+
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
-            assert isinstance(key, CacheEngineKey)
+            if not isinstance(key, CacheEngineKey):
+                raise TypeError(
+                    f"Expected 'key' to be a CacheEngineKey, got {type(key).__name__}."
+                )
 
             keys_multi_layer = key.split_layers(self.num_layers)
 
@@ -590,22 +620,29 @@ class LMCacheEngine:
 
             get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)
 
-            assert isinstance(
+            if not isinstance(
                 self.gpu_connector,
                 (
                     VLLMPagedMemLayerwiseGPUConnector,
                     VLLMBufferLayerwiseGPUConnector,
                     SGLangLayerwiseGPUConnector,
                 ),
-            )
+            ):
+                raise TypeError(
+                    f"Expected 'gpu_connector' to be "
+                    f"VLLMPagedMemLayerwiseGPUConnector, "
+                    f"VLLMBufferLayerwiseGPUConnector or "
+                    f"SGLangLayerwiseGPUConnector, "
+                    f"but got {type(self.gpu_connector).__name__}."
+                )
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
             to_count_down = []
             for layer_id in range(self.num_layers):
                 task = next(get_generator)
-
-                assert task is not None
+                if task is None:
+                    raise ValueError("task should be set.")
 
                 if layer_id == 0:
                     # NOTE(Yuwei): For sglang integration we need to provide retrieved
@@ -681,8 +718,10 @@ class LMCacheEngine:
         if tokens is not None:
             self.stats_monitor.on_lookup_request(len(tokens))
         else:
-            assert offsets is not None
-            assert hashes is not None
+            if offsets is None:
+                raise ValueError("offsets should be set.")
+            if hashes is None:
+                raise ValueError("hashes should be set.")
             self.stats_monitor.on_lookup_request(sum(offsets))
 
         try:
@@ -690,7 +729,8 @@ class LMCacheEngine:
             prev_end = 0
 
             if pin:
-                assert lookup_id is not None, "lookup_id is required when pin is True"
+                if lookup_id is None:
+                    raise ValueError("lookup_id is required when pin is True.")
 
             for start, end, key in self.token_database.process_tokens(
                 tokens=tokens,
@@ -698,7 +738,11 @@ class LMCacheEngine:
                 offsets=offsets,
                 request_configs=request_configs,
             ):
-                assert isinstance(key, CacheEngineKey)
+                if not isinstance(key, CacheEngineKey):
+                    raise TypeError(
+                        f"Expected 'key' to be a CacheEngineKey, "
+                        f"got {type(key).__name__}."
+                    )
 
                 if self.use_layerwise:
                     # TODO(Jiayi): Optimize by checking only the existence of the key
@@ -771,7 +815,8 @@ class LMCacheEngine:
             keys=keys,
             location=old_position,
         )
-        assert memory_objs is not None, "Failed to get memory objects to move"
+        if memory_objs is None:
+            raise ValueError("Failed to get memory objects to move.")
         logger.debug(
             f"Trying to send {len(memory_objs)} memory objects to {new_position}"
         )
@@ -836,7 +881,10 @@ class LMCacheEngine:
             offsets=offsets,
             request_configs=request_configs,
         ):
-            assert isinstance(key, CacheEngineKey)
+            if not isinstance(key, CacheEngineKey):
+                raise TypeError(
+                    f"Expected 'key' to be a CacheEngineKey, got {type(key).__name__}."
+                )
             keys.append(key)
             cum_chunk_lengths.append(end)
 
@@ -884,13 +932,13 @@ class LMCacheEngine:
             keys=keys,
             location=location,
         )
-        assert memory_objs is not None, (
-            "LMCacheEngine.compress: Failed to get memory objects to compress"
-        )
+        if memory_objs is None:
+            raise ValueError(" Failed to get memory objects to compress.")
 
         compressed_memory_objs = []
         for memory_obj in memory_objs:
-            assert memory_obj is not None
+            if memory_obj is None:
+                raise ValueError(" Memory object not set in compressed memory objects.")
             compressed_memory_obj = serializer.serialize(memory_obj)
             memory_obj.unpin()
             compressed_memory_objs.append(compressed_memory_obj)
@@ -939,15 +987,15 @@ class LMCacheEngine:
             keys=keys,
             location=location,
         )
-
-        assert compressed_memory_objs is not None, (
-            "LMCacheEngine.compress: Failed to get compressed "
-            "memory objects to decompress"
-        )
+        if compressed_memory_objs is None:
+            raise ValueError("Failed to get compressed memory objects to decompress.")
 
         memory_objs = []
         for compressed_memory_obj in compressed_memory_objs:
-            assert compressed_memory_obj is not None
+            if compressed_memory_obj is None:
+                raise ValueError(
+                    "Compressed memory object empty in compressed memory object list."
+                )
             memory_obj = deserializer.deserialize(compressed_memory_obj)
             compressed_memory_obj.unpin()
             memory_objs.append(memory_obj)
@@ -993,7 +1041,11 @@ class LMCacheEngine:
         locations: Optional[List[str]] = None,
         request_configs: Optional[dict] = None,
     ) -> int:
-        assert isinstance(self.storage_manager, StorageManager)
+        if not isinstance(self.storage_manager, StorageManager):
+            raise TypeError(
+                f"Expected 'storage_manager' to be a StorageManager, "
+                f"got {type(self.storage_manager).__name__}."
+            )
         # Clear all caches if tokens is None
         if tokens is None or len(tokens) == 0:
             num_cleared = self.storage_manager.clear(locations)
@@ -1004,7 +1056,10 @@ class LMCacheEngine:
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, request_configs=request_configs
         ):
-            assert isinstance(key, CacheEngineKey)
+            if not isinstance(key, CacheEngineKey):
+                raise TypeError(
+                    f"Expected 'key' to be a CacheEngineKey, got {type(key).__name__}."
+                )
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
         return num_removed
@@ -1045,10 +1100,15 @@ class LMCacheEngine:
             ret_mask: Output mask updated with cache hit positions
             **kwargs: Additional keyword arguments
         """
-        assert "req_id" in kwargs, "req_id is required for async loading"
+        if "req_id" not in kwargs:
+            raise ValueError("req_id is required for async loading.")
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
-            assert isinstance(request_configs, dict)
+            if not isinstance(request_configs, dict):
+                raise TypeError(
+                    f"Expected 'request_configs' to be a dict, "
+                    f"got {type(request_configs).__name__}."
+                )
 
         tot_kv_size = 0
         chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
@@ -1067,7 +1127,10 @@ class LMCacheEngine:
                 request_configs=request_configs,
             )
         ):
-            assert isinstance(key, CacheEngineKey)
+            if not isinstance(key, CacheEngineKey):
+                raise TypeError(
+                    f"Expected 'key' to be a CacheEngineKey, got {type(key).__name__}."
+                )
             memory_obj = memory_objs[idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
@@ -1107,14 +1170,21 @@ class LMCacheEngine:
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
-            assert isinstance(request_configs, dict)
+            if not isinstance(request_configs, dict):
+                raise TypeError(
+                    f"Expected 'request_configs' to be a dict, "
+                    f"got {type(request_configs).__name__}."
+                )
 
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
-            assert isinstance(key, CacheEngineKey)
+            if not isinstance(key, CacheEngineKey):
+                raise TypeError(
+                    f"Expected 'key' to be a CacheEngineKey, got {type(key).__name__}."
+                )
 
             if key in self.lookup_cache:
                 # TODO(Jiayi): we can reduce the number of `contains` calls
@@ -1132,7 +1202,8 @@ class LMCacheEngine:
                 # object is already pinned in the storage backend.
                 ret_mask[start:end] = True
 
-            assert location is not None
+            if location is None:
+                raise ValueError("location should be set.")
 
             block_mapping[location].append((key, start, end))
 
@@ -1143,9 +1214,8 @@ class LMCacheEngine:
                 keys=keys,
                 location=location,
             )
-            assert memory_objs is not None, (
-                "Failed to get memory objects from storage backend"
-            )
+            if memory_objs is None:
+                raise ValueError("Failed to get memory objects from storage backend.")
 
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
@@ -1315,7 +1385,8 @@ class LMCacheEngineBuilder:
             )
 
         if config.weka_path is not None or config.gds_path is not None:
-            assert config.cufile_buffer_size is not None
+            if config.cufile_buffer_size is None:
+                raise ValueError("cufile_buffer_size must be set in the configuration.")
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
         max_local_cpu_size = config.max_local_cpu_size

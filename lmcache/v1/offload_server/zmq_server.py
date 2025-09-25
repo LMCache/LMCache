@@ -64,9 +64,13 @@ class ZMQOffloadServer(OffloadServerInterface):
         slot_mapping: List[int],
         offsets: List[int],
     ) -> bool:
-        self.lmcache_engine.store(
-            hashes=hashes, slot_mapping=slot_mapping, offsets=offsets
-        )
+        try:
+            self.lmcache_engine.store(
+                hashes=hashes, slot_mapping=slot_mapping, offsets=offsets
+            )
+        except (TypeError, ValueError) as e:
+            print(f"Store failed: {e}")
+            return False
         return True
 
     def close(self) -> None:

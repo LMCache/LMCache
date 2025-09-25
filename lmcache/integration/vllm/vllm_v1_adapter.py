@@ -415,7 +415,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
-) -> LMCacheEngine:
+) -> Union[LMCacheEngine | None]:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
@@ -428,6 +428,8 @@ def _init_lmcache_engine(
 
     :return: The initialized LMCache engine
     :rtype: LMCacheEngine
+
+    :return: None if LMCache engine could not be created or retrieved
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -519,14 +521,18 @@ def _init_lmcache_engine(
             use_mla=use_mla,
         )
     tpg = get_tp_group()
-    engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME,
-        lmcache_config,
-        metadata,
-        vllm_gpu_connector,
-        tpg.broadcast,
-        tpg.broadcast_object,
-    )
+    try:
+        engine = LMCacheEngineBuilder.get_or_create(
+            ENGINE_NAME,
+            lmcache_config,
+            metadata,
+            vllm_gpu_connector,
+            tpg.broadcast,
+            tpg.broadcast_object,
+        )
+    except ValueError as e:
+        logger.error(f"LMCacheEngine instance get/create failed: {e}")
+        return None
 
     return engine
 
@@ -596,6 +602,7 @@ class LMCacheConnectorV1Impl:
                 config,
                 vllm_config,
             )
+            assert self.lmcache_engine is not None
 
             self.use_layerwise = config.use_layerwise
             self.enable_blending = config.enable_blending
@@ -609,7 +616,6 @@ class LMCacheConnectorV1Impl:
                 )
 
             # Create lookup server using factory
-            assert self.lmcache_engine is not None
             self.lookup_server = LookupClientFactory.create_lookup_server(
                 self.lmcache_engine, vllm_config
             )
@@ -842,26 +848,35 @@ class LMCacheConnectorV1Impl:
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     )
                 else:
-                    layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
-                        kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                        sync=sync,
-                    )
+                    try:
+                        layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                            tokens[:lmcache_cached_tokens],
+                            token_mask[:lmcache_cached_tokens],
+                            kvcaches=kvcaches,
+                            slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                            sync=sync,
+                        )
+                    except (TypeError, ValueError) as e:
+                        logger.error(f"Retrieve layer failed: {e}")
+                        return
+
                     # NOTE: retrieve for two layers at the first layer
                     next(layerwise_retriever)
                     next(layerwise_retriever)
                     self.layerwise_retrievers.append(layerwise_retriever)
             else:
-                ret_token_mask = self.lmcache_engine.retrieve(
-                    tokens[:lmcache_cached_tokens],
-                    token_mask[:lmcache_cached_tokens],
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                    request_configs=request.request_configs,
-                    req_id=request.req_id,
-                )
+                try:
+                    ret_token_mask = self.lmcache_engine.retrieve(
+                        tokens[:lmcache_cached_tokens],
+                        token_mask[:lmcache_cached_tokens],
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        request_configs=request.request_configs,
+                        req_id=request.req_id,
+                    )
+                except (TypeError, ValueError) as e:
+                    logger.error(f"Retrieve failed: {e}")
+                    return
 
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
@@ -988,14 +1003,18 @@ class LMCacheConnectorV1Impl:
 
                 # TODO (Jiayi): need to make layerwise storing
                 # compatible with disagg spec
-                layerwise_storer = self.lmcache_engine.store_layer(
-                    token_ids,
-                    mask=store_mask,
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
-                    offset=skip_leading_tokens,
-                    sync=is_first,
-                )
+                try:
+                    layerwise_storer = self.lmcache_engine.store_layer(
+                        token_ids,
+                        mask=store_mask,
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping,
+                        offset=skip_leading_tokens,
+                        sync=is_first,
+                    )
+                except (TypeError, ValueError) as e:
+                    logger.error(f"Store layer failed: {e}")
+                    return
                 self.layerwise_storers.append(layerwise_storer)
                 if is_first:
                     is_first = False
@@ -1084,15 +1103,19 @@ class LMCacheConnectorV1Impl:
                 store_mask = store_mask[:aligned_token_len]
                 slot_mapping = slot_mapping[:aligned_token_len]
 
-            self.lmcache_engine.store(
-                token_ids,
-                mask=store_mask,
-                kvcaches=kvcaches,
-                slot_mapping=slot_mapping,
-                offset=skip_leading_tokens,
-                transfer_spec=request.disagg_spec,
-                request_configs=request.request_configs,
-            )
+            try:
+                self.lmcache_engine.store(
+                    token_ids,
+                    mask=store_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                    offset=skip_leading_tokens,
+                    transfer_spec=request.disagg_spec,
+                    request_configs=request.request_configs,
+                )
+            except (TypeError, ValueError) as e:
+                logger.error(f"Store failed: {e}")
+                return
 
             # NOTE(Jiayi): We assume all tokens are saved
             save_spec.skip_leading_tokens = len(token_ids)

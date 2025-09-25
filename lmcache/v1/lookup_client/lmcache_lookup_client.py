@@ -220,22 +220,30 @@ class LMCacheLookupServer:
                     offset_frames = frames[1]
                     hashes = self.decoder.decode(hash_frames)
                     offsets = self.decoder.decode(offset_frames)
-                    result = self.lmcache_engine.lookup(
-                        hashes=hashes,
-                        offsets=offsets,
-                        lookup_id=lookup_id,
-                        pin=True,
-                        request_configs=request_configs,
-                    )
+                    try:
+                        result = self.lmcache_engine.lookup(
+                            hashes=hashes,
+                            offsets=offsets,
+                            lookup_id=lookup_id,
+                            pin=True,
+                            request_configs=request_configs,
+                        )
+                    except (TypeError, ValueError) as e:
+                        logger.error(f"Lookup failed: {e}")
+                        return
                 else:
                     token_frames = frames[0]
                     tokens = self.decoder.decode(token_frames)
-                    result = self.lmcache_engine.lookup(
-                        tokens=tokens,
-                        lookup_id=lookup_id,
-                        pin=True,
-                        request_configs=request_configs,
-                    )
+                    try:
+                        result = self.lmcache_engine.lookup(
+                            tokens=tokens,
+                            lookup_id=lookup_id,
+                            pin=True,
+                            request_configs=request_configs,
+                        )
+                    except (TypeError, ValueError) as e:
+                        logger.error(f"Lookup failed: {e}")
+                        return
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 

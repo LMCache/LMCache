@@ -295,13 +295,19 @@ class LMCacheAsyncLookupServer:
                             raise ValueError(f"Unexpected tags_str: {kvs}")
                         request_configs[kvs[0]] = kvs[1]
 
-                self.lmcache_engine.async_lookup_and_prefetch(
-                    lookup_id=lookup_id,
-                    hashes=hashes,
-                    offsets=offsets,
-                    pin=True,
-                    request_configs=request_configs,
-                )
+                try:
+                    self.lmcache_engine.async_lookup_and_prefetch(
+                        lookup_id=lookup_id,
+                        hashes=hashes,
+                        offsets=offsets,
+                        pin=True,
+                        request_configs=request_configs,
+                    )
+                except TypeError as e:
+                    logger.error(
+                        f"Asyn lookup and prefetch failed for'{lookup_id}': {e}"
+                    )
+                    break
 
     def send_response_to_scheduler(self, lookup_id: str, num_hit_tokens: int):
         lookup_id_buf = lookup_id.encode("utf-8")

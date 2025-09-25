@@ -236,7 +236,12 @@ if __name__ == "__main__":
 
             logger.info(f"Storing {len(tokens)} tokens ({args.num_chunks} chunks)...")
             start_time = time.time()
-            engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+
+            try:
+                engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+            except (TypeError, ValueError) as e:
+                logger.error(f"Store failed: {e}")
+                exit(1)
 
             end_time = time.time()
             elapsed_time = end_time - start_time
@@ -256,7 +261,11 @@ if __name__ == "__main__":
 
             while received_count < args.num_chunks:
                 # Check how many chunks we've received by looking up tokens
-                received_count = engine.lookup(tokens) // config.chunk_size
+                try:
+                    received_count = engine.lookup(tokens) // config.chunk_size
+                except (TypeError, ValueError) as e:
+                    logger.error(f"Lookup failed: {e}")
+                    break
 
                 if received_count == args.num_chunks:
                     break
@@ -279,9 +288,13 @@ if __name__ == "__main__":
                 start_time = time.time()
 
                 # Retrieve tokens from the cache engine
-                ret_mask = engine.retrieve(
-                    tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
-                )
+                try:
+                    ret_mask = engine.retrieve(
+                        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping
+                    )
+                except (TypeError, ValueError) as e:
+                    logger.error(f"Retrieve failed for '{tokens}': {e}")
+                    continue
 
                 end_time = time.time()
                 elapsed_time = end_time - start_time

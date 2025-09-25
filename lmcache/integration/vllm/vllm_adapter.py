@@ -381,7 +381,12 @@ def lmcache_store_kv(
                 seq_data.get_token_ids()[:seq_len], device="cpu"
             )
 
-            skip_leading_tokens = engine.lookup(current_tokens)
+            try:
+                skip_leading_tokens = engine.lookup(current_tokens)
+            except (TypeError, ValueError) as e:
+                logger.error(f"Lookup failed: {e}")
+                return
+
             assert skip_leading_tokens <= seq_len
 
             vllm_num_required_tokens = (
@@ -441,13 +446,17 @@ def lmcache_store_kv(
                 kv_tensors_mask = torch.ones_like(current_tokens, dtype=torch.bool)
                 kv_tensors_mask[:skip_leading_tokens] = False
 
-                engine.store(
-                    current_tokens.cpu(),
-                    kv_tensors_mask,
-                    kvcaches=kv_caches,
-                    slot_mapping=slot_mapping_req_full,
-                    offset=skip_leading_tokens,
-                )
+                try:
+                    engine.store(
+                        current_tokens.cpu(),
+                        kv_tensors_mask,
+                        kvcaches=kv_caches,
+                        slot_mapping=slot_mapping_req_full,
+                        offset=skip_leading_tokens,
+                    )
+                except (TypeError, ValueError) as e:
+                    logger.error(f"Store failed: {e}")
+                    return
             else:
                 stored_token_num = 0
                 skip_leading_tokens = seq_len
@@ -607,13 +616,17 @@ def lmcache_retrieve_kv(
                 slot_mapping_req_full = slot_mapping[start_pos:end_pos]
 
             # call lmcache retrieve
-            ret_token_mask = engine.retrieve(
-                full_token_tensor,
-                token_mask,
-                kvcaches=kv_caches,
-                slot_mapping=slot_mapping_req_full,
-                use_mla=engine.metadata.use_mla,
-            )
+            try:
+                ret_token_mask = engine.retrieve(
+                    full_token_tensor,
+                    token_mask,
+                    kvcaches=kv_caches,
+                    slot_mapping=slot_mapping_req_full,
+                    use_mla=engine.metadata.use_mla,
+                )
+            except (TypeError, ValueError) as e:
+                logger.error(f"Retrieve failed for '{full_token_tensor}': {e}")
+                return None, False, None
             lmc_num_computed_tokens = max(
                 torch.sum(ret_token_mask).item()
                 - (vllm_num_computed_tokens - vllm_num_computed_tokens_align),

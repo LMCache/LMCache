@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Union
 import uuid
 
 # Third Party
@@ -51,7 +51,7 @@ def init_lmcache_engine(
     tp_size: int,
     rank: int,
     kv_dtype: torch.dtype,
-) -> LMCacheEngine:
+) -> Union[LMCacheEngine | None]:
     """
     TODO: ADD COMMENTS
     """
@@ -107,14 +107,18 @@ def init_lmcache_engine(
             dtype=kv_dtype,
             device=device,
         )
-    engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME,
-        config,
-        metadata,
-        gpu_connector,
-        mock_up_broadcast_fn,
-        mock_up_broadcast_object_fn,
-    )
+    try:
+        engine = LMCacheEngineBuilder.get_or_create(
+            ENGINE_NAME,
+            config,
+            metadata,
+            gpu_connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
+    except ValueError as e:
+        logger.error(f"LMCacheEngine instance get/create failed: {e}")
+        return None
 
     return engine
 
@@ -135,6 +139,7 @@ class LMCacheConnector:
             rank,
             kv_dtype,
         )
+        assert self.lmcache_engine is not None
         self.sgl_config = sgl_config
         self.tp_size = tp_size
         self.rank = rank
@@ -158,13 +163,17 @@ class LMCacheConnector:
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
 
-        ret_token_mask = self.lmcache_engine.retrieve(
-            token_ids,
-            mask=load_mask,
-            kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
-            offset=offset,
-        )
+        try:
+            ret_token_mask = self.lmcache_engine.retrieve(  # type: ignore [union-attr]
+                token_ids,
+                mask=load_mask,
+                kvcaches=self.kvcaches,
+                slot_mapping=slot_mapping,
+                offset=offset,
+            )
+        except (TypeError, ValueError) as e:
+            logger.error(f"Retrieve failed: {e}")
+            return 0
 
         num_retrieved_tokens = ret_token_mask.sum().item()
 
@@ -182,19 +191,27 @@ class LMCacheConnector:
         slot_mapping = slot_mapping.cuda()
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
-        self.lmcache_engine.store(
-            token_ids,
-            mask=store_mask,
-            kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
-            offset=offset,
-        )
+        try:
+            self.lmcache_engine.store(  # type: ignore [union-attr]
+                token_ids,
+                mask=store_mask,
+                kvcaches=self.kvcaches,
+                slot_mapping=slot_mapping,
+                offset=offset,
+            )
+        except (TypeError, ValueError) as e:
+            logger.error(f"Store failed: {e}")
+            return
 
     def chunk_size(self):
         return self.lmcache_engine.config.chunk_size
 
     def reset(self):
-        self.lmcache_engine.clear()
+        try:
+            self.lmcache_engine.clear()
+        except TypeError as e:
+            logger.error(f"Clear failed: {e}")
+            return
 
     def close(self):
         self.lmcache_engine.close()
@@ -210,7 +227,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         v_pool: List[torch.Tensor],
     ):
         super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
-        self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
+        self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size  # type: ignore [union-attr]
         self.layerwise_retrievers: List[Any] = []
         self.layer_load_layer: List[int] = []
         self.kvcaches = [k_pool, v_pool]
@@ -243,13 +260,17 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
 
-        layerwise_retriever = self.lmcache_engine.retrieve_layer(
-            token_ids,
-            mask=load_mask,
-            kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
-            sync=False,
-        )
+        try:
+            layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                token_ids,
+                mask=load_mask,
+                kvcaches=self.kvcaches,
+                slot_mapping=slot_mapping,
+                sync=False,
+            )
+        except (TypeError, ValueError) as e:
+            logger.error(f"Retrieve layer failed: {e}")
+            return 0
 
         retrieve_token_num = next(layerwise_retriever)
         # Load First Layer
@@ -270,18 +291,28 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
         lookup_id = str(uuid.uuid4())
-        self.lmcache_engine.lookup(token_ids, lookup_id=lookup_id, pin=True)
 
-        layerwise_storer = self.lmcache_engine.store_layer(
-            token_ids,
-            mask=store_mask,
-            kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
-            offset=store_metadata.offset,
-            sync=False,
-        )
+        try:
+            self.lmcache_engine.lookup(token_ids, lookup_id=lookup_id, pin=True)  # type: ignore [union-attr]
+        except (TypeError, ValueError) as e:
+            logger.error(f"Lookup failed: {e}")
+            return
+
+        try:
+            layerwise_storer = self.lmcache_engine.store_layer(  # type: ignore [union-attr]
+                token_ids,
+                mask=store_mask,
+                kvcaches=self.kvcaches,
+                slot_mapping=slot_mapping,
+                offset=store_metadata.offset,
+                sync=False,
+            )
+        except (TypeError, ValueError) as e:
+            logger.error(f"Store layer failed: {e}")
+            return
+
         next(layerwise_storer)
         for _ in range(self.sgl_config.num_hidden_layers):
             next(layerwise_storer)
 
-        self.lmcache_engine.lookup_unpin([lookup_id])
+        self.lmcache_engine.lookup_unpin([lookup_id])  # type: ignore [union-attr]
