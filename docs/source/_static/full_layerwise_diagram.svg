@@ -2,7 +2,7 @@
 <svg viewBox="0 0 1600 1400"
      xmlns="http://www.w3.org/2000/svg"
      preserveAspectRatio="xMinYMin meet">
-     
+
   <!-- GPU Model Runner Box -->
   <rect x="50" y="50" width="450" height="650" fill="#e3f2fd" stroke="#1976d2" stroke-width="3" rx="10"/>
   <text x="275" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#1976d2">GPU Model Runner</text>
@@ -180,7 +180,7 @@
   <!-- Operation Boxes for Numbered Steps -->
   
   <!-- Operation 1 Box -->
-  <rect x="20" y="750" width="250" height="80" fill="#e3f2fd" stroke="#0277bd" stroke-width="2" rx="5"/>
+  <rect x="20" y="750" width="250" height="80" fill="#ffcc80" stroke="#ef6c00" stroke-width="2" rx="5"/>
   <circle cx="35" cy="765" r="12" fill="#ff9800" stroke="#ef6c00" stroke-width="2"/>
   <text x="35" y="770" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">1</text>
   <text x="140" y="765" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#01579b">start_load_kv() Operations</text>
@@ -189,7 +189,7 @@
   <text x="140" y="810" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#01579b">• Call retrieve_layer() - 2nd next() (layer 0)</text>
   
   <!-- Operation 2 Box -->
-  <rect x="290" y="750" width="250" height="80" fill="#e3f2fd" stroke="#1976d2" stroke-width="2" rx="5"/>
+  <rect x="290" y="750" width="250" height="80" fill="#d1c4e9" stroke="#6a1b9a" stroke-width="2" rx="5"/>
   <circle cx="305" cy="765" r="12" fill="#9c27b0" stroke="#6a1b9a" stroke-width="2"/>
   <text x="305" y="770" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">2</text>
   <text x="415" y="765" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#0d47a1">wait_for_layer_load() Operations</text>
