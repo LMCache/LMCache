@@ -335,6 +335,12 @@ class AllocatorBackendInterface(StorageBackendInterface):
         """
         raise NotImplementedError
 
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the chunk budget for the allocator backend.
+        """
+        raise NotImplementedError
+
 
 class ConfigurableStorageBackendInterface(StorageBackendInterface):
     """The Configurable Storage Backend Interface needs to be implemented

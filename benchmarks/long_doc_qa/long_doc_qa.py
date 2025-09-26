@@ -49,6 +49,9 @@ Commandline arguments:
 
     --visualize: Visualize the results
 
+    --eos-token-id: EOS token id. we bias against this token id so we always
+                   get the number of output tokens we specify
+
     --hit-miss-ratio: In query round, control how many of the prompts
     will miss the cache. For example, 3:1 means every fourth repeated prompt
 """
@@ -69,6 +72,7 @@ import pandas as pd
 OUTPUT_FILE = None
 completions_mode = False
 visualize = False
+eos_token_id = None
 
 
 @dataclass
@@ -163,6 +167,7 @@ async def process_single_prompt(
         start_time = time.time()
         first_token_time = None
 
+        # add stop None so we always get the number of output tokens we specify
         if completions_mode:
             response = await client.completions.create(
                 model=model,
@@ -171,6 +176,9 @@ async def process_single_prompt(
                 max_tokens=output_len,
                 temperature=0.0,
                 stream_options={"include_usage": True},
+                logit_bias={str(eos_token_id): -100}
+                if eos_token_id is not None
+                else None,
             )
 
             pieces = []
@@ -206,6 +214,7 @@ async def process_single_prompt(
             max_tokens=output_len,
             temperature=0.0,
             stream_options={"include_usage": True},
+            logit_bias={str(eos_token_id): -100} if eos_token_id is not None else None,
         )
 
         responses = []
@@ -407,8 +416,11 @@ async def main(args):
     random.seed(args.shuffle_seed)
 
     # Create the OpenAI client
+    # No timeout: some benchmarks can take 4-5 minutes per request
     client = AsyncOpenAI(
-        base_url=f"http://localhost:{args.port}/v1", api_key="sk-dummy"
+        base_url=f"http://localhost:{args.port}/v1",
+        api_key="sk-dummy",
+        timeout=None,
     )
     model = args.model
 
@@ -667,6 +679,16 @@ def create_argument_parser():
         ),
     )
 
+    parser.add_argument(
+        "--eos-token-id",
+        type=int,
+        default=None,
+        help=(
+            "EOS token id. we bias against this token id so we always "
+            "get the number of output tokens we specify"
+        ),
+    )
+
     return parser
 
 
@@ -678,5 +700,7 @@ if __name__ == "__main__":
     if visualize:
         # Third Party
         import matplotlib.pyplot as plt
+    if args.eos_token_id is not None:
+        eos_token_id = args.eos_token_id
     OUTPUT_FILE = args.output
     asyncio.run(main(args))

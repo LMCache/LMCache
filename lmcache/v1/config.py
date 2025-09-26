@@ -356,6 +356,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": 3000,
         "env_converter": int,
     },
+    "hit_miss_ratio": {
+        "type": Optional[float],
+        "default": None,
+        "env_converter": float,
+    },
 }
 
 
@@ -429,6 +434,15 @@ def _create_config_class():
 
 def _validate_config(self):
     """Validate configuration"""
+    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
+    if self.enable_async_loading or self.use_layerwise:
+        logger.warning(
+            "Automatically setting save_unfull_chunk=False because "
+            "enable_async_loading=True or use_layerwise=True to prevent "
+            "CPU memory fragmentation"
+        )
+        self.save_unfull_chunk = False
+
     if self.enable_p2p:
         assert self.enable_controller
         assert self.controller_pull_url is not None

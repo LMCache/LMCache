@@ -75,6 +75,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.layerwise = config.use_layerwise
         self.enable_blending = config.enable_blending
 
+        # Store config and metadata for chunk budget calculation
+        self.config = config
+        self.metadata = metadata
+
         # to help maintain suffix -> prefix order in the dict
         # assumption: only one request is looked up at a time
         # (only one worker per cache engine)
@@ -503,6 +507,57 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
+
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the maximum number of chunks that can be allocated concurrently
+        without causing memory deadlocks in the async loading system.
+
+        Returns:
+            int: The estimated chunk budget for concurrent allocations
+        """
+        logger.info("Attempting to calculate chunk budget for async loading")
+        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+        assert self.metadata is not None, (
+            "metadata required for chunk budget calculation"
+        )
+
+        total_memory = int(self.config.max_local_cpu_size * 1024**3)
+        chunk_tokens = self.config.chunk_size
+        # already accounted for parallelism
+        kv_shape = (
+            self.metadata.kv_shape
+        )  # [num_layers, kv_size, chunk_size, num_heads, head_size]
+        num_layers = kv_shape[0]
+        kv_size = kv_shape[1]  # 1 for MLA, 2 for regular
+        num_heads = kv_shape[3]
+        head_size = kv_shape[4]
+        hidden_dim = num_heads * head_size
+        dtype_size = self.metadata.kv_dtype.itemsize
+
+        if self.layerwise:
+            # layerwise: [chunk_tokens, kv_size, hidden_dim]
+            chunk_bytes = chunk_tokens * kv_size * hidden_dim * dtype_size
+        else:
+            # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
+            chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
+        logger.info(
+            f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
+            f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
+            f"dtype_size={dtype_size}, "
+            f"hidden_dim={hidden_dim}"
+        )
+        logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
+        # add alignment overhead
+        # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
+        alignment = self.memory_allocator.align_bytes
+        aligned_chunk_bytes = ((chunk_bytes + alignment - 1) // alignment) * alignment
+
+        # calculate budget with safety margin
+        max_chunks = total_memory // aligned_chunk_bytes
+
+        chunk_budget = int(max_chunks)
+        return chunk_budget
 
     def get_keys(self) -> List[CacheEngineKey]:
         """

@@ -87,9 +87,9 @@ class AdhocSharedMemoryManager:
 
     def close(self):
         # let python GC clean up mmap inodes
-        for mm in self.adhoc_shm_manager.mmaps:
+        for mm in self.mmaps:
             mm.close()
-        for shm_name in self.adhoc_shm_manager.shm_names:
+        for shm_name in self.shm_names:
             try:
                 os.unlink(shm_name)
             except FileNotFoundError:
@@ -448,8 +448,8 @@ class S3Connector(RemoteConnector):
         if len(keys) > self.s3_max_inflight_reqs:
             logger.warning(
                 f"More keys {len(keys)} to get than "
-                f"max inflight requests {self.s3_max_inflight_reqs}.",
-                "This will cause slower retrieval.",
+                f"max inflight requests {self.s3_max_inflight_reqs}."
+                "This will cause slower retrieval."
             )
 
         # TODO(Jiayi): Need some error handling in this loop.
