@@ -450,24 +450,16 @@ class RemoteBackend(StorageBackendInterface):
         return True
 
     def remove(self, key, force=True):
-        """
-        Remove the key and the corresponding cache in the remote backend.
-
-        Args:
-            key: The key to remove.
-            force: Whether to force removal. This backend does not support pinning, so this parameter is currently ignored.
-
-        Returns:
-            bool: True if the key was successfully removed, False otherwise.
-        """
         if self.connection is None:
             logger.warning("Connection is None in remove, returning False")
             return False
 
         try:
             return self.connection.remove_sync(key)
-        except Exception:
-            logger.exception(f"Failed to remove key {key}")
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove key {key} from remote backend, error: {e}"
+            )
             return False
 
     def get_allocator_backend(self):

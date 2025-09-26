@@ -275,7 +275,6 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
     def remove_sync(self, key: CacheEngineKey) -> bool:
         """
         Remove a memory object.
