@@ -1525,6 +1525,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         else:
             self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
+        self.align_bytes = self.pin_allocator.align_bytes
+
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
         self.buffer_allocator = BufferAllocator("cpu")

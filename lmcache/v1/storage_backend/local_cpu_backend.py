@@ -555,7 +555,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
-        alignment = 4096
+        alignment = self.memory_allocator.align_bytes
         aligned_chunk_bytes = ((chunk_bytes + alignment - 1) // alignment) * alignment
 
         # calculate budget with safety margin
