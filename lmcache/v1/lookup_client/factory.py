@@ -65,7 +65,7 @@ class LookupClientFactory:
             else:
                 client = LMCacheLookupClient(vllm_config)
 
-        if config.hit_limit_upper is not None and 0 <= config.hit_limit_upper <= 1:
+        if config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1:
             return HitLimitLookupClient(client, config)
         return client
 
