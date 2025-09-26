@@ -224,7 +224,7 @@ class RequestTracker:
             new_block_ids = []
         elif len(new_block_ids) == 0:
             new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
+        elif isinstance(new_block_ids[0], list):
             new_block_ids = new_block_ids[0]
         elif isinstance(new_block_ids, list):
             pass
