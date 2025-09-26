@@ -204,7 +204,7 @@ class AuditConnector(RemoteConnector):
 
     async def list(self) -> List[str]:
         """List keys with audit log"""
-        self.logger.debug("[REMOTE_AUDIT][{self.real_connector}]:LIST|START")
+        self.logger.debug(f"[REMOTE_AUDIT][{self.real_connector}]:LIST|START")
         t1 = time.perf_counter()
         result = await self.real_connector.list()
         t2 = time.perf_counter()
