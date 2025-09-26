@@ -15,8 +15,8 @@ logger = init_logger(__name__)
 
 """
 HitLimitLookupClient now is used for test, when lookup is called, cal the cache hit,
-- if the cache hit < hit_miss_ratio, direct return the result
-- if the cache hit > hit_miss_ratio, re-compute the result by hit_miss_ratio
+- if the cache hit <= (1 - hit_miss_ratio), direct return the result
+- if the cache hit > (1 - hit_miss_ratio), re-compute the result by hit_miss_ratio
 """
 
 
@@ -26,11 +26,11 @@ class HitLimitLookupClient(LookupClientInterface):
     ):
         assert config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1
         self.actual_lookup_client = actual_lookup_client
-        self.hit_miss_ratio = config.hit_miss_ratio
+        self.hit_ratio_upper = 1 - config.hit_miss_ratio
         self.chunk_size = config.chunk_size
         logger.info(
-            f"create HitLimitLookupClient succeed, the hit miss ratio "
-            f"is {self.hit_miss_ratio}, chunk size is {self.chunk_size}"
+            f"create HitLimitLookupClient succeed, the hit ratio upper"
+            f"is {self.hit_ratio_upper}, chunk size is {self.chunk_size}"
         )
 
     def lookup(
@@ -44,23 +44,23 @@ class HitLimitLookupClient(LookupClientInterface):
         if result is not None:
             total_tokens_length = len(token_ids)
             assert result <= total_tokens_length
-            current_hit_rate = 0.0
+            current_hit_ratio = 0.0
             if total_tokens_length > 0:
-                current_hit_rate = result / total_tokens_length
+                current_hit_ratio = result / total_tokens_length
             # limit the hit tokens
-            if current_hit_rate > self.hit_miss_ratio:
+            if current_hit_ratio > self.hit_ratio_upper:
                 origin_result = result
                 # align to chunk size
                 new_result = (
-                    int(total_tokens_length * self.hit_miss_ratio)
+                    int(total_tokens_length * self.hit_ratio_upper)
                     // self.chunk_size
                     * self.chunk_size
                 )
                 # check again
                 result = min(result, new_result)
                 logger.debug(
-                    f"hit miss ratio: {self.hit_miss_ratio} is smaller than "
-                    f"the real hit rate {current_hit_rate}, "
+                    f"hit ratio upper: {self.hit_ratio_upper} is smaller than "
+                    f"the real hit ratio {current_hit_ratio}, "
                     f"the origin result is {origin_result}, "
                     f"the new result is {new_result}, the final result is {result}"
                 )
