@@ -282,14 +282,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             if save_only_first_rank and metadata.is_first_rank():
                 # Use first_rank_local_reserve_cpu_size if available
-                first_rank_reserve_size = (
-                    config.extra_config.get(
-                        "first_rank_local_reserve_cpu_size", reserve_cpu_size
-                    )
-                    if config.extra_config
-                    else reserve_cpu_size
+                reserve_cpu_size = config.get_extra_config_value(
+                    "first_rank_local_reserve_cpu_size", reserve_cpu_size
                 )
-                reserve_cpu_size = first_rank_reserve_size
 
         # Effective memory: min(configured_size, available_memory - reserve_size)
         if system_available_memory_gb > 0:
@@ -325,10 +320,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if save_only_first_rank and metadata.is_first_rank():
                 # Only the first rank will save the cache,
                 # so we need to set it larger than other ranks
-                cpu_size = (
-                    config.extra_config.get("first_rank_max_local_cpu_size", cpu_size)
-                    if config.extra_config
-                    else cpu_size
+                cpu_size = config.get_extra_config_value(
+                    "first_rank_max_local_cpu_size", cpu_size
                 )
 
         # Detect the numa mapping

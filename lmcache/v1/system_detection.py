@@ -3,13 +3,18 @@
 from dataclasses import dataclass
 from typing import Optional
 import platform
-import subprocess
 
 # Third Party
+import psutil
 import torch
 
 if torch.cuda.is_available():
-    from lmcache.c_ops import get_gpu_pci_bus_id
+    try:
+        # First Party
+        from lmcache.c_ops import get_gpu_pci_bus_id
+    except ImportError:
+        # Fallback if c_ops is not available
+        get_gpu_pci_bus_id = None
 
 # First Party
 from lmcache.logging import init_logger
@@ -27,96 +32,23 @@ class SystemMemoryDetector:
     @staticmethod
     def get_available_memory_gb() -> float:
         """
-        Get system available memory in GB.
-        Uses different methods based on the operating system:
-        - Linux: 'free' command
-        - macOS: 'vm_stat' command
-        - Others: fallback to 0.0
-        """
-        system = platform.system().lower()
+        Get system available memory in GB using psutil.
+        This method is cross-platform and doesn't require subprocess calls.
 
-        if system == "linux":
-            return SystemMemoryDetector._get_linux_available_memory()
-        elif system == "darwin":  # macOS
-            return SystemMemoryDetector._get_macos_available_memory()
-        else:
-            logger.warning(f"Unsupported operating system: {system}")
-            return 0.0
-
-    @staticmethod
-    def _get_linux_available_memory() -> float:
-        """
-        Get available memory on Linux using 'free' command.
+        Returns:
+            Available memory in GB, or 0.0 if detection fails.
         """
         try:
-            # Run 'free -b' to get memory info in bytes
-            result = subprocess.run(
-                ["free", "-b"], capture_output=True, text=True, check=True
-            )
-            lines = result.stdout.strip().split("\n")
+            # Use psutil to get virtual memory information
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024**3)
 
-            # Parse the memory line (second line)
-            # Format: Mem: total used free shared buff/cache available
-            mem_line = lines[1].split()
-            if len(mem_line) >= 7:
-                available_bytes = int(mem_line[6])  # available column
-                available_gb = available_bytes / (1024**3)
-                logger.info(f"Linux system available memory: {available_gb:.2f} GB")
-                return available_gb
-            else:
-                logger.warning("Unable to parse 'free' command output format")
-                return 0.0
-        except (
-            subprocess.CalledProcessError,
-            FileNotFoundError,
-            ValueError,
-            IndexError,
-        ) as e:
-            logger.warning(f"Failed to get Linux system available memory: {e}")
-            return 0.0
-
-    @staticmethod
-    def _get_macos_available_memory() -> float:
-        """
-        Get available memory on macOS using 'vm_stat' command.
-        """
-        try:
-            # Get page size
-            page_size_result = subprocess.run(
-                ["pagesize"], capture_output=True, text=True, check=True
-            )
-            page_size = int(page_size_result.stdout.strip())
-
-            # Get vm_stat output
-            result = subprocess.run(
-                ["vm_stat"], capture_output=True, text=True, check=True
-            )
-            lines = result.stdout.strip().split("\n")
-
-            free_pages = 0
-            inactive_pages = 0
-
-            for line in lines:
-                if "Pages free:" in line:
-                    free_pages = int(line.split(":")[1].strip().rstrip("."))
-                elif "Pages inactive:" in line:
-                    inactive_pages = int(line.split(":")[1].strip().rstrip("."))
-
-            # Calculate available memory (free + inactive pages)
-            available_pages = free_pages + inactive_pages
-            available_bytes = available_pages * page_size
-            available_gb = available_bytes / (1024**3)
-
-            logger.info(f"macOS system available memory: {available_gb:.2f} GB")
+            system = platform.system()
+            logger.info(f"{system} system available memory: {available_gb:.2f} GB")
             return available_gb
 
-        except (
-            subprocess.CalledProcessError,
-            FileNotFoundError,
-            ValueError,
-            IndexError,
-        ) as e:
-            logger.warning(f"Failed to get macOS system available memory: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to get system available memory using psutil: {e}")
             return 0.0
 
 
