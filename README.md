@@ -41,6 +41,25 @@ By combining LMCache with vLLM, developers achieve 3-10x delay savings and GPU c
 
 ![performance](https://github.com/user-attachments/assets/86137f17-f216-41a0-96a7-e537764f7a4c)
 
+## KV Cache Memory Analysis
+
+Comprehensive visualizations of KV cache memory requirements across 20+ latest models:
+
+### Model Comparison
+![KV Cache Comparison](examples/kv_cache_calculator/kv_cache_visualizations/kv_cache_comparison.png)
+
+### Extreme Context Projection
+![Extreme Context Projection](examples/kv_cache_calculator/kv_cache_visualizations/extreme_context_projection.png)
+
+### Data Type Comparison
+![Data Type Comparison](examples/kv_cache_calculator/kv_cache_visualizations/dtype_comparison.png)
+
+### Paged Attention Optimization
+![Paged Attention Comparison](examples/kv_cache_calculator/kv_cache_visualizations/paged_attention_comparison.png)
+
+### Continuous Batching Impact
+![Continuous Batching Impact](examples/kv_cache_calculator/kv_cache_visualizations/continuous_batching_impact.png)
+
 ## Features
 
 - [x] 🔥 Integration with vLLM v1 with the following features:
