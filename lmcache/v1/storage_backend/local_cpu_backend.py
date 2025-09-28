@@ -271,7 +271,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # Get the system available memory and calculate effective cpu_size
         system_available_memory_gb = SystemMemoryDetector.get_available_memory_gb()
         # Get reserve memory size from config
-        reserve_cpu_size = config.local_reserve_cpu_size
+        reserve_cpu_size = config.reserve_local_cpu_size
 
         # Handle first rank special case
         if metadata is not None:
@@ -281,9 +281,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
             if save_only_first_rank and metadata.is_first_rank():
-                # Use first_rank_local_reserve_cpu_size if available
+                # Use first_rank_reserve_local_cpu_size if available
                 reserve_cpu_size = config.get_extra_config_value(
-                    "first_rank_local_reserve_cpu_size", reserve_cpu_size
+                    "first_rank_reserve_local_cpu_size", reserve_cpu_size
                 )
 
         # Effective memory: min(configured_size, available_memory - reserve_size)
