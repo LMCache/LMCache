@@ -65,7 +65,6 @@ from dataclasses import dataclass
 import argparse
 import asyncio
 import random
-import string
 import sys
 import time
 
@@ -85,17 +84,10 @@ class RandomTokenGenerator:
         self._min_len = max(1, int(token_len_range[0]))
         self._max_len = max(self._min_len, int(token_len_range[1]))
         cap = max(1, int(vocab_size))
-        # Prebuild vocab to avoid rebuilding per call
-        # Each vocab word is guaranteed to be a single token when space-separated
-        self._vocab = [
-            "".join(
-                random.choices(
-                    string.ascii_lowercase,
-                    k=random.randint(self._min_len, self._max_len),
-                )
-            )
-            for _ in range(cap)
-        ]
+        # Use a simple vocabulary with format "t{i}"
+        # to ensure each word is exactly one token
+        # This guarantees accurate token count generation
+        self._vocab = [f"t{i}" for i in range(cap)]
 
     def generate(self, num_tokens: int, chunk_size: int = 4096) -> str:
         """
