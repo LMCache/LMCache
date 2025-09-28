@@ -54,6 +54,10 @@ Commandline arguments:
 
     --hit-miss-ratio: In query round, control how many of the prompts
     will miss the cache. For example, 3:1 means every fourth repeated prompt
+
+    --with-question: Whether to append a question to each prompt.
+
+    --question-length: Length of each random question appended.
 """
 
 # Standard
@@ -61,6 +65,7 @@ from dataclasses import dataclass
 import argparse
 import asyncio
 import random
+import string
 import sys
 import time
 
@@ -73,6 +78,53 @@ OUTPUT_FILE = None
 completions_mode = False
 visualize = False
 eos_token_id = None
+
+
+class RandomTokenGenerator:
+    def __init__(self, vocab_size: int = 2048, token_len_range=(2, 5)):
+        self._min_len = max(1, int(token_len_range[0]))
+        self._max_len = max(self._min_len, int(token_len_range[1]))
+        cap = max(1, int(vocab_size))
+        # Prebuild vocab to avoid rebuilding per call
+        # Each vocab word is guaranteed to be a single token when space-separated
+        self._vocab = [
+            "".join(
+                random.choices(
+                    string.ascii_lowercase,
+                    k=random.randint(self._min_len, self._max_len),
+                )
+            )
+            for _ in range(cap)
+        ]
+
+    def generate(self, num_tokens: int, chunk_size: int = 4096) -> str:
+        """
+        Generate exactly num_tokens tokens.
+
+        Each word from self._vocab is treated as exactly one token when
+        space-separated, ensuring accurate token count.
+
+        Args:
+            num_tokens: The exact number of tokens to generate
+            chunk_size: Process tokens in chunks to avoid memory issues
+
+        Returns:
+            A string containing exactly num_tokens space-separated tokens
+        """
+        if num_tokens <= 0:
+            return ""
+
+        remaining = int(num_tokens)
+        parts: list[str] = []
+
+        while remaining > 0:
+            k = min(chunk_size, remaining)
+            # Select exactly k tokens from vocab
+            tokens = random.choices(self._vocab, k=k)
+            parts.append(" ".join(tokens))
+            remaining -= k
+
+        return " ".join(parts)
 
 
 @dataclass
@@ -423,9 +475,10 @@ async def main(args):
         timeout=None,
     )
     model = args.model
+    # Instantiate once to avoid rebuilding vocab repeatedly
+    token_gen = RandomTokenGenerator()
 
-    pre_warmup_prompts = [str(i) + "xx" + " ".join(["hi"] * 1000) for i in range(5)]
-
+    pre_warmup_prompts = [str(i) + "xx" + token_gen.generate(1000) for i in range(5)]
     await test_long_document_qa(
         client=client,
         model=model,
@@ -438,11 +491,13 @@ async def main(args):
     # we append the document id at the beginning to avoid any of the document
     # being the prefix of other documents
     warmup_prompts = [
-        str(i) + " " + " ".join(["hi"] * args.document_length)
+        str(i) + " " + token_gen.generate(args.document_length)
         for i in range(args.num_documents)
     ]
 
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
+    if getattr(args, "with_question", False):
+        prompts = [p + " " + token_gen.generate(args.question_length) for p in prompts]
     prompts, miss_mask = add_cache_misses(prompts, args.hit_miss_ratio)
 
     write_resp("------warm up round------\n")
@@ -687,6 +742,20 @@ def create_argument_parser():
             "EOS token id. we bias against this token id so we always "
             "get the number of output tokens we specify"
         ),
+    )
+
+    parser.add_argument(
+        "--with-question",
+        action="store_true",
+        help="Append a random question to each document prompt.",
+    )
+
+    parser.add_argument(
+        "--question-length",
+        type=int,
+        default=16,
+        help="Length of each random question appended."
+        "(effective when --with-question is enabled)",
     )
 
     return parser
