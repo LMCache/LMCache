@@ -139,7 +139,7 @@ class KVController:
         """
         Deregister all kv chunks of an instance-worker.
         """
-        for key in self.kv_pool:
+        for key in list(self.kv_pool.keys()):
             self.kv_pool[key] = [
                 m
                 for m in self.kv_pool[key]
