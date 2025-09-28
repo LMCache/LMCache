@@ -207,9 +207,9 @@ class RequestTracker:
         )
 
     def update(
-        self,
-        new_token_ids: list[int],
-        new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
+            self,
+            new_token_ids: list[int],
+            new_block_ids: Union[Optional[tuple[list[int], ...]], list[list[int]], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -224,6 +224,8 @@ class RequestTracker:
             new_block_ids = []
         elif len(new_block_ids) == 0:
             new_block_ids = []
+        elif isinstance(new_block_ids, tuple):
+            new_block_ids = new_block_ids[0]
         elif new_block_ids and isinstance(new_block_ids[0], list):
             new_block_ids = new_block_ids[0]
         elif isinstance(new_block_ids, list):
