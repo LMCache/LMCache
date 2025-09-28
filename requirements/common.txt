@@ -4,6 +4,7 @@ aiohttp
 awscrt
 cufile-python
 fastapi
+httpx
 msgspec
 numpy
 nvtx
