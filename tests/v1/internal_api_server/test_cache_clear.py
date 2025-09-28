@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from unittest.mock import MagicMock
+import json
 
 # Third Party
 from fastapi.testclient import TestClient
@@ -32,14 +33,6 @@ class TestCacheClearAPI:
         app.state.lmcache_adapter = mock_lmcache_adapter
         return TestClient(app)
 
-    @pytest.fixture
-    def client_without_engine(self):
-        """Create a test client without lmcache_engine."""
-        mock_adapter = MagicMock()
-        mock_adapter.lmcache_engine = None
-        app.state.lmcache_adapter = mock_adapter
-        return TestClient(app)
-
     def test_cache_clear_success(self, client_with_adapter, mock_lmcache_adapter):
         """Test successful cache clear operation."""
         # Act
@@ -47,7 +40,9 @@ class TestCacheClearAPI:
 
         # Assert
         assert response.status_code == 200
-        assert response.text == "num_removed: 5"
+        response_data = json.loads(response.text)
+        assert response_data["status"] == "success"
+        assert response_data["num_removed"] == 5
 
         # Verify that the clear method was called with correct parameters
         mock_lmcache_adapter.lmcache_engine.clear.assert_called_once_with(
@@ -73,7 +68,9 @@ class TestCacheClearAPI:
 
         # Assert
         assert response.status_code == 200
-        assert response.text == "num_removed: 5"
+        response_data = json.loads(response.text)
+        assert response_data["status"] == "success"
+        assert response_data["num_removed"] == 5
 
         # Verify that the clear method was called with the correct locations
         mock_lmcache_adapter.lmcache_engine.clear.assert_called_once()
@@ -99,7 +96,9 @@ class TestCacheClearAPI:
 
         # Assert
         assert response.status_code == 500
-        assert "Error: Failed to clear cache - Cache error" in response.text
+        response_data = json.loads(response.text)
+        assert response_data["error"] == "Failed to clear cache"
+        assert response_data["message"] == "Cache error"
 
     def test_cache_clear_negative_return_value(
         self, client_with_adapter, mock_lmcache_adapter
@@ -113,19 +112,23 @@ class TestCacheClearAPI:
 
         # Assert
         assert response.status_code == 200
-        assert response.text == "num_removed: -1"
+        response_data = json.loads(response.text)
+        assert response_data["status"] == "success"
+        assert response_data["num_removed"] == -1
 
     def test_cache_clear_adapter_attribute_error(self):
         """Test cache clear when adapter doesn't have lmcache_engine attribute."""
-        # Arrange
-        mock_adapter = MagicMock()
-        del mock_adapter.lmcache_engine  # Remove the attribute
-        app.state.lmcache_adapter = mock_adapter
-        client = TestClient(app)
 
+        # Arrange
+        class AdapterWithoutEngine:
+            pass
+
+        app.state.lmcache_adapter = AdapterWithoutEngine()
+        client = TestClient(app)
         # Act
         response = client.delete("/cache/clear")
-
         # Assert
-        assert response.status_code == 500
-        assert "/cache/clear api only work for lmcache_engine" in response.text
+        assert response.status_code == 503
+        response_data = json.loads(response.text)
+        assert response_data["error"] == "/cache/clear API is unavailable"
+        assert response_data["message"] == "LMCache engine not configured."
