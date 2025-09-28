@@ -3,6 +3,7 @@ aiofiles
 aiohttp
 awscrt
 cufile-python
+fastapi
 msgspec
 numpy
 nvtx
