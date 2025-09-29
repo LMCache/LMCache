@@ -552,6 +552,7 @@ def _get_extra_config_value(self, key, default_value=None):
     else:
         return default_value
 
+
 def _get_mla_lookup_server_worker_id(self, use_mla):
     if self.mla_lookup_server_worker_id is None:
         # if mla is not enabled, return -1, which means start
@@ -560,6 +561,7 @@ def _get_mla_lookup_server_worker_id(self, use_mla):
         # server on worker 0 as default
         return 0 if use_mla else -1
     return self.mla_lookup_server_worker_id
+
 
 def _from_defaults(cls, **kwargs):
     """Create configuration from defaults"""
