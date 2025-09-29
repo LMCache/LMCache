@@ -40,7 +40,8 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             start lookup server on all workers
         if mla is enabled(default is 0):
             - if mla_lookup_server_worker_id < 0, start lookup server on all workers
-            - if mla_lookup server_worker_id >= 0, start lookup server on the given worker
+            - if mla_lookup server_worker_id >= 0, start lookup server on the given
+              worker
     """
 
     def __init__(
@@ -206,8 +207,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 all_res = self.res_for_each_worker[lookup_id]
 
                 if len(all_res) == self.tensor_parallel_size or (
-                    self.mla_lookup_server_worker_id >= 0
-                    and len(all_res) == 1
+                    self.mla_lookup_server_worker_id >= 0 and len(all_res) == 1
                 ):
                     self.res_for_each_worker.pop(lookup_id)
 

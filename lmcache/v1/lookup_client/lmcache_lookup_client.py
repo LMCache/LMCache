@@ -38,7 +38,8 @@ class LMCacheLookupClient(LookupClientInterface):
             start lookup server on all workers
         if mla is enabled(default is 0):
             - if mla_lookup_server_worker_id < 0, start lookup server on all workers
-            - if mla_lookup server_worker_id >= 0, start lookup server on the given worker
+            - if mla_lookup server_worker_id >= 0, start lookup server on the given
+              worker
     """
 
     def __init__(
