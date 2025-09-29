@@ -19,8 +19,10 @@ class ClientCommand(IntEnum):
     PUT = auto()
     GET = auto()
     EXIST = auto()
+    EXISTS_PIN = auto()
     LIST = auto()
     HEALTH = auto()
+    UNPIN = auto()
 
 
 class ServerReturnCode(IntEnum):
@@ -179,7 +181,7 @@ class ClientMetaMessage:
         )
 
     @staticmethod
-    def packlength() -> int:
+    def num_bytes() -> int:
         # NOTE: 9 is the number of integers
         return 4 * 9 + MAX_KEY_LENGTH
 
@@ -214,7 +216,7 @@ class ServerMetaMessage:
         return packed_bytes
 
     @staticmethod
-    def packlength() -> int:
+    def num_bytes() -> int:
         return 4 * 9
 
     @staticmethod

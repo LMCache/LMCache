@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 
 class LMSBackendInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def put(
+    async def put(
         self,
         client_meta: ClientMetaMessage,
         kv_chunk_bytes: bytearray,
@@ -33,9 +33,10 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def contains(
+    async def contains(
         self,
         key: CacheEngineKey,
+        pin: bool = False,
     ) -> bool:
         """
         Query if a key is in the cache or not
@@ -43,7 +44,7 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def get(
+    async def get(
         self,
         key: CacheEngineKey,
     ) -> Optional[LMSMemoryObj]:
@@ -60,7 +61,7 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def list_keys(
+    async def list_keys(
         self,
     ) -> List[CacheEngineKey]:
         """
@@ -72,7 +73,7 @@ class LMSBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def close(self):
+    async def close(self):
         """
         Do the cleanup things
         Children classes should override this method if necessary

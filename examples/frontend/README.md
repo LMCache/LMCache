@@ -6,7 +6,7 @@ Your server should have at least 1 GPU.
 
 This will use the port 8000 (for vLLM), 8501 (for the frontend) and port 65432(for LMCache).  
 ## Steps
-1.  ```lmcache_server localhost 65432```  
+1.  ```lmcache_server --host localhost --port 65432 --capacity 100```  
 And wait until it's ready.  
 2. In one terminal,  
 ```LMCACHE_CONFIG_FILE=example.yaml CUDA_VISIBLE_DEVICES=0 vllm serve mistralai/Mistral-7B-Instruct-v0.2 --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'```  

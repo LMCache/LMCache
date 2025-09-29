@@ -226,6 +226,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
             memory_obj.unpin()
             return True
 
+    def batched_unpin(self, keys: List[CacheEngineKey]):
+        with self.cpu_lock:
+            for key in keys:
+                if key not in self.hot_cache:
+                    continue
+                memory_obj = self.hot_cache[key]
+                memory_obj.unpin()
+
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         if force:
             self.cpu_lock.acquire()

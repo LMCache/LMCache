@@ -48,7 +48,7 @@ class ClientMetaMessage:
         return ClientMetaMessage(ClientCommand(command), key.decode().strip(), length)
 
     @staticmethod
-    def packlength() -> int:
+    def num_bytes() -> int:
         return 4 * 2 + MAX_KEY_LENGTH
 
 
@@ -66,7 +66,7 @@ class ServerMetaMessage:
         return packed_bytes
 
     @staticmethod
-    def packlength() -> int:
+    def num_bytes() -> int:
         return 8
 
     @staticmethod

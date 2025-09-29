@@ -41,11 +41,11 @@ First, create a configuration file named ``lmcache_config.yaml`` with the follow
 Run centralized sharing example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Start the LMCache centralized server,
+1. Start the LMCache centralized server, specifying the capacity of the cache server in GB.
 
 .. code-block:: bash
 
-    lmcache_server localhost 65432
+    lmcache_server --host localhost --port 65432 --capacity 100
 
 2. In a different terminal,
 

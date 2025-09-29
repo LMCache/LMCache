@@ -202,6 +202,16 @@ class LocalDiskBackend(StorageBackendInterface):
             else:
                 return False
 
+    def batched_unpin(
+        self,
+        keys: List[CacheEngineKey],
+    ):
+        with self.disk_lock:
+            for key in keys:
+                if key not in self.dict:
+                    continue
+                self.dict[key].unpin()
+
     def remove(
         self,
         key: CacheEngineKey,

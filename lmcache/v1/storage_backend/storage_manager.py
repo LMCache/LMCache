@@ -671,13 +671,12 @@ class StorageManager:
 
         :param Optional[List[str]] locations: The range of storage backends
         to perform `unpin` in.
-        Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, perform `unpin` in all backends.
         """
         for backend_name, backend in self.storage_backends.items():
             if locations is None or backend_name in locations:
-                for key in keys:
-                    backend.unpin(key)
+                # might be a no-op for some remote backends
+                backend.batched_unpin(keys)
 
     def clear(
         self,

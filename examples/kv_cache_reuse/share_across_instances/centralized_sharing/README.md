@@ -13,7 +13,7 @@ export PYTHONHASHSEED=0
 ## Steps
 1.  Start the lmcache centralized server,
 ```bash
-lmcache_server localhost 65432
+lmcache_server --host localhost --port 65432 --capacity 100
 ```  
 2. In a different terminal,  
 ```bash

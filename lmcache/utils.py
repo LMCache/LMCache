@@ -110,6 +110,17 @@ class CacheEngineKey:
     chunk_hash: int
     request_configs: Optional[dict] = None
 
+    @staticmethod
+    def make_dummy_key() -> CacheEngineKey:
+        return CacheEngineKey(
+            fmt="",
+            model_name="",
+            world_size=0,
+            worker_id=0,
+            chunk_hash=0,
+            request_configs=None,
+        )
+
     def __post_init__(self):
         tag_list = None
         if self.request_configs is not None:

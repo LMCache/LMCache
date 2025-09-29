@@ -104,10 +104,7 @@ class NixlChannel(BaseTransferChannel):
         self.running_threads: list[threading.Thread] = []
 
         self.async_mode = async_mode
-        if self.async_mode:
-            self.zmq_context = get_zmq_context(use_asyncio=True)
-        else:
-            self.zmq_context = get_zmq_context(use_asyncio=False)
+        self.zmq_context = get_zmq_context(use_asyncio=self.async_mode)
         self.peer_init_url = kwargs["peer_init_url"]
         self.event_loop = kwargs.get("event_loop", None)
 

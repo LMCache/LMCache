@@ -18,7 +18,6 @@ class LMCacheServer:
     def __init__(self, host, port, device):
         self.host = host
         self.port = port
-        # self.data_store = {}
         self.data_store = CreateStorageBackend(device)
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -37,7 +36,7 @@ class LMCacheServer:
     def handle_client(self, client_socket):
         try:
             while True:
-                header = self.receive_all(client_socket, ClientMetaMessage.packlength())
+                header = self.receive_all(client_socket, ClientMetaMessage.num_bytes())
                 if not header:
                     break
                 meta = ClientMetaMessage.deserialize(header)

@@ -185,9 +185,9 @@ the ``lmcache`` package.
 
 .. code-block:: bash
 
-    lmcache_server <host> <port> <device>
+    lmcache_server --host <host> --port <port> --device <device> --capacity <capacity>
 
-    lmcache_server localhost 65432
+    lmcache_server --host localhost --port 65432 --capacity 100
 
 Currently, the only supported device is "cpu" (which is the default, so you don't need to specify it).
 

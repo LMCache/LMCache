@@ -11,7 +11,7 @@ from lmcache.protocol import (
 def test_client_meta_message():
     msg = ClientMetaMessage(ClientCommand.PUT, "some-random-key", 50)
     s = msg.serialize()
-    assert len(s) == ClientMetaMessage.packlength()
+    assert len(s) == ClientMetaMessage.num_bytes()
     msg2 = ClientMetaMessage.deserialize(s)
     assert msg2 == msg
 
@@ -19,6 +19,6 @@ def test_client_meta_message():
 def test_server_meta_message():
     msg = ServerMetaMessage(ServerReturnCode.FAIL, 0)
     s = msg.serialize()
-    assert len(s) == ServerMetaMessage.packlength()
+    assert len(s) == ServerMetaMessage.num_bytes()
     msg2 = ServerMetaMessage.deserialize(s)
     assert msg2 == msg

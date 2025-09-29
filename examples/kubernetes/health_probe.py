@@ -50,7 +50,7 @@ def main():
             s.sendall(msg.serialize())
 
             # Receive and parse response
-            resp = s.recv(ServerMetaMessage.packlength())
+            resp = s.recv(ServerMetaMessage.num_bytes())
             if not resp:
                 print("No response received from server", file=sys.stderr)
                 sys.exit(1)

@@ -297,6 +297,16 @@ class MemoryObj(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
+@dataclass
+class LMSMemoryObj:
+    data: bytearray
+    length: int
+    fmt: MemoryFormat
+    dtype: Optional[torch.dtype]
+    shape: torch.Size
+    pin_count: int = 0
+
+
 def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,

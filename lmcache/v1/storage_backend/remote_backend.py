@@ -149,10 +149,10 @@ class RemoteBackend(StorageBackendInterface):
             if self.config.extra_config is not None and self.config.extra_config.get(
                 "use_exists_sync", False
             ):
-                return self.connection.exists_sync(key)
+                return self.connection.exists_sync(key, pin)
             else:
                 future = asyncio.run_coroutine_threadsafe(
-                    self.connection.exists(key), self.loop
+                    self.connection.exists(key, pin), self.loop
                 )
                 res = future.result()
                 return res
@@ -457,6 +457,15 @@ class RemoteBackend(StorageBackendInterface):
             "This method is a no-op and will return True."
         )
         return True
+
+    def support_batched_unpin(self) -> bool:
+        return self.connection is not None and self.connection.support_batched_unpin()
+
+    def batched_unpin(self, keys: List[CacheEngineKey]):
+        if self.connection is None:
+            logger.warning("Connection is None in batched_unpin")
+            return
+        asyncio.run_coroutine_threadsafe(self.connection.batched_unpin(keys), self.loop)
 
     def remove(self, key, force=True):
         raise NotImplementedError("Remote backend does not support remove now.")

@@ -111,7 +111,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         logger.info("Dummy post-initializing remote connector")
 
     @abc.abstractmethod
-    async def exists(self, key: CacheEngineKey) -> bool:
+    async def exists(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check if the remote server contains the key
 
@@ -124,7 +124,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def exists_sync(self, key: CacheEngineKey) -> bool:
+    def exists_sync(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check if the remote server contains the key synchronized
 
@@ -272,6 +272,18 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     ) -> List[MemoryObj]:
         """
         Batched get the memory_objs of the corresponding keys
+        """
+        raise NotImplementedError
+
+    def support_batched_unpin(self) -> bool:
+        """
+        Connectors that support batched unpin should override this method.
+        """
+        return False
+
+    async def batched_unpin(self, keys: List[CacheEngineKey]):
+        """
+        Batched unpin the memory_objs of the corresponding keys
         """
         raise NotImplementedError
 

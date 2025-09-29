@@ -197,6 +197,13 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def batched_unpin(self, keys: List[CacheEngineKey]) -> None:
+        """
+        Unpin a list of memory objects.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """
         remove a memory object.
@@ -332,6 +339,13 @@ class AllocatorBackendInterface(StorageBackendInterface):
             None if the allocation failed.
 
         :rtype: Optional[MemoryObj]
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def batched_unpin(self, keys: List[CacheEngineKey]) -> None:
+        """
+        Unpin a list of memory objects.
         """
         raise NotImplementedError
 

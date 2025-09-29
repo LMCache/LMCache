@@ -7,12 +7,12 @@ from lmcache.v1.server.storage_backend.local_backend import LMSLocalBackend
 logger = init_logger(__name__)
 
 
-def CreateStorageBackend(device: str) -> LMSBackendInterface:
+def CreateStorageBackend(device: str, capacity: int) -> LMSBackendInterface:
     match device:
         case "cpu":
             # cpu only
             logger.info("Initializing cpu-only cache server")
-            return LMSLocalBackend()
+            return LMSLocalBackend(capacity)
         case _:
             raise ValueError(f"Unsupported device: {device}")
         # TODO(Jiayi): please implement hierarchical remote storage

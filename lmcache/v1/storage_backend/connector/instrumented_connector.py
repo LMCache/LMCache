@@ -56,11 +56,11 @@ class InstrumentedRemoteConnector(RemoteConnector):
         return memory_obj
 
     # Delegate all other methods to the underlying connector
-    async def exists(self, key: CacheEngineKey) -> bool:
-        return await self._connector.exists(key)
+    async def exists(self, key: CacheEngineKey, pin: bool = False) -> bool:
+        return await self._connector.exists(key, pin)
 
-    def exists_sync(self, key: CacheEngineKey) -> bool:
-        return self._connector.exists_sync(key)
+    def exists_sync(self, key: CacheEngineKey, pin: bool = False) -> bool:
+        return self._connector.exists_sync(key, pin)
 
     async def list(self) -> List[str]:
         return await self._connector.list()
@@ -85,6 +85,12 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     def support_batched_async_contains(self) -> bool:
         return self._connector.support_batched_async_contains()
+
+    def support_batched_unpin(self) -> bool:
+        return self._connector.support_batched_unpin()
+
+    async def batched_unpin(self, keys: List[CacheEngineKey]):
+        await self._connector.batched_unpin(keys)
 
     async def batched_async_contains(
         self,
