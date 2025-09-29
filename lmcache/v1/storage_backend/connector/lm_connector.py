@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
+from enum import IntEnum, auto
 from typing import List, Optional
 import asyncio
 import socket
@@ -19,9 +20,17 @@ from lmcache.v1.protocol import (
     ServerReturnCode,
 )
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
+
+
+class Priorities(IntEnum):
+    PEEK = auto()
+    PREFETCH = auto()
+    GET = auto()
+    PUT = auto()
 
 
 class SafeAsyncSocket:
@@ -171,6 +180,7 @@ class LMCServerConnector(RemoteConnector):
         conc_fut = asyncio.run_coroutine_threadsafe(self.socket_pool.connect(), loop)
         # this will block the entire worker thread until socket pool is initialized
         conc_fut.result()
+        self.pq_executor = AsyncPQExecutor(loop)
 
     async def exists(self, key: CacheEngineKey, pin: bool = False) -> bool:
         # the LMServer supports the pin semantics to "unrace"
@@ -239,7 +249,7 @@ class LMCServerConnector(RemoteConnector):
             await self.socket_pool.recv_into(sock_idx, buffer, meta.length)
             return memory_obj
 
-    async def put(
+    async def _put(
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
@@ -263,6 +273,14 @@ class LMCServerConnector(RemoteConnector):
             )
 
             await self.socket_pool.send(sock_idx, kv_bytes)
+
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        return await self.pq_executor.submit_job(
+            self._put,
+            key=key,
+            memory_obj=memory_obj,
+            priority=Priorities.PUT,
+        )
 
     async def list(self) -> List[str]:
         async with self.socket_pool.allocate() as sock_idx:
@@ -297,7 +315,7 @@ class LMCServerConnector(RemoteConnector):
     def support_batched_async_contains(self) -> bool:
         return True
 
-    async def batched_async_contains(
+    async def _batched_async_contains(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
@@ -310,16 +328,37 @@ class LMCServerConnector(RemoteConnector):
             num_hit_counts += 1
         return num_hit_counts
 
+    async def batched_async_contains(
+        self, lookup_id: str, keys: List[CacheEngineKey], pin: bool = False
+    ) -> int:
+        return await self.pq_executor.submit_job(
+            self._batched_async_contains,
+            lookup_id=lookup_id,
+            keys=keys,
+            pin=pin,
+            priority=Priorities.PEEK,
+        )
+
     def support_batched_get_non_blocking(self) -> bool:
         return True
 
-    async def batched_get_non_blocking(
+    async def _batched_get_non_blocking(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
         result = await self.batched_get(keys)
         return [r for r in result if r is not None]
+
+    async def batched_get_non_blocking(
+        self, lookup_id: str, keys: List[CacheEngineKey]
+    ) -> List[MemoryObj]:
+        return await self.pq_executor.submit_job(
+            self._batched_get_non_blocking,
+            lookup_id=lookup_id,
+            keys=keys,
+            priority=Priorities.PREFETCH,
+        )
 
     def support_batched_unpin(self) -> bool:
         return True
