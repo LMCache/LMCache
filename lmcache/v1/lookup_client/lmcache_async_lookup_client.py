@@ -36,12 +36,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     Related extra_config:
     - mla_lookup_server_worker_id:
         is a flag to control whether to create lookup server only on one worker.
-        if mla is not enabled(return -1):
-            start lookup server on all workers
-        if mla is enabled(default is 0):
-            - if mla_lookup_server_worker_id < 0, start lookup server on all workers
-            - if mla_lookup server_worker_id >= 0, start lookup server on the given
-              worker
+        if mla is not enabled, default is -1;
+        if mla is enabled, default is 0;
+        - if mla_lookup_server_worker_id < 0, start lookup server on all workers
+        - if mla_lookup server_worker_id >= 0, start lookup server on the given worker
     """
 
     def __init__(
