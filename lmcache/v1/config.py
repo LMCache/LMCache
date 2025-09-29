@@ -99,24 +99,6 @@ def _parse_quoted_string(value: str) -> str:
     return value
 
 
-def _manual_unescape(s: str) -> str:
-    """Manually handle common escape sequences."""
-    replacements = {
-        "\\n": "\n",
-        "\\t": "\t",
-        "\\r": "\r",
-        "\\\\": "\\",
-        '\\"': '"',
-        "\\'": "'",
-    }
-
-    result = s
-    for escaped, unescaped in replacements.items():
-        result = result.replace(escaped, unescaped)
-
-    return result
-
-
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
