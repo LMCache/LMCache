@@ -391,8 +391,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": float,
     },
     "mla_lookup_server_worker_id": {
-        "type": int,
-        "default": -1,
+        "type": Optional[int],
+        "default": None,
         "env_converter": int,
     },
 }
@@ -553,15 +553,13 @@ def _get_extra_config_value(self, key, default_value=None):
         return default_value
 
 def _get_mla_lookup_server_worker_id(self, use_mla):
-    if not use_mla:
-        # if mla is not enabled, start lookup server on all worker
-        return -1
-    else:
-        # if mla is enabled, start lookup server on worker 0 as default
-        if self.mla_lookup_server_worker_id == -1:
-            return 0
-        return self.mla_lookup_server_worker_id
-
+    if self.mla_lookup_server_worker_id is None:
+        # if mla is not enabled, return -1, which means start
+        # lookup server on all worker as default
+        # if mla is enabled, return 0, which means start lookup
+        # server on worker 0 as default
+        return 0 if use_mla else -1
+    return self.mla_lookup_server_worker_id
 
 def _from_defaults(cls, **kwargs):
     """Create configuration from defaults"""
