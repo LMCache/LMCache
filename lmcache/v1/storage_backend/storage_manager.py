@@ -121,6 +121,7 @@ class WeightedSemaphore:
         async with self._cond:
             logger.info(f"WeightedSemaphore: Attempting to acquire {n} chunks")
             if n <= self._concurrent_budget_cap:
+                # the CV spinning is inside of wait_for
                 await self._cond.wait_for(lambda: self._current_chunks >= n)
                 self._current_chunks -= n
             else:

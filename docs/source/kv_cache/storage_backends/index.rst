@@ -11,6 +11,7 @@ Supported Backends
 
    cpu_ram
    local_storage
+   lmserver
    gds
    redis
    s3

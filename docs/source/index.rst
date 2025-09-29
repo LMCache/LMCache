@@ -84,6 +84,7 @@ Documentation
    :caption: KV Cache offloading and sharing
 
    kv_cache/storage_backends/index
+   kv_cache/async_loading
    kv_cache/caching_policies
 
 :raw-html:`<br />`

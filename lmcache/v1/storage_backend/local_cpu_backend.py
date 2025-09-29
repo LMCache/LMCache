@@ -555,16 +555,19 @@ class LocalCPUBackend(AllocatorBackendInterface):
             f"dtype_size={dtype_size}, "
             f"hidden_dim={hidden_dim}"
         )
-        logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
         # add alignment overhead
-        # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         alignment = self.memory_allocator.align_bytes
+        logger.info(f"Memory allocator alignment: {alignment} bytes")
         aligned_chunk_bytes = ((chunk_bytes + alignment - 1) // alignment) * alignment
+        logger.info(
+            f"Calculated aligned bytes per chunk per rank: {aligned_chunk_bytes}"
+        )
 
         # calculate budget with safety margin
         max_chunks = total_memory // aligned_chunk_bytes
 
         chunk_budget = int(max_chunks)
+        logger.info(f"Calculated chunk budget: {chunk_budget}")
         return chunk_budget
 
     def get_keys(self) -> List[CacheEngineKey]:
