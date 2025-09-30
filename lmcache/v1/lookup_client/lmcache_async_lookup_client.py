@@ -58,13 +58,14 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             metadata.use_mla
         )
         assert self.mla_lookup_server_worker_id < metadata.world_size
-        ranks = self.tensor_parallel_size
+
         self.push_sockets = []
         if self.mla_lookup_server_worker_id >= 0:
-            ranks = 1
-        for tp_rank in range(ranks):
-            if self.mla_lookup_server_worker_id >= 0:
-                tp_rank = self.mla_lookup_server_worker_id
+            ranks = [self.mla_lookup_server_worker_id]
+        else:
+            ranks = [i for i in range(self.tensor_parallel_size)]
+
+        for tp_rank in ranks:
             worker_socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup_worker", rpc_port, tp_rank
             )

@@ -57,10 +57,12 @@ class LMCacheLookupClient(LookupClientInterface):
             metadata.use_mla
         )
         assert self.mla_lookup_server_worker_id < metadata.world_size
-        ranks = self.tensor_parallel_size
+
         self.sockets = []
         if self.mla_lookup_server_worker_id >= 0:
-            ranks = 1
+            ranks = [self.mla_lookup_server_worker_id]
+        else:
+            ranks = [i for i in range(self.tensor_parallel_size)]
 
         # Set timeout values from config
         timeout_ms = config.lookup_timeout_ms
@@ -72,9 +74,7 @@ class LMCacheLookupClient(LookupClientInterface):
         # same result.
         self.reqs_status: dict[str, int] = {}
 
-        for tp_rank in range(ranks):
-            if self.mla_lookup_server_worker_id >= 0:
-                tp_rank = self.mla_lookup_server_worker_id
+        for tp_rank in ranks:
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
             )
