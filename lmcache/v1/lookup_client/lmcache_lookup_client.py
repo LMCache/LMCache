@@ -112,6 +112,10 @@ class LMCacheLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
+        cached_num_hit_toks = self.reqs_status.get(lookup_id, None)
+        if cached_num_hit_toks is not None:
+            return cached_num_hit_toks
+
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
