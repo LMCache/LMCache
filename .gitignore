@@ -79,6 +79,9 @@ lmcache/experimental/tests
 /examples/offline_inference/buggy_example.py
 /examples/test_example
 
+# benchmark results
+*.csv
+
 # disk cache
 /remote_disk
 /local_disk
