@@ -5,7 +5,7 @@ import json
 import threading
 
 # Third Party
-from vllm.utils import make_zmq_socket
+from vllm.utils import make_zmq_socket, get_zmq_context
 import msgspec
 import torch
 import zmq
@@ -40,7 +40,7 @@ class LMCacheLookupClient(LookupClientInterface):
         metadata, config = create_lmcache_metadata(vllm_config)
 
         self.encoder = msgspec.msgpack.Encoder()
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
@@ -59,6 +59,13 @@ class LMCacheLookupClient(LookupClientInterface):
 
         # Set timeout values from config
         timeout_ms = config.lookup_timeout_ms
+
+        # NOTE: map from lookup_id (i.e., req_id) to req's status.
+        # int indicates number of hit tokens.
+        # The assumption here is that once a request is looked up,
+        # the following lookups of the same request must have the
+        # same result.
+        self.req_status: dict[str, int] = {}
 
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
@@ -95,7 +102,6 @@ class LMCacheLookupClient(LookupClientInterface):
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
-    # FIXME(Jiayi): Cacheblend need token ids
     def lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
@@ -163,7 +169,14 @@ class LMCacheLookupClient(LookupClientInterface):
         # NOTE: it is possible that the number of hit tokens is different
         # across TP ranks, so we can use the minimum value as the
         # number of hit tokens.
-        return min(results)
+        num_hit_toks = min(results)
+        self.req_status[lookup_id] = num_hit_toks
+
+        return num_hit_toks
+    
+    def clear_lookup_status(self, lookup_id: str) -> None:
+        with self.lock:
+            self.reqs_status.pop(lookup_id, None)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""

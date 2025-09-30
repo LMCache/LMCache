@@ -740,7 +740,6 @@ class LMCacheEngine:
             if pin:
                 self.storage_manager.touch_cache()
 
-    # FIXME
     @_lmcache_nvtx_annotate
     def move(
         self,
@@ -963,11 +962,10 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
-    def lookup_unpin(self, lookup_ids: list[str]) -> None:
-        for lookup_id in lookup_ids:
-            if lookup_id in self.lookup_pins:
-                self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
-                del self.lookup_pins[lookup_id]
+    def lookup_unpin(self, lookup_id: str) -> None:
+        if lookup_id in self.lookup_pins:
+            self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
+            del self.lookup_pins[lookup_id]
 
     @_lmcache_nvtx_annotate
     def clear(

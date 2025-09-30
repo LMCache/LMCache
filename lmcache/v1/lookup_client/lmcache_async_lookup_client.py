@@ -5,7 +5,7 @@ import threading
 import time
 
 # Third Party
-from vllm.utils import make_zmq_socket
+from vllm.utils import make_zmq_socket, get_zmq_context
 import msgspec
 import torch
 import zmq
@@ -42,7 +42,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         metadata, config = create_lmcache_metadata(vllm_config)
 
         self.encoder = msgspec.msgpack.Encoder()
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.ctx = get_zmq_context(use_asyncio=False)
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
@@ -107,15 +107,15 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # (e.g., worker process).
         self.lock = threading.Lock()
 
-        # map from lookup_id to req's status.
+        # map from lookup_id (i.e., req_id) to req's status.
         # None indicates ongoing.
         # int indicates number of hit tokens.
         self.reqs_status: dict[str, Optional[int]] = {}
 
-        # map from lookup_id to number of hit tokens for each worker
+        # map from lookup_id (i.e., req_id) to number of hit tokens for each worker
         self.res_for_each_worker: dict[str, list[int]] = {}
 
-        # The two parts are [lookup_id, num_hit_tokens]
+        # The two parts are [lookup_id (i.e., req_id), num_hit_tokens]
         self.num_parts = 2
 
         self.running = True
@@ -146,7 +146,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 time.sleep(self.lookup_backoff_time)
                 return None
             elif req_status != -1:
-                self.reqs_status.pop(lookup_id)
+                # self.reqs_status.pop(lookup_id)
                 return req_status
             self.reqs_status[lookup_id] = None
         hashes = []
@@ -207,6 +207,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     # can use the minimum value as the number of
                     # hit tokens.
                     self.reqs_status[lookup_id] = min(all_res)
+    
+    def clear_lookup_status(self, lookup_id: str) -> None:
+        with self.lock:
+            self.reqs_status.pop(lookup_id, None)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
