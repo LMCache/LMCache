@@ -195,7 +195,10 @@ class StorageManager:
         )
         self.thread.start()
 
-        if torch.cuda.is_available():
+        # For scheduler role, always use CPU device
+        if metadata.role == "scheduler":
+            dst_device = "cpu"
+        elif torch.cuda.is_available():
             dst_device = "cuda"
         else:
             dst_device = "cpu"
@@ -230,7 +233,7 @@ class StorageManager:
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and metadata.role != "scheduler":
             self.internal_copy_stream = torch.cuda.Stream()
         else:
             self.internal_copy_stream = None
@@ -293,6 +296,8 @@ class StorageManager:
         """
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
+        if self.allocator_backend is None:
+            raise RuntimeError("Allocator backend not available for scheduler role")
         return self.allocator_backend.batched_allocate(
             shape, dtype, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
         )
@@ -336,10 +341,14 @@ class StorageManager:
             str,
             tuple[Sequence[CacheEngineKey], list[MemoryObj]],
         ] = {}
-        obj_dict[get_backend_cname(self.allocator_backend)] = (
-            keys,
-            memory_objs,
-        )
+        if self.allocator_backend is not None:
+            obj_dict[get_backend_cname(self.allocator_backend)] = (
+                keys,
+                memory_objs,
+            )
+        else:
+            # For scheduler role, no allocator backend available
+            raise RuntimeError("Batched put not available for scheduler role")
 
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
@@ -379,7 +388,10 @@ class StorageManager:
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj:
-                if backend_name not in ["LocalCPUBackend", "PDBackend"]:
+                if (
+                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    and "LocalCPUBackend" in self.storage_backends
+                ):
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
                     local_cpu_backend.submit_put_task(key, memory_obj)

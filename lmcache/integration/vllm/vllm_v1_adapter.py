@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+from typing import TYPE_CHECKING, Any, Generator, List, Optional, Union
 import os
 
 # Third Party
@@ -54,6 +54,7 @@ from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
 from lmcache.v1.gpu_connector import (
+    GPUConnectorInterface,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
@@ -63,6 +64,7 @@ from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
     LMCacheAsyncLookupServer,
 )
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 
@@ -76,6 +78,45 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class DummyGpuConnector(GPUConnectorInterface):
+    def __init__(self):
+        pass
+
+    def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
+        pass
+
+    def to_gpu_batch(
+        self,
+        memory_objs: list["MemoryObj"],
+        slot_mappings: list[torch.Tensor],
+    ) -> None:
+        pass
+
+    def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
+        return None
+
+    def batched_from_gpu(
+        self,
+        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ):
+        return []
+
+    def batched_to_gpu(
+        self,
+        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ):
+        pass
+
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        return torch.Size([0])
 
 
 @dataclass
@@ -441,6 +482,7 @@ def _calculate_draft_layers(vllm_config, model_config):
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
+    role: Optional[str] = None,
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -500,58 +542,78 @@ def _init_lmcache_engine(
         kv_dtype,
         kv_shape,
         use_mla,
+        role,
     )
 
-    use_gpu = need_gpu_interm_buffer(lmcache_config)
-    vllm_gpu_connector: Union[
-        VLLMBufferLayerwiseGPUConnector,
-        VLLMPagedMemGPUConnectorV2,
-        VLLMPagedMemLayerwiseGPUConnector,
-    ]
-
-    if use_mla and lmcache_config.use_layerwise:
-        raise ValueError("layerwise MLA connector is not supported yet")
-
-    # When use_mla is True, num_kv_head is 1
-    hidden_dim_size = num_kv_head * head_size
-    if lmcache_config.use_layerwise:
-        if lmcache_config.enable_blending:
-            # Use layerwise connector for blending
-            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-            )
-        else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-            )
+    # For scheduler role, use DummyGpuConnector
+    vllm_gpu_connector: GPUConnectorInterface
+    if role == "scheduler":
+        vllm_gpu_connector = DummyGpuConnector()
     else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
-    tpg = get_tp_group()
+        use_gpu = need_gpu_interm_buffer(lmcache_config)
+
+        if use_mla and lmcache_config.use_layerwise:
+            raise ValueError("layerwise MLA connector is not supported yet")
+
+        # When use_mla is True, num_kv_head is 1
+        hidden_dim_size = num_kv_head * head_size
+        if lmcache_config.use_layerwise:
+            if lmcache_config.enable_blending:
+                # Use layerwise connector for blending
+                vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
+            else:
+                vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
+        else:
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+
+    if role == "scheduler":
+        # Provide dummy implementations for scheduler role
+        def dummy_broadcast(tensor: torch.Tensor, src: int) -> None:
+            pass
+
+        def dummy_broadcast_object(obj: Any, src: int) -> Any:
+            return obj
+
+        broadcast = dummy_broadcast
+        broadcast_object = dummy_broadcast_object
+    else:
+        tpg = get_tp_group()
+
+        def broadcast_wrapper(tensor: torch.Tensor, src: int) -> None:
+            tpg.broadcast(tensor, src)
+
+        broadcast = broadcast_wrapper
+        broadcast_object = tpg.broadcast_object
+
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         lmcache_config,
         metadata,
         vllm_gpu_connector,
-        tpg.broadcast,
-        tpg.broadcast_object,
+        broadcast,
+        broadcast_object,
     )
 
     return engine
@@ -609,9 +671,18 @@ class LMCacheConnectorV1Impl:
         ] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
+            self.lmcache_engine: Optional[LMCacheEngine] = None
+            # Check if bypass lookup is enabled for scheduler
+            if config.enable_scheduler_bypass_lookup:
+                # Create LMCacheEngine for scheduler when bypass is enabled
+                self.lmcache_engine = _init_lmcache_engine(
+                    config,
+                    vllm_config,
+                    role="scheduler",
+                )
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
-                vllm_config, config
+                vllm_config, config, self.lmcache_engine
             )
             self._unfinished_requests: dict[str, Request] = {}
             self.lmcache_engine = None

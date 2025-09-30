@@ -396,6 +396,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
+    "enable_scheduler_bypass_lookup": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
 }
 
 
