@@ -5,7 +5,6 @@ import json
 import threading
 
 # Third Party
-from vllm.utils import get_zmq_context, make_zmq_socket
 import msgspec
 import torch
 import zmq
@@ -15,7 +14,11 @@ from lmcache.integration.vllm.utils import create_lmcache_metadata, mla_enabled
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
+from lmcache.v1.rpc_utils import (
+    get_zmq_context,
+    get_zmq_rpc_path_lmcache,
+    get_zmq_socket,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -75,11 +78,12 @@ class LMCacheLookupClient(LookupClientInterface):
                 f"lmcache lookup client connect to tp_rank {tp_rank} "
                 f"with socket path {socket_path}"
             )
-            socket = make_zmq_socket(
+            socket = get_zmq_socket(
                 self.ctx,
                 socket_path,
-                zmq.REQ,  # type: ignore[attr-defined]
-                bind=False,
+                "ipc",
+                zmq.REQ,
+                "connect",
             )
 
             # Set socket timeout during initialization
@@ -207,11 +211,12 @@ class LMCacheLookupServer:
         socket_path = get_zmq_rpc_path_lmcache(
             vllm_config, "lookup", rpc_port, vllm_config.parallel_config.rank
         )
-        self.socket = make_zmq_socket(
+        self.socket = get_zmq_socket(
             self.ctx,
             socket_path,
+            "ipc",
             zmq.REP,  # type: ignore[attr-defined]
-            bind=True,
+            "bind",
         )
 
         self.lmcache_engine = lmcache_engine

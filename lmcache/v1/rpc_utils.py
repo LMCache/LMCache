@@ -113,7 +113,7 @@ def get_zmq_rpc_path_lmcache(
     )
 
     socket_path = (
-        f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_"
+        f"{base_url}/engine_{engine_id}_service_{service_name}_"
         f"lmcache_rpc_port_{rpc_port}"
     )
 

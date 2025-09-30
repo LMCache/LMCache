@@ -5,7 +5,6 @@ import threading
 import time
 
 # Third Party
-from vllm.utils import get_zmq_context, make_zmq_socket
 import msgspec
 import torch
 import zmq
@@ -15,7 +14,11 @@ from lmcache.integration.vllm.utils import create_lmcache_metadata, mla_enabled
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
+from lmcache.v1.rpc_utils import (
+    get_zmq_context,
+    get_zmq_rpc_path_lmcache,
+    get_zmq_socket,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -66,11 +69,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 f"with worker socket path {worker_socket_path}"
             )
 
-            push_socket = make_zmq_socket(
+            push_socket = get_zmq_socket(
                 self.ctx,
                 worker_socket_path,
+                "ipc",
                 zmq.PUSH,  # type: ignore[attr-defined]
-                bind=False,
+                "connect",
             )
 
             self.push_sockets.append(push_socket)
@@ -78,11 +82,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
             vllm_config, "lookup_scheduler", rpc_port, 0
         )
-        self.pull_socket = make_zmq_socket(
+        self.pull_socket = get_zmq_socket(
             self.ctx,
             scheduler_socket_path,
+            "ipc",
             zmq.PULL,  # type: ignore[attr-defined]
-            bind=True,
+            "bind",
         )
         logger.info(
             f"lmcache lookup client connect to scheduler "
@@ -244,17 +249,19 @@ class LMCacheAsyncLookupServer:
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
             vllm_config, "lookup_scheduler", rpc_port, 0
         )
-        self.push_socket = make_zmq_socket(
+        self.push_socket = get_zmq_socket(
             self.ctx,
             scheduler_socket_path,
+            "ipc",
             zmq.PUSH,  # type: ignore[attr-defined]
-            bind=False,
+            "connect",
         )
-        self.pull_socket = make_zmq_socket(
+        self.pull_socket = get_zmq_socket(
             self.ctx,
             worker_socket_path,
+            "ipc",
             zmq.PULL,  # type: ignore[attr-defined]
-            bind=True,
+            "bind",
         )
 
         self.lmcache_engine = lmcache_engine
