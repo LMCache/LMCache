@@ -801,7 +801,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return TensorMemoryObj(
             raw_data=self.buffer[block.start : block.start + raw_size],
             metadata=MemoryObjMetadata(
-                shape, dtype, block.start, aligned_size, 1, False, fmt
+                shape, dtype, block.start, aligned_size, 1, 0, fmt
             ),
             parent_allocator=self,
         )
@@ -876,7 +876,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 TensorMemoryObj(
                     raw_data=raw_data,
                     metadata=MemoryObjMetadata(
-                        shape, dtype, temp_start, unit_aligned_size, 1, False, fmt
+                        shape, dtype, temp_start, unit_aligned_size, 1, 0, fmt
                     ),
                     parent_allocator=self,
                 )
