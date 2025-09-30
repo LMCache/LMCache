@@ -51,7 +51,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             True if producer reuse is supported, False otherwise
         """
         return False
-    
+
     def clear_lookup_status(self, lookup_id: str) -> None:
         """
         Clear temporary lookup status for a given lookup ID.

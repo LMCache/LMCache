@@ -5,7 +5,7 @@ import threading
 import time
 
 # Third Party
-from vllm.utils import make_zmq_socket, get_zmq_context
+from vllm.utils import get_zmq_context, make_zmq_socket
 import msgspec
 import torch
 import zmq
@@ -146,7 +146,6 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 time.sleep(self.lookup_backoff_time)
                 return None
             elif req_status != -1:
-                # self.reqs_status.pop(lookup_id)
                 return req_status
             self.reqs_status[lookup_id] = None
         hashes = []
@@ -207,7 +206,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     # can use the minimum value as the number of
                     # hit tokens.
                     self.reqs_status[lookup_id] = min(all_res)
-    
+
     def clear_lookup_status(self, lookup_id: str) -> None:
         with self.lock:
             self.reqs_status.pop(lookup_id, None)

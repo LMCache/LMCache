@@ -5,7 +5,7 @@ import json
 import threading
 
 # Third Party
-from vllm.utils import make_zmq_socket, get_zmq_context
+from vllm.utils import get_zmq_context, make_zmq_socket
 import msgspec
 import torch
 import zmq
@@ -65,7 +65,7 @@ class LMCacheLookupClient(LookupClientInterface):
         # The assumption here is that once a request is looked up,
         # the following lookups of the same request must have the
         # same result.
-        self.req_status: dict[str, int] = {}
+        self.reqs_status: dict[str, int] = {}
 
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
@@ -170,13 +170,12 @@ class LMCacheLookupClient(LookupClientInterface):
         # across TP ranks, so we can use the minimum value as the
         # number of hit tokens.
         num_hit_toks = min(results)
-        self.req_status[lookup_id] = num_hit_toks
+        self.reqs_status[lookup_id] = num_hit_toks
 
         return num_hit_toks
-    
+
     def clear_lookup_status(self, lookup_id: str) -> None:
-        with self.lock:
-            self.reqs_status.pop(lookup_id, None)
+        self.reqs_status.pop(lookup_id, None)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
