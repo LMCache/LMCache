@@ -1,0 +1,354 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:2
+msgid "Redis"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:9
+msgid ""
+"Redis is an in-memory key-value store and is a supported option for "
+"remote KV Cache offloading in LMCache. Some other remote backends are "
+":doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`, and "
+":doc:`InfiniStore <./infinistore>`. This guide will mainly focus on "
+"single-node Redis but also shows you how to set up Redis Sentinels and an"
+" LMCache Server."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:14
+msgid "Two ways to configure LMCache Redis Offloading:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:16
+msgid "**1. Environment Variables:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:18
+#: ../../source/kv_cache/storage_backends/redis.rst:40
+msgid "``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:36
+msgid "**2. Configuration File**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:38
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:42
+msgid "Example ``config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:59
+msgid "Remote Storage Explanation:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:61
+msgid ""
+"LMCache's backend is obeys the natural memory hierarchy of prioritizing "
+"CPU RAM offloading, then Local Storage offloading, and finally remote "
+"offloading."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:64
+msgid ""
+"For LMCache to know how to create a connector to a remote backend, you "
+"must specify in ``remote_url`` a connector type followed by one or most "
+"host:port pairs (depending on what connector type is used). If "
+"``remote_url`` is set to ``None``, LMCache will not use any remote "
+"storage."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:68
+msgid "Examples of ``remote_url``'s:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:79
+msgid "Remote Storage Example"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:83
+msgid "**Prerequisites:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:85
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:87
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:89
+msgid "Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:95
+msgid "**Step 0. Set up a directory for this example:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:102
+msgid "**Step 1. Start a Redis server:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:110
+msgid "Check if Redis is running:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:116
+msgid "Expected Response:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:122
+msgid "**Optional: Setting up Sentinels:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:124
+msgid ""
+"To enable high availability with Redis, you can configure Redis sentinels"
+" to monitor the master and automatically fail over to a replica if "
+"needed."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:127
+msgid "**Step 1a. Start a Redis replica:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:133
+msgid "**Step 1b. Create Sentinel configuration files:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:135
+msgid ""
+"Create three files: ``sentinel-26379.conf``, ``sentinel-26380.conf``, and"
+" ``sentinel-26381.conf``, with contents like this:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:145
+msgid "**Step 1c. Start each Sentinel:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:153
+msgid "**Step 1d. Make sure the Sentinels are tracking the master:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:161
+msgid "**Step 1e. Verify everything is running:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:167
+msgid "You should see something like this (without the comments):"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:181
+msgid "**Alternative: Starting an LMCache Server:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:183
+msgid ""
+"The ``lmcache_server`` CLI entrypoint starts a remote LMCache server and "
+"comes with the ``lmcache`` package."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:192
+msgid ""
+"Currently, the only supported device is \"cpu\" (which is the default, so"
+" you don't need to specify it)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:195
+msgid "**Step 2. Start a vLLM server with remote offloading enabled:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:197
+msgid "Create a an lmcache configuration file called: ``redis-offload.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:208
+#: ../../source/kv_cache/storage_backends/redis.rst:237
+#: ../../source/kv_cache/storage_backends/redis.rst:263
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:227
+msgid "**Optional: Sentinels**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:229
+msgid ""
+"Create a an lmcache configuration file called: ``redis-sentinel-"
+"offload.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:253
+msgid "**Alternative: LMCache Server**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:255
+msgid ""
+"Create a an lmcache configuration file called: ``lmcache-server-"
+"offload.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:279
+msgid "**Step 3. Viewing and Managing LMCache Entries in Redis:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:281
+msgid ""
+"If you would like to feel the TTFT speed up with offloading and KV Cache "
+"reuse, feel free to use the same ``query-twice.py`` script and ``man-"
+"bash.txt`` long context as in :doc:`CPU RAM <./cpu_ram>` and :doc:`Local "
+"Storage <./local_storage>`."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:284
+msgid ""
+"Here, we are instead going to demonstrate how to search for and modify "
+"LMCache KV Chunk entries in Redis."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:286
+msgid ""
+"Please note that the official LMCache way to achieve this redis-specific "
+"functionality of viewing and modifying LMCache KV Chunks is available in "
+":doc:`LMCache Controller <../../kv_cache_management/index>`."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:288
+msgid "Let's warm/populate LMCache first with ``curl`` this time:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:305
+msgid ""
+"LMCache stores data in Redis using a structured key format. Each key "
+"contains the following information in a delimited format:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:311
+msgid "`format`: The model format (e.g., \"vllm\" or \"huggingface\")"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:312
+msgid "`model_name`: Name of the language model"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:313
+msgid "`world_size`: Total number of workers in distributed deployment"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:314
+msgid "`worker_id`: ID of the worker that created this cache entry"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:315
+msgid "`chunk_hash`: Hash of the token chunk (SHA-256 based)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:317
+msgid "For example, a typical key might look like:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:323
+msgid "**Using redis-cli to View LMCache Data**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:325
+msgid "To inspect and manage LMCache entries in Redis:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:331
+msgid "**Optional: If you are using sentinels, first find the master port:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:339
+msgid "**List LMCache keys:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:341
+msgid ""
+"Notice (from the suffixes of the keys) that each LMCache KV Chunk has two"
+" entries: ``kv_bytes`` and ``metadata``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:354
+msgid "**Delete LMCache entries:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:360
+msgid "Delete a specific LMCache entry:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:369
+msgid "**Check if a key exists:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:375
+msgid "**View memory usage for a key:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:377
+msgid ""
+"Notice that the ``kv_bytes`` entry is what is exactly holding the KV "
+"Chunk and is much larger than the ``metadata`` entry."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:387
+msgid "**Delete specific keys:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:401
+msgid "**Monitor Redis in real-time:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:407
+msgid "**Get Redis stats for LMCache:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:417
+msgid ""
+"This tutorial utilized the ``redis-cli`` to directly peak into a remote "
+"backend and manipualte KV Chunks."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:420
+msgid ""
+"Once again, please refer to the :doc:`LMCache Controller "
+"<../../kv_cache_management/index>` for the official LMCache way of "
+"controlling and routing your KV Caches in your LMCache instances."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/redis.rst:423
+msgid "**Step 4. Clean up:**"
+msgstr ""
+

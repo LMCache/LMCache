@@ -1,0 +1,260 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/developer_guide/architecture.rst:2
+msgid "Architecture Overview"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:5
+msgid "High-Level System Architecture"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:8
+msgid ""
+"LMCache extends an LLM inference engine (e.g., vLLM) with a multi-tier KV"
+" cache storage system spanning GPU memory, CPU memory, and disk/remote "
+"backends. The diagram below illustrates how KV cache blocks move across "
+"these layers."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:10
+msgid "**Multi-Tier Storage Architecture**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:12
+msgid ""
+"LMCache implements a hierarchical storage system with three distinct "
+"tiers:"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:14
+msgid ""
+"**GPU Memory**: Holds the active working set of KV caches that are "
+"currently being used by the model"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:15
+msgid ""
+"**CPU DRAM**: Acts as a \"hot cache\" for recently used KV chunks, using "
+"pinned memory for efficient GPU-CPU transfers"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:16
+msgid ""
+"**Local storage (e.g., local disk, NVMe GDS)**: Provides a large tier for"
+" local KV caching (e.g. for long documents)"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:17
+msgid ""
+"**Remote storage (e.g., Redis, Mooncake, InfiniStore)**: Persistent "
+"storage for KV caches. Reliable but not as performant as previous tiers."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:19
+msgid "**Data Flow and Operations**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:21
+msgid ""
+"When the model generates new key-value (KV) cache chunks on the GPU, "
+"LMCache can:"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:23
+msgid ""
+"**Offload overflow KV caches** from GPU to CPU DRAM, freeing precious GPU"
+" memory"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:24
+msgid ""
+"**Asynchronously write** KV caches from CPU to disk or remote storage "
+"using LRU eviction policies"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:25
+msgid ""
+"**Prefetch hot KV caches** from disk/remote storage back to CPU when "
+"needed"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:26
+msgid "**On-demand reuse** of cached segments by moving them from CPU back to GPU"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:28
+msgid ""
+"This architecture enables LMCache to significantly reduce prefill delays "
+"and GPU memory pressure while maintaining high performance through "
+"intelligent cache management."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:49
+msgid "Two modes"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:51
+msgid "**Storage Mode (KV cache offloading)**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:52
+msgid ""
+"LMCache acts as a persistent KV store, optimizing for high reuse across "
+"queries or sessions. It offloads infrequently used KV blocks from GPU "
+"memory and persists popular caches across sessions, boosting cache hit "
+"rates for \"hot\" content. KV caches survive beyond single inference "
+"calls and even process restarts when backed by disk or external storage."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:73
+msgid "**Transport Mode (Prefill-decode disaggregation)**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:74
+msgid ""
+"Focuses on accelerating distributed inference by routing KV cache data "
+"between nodes in real-time. Enables prefill-decode disaggregation where "
+"one server computes KV for prompts and delivers them to another server "
+"for generation without recomputation. Uses peer-to-peer channels with "
+"communication libraries like NIXL for low-latency, high-bandwidth "
+"transfers."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:78
+msgid "Core Components"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:80
+msgid "**LLM Inference Engine Integration Module (Connector)**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:81
+msgid ""
+"Integrated into the LLM engine (vLLM), the Connector taps into the paged "
+"KV memory manager. During prompt processing, it checks if token sequences"
+" were seen before:"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:83
+msgid ""
+"**Cache hit**: Fetches precomputed KV cache chunks from LMCache, "
+"bypassing computation"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:84
+msgid ""
+"**Cache miss**: Model computes KV as usual, then Connector hands newly-"
+"generated KV data to LMCache for storage"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:86
+msgid "**Cache Index (Token Database)**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:87
+msgid ""
+"Maintains an internal index mapping token sequences to cached KV entries "
+"and their locations. Enables cross-request and cross-instance cache "
+"lookups with configurable chunking strategy (default 256 tokens) and "
+"hashing scheme."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:89
+msgid "**Memory Object & Allocator**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:90
+msgid ""
+"Manages KV cache entries as MemoryObj instances using a custom memory "
+"allocator within LocalCPUBackend. Ensures pinned memory for fast GPU↔CPU "
+"transfers, NUMA-aware allocation, and interfaces with eviction policies "
+"(LRU by default)."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:92
+msgid "**Asynchronous Offloading**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:93
+msgid ""
+"Offloading / loading the KV cache chunks in an asynchronous manner to "
+"avoid blocking inference threads and GPU cycles."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:95
+msgid "**Remote Connectors**"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:96
+msgid ""
+"Plugin-based system for remote backends (Redis, Mooncake, NiXL). Uses "
+"generic RemoteBackend wrapper that delegates operations to connector "
+"implementations, supporting dynamic loading of custom backends."
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:99
+msgid "LMCache Controller"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:101
+msgid "The Controller provides a management API for runtime cache operations:"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:103
+msgid ""
+"**Lookup**: Query cache entries for given token sequences and their "
+"locations"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:104
+msgid "**Clear**: Purge KV cache entirely or for specific entries"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:105
+msgid ""
+"**Compress/Decompress**: On-demand compression using CacheGen or "
+"decompression to full precision"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:106
+msgid ""
+"**Move**: Migrate caches to specified locations for cache warming or "
+"optimization"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:107
+msgid "**Pin/Unpin**: Mark cache entries as persistent to prevent eviction"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:108
+msgid ""
+"**Health & Finish Checks**: Report worker health and confirm completion "
+"of async operations"
+msgstr ""
+
+#: ../../source/developer_guide/architecture.rst:110
+msgid ""
+"The Controller coordinates with all LMCache workers in the system, "
+"providing centralized management for both single-instance and distributed"
+" deployments."
+msgstr ""
+

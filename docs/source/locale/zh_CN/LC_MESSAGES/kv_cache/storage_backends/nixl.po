@@ -1,0 +1,118 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:3
+msgid "Nixl"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:8
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:10
+msgid ""
+"NIXL (NVIDIA Inference Xfer Library) is a high-performance library "
+"designed for accelerating point to point communications in AI inference "
+"frameworks. It provides an abstraction over various types of memory (CPU "
+"and GPU) and storage through a modular plug-in architecture, enabling "
+"efficient data transfer and coordination between different components of "
+"the inference pipeline."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:12
+msgid ""
+"LMCache supports using NIXL as a storage backend, allowing using NIXL to "
+"save either GPU or CPU memory into storage."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:15
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:17
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:18
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:19
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:22
+msgid "Ways to configure LMCache NIXL Offloading"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:24
+msgid "**Configuration File**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:26
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:28
+msgid "``LMCACHE_USE_EXPERIMENTAL`` MUST be set."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:30
+msgid "Example ``lmcache-config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:40
+msgid "Key settings:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:42
+msgid "``nixl_buffer_size``: buffer size for NIXL transfers."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:44
+msgid ""
+"``nixl_file_pool_size``: number of files opened at init time for nixl "
+"backend."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:46
+msgid ""
+"``nixl_path``: directory under which the storage files will be saved "
+"(e.g. /mnt/nixl/). Needed for NIXL backends that store to file."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:48
+msgid ""
+"``nixl_backend``: configuration of which nixl backend to use for storage."
+" Options are: [\"GDS\", \"GDS_MT\", \"POSIX\", \"HF3FS\"]."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:50
+msgid ""
+"``nixl_buffer_device``: dictates where the memory managed by NIXL should "
+"be on. \"cpu\" or \"cuda\" is supported for \"GDS\" and \"GDS_MT\" "
+"backends - for \"POSIX\" and \"HF3FS\", must be \"cpu\"."
+msgstr ""
+

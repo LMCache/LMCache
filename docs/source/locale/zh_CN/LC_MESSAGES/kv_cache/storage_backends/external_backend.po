@@ -1,0 +1,99 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:2
+msgid "Configurable Storage Backends"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:4
+msgid ""
+"LMCache supports integrating custom storage backends through dynamic "
+"loading or plug and play capability. This allows extending cache storage "
+"capabilities without modifying core code."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:7
+msgid "Backend Definition Requirements"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:8
+msgid "Inherit from ``ConfigurableStorageBackendInterface``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:9
+msgid ""
+"Implement all the abstract methods of the parent interface of "
+"``ConfigurableStorageBackendInterface``- ``StorageBackendInterface``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:10
+msgid "Package as an installable Python module"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:14
+msgid ""
+"The interface constructor is the instantiation contract that the LMCache "
+"loading system will use when loading configurable storage backends. If "
+"you wish to implement a constructor, it should have the same parameter "
+"signature and call the interface constructor."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:18
+msgid "How to Integrate the Backend with LMCache"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:19
+msgid "Install your backend package in the LMCache environment"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:20
+msgid ""
+"Add ``external_backends`` and its related ``module_path`` and "
+"``class_name`` to ``extra_config`` section of LMCache configuration as "
+"follows:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:32
+msgid "An example configuration for a logging backend is as follows:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:46
+msgid ""
+"Backends are initialized in order during LMCache startup - earlier "
+"backends have higher priority during cache lookups"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:47
+msgid ""
+"``external_backends.<backend_name>`` distinguishes the different dynamic "
+"loaded backends"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:50
+msgid "Backend Implementation Example"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/external_backend.rst:51
+msgid ""
+"A sample backend implementation can be viewed at "
+"https://github.com/opendataio/lmc_external_log_backend/"
+msgstr ""
+

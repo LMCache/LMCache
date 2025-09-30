@@ -1,0 +1,67 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/production/docker_deployment.rst:4
+msgid "Docker deployment"
+msgstr ""
+
+#: ../../source/production/docker_deployment.rst:7
+msgid "Running the container image"
+msgstr ""
+
+#: ../../source/production/docker_deployment.rst:9
+msgid ""
+"You can run the LMCache integrated with vLLM image using Docker as "
+"follows:"
+msgstr ""
+
+#: ../../source/production/docker_deployment.rst:26
+msgid ""
+"The image name and tag can be found on DockerHub - `LMCache/vllm-openai "
+"<https://hub.docker.com/r/lmcache/vllm-openai>`_. See example run file in"
+" `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more "
+"details."
+msgstr ""
+
+#: ../../source/production/docker_deployment.rst:31
+msgid "DockerHub contains the following image types:"
+msgstr ""
+
+#: ../../source/production/docker_deployment.rst:33
+msgid ""
+"Nightly build images of LMCache and vLLM latest code (e.g. tagged with "
+"`latest-nightly` and `nightly-<date>`)"
+msgstr ""
+
+#: ../../source/production/docker_deployment.rst:34
+msgid ""
+"Images of stable releases of LMCache and vLLM (tagged with `v0.x.x`, the "
+"exact version of vllm a version of lmcache was built with can be "
+"discovered by consulting the compatibility matrix inside of `installation"
+" <../installation.rst>`_)"
+msgstr ""
+
+#: ../../source/production/docker_deployment.rst:36
+msgid ""
+"Lightweight image that cannot run PD disaggregation (tagged with "
+"`lightweight`)"
+msgstr ""
+

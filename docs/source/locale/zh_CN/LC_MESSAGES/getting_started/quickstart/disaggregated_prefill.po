@@ -1,0 +1,269 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:4
+msgid "Example: Disaggregated prefill"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:6
+msgid ""
+"With LMCache as a KV cache transfer library, we can run disaggregated "
+"prefill with vLLM. Right now, LMCache uses NIXL as a transport layer to "
+"enable fast KV cache transfer via NVLink, RDMA, or TCP."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:9
+msgid ""
+"This guide demonstrates how to run LMCache with disaggregated prefill "
+"using a single prefiller and decoder setup (1P1D) on a single machine. "
+"The architecture splits the LLM inference into two stages: prefill and "
+"decode, running on separate GPUs for better resource utilization."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:13
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:15
+msgid "Before you begin, ensure you have:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:17
+msgid "At least 2 GPUs"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:18
+msgid "Python packages installed:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:19
+msgid "``lmcache`` (0.2.1 or above)"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:20
+msgid ""
+"``nixl`` (Install instructions `here <https://github.com/ai-"
+"dynamo/nixl>`_)"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:21
+msgid "``vllm`` (latest main branch)"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:22
+msgid "``httpx``, ``fastapi``, and ``uvicorn``"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:23
+msgid ""
+"A valid Hugging Face token (``HF_TOKEN``) with access to Llama 3.1 8B "
+"models"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:25
+msgid "(Recommended) A machine with NVLink or RDMA enabled GPUs"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:29
+msgid ""
+"You can use ``ucx_perftest`` to check the GPU-GPU memory transfer and "
+"verify the NVLink or RDMA connection. Please refer to this link: `UCX "
+"Performance Test <https://ucx-py.readthedocs.io/en/latest/ucx-"
+"debug.html>`_."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:33
+msgid "Architecture Overview"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:35
+msgid "The disaggregated prefill setup consists of three main components:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:37
+msgid ""
+"**Prefiller Server (Port 8100)**: Handles the prefill phase of LLM "
+"inference"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:38
+msgid "**Decoder Server (Port 8200)**: Manages the decoding/generation phase"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:39
+msgid "**Proxy Server (Port 9000)**: Coordinates between prefiller and decoder"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:42
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:44
+msgid "**Prefiller Server Configuration** (``lmcache-prefiller-config.yaml``):"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:59
+msgid "**Decoder Server Configuration** (``lmcache-decoder-config.yaml``):"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:76
+msgid "Step-by-Step Setup"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:78
+msgid "**Environment Setup**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:80
+msgid "Set your Hugging Face token before running the vLLM servers."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:86
+msgid "**Launch the vLLM + LMCache Inference Servers**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:88
+msgid "You can launch the components individually:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:90
+msgid "Launch Decoder (on GPU 1):"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:103
+msgid "Launch Prefiller (on GPU 0):"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:116
+msgid "Launch a proxy server to coordinate between prefiller and decoder:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:118
+msgid ""
+"The code for the proxy server is available `in vLLM repo "
+"<https://github.com/vllm-"
+"project/vllm/blob/main/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py>`_."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:138
+msgid ""
+"The ``UCX_TLS`` environment variable is used to specify the transport "
+"layer for UCX (the example uses NVLink) The ``CUDA_VISIBLE_DEVICES`` "
+"environment variable is used to specify the GPUs to use for the servers."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:142
+msgid "**Verify Setup**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:144
+msgid "The servers are ready when you can access:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:146
+msgid "Prefiller: ``http://localhost:7100/v1/completions``"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:147
+msgid "Decoder: ``http://localhost:7200/v1/completions``"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:148
+msgid "Proxy: ``http://localhost:9100/v1/completions``"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:151
+msgid "Usage"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:153
+msgid ""
+"Send requests to the proxy server (port 9000) using either the "
+"completions or chat completions endpoint:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:165
+msgid ""
+"You can also test the setup with the following command, which runs the "
+"`benchmark_serving.py <https://github.com/vllm-"
+"project/vllm/blob/main/vllm/benchmarks/benchmark_serving.py>`_ from vLLM."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:177
+msgid "Monitoring"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:179
+msgid "The prefiller instance will log the throughput of KV cache transfer:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:181
+msgid ""
+"LMCache INFO: Store 5271 tokens takes: 6.5000 ms, throughput: 98.9889 "
+"GB/s; offload_time: 2.6594 ms, put_time: 3.4539 ms "
+"(cache_engine.py:190:lmcache.v1.cache_engine)"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:183
+msgid ""
+"The decoder instance will log how many tokens are fetched from the "
+"LMCache:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:185
+msgid ""
+"LMCache INFO: Reqid: cmpl-b8bf01cbe47e4d108732ceeb4158d310-0, Total "
+"tokens 5170, LMCache hit tokens: 5169, need to load: 5169 "
+"(vllm_v1_adapter.py:543:lmcache.integration.vllm.vllm_v1_adapter)"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:187
+msgid "The proxy server will log the TTFT of the prefiller node:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:201
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:203
+msgid "Common issues and solutions:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:205
+msgid "**GPU Requirements**: Ensure you have at least 2 GPUs available"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:206
+msgid "**Port Conflicts**: Check if ports used above are available"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:207
+msgid ""
+"**HF Token**: Verify your token starts with ``hf_`` and has necessary "
+"model access"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:208
+msgid ""
+"**CUDA Errors**: Ensure CUDA_VISIBLE_DEVICES is set correctly for each "
+"server"
+msgstr ""
+

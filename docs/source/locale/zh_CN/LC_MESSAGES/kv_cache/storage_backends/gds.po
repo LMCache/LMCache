@@ -1,0 +1,176 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:2
+msgid "GDS Backend"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:9
+msgid ""
+"This backend will work with any file system, whether local, remote, and "
+"remote with GDS-based optimizations. Remote file systems allow for "
+"multiple LMCache instances to share data seamlessly. The GDS (GPU-Direct "
+"Storage) optimizations are used for for zero-copy I/O from GPU memory to "
+"storage systems."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:16
+msgid "Ways to configure LMCache GDS Backend"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:18
+msgid "**1. Environment Variables:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:20
+#: ../../source/kv_cache/storage_backends/gds.rst:40
+msgid "``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:36
+msgid "**2. Configuration File**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:38
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:42
+msgid "Example ``config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:57
+msgid "CuFile Buffer Size Explanation"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:59
+msgid ""
+"The backend currently pre-registers buffer space to speed up cuFile "
+"operations. This buffer space is registered in VRAM so options like "
+"``--gpu-memory-utilization`` from ``vllm`` should be considered when "
+"setting it. For example, a good rule of thumb for H100 which generally "
+"has 80GiBs of VRAM would be to start with 8GiB and set ``--gpu-memory-"
+"utilization 0.85`` and depending on your workflow fine-tune it from "
+"there."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:67
+msgid "Setup Example"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:71
+msgid "**Prerequisites:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:73
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:75
+msgid "A mounted file system. A file system supportings GDS will work best."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:77
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:79
+msgid "Hugging Face access to ``meta-llama/Llama-3.1-70B-Instruct``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:85
+msgid "**Step 1. Create cache directory under your file system mount:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:87
+msgid ""
+"To find all the types of file systems supporting GDS in your system, use "
+"`gdscheck` from NVIDIA:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:93
+msgid "Check with your storage vendor on how to mount the remote file system."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:95
+msgid ""
+"(For example, if you want to use a GDS-enabled NFS driver, try the "
+"modified [NFS stack](https://vastnfs.vastdata.com/), which is an open "
+"source driver that works with any standard [NFS "
+"RDMA](https://datatracker.ietf.org/doc/html/rfc5532) server. More vendor-"
+"specific instructions will be added here in the future)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:101
+msgid ""
+"Create a directory under the file systew mount (the name here is "
+"arbitrary):"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:107
+msgid "**Step 2. Start a vLLM server with file backend enabled:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:109
+msgid "Create a an lmcache configuration file called: ``gds-backend.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:118
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:137
+msgid "POSIX fallback"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:139
+msgid ""
+"In some cases, libcufile implements its own internal POSIX fallback "
+"without `GdsBackend` being aware. In others, an error such as "
+"`RuntimeError: cuFileHandleRegister failed (cuFile err=5030, cuda_err=0)`"
+" may be throwned. Thus, backend can be configured to fallback to its own "
+"POSIX implementation when the usage of the libcufile APIs is not "
+"successful."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:143
+msgid ""
+"To force `GdsBackend` not use libcufile APIs for any reason, you can "
+"override its behavior via `extra_config`, e.g:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/gds.rst:150
+msgid ""
+"Note that under this mode it would still use CUDA APIs to map and do "
+"operations the pre-registered GPU memory."
+msgstr ""
+

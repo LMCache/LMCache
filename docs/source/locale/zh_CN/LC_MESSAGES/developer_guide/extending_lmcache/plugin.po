@@ -1,0 +1,185 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:2
+msgid "Extending LMCache: Plugin"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:4
+msgid ""
+"The LMCache plugin system allows developers to extend functionality by "
+"running custom scripts alongside LMCache processes. Plugins can be "
+"written in Python and Bash for now, and are managed by the "
+"``PluginLauncher`` class."
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:7
+msgid "Key Use Cases"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:8
+msgid "Start metric reporters for centralized monitoring"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:9
+msgid "Implement log reporters for log collection systems"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:10
+msgid "Report process-level metrics to alerting systems"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:11
+msgid "Implement health checks and service discovery"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:12
+msgid "Custom cache management operations"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:15
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:16
+msgid ""
+"Plugins are configured through environment variables and configuration "
+"files:"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:18
+msgid ""
+"Environment Variables: - ``LMCACHE_PLUGIN_ROLE``: Process role (e.g., "
+"``SCHEDULER``, ``WORKER``) - ``LMCACHE_PLUGIN_CONFIG``: JSON string "
+"containing plugin configuration - ``LMCACHE_PLUGIN_WORKER_ID``: Current "
+"worker ID - ``LMCACHE_PLUGIN_WORKER_COUNT``: Total worker count in "
+"cluster"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:24
+msgid "Configuration File (``lmcache.yaml``):"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:35
+msgid "Plugin Naming Convention"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:36
+msgid "Plugin filenames determine execution targets:"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:38
+msgid ""
+"Role-Specific Plugins: - Format: "
+"``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - Examples:"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:42
+msgid "``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:43
+msgid "``worker_0_test.sh``: Runs only on worker ID 0"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:44
+msgid "``all_plugin.sh``: Runs on all workers"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:46
+msgid ""
+"Notes: - Role names are case-insensitive - Worker ID must be numeric when"
+" specified - To target a specific worker ID, the filename must have at "
+"least three parts separated by underscores (e.g., "
+"`worker_<ID>_<DESCRIPTION>.ext`). A file named `worker_<DESCRIPTION>.ext`"
+" will run on all workers."
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:52
+msgid "Execution Model"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:53
+msgid ""
+"**Interpreter Detection**: - Uses shebang line (e.g., "
+"``#!/opt/venv/bin/python``) - Fallback interpreters:"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:57
+msgid "``.py`` → ``python``"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:58
+msgid "``.sh`` → ``bash``"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:60
+msgid ""
+"**Output Handling**: - Stdout/stderr captured continuously - Logged with "
+"plugin name prefix"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:64
+msgid ""
+"**Process Management**: - Launched as subprocesses - Terminated when "
+"parent process exits"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:69
+msgid "Example Plugins"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:70
+msgid "Python Plugin (``scheduler_foo_plugin.py``):"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:76
+msgid "Bash Plugin (``all_plugin.sh``):"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:83
+msgid "Best Practices"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:84
+msgid "Keep plugins lightweight and efficient"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:85
+msgid "Use descriptive naming conventions"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:86
+msgid "Implement graceful error handling"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:87
+msgid "Include shebang for portability"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:88
+msgid "Validate configuration inputs"
+msgstr ""
+
+#: ../../source/developer_guide/extending_lmcache/plugin.rst:89
+msgid "Add timeout mechanisms for long operations"
+msgstr ""
+

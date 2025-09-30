@@ -43,6 +43,10 @@ copybutton_prompt_text = r"^(\$ |>>> |\# )"
 copybutton_prompt_is_regexp = True
 autosectionlabel_prefix_document = True
 
+# -- Internationalization configuration --------------------------------------
+locale_dirs = ['locale/']   # 翻译文件的路径
+gettext_compact = False     # 为每个文档生成单独的 .pot 文件
+
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):
     """Remove note about base class when a class is

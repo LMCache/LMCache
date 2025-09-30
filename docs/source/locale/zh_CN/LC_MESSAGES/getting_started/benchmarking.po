@@ -1,0 +1,93 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/getting_started/benchmarking.rst:2
+msgid "Benchmarking"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:4
+msgid "This is a simple tutorial on how to deploy and benchmark LMCache."
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:7
+msgid "Workload Generator -- Long Doc QA:"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:9
+msgid ""
+"Long Doc QA (found in ``benchmarks/long_doc_qa/``) is a highly flexible "
+"traffic simulator that sends long context queries (\"documents\") to your"
+" serving engine. Some configurable parameters include the number of "
+"tokens in the documents (default is 10000), the number of documents to "
+"send to the model (default is 20), the number of output tokens per "
+"request (default is 100), and the cache hit/miss ratio (e.g. 2:2 means a "
+"repeated 2 hit and 2 miss pattern through all the documents). You can "
+"also choose the number of times to repeat prompts and the mode of "
+"repetition (random, tile, interleave)."
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:13
+msgid ""
+"LMCache provides a simple Long Doc QA Recommender that helps you deploy "
+"LMCache and generate the appropriate traffic through Long Doc QA. It will"
+" also help you determine the tensor parallelism and the amount of CPU RAM"
+" to deploy LMCache with based on the specifications of your hardware."
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:16
+msgid ""
+"First set your ``HF_TOKEN`` environment variable with access to the model"
+" you want to benchmark. Then run the recommendation script:"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:23
+msgid "Example #1:"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:68
+msgid "Llama 8B vLLM Metrics:"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:81
+msgid "Llama 8B LMCache Metrics:"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:93
+msgid ""
+"The warmup round is the first time the model sees the documents. The "
+"query round is the second time the model sees the documents. Without "
+"offloading, even with KV Cache reuse, there is no improvement in TTFT nor"
+" throughput. With offloading, we can see significant performance "
+"improvements to the query round."
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:96
+msgid "Example #2:"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:138
+msgid "Llama 70B vLLM Metrics:"
+msgstr ""
+
+#: ../../source/getting_started/benchmarking.rst:151
+msgid "Llama 70B LMCache Metrics:"
+msgstr ""
+

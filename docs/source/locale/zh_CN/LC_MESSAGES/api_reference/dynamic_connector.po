@@ -1,0 +1,94 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/api_reference/dynamic_connector.rst:2
+msgid "vLLM Dynamic Connector"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:5
+msgid "Upstream Integration:"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:7
+msgid ""
+"LMCache integration with official upstream vLLM was introduced in `early "
+"February 2025 <https://github.com/vllm-project/vllm/pull/12953>`_."
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:9
+msgid ""
+"vLLM imports the connector from the lmcache package and wraps it in "
+"`vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py "
+"<https://github.com/vllm-"
+"project/vllm/blob/main/vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py>`_:"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:15
+msgid ""
+"This means that any updates to LMCache connector need to be "
+"synced/updated in the upstream vLLM."
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:17
+msgid "Example usage of vLLM upstream connector:"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:19
+#: ../../source/api_reference/dynamic_connector.rst:44
+msgid "**Pythonic Transfer Config:**"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:29
+msgid "**Command Line Transfer Configs:**"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:38
+msgid "Dynamic Connector:"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:40
+msgid ""
+"`In June 2025 <https://github.com/vllm-project/vllm/pull/18142>`_, vLLM "
+"supports dynamic loading of KV connector implementations so we can "
+"directly reference connectors from the LMCache package without having to "
+"update vLLM."
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:42
+msgid "Example usage of dynamic connector from LMCache:"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:55
+msgid "**Command Line Transfer Config:**"
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:63
+msgid ""
+"This allows LMCache to modify/develop connectors and quickly plug-and-"
+"play."
+msgstr ""
+
+#: ../../source/api_reference/dynamic_connector.rst:65
+msgid ""
+"Any custom adapters will be documented here in the future as well as "
+"possible deprecations to the upstream connector."
+msgstr ""
+

@@ -1,0 +1,171 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/api_reference/multimodality.rst:2
+msgid "KV Caching for Multimodal Models with vLLM"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:5
+msgid "Overview"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:7
+msgid ""
+"vLLM is building on its multimodal capability and currently supports the "
+"following `List of Multimodal Language Models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-"
+"multimodal-language-models>`_."
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:9
+msgid ""
+"LMCache can therefore be used to speed up inference time for all "
+"multimodal models supported by vLLM. This document shows the speedup "
+"improvements using LMCache for KV caching in vLLM for multimodal models."
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:12
+msgid "Examples of TTFT speed up for different multimodal types"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:15
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:17
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vLLM instance depending on your GPU memory"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:18
+msgid ""
+"vLLM and LMCache installed (:doc:`Installation Guide "
+"<../getting_started/installation>`)"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:19
+msgid "vLLM audio dependencies installed: ``pip install vllm[audio]``"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:22
+msgid "Examples"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:26
+msgid ""
+"The examples below use a python script for inferencing multimodal models "
+"hosted by vLLM. The script is the "
+"`openai_chat_completion_client_for_multimodal python script in vLLM "
+"<https://github.com/vllm-"
+"project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_."
+" You will need to download it locally for running the examples below. The"
+" script is printed in the `reference section <#reference-inferencing-"
+"multimodal-models-in-vllm-example-python-script>`_ that follows for you "
+"perusal. Go to the `Example output <#example-output>`_ section to see the"
+" output in the vLLM logs that demonstrate the speedup improvements."
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:34
+msgid "Audio Inference with Ultravox:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:36
+msgid ""
+"Start vLLM server with ``fixie-ai/ultravox-v0_5-llama-3_2-1b`` model and "
+"LMCache KV caching:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:44
+#: ../../source/api_reference/multimodality.rst:61
+#: ../../source/api_reference/multimodality.rst:79
+#: ../../source/api_reference/multimodality.rst:96
+msgid ""
+"Run the python script twice to demonstrate TTFT speedup on the second "
+"turn because of the caching:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:52
+msgid "Single Image Inference with Llava:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:54
+msgid ""
+"Start vLLM server with ``llava-hf/llava-1.5-7b-hf`` model and LMCache KV "
+"caching:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:69
+msgid "Multi-image Inference with Phi-3.5-vision-instruct:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:71
+msgid ""
+"Start vLLM server with ``microsoft/Phi-3.5-vision-instruct`` model and "
+"LMCache KV caching:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:87
+msgid "Video Inference with Llava-OneVision:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:89
+msgid ""
+"Start vLLM server with ``llava-hf/llava-onevision-qwen2-7b-ov-hf`` model "
+"and LMCache KV caching:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:105
+msgid "Example output"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:107
+msgid ""
+"When running the examples above you will notice output in the vLLM logs "
+"similar to below."
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:109
+msgid "This first output demonstrates the tokens being cached and loaded."
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:115
+msgid "This then shows the speedup between the first and second runs."
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:117
+msgid "First request:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:128
+msgid "Second request:"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:139
+msgid "Reference: Inferencing multimodal models in vLLM example Python script"
+msgstr ""
+
+#: ../../source/api_reference/multimodality.rst:141
+msgid ""
+"Source: https://github.com/vllm-"
+"project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py"
+msgstr ""
+

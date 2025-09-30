@@ -1,0 +1,114 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/community/meetings.rst:2
+msgid "Community meetings"
+msgstr ""
+
+#: ../../source/community/meetings.rst:4
+msgid ""
+"LMCache hosts regular community meetings to discuss updates, address new "
+"feature requests, and feedback from the community. If you are interested "
+"in contributing to the LMCache projects (core LMCache or Production "
+"Stack), we encourage you to join the meetings."
+msgstr ""
+
+#: ../../source/community/meetings.rst:9
+msgid "Meeting schedule"
+msgstr ""
+
+#: ../../source/community/meetings.rst:10
+msgid "The LMCache community meetings held separately for each project:"
+msgstr ""
+
+#: ../../source/community/meetings.rst:12
+msgid "LMCache - `Github <https://github.com/LMCache/LMCache/>`__"
+msgstr ""
+
+#: ../../source/community/meetings.rst:13
+msgid ""
+"Production Stack - `Github <https://github.com/vllm-project/production-"
+"stack>`__"
+msgstr ""
+
+#: ../../source/community/meetings.rst:16
+msgid "LMCache Project"
+msgstr ""
+
+#: ../../source/community/meetings.rst:18
+msgid ""
+"The LMCache community meeting is held bi-weekly on **Tuesdays** at "
+"**9:00-9:30 AM PT**."
+msgstr ""
+
+#: ../../source/community/meetings.rst:20
+msgid "Please find the meeting invite link below:"
+msgstr ""
+
+#: ../../source/community/meetings.rst:22
+#: ../../source/community/meetings.rst:32
+msgid ""
+"**Meeting link**: `Zoom link "
+"<https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_"
+msgstr ""
+
+#: ../../source/community/meetings.rst:23
+msgid ""
+"**Calendar Invite**: `Google Calendar "
+"<https://drive.usercontent.google.com/u/0/uc?id=15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn&export=download>`__"
+msgstr ""
+
+#: ../../source/community/meetings.rst:24
+msgid ""
+"**Slack Channel**: `#lmcache "
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
+"5Amprc9k5hcIdXT7XevTaQ>`_"
+msgstr ""
+
+#: ../../source/community/meetings.rst:27
+msgid "vLLM Production Stack Project"
+msgstr ""
+
+#: ../../source/community/meetings.rst:29
+msgid ""
+"The Production Stack community meeting is held bi-weekly on **Tuesdays** "
+"at **5:30-6:00 PM PT**. Please find the meeting invite link below:"
+msgstr ""
+
+#: ../../source/community/meetings.rst:33
+msgid ""
+"**Calendar Invite**: `Google Calendar "
+"<https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`__"
+msgstr ""
+
+#: ../../source/community/meetings.rst:34
+msgid ""
+"**Slack Channel**: `#production-stack <https://vllm-"
+"dev.slack.com/archives/C089SMEAKRA>`_"
+msgstr ""
+
+#: ../../source/community/meetings.rst:38
+msgid ""
+"The Zoom meeting link is the same for both LMCache and Production Stack "
+"community meetings. Meeting notes are available here: `Meeting notes "
+"<https://docs.google.com/document/d/1vX0g2q3j4x5m7J6z8Q9Gk4Z5l7f3K8h0nqYwW1a2c4o/edit?usp=sharing>`_."
+msgstr ""
+

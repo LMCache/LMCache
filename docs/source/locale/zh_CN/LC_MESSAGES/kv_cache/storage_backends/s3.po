@@ -1,0 +1,184 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/kv_cache/storage_backends/s3.rst:2
+msgid "S3 Backend"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:5
+msgid "Example Configurations"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:8
+msgid "Basic S3 Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:24
+msgid "S3 Express One Zone"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:43
+msgid "CoreWeave (S3-compatible)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:64
+msgid ""
+"**Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that "
+"caches for GPU locality. Set `s3_enable_s3express: False` for non-AWS "
+"services."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:67
+msgid "Configuration Parameters"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:69
+msgid "**remote_url**: S3 bucket URL (`s3://bucket-name`)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:70
+msgid ""
+"**save_unfull_chunk**: Save partial chunks (default: True, **must be "
+"False for S3**)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:71
+msgid "**enable_async_loading**: Async loading (default: False)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:72
+msgid "**blocking_timeout_secs**: Timeout seconds (default: 10)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:75
+msgid "S3-Specific (in extra_config)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:77
+msgid "**s3_region**: AWS region for S3 client (required)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:78
+msgid ""
+"**s3_max_io_concurrency**: Max concurrent I/O operations for event loop "
+"group (controls AWS CRT threading)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:79
+msgid ""
+"**s3_max_inflight_reqs**: Max simultaneous S3 requests (creates this many"
+" /dev/shm buffers and semaphore limit)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:80
+msgid ""
+"**s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation ([\"h2\", "
+"\"http/1.1\"])"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:81
+msgid ""
+"**s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT "
+"client"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:82
+msgid ""
+"**s3_file_prefix**: Prefix for S3 object keys (e.g., `cache` becomes "
+"`/cache/key_name`). Avoid leading/trailing slashes."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:83
+msgid ""
+"**save_chunk_meta**: Whether to save chunk metadata with data (set False "
+"for performance)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:85
+msgid ""
+"The effective concurrency is limited by the minimum of "
+"`s3_max_io_concurrency` and `s3_max_inflight_reqs`."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:88
+msgid "/dev/shm Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:90
+msgid ""
+"/dev/shm is used as the tmpfs that S3 can use to transfer only into RAM "
+"instead of having to touch a block device."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:93
+msgid "Memory Requirements and Configuration Calculation"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:95
+msgid "Calculate total memory needed:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:102
+msgid "Calculate s3_max_inflight_reqs based on /dev/shm:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:108
+msgid "Check current size:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:114
+msgid "Increase size:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:120
+msgid "Clean up LMCache files:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:127
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:129
+msgid "**Memory:**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:131
+msgid "Check: `df -h /dev/shm`"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:133
+msgid ""
+"Fix: Increase `/dev/shm` size or reduce `s3_max_inflight_reqs` or "
+"`max_local_cpu_size`"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:135
+msgid "Clean: `rm -f /dev/shm/my_shm_*`"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:137
+msgid "**Latency**::"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/s3.rst:141
+msgid "Consider S3 Express One Zone"
+msgstr ""
+

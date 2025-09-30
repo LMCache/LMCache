@@ -1,0 +1,346 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:2
+msgid "1p1d"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:5
+msgid "One Prefiller, One Decoder (1p1d) Example"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:7
+msgid ""
+"This example demonstrates how to run LMCache with disaggregated prefill "
+"using NIXL on a single node with a 1 prefiller + 1 decoder setup. This "
+"configuration separates the compute-intensive prefill operations from the"
+" decode operations, allowing for better resource utilization and "
+"performance optimization."
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:10
+msgid "Architecture Overview"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:12
+msgid "The 1p1d setup consists of three main components:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:14
+msgid ""
+"**Prefiller Server** - Handles the prefill phase of inference (initial "
+"prompt processing)"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:15
+msgid ""
+"**Decoder Server** - Handles the decode phase of inference (token "
+"generation)"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:16
+msgid "**Proxy Server** - Coordinates requests between the prefiller and decoder"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:40
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:42
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:43
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:44
+msgid "**Hardware**: At least 2 GPUs"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:45
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:48
+msgid "Quick Start"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:50
+msgid "**Set your Hugging Face token**:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:56
+msgid "**Navigate to the example directory**:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:62
+msgid "**Run the example**:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:68
+msgid "The script will automatically:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:70
+msgid "Launch a prefiller instance on port 7100 (GPU 0)"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:71
+msgid "Launch a decoder instance on port 7200 (GPU 1)"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:72
+msgid "Launch a proxy server on port 9100"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:73
+msgid "Wait for all servers to be ready"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:75
+msgid "Press ``Ctrl+C`` to stop all servers."
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:78
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:80
+msgid ""
+"**Important**: For correct KV cache transfer, ensure all processes use "
+"the same ``PYTHONHASHSEED`` to keep the hash of the KV cache consistent "
+"across processes:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:87
+msgid "Prefiller Configuration"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:89
+msgid "The prefiller is configured via ``configs/lmcache-prefiller-config.yaml``:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:105
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:131
+msgid "Key settings:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:107
+msgid "``pd_role: \"sender\"`` - Configures this instance to send KV cache data"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:108
+msgid "``pd_buffer_size: 1073741824 # 1GB`` - Buffer size for transfers"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:109
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:135
+msgid "``pd_buffer_device: \"cuda\"`` - Uses GPU memory for buffering"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:112
+msgid "Decoder Configuration"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:114
+msgid "The decoder is configured via ``configs/lmcache-decoder-config.yaml``:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:133
+msgid ""
+"``pd_role: \"receiver\"`` - Configures this instance to receive KV cache "
+"data"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:134
+msgid "``pd_buffer_size: 2147483648 # 2GB`` - Buffer size for transfers"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:138
+msgid "Components Deep Dive"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:141
+msgid "Proxy Server (disagg_proxy_server.py)"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:143
+msgid "The proxy server coordinates the disaggregated prefill workflow:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:145
+msgid "**Request Handling**: Receives client requests on port 9100"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:146
+msgid ""
+"**Prefill Coordination**: Sends requests to the prefiller with "
+"``max_tokens=1``"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:147
+msgid "**Prefill Response**: Receives prefiller that says nixl transfer is done"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:148
+msgid "**Response Streaming**: Streams the full response from the decoder"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:149
+msgid "**Performance Monitoring**: Tracks Time-To-First-Token (TTFT) statistics"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:151
+msgid "Supported endpoints:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:153
+msgid "``/v1/completions``"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:154
+msgid "``/v1/chat/completions``"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:157
+msgid "vLLM Server Launcher (disagg_vllm_launcher.sh)"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:159
+msgid ""
+"This script launches individual vLLM servers with appropriate "
+"configurations:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:161
+msgid "**Prefiller Launch Command**:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:178
+msgid "**Decoder Launch Command**:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:196
+msgid "Testing and Benchmarking"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:199
+msgid "Basic Test"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:201
+msgid "Once all servers are running, you can test with a simple curl command:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:213
+msgid "Performance Benchmarking"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:215
+msgid "For comprehensive performance testing, use vLLM's benchmark tool:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:224
+msgid ""
+"This benchmark: - Sends requests to port 9100 (proxy server) - Uses "
+"random prompts with 7500 input tokens - Generates 200 output tokens per "
+"request - Tests with 30 total prompts at 1 request/second"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:231
+msgid "Log Files and Monitoring"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:233
+msgid "The example generates three log files for monitoring:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:235
+msgid "``prefiller.log`` - Prefiller server logs and errors"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:236
+msgid "``decoder.log`` - Decoder server logs and errors"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:237
+msgid "``proxy.log`` - Proxy server logs and TTFT statistics"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:239
+msgid ""
+"The proxy server automatically calculates and displays TTFT statistics "
+"every 5 seconds:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:252
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:255
+msgid "Common Issues"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:257
+msgid "**GPU Memory**: Ensure each GPU has sufficient memory for the model"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:258
+msgid "**NIXL Installation**: Verify NIXL is properly installed and accessible"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:259
+msgid "**Port Conflicts**: Check that ports 7100, 7200, and 9000 are available"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:260
+msgid "**HF Token**: Ensure your Hugging Face token has access to Llama models"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:263
+msgid "Error Recovery"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:265
+msgid "If any server fails to start:"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:267
+msgid "Check the corresponding log file for error details"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:268
+msgid "Verify GPU availability with ``nvidia-smi``"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:269
+msgid "Ensure all dependencies are installed"
+msgstr ""
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:270
+msgid "Try restarting with ``Ctrl+C`` followed by re-running the script"
+msgstr ""
+

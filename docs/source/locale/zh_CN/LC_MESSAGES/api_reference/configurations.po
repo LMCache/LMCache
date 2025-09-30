@@ -1,0 +1,924 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/api_reference/configurations.rst:2
+msgid "Configuring LMCache"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:4
+msgid "LMCache supports two types of configurations:"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:6
+msgid ""
+"**Configuration file**: a YAML (recommended) or JSON file that contains "
+"the configuration items."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:7
+msgid ""
+"**Environment variables**: environment variables that start with "
+"``LMCACHE_``."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:9
+msgid ""
+"To use a configuration file, you can set the ``LMCACHE_CONFIG_FILE`` "
+"environment variable to the path of the configuration file."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:13
+msgid ""
+"The environment variable configurations will be ignored if the "
+"configuration file is present."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:17
+msgid "General Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:19
+msgid "Basic cache settings that control the core functionality of LMCache."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:25
+#: ../../source/api_reference/configurations.rst:97
+#: ../../source/api_reference/configurations.rst:122
+#: ../../source/api_reference/configurations.rst:144
+#: ../../source/api_reference/configurations.rst:177
+#: ../../source/api_reference/configurations.rst:258
+#: ../../source/api_reference/configurations.rst:294
+#: ../../source/api_reference/configurations.rst:322
+#: ../../source/api_reference/configurations.rst:338
+msgid "YAML Config Name"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:26
+#: ../../source/api_reference/configurations.rst:98
+#: ../../source/api_reference/configurations.rst:123
+#: ../../source/api_reference/configurations.rst:145
+#: ../../source/api_reference/configurations.rst:178
+#: ../../source/api_reference/configurations.rst:259
+#: ../../source/api_reference/configurations.rst:295
+#: ../../source/api_reference/configurations.rst:323
+#: ../../source/api_reference/configurations.rst:339
+msgid "Environment Variable"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:27
+#: ../../source/api_reference/configurations.rst:99
+#: ../../source/api_reference/configurations.rst:124
+#: ../../source/api_reference/configurations.rst:146
+#: ../../source/api_reference/configurations.rst:179
+#: ../../source/api_reference/configurations.rst:238
+#: ../../source/api_reference/configurations.rst:260
+#: ../../source/api_reference/configurations.rst:296
+#: ../../source/api_reference/configurations.rst:324
+#: ../../source/api_reference/configurations.rst:340
+msgid "Description"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:28
+msgid "chunk_size"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:29
+msgid "LMCACHE_CHUNK_SIZE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:30
+msgid "Size of cache chunks. Default: 256"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:31
+msgid "local_cpu"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:32
+msgid "LMCACHE_LOCAL_CPU"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:33
+msgid "Whether to enable CPU caching. Values: true/false. Default: true"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:34
+msgid "max_local_cpu_size"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:35
+msgid "LMCACHE_MAX_LOCAL_CPU_SIZE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:36
+msgid "Maximum CPU cache size in GB. Default: 5.0"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:37
+msgid "local_disk"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:38
+msgid "LMCACHE_LOCAL_DISK"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:39
+msgid "Path to local disk cache. Format: \"file:///path/to/cache\"."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:40
+msgid "max_local_disk_size"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:41
+msgid "LMCACHE_MAX_LOCAL_DISK_SIZE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:42
+msgid "Maximum disk cache size in GB. Default: 0.0"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:43
+msgid "remote_url"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:44
+msgid "LMCACHE_REMOTE_URL"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:45
+msgid "Remote storage URL. Format: \"protocol://host:port\"."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:46
+msgid "remote_serde"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:47
+msgid "LMCACHE_REMOTE_SERDE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:48
+msgid ""
+"Serialization format. Values: \"naive\" or \"cachegen\". Default: "
+"\"naive\""
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:49
+msgid "save_decode_cache"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:50
+msgid "LMCACHE_SAVE_DECODE_CACHE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:51
+msgid "Whether to store decode KV cache. Values: true/false. Default: false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:52
+msgid "use_layerwise"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:53
+msgid "LMCACHE_USE_LAYERWISE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:54
+msgid "Whether to enable layerwise pipelining. Values: true/false. Default: false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:55
+msgid "pre_caching_hash_algorithm"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:56
+msgid "LMCACHE_PRE_CACHING_HASH_ALGORITHM"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:57
+msgid "Hash algorithm for prefix-caching. Default: \"builtin\""
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:58
+msgid "save_unfull_chunk"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:59
+msgid "LMCACHE_SAVE_UNFULL_CHUNK"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:60
+msgid "Whether to save unfull chunks. Values: true/false. Default: true"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:61
+msgid "blocking_timeout_secs"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:62
+msgid "LMCACHE_BLOCKING_TIMEOUT_SECS"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:63
+msgid "Timeout for blocking operations in seconds. Default: 10"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:64
+msgid "py_enable_gc"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:65
+msgid "LMCACHE_PY_ENABLE_GC"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:66
+msgid ""
+"Whether to enable Python garbage collection. Values: true/false. Default:"
+" true"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:67
+msgid "cache_policy"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:68
+msgid "LMCACHE_CACHE_POLICY"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:69
+msgid "Cache eviction policy (e.g. \"LRU\", \"LFU\", \"FIFO\"). Default: \"LRU\""
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:70
+msgid "numa_mode"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:71
+msgid "LMCACHE_NUMA_MODE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:72
+msgid ""
+"NUMA-aware memory allocation mode. Values: \"auto\" (detect from system),"
+" \"manual\" (use extra_config mapping), null (disabled). When enabled, "
+"allocates pinned memory on specific NUMA nodes for better GPU-CPU memory "
+"bandwidth. Default: null"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:73
+msgid "external_lookup_client"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:74
+msgid "LMCACHE_EXTERNAL_LOOKUP_CLIENT"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:75
+msgid ""
+"External KV lookup service URI (e.g., \"mooncakestore://address\"). If "
+"null, defaults to LMCache's internal lookup client. Default: null"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:76
+msgid "priority_limit"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:77
+msgid "LMCACHE_PRIORITY_LIMIT"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:78
+msgid ""
+"Caches requests only if priority value ≤ limit. (**Not applicable for PD "
+"Disaggregation**) Type: int. Default: None"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:79
+msgid "extra_config"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:80
+msgid "LMCACHE_EXTRA_CONFIG={\"key\": value, ...}"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:81
+msgid ""
+"Additional configuration as JSON dict. For NUMA manual mode, include "
+"\"gpu_to_numa_mapping\": {gpu_id: numa_node, ...}. Default: {}"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:84
+msgid "Cache Blending Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:86
+msgid "Settings related to cache blending functionality."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:90
+msgid ""
+"We have an end-to-end `example "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_. We "
+"also have more :doc:`detailed documentation "
+"<../kv_cache_optimizations/blending>`."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:100
+msgid "enable_blending"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:101
+msgid "LMCACHE_ENABLE_BLENDING"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:102
+msgid "Whether to enable blending. Values: true/false. Default: false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:103
+msgid "blend_recompute_ratios"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:104
+msgid "LMCACHE_BLEND_RECOMPUTE_RATIOS"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:105
+msgid "Ratio of blending recompute. Default: 0.15"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:106
+msgid "blend_check_layers"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:107
+msgid "LMCACHE_BLEND_CHECK_LAYERS"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:108
+msgid "Layers to determine the recomputed tokens. Default: 1"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:109
+msgid "blend_special_str"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:110
+msgid "LMCACHE_BLEND_SPECIAL_STR"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:111
+msgid "Separator string for blending. Default: \" # # \""
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:114
+msgid "Peer-to-Peer Sharing Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:116
+msgid ""
+"Settings for enabling and configuring peer-to-peer CPU KV cache sharing "
+"and global KV cache lookup."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:125
+msgid "enable_p2p"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:126
+msgid "LMCACHE_ENABLE_P2P"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:127
+msgid "Whether to enable peer-to-peer sharing. Values: true/false. Default: false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:128
+msgid "lookup_url"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:129
+msgid "LMCACHE_LOOKUP_URL"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:130
+msgid "URL of the lookup server. Required if enable_p2p is true"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:131
+msgid "distributed_url"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:132
+msgid "LMCACHE_DISTRIBUTED_URL"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:133
+msgid "URL of the distributed server. Required if enable_p2p is true"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:136
+msgid "Controller Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:138
+msgid "Settings for the KV cache controller functionality."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:147
+msgid "enable_controller"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:148
+msgid "LMCACHE_ENABLE_CONTROLLER"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:149
+msgid "Whether to enable controller. Values: true/false. Default: false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:150
+msgid "lmcache_instance_id"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:151
+msgid "LMCACHE_LMCACHE_INSTANCE_ID"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:152
+msgid "ID of the LMCache instance. Default: \"lmcache_default_instance\""
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:153
+msgid "controller_url"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:154
+msgid "LMCACHE_CONTROLLER_URL"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:155
+msgid "URL of the controller server"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:156
+msgid "lmcache_worker_port"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:157
+msgid "LMCACHE_LMCACHE_WORKER_PORT"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:158
+msgid "Port number for LMCache worker"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:161
+msgid "Disaggregated Prefill Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:163
+msgid ""
+"Settings for disaggregated prefill functionality. The latest/default PD "
+"is implemented inside of `lmcache/v1/storage_backend/pd_backend.py`."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:167
+msgid ""
+"When PD is enabled, the following restrictions apply (welcome "
+"contributions to remove these restrictions):"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:169
+msgid "remote_url must be null"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:170
+msgid "save_decode_cache must be false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:171
+msgid "enable_p2p must be false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:180
+msgid "enable_pd"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:181
+msgid "LMCACHE_ENABLE_PD"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:182
+msgid "Whether to enable PD. Values: true/false. Default: false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:183
+msgid "transfer_channel"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:184
+msgid "LMCACHE_TRANSFER_CHANNEL"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:185
+msgid "Transfer channel used for PD. Values: \"nixl\". Default: none"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:186
+msgid "pd_role"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:187
+msgid "LMCACHE_PD_ROLE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:188
+msgid "PD role. Values: \"sender\" (prefiller) or \"receiver\" (decoder)."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:189
+msgid "pd_buffer_size"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:190
+msgid "LMCACHE_PD_BUFFER_SIZE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:191
+msgid ""
+"Transport buffer size for PD in bytes. Required for both senders and "
+"receivers when enable_pd=true"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:192
+msgid "pd_buffer_device"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:193
+msgid "LMCACHE_PD_BUFFER_DEVICE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:194
+msgid ""
+"Device for PD buffer. Values: \"cpu\", \"cuda\". Required for both "
+"senders and receivers when enable_pd=true"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:195
+msgid "nixl_backends"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:196
+msgid "LMCACHE_NIXL_BACKENDS"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:197
+msgid ""
+"List of Nixl transport backends. Useful for non-disaggregated use case "
+"(see below). UCX default is sufficient for disagg use case. Default: "
+"[\"UCX\"]"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:198
+msgid "pd_peer_host"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:199
+msgid "LMCACHE_PD_PEER_HOST"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:200
+msgid "Host for peer connections. Required for receivers to bind to"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:201
+msgid "pd_peer_init_port"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:202
+msgid "LMCACHE_PD_PEER_INIT_PORT"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:203
+msgid ""
+"Initialization port for peer connections. Required for receivers to bind "
+"to"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:204
+msgid "pd_peer_alloc_port"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:205
+msgid "LMCACHE_PD_PEER_ALLOC_PORT"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:206
+msgid "Allocation port for peer connections. Required for receivers to bind to"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:207
+msgid "pd_proxy_host"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:208
+msgid "LMCACHE_PD_PROXY_HOST"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:209
+msgid ""
+"Host for proxy server. Required for senders to connect to inform the "
+"proxy when transfer to decoder has been completed"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:210
+msgid "pd_proxy_port"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:211
+msgid "LMCACHE_PD_PROXY_PORT"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:212
+msgid ""
+"Port for proxy server. Required for senders to connect to inform the "
+"proxy when transfer to decoder has been completed"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:215
+msgid "Nixl (as a storage backend) Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:217
+msgid ""
+"Settings for using Nixl as a storage backend instead of disaggregated "
+"prefill. This mode requires additional configurations in "
+"``extra_config``."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:221
+msgid ""
+"This is a different mode from disaggregated prefill. When using Nixl as a"
+" storage backend, you need to configure it through ``extra_config``."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:237
+msgid "Configuration Key"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:239
+msgid "enable_nixl_storage"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:240
+msgid "Whether to enable Nixl storage backend. Values: true/false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:241
+msgid "nixl_backend"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:242
+msgid "Storage backend type. Options: \"GDS\", \"GDS_MT\", \"POSIX\", \"HF3FS\""
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:243
+msgid "nixl_path"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:244
+msgid "File system path for Nixl storage"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:245
+msgid "nixl_file_pool_size"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:246
+msgid "Number of files in the storage pool"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:250
+msgid "Additional Storage Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:252
+msgid "Settings for different storage backends and paths."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:261
+msgid "weka_path"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:262
+msgid "LMCACHE_WEKA_PATH"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:263
+msgid "Path for Weka storage backend"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:264
+msgid "gds_path"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:265
+msgid "LMCACHE_GDS_PATH"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:266
+msgid "Path for GDS backend"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:267
+msgid "cufile_buffer_size"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:268
+msgid "LMCACHE_CUFILE_BUFFER_SIZE"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:269
+msgid "Buffer size for cuFile operations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:272
+msgid "Internal API Server Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:274
+msgid ""
+"Settings for the internal API server that provides management and "
+"debugging APIs for LMCache engines. The API server runs on each worker "
+"and scheduler, allowing you to inspect and control LMCache behavior at "
+"runtime."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:278
+msgid "The internal API server provides endpoints for:"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:280
+msgid "**Metrics**: Performance and cache statistics"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:281
+msgid "**Configuration**: Runtime configuration inspection"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:282
+msgid "**Metadata**: Engine and model metadata"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:283
+msgid "**Threads**: Thread debugging information"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:284
+msgid "**Log Level**: Dynamic log level adjustment"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:285
+msgid ""
+"**Script Execution**: Run custom Python scripts with access to the "
+"LMCache engine"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:288
+msgid "Configuration Options"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:297
+msgid "internal_api_server_enabled"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:298
+msgid "LMCACHE_INTERNAL_API_SERVER_ENABLED"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:299
+msgid "Whether to enable internal API server. Default: false"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:300
+msgid "internal_api_server_host"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:301
+msgid "LMCACHE_INTERNAL_API_SERVER_HOST"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:302
+msgid "Host for internal API server to bind to. Default: \"0.0.0.0\""
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:303
+msgid "internal_api_server_port_start"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:304
+msgid "LMCACHE_INTERNAL_API_SERVER_PORT_START"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:305
+msgid ""
+"Starting port for internal API server. Port assignment: Scheduler = "
+"port_start + 0, Worker i = port_start + i + 1. Example: If "
+"port_start=6999, then Scheduler=6999, Worker 0=7000, Worker 1=7001, etc. "
+"Default: 6999"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:306
+msgid "internal_api_server_include_index_list"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:307
+msgid "LMCACHE_INTERNAL_API_SERVER_INCLUDE_INDEX_LIST"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:308
+msgid ""
+"List of worker/scheduler indices to enable API server on. Use 0 for "
+"scheduler, 1 for worker 0, 2 for worker 1, etc. If null, enables on all "
+"workers/scheduler. Example: [0, 1] enables only on scheduler and worker "
+"0. Default: null"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:309
+msgid "internal_api_server_socket_path_prefix"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:310
+msgid "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:311
+msgid ""
+"If specified, use Unix domain sockets instead of TCP ports. Socket paths "
+"will be \"{prefix}_{port}\". Example: \"/tmp/lmcache_api_socket\" creates"
+" \"/tmp/lmcache_api_socket_6999\", \"/tmp/lmcache_api_socket_7000\", etc."
+" Default: null"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:314
+msgid "Plugin Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:316
+msgid "Settings for plugin system."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:325
+msgid "plugin_locations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:326
+msgid "LMCACHE_PLUGIN_LOCATIONS"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:327
+msgid "List of plugin locations. Default: []"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:330
+msgid "Deprecated Configurations"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:332
+msgid "These configurations are deprecated and may be removed in future versions."
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:341
+msgid "audit_actual_remote_url"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:342
+msgid "LMCACHE_AUDIT_ACTUAL_REMOTE_URL"
+msgstr ""
+
+#: ../../source/api_reference/configurations.rst:343
+msgid ""
+"(Deprecated) URL of actual remote LMCache instance for auditing. Use "
+"extra_config['audit_actual_remote_url'] instead"
+msgstr ""
+

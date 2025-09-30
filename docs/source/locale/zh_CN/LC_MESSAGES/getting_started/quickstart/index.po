@@ -1,0 +1,130 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/getting_started/quickstart/index.rst:4
+msgid "Quickstart Examples"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:6
+msgid ""
+"This section provides quick examples to help you get started with "
+"LMCache's key features."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:9
+msgid "KV Cache Offloading"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:11
+msgid ""
+"KV cache offloading allows you to move KV caches from GPU memory to CPU "
+"memory or other storage devices. This feature is particularly useful "
+"when:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:13
+msgid ""
+"There are requests shares the same prefix (e.g., long system prompt, "
+"reusing chat history in chat applications, or caching offline-processed "
+"data)."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:14
+msgid "The GPU memory is limited to save all the KV caches."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:16
+msgid ""
+"By offloading KV caches, LMCache can reduce both time-to-first-token "
+"(TTFT) and GPU cycles."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:18
+msgid "See :ref:`offload_kv_cache` for more details."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:21
+msgid "KV Cache Sharing"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:23
+msgid ""
+"KV cache sharing enables sharing the KV cache across different LLM "
+"instances. This feature is beneficial when:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:25
+msgid "There are multiple LLM instances running in the same system."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:26
+msgid "The requests that share the same prefix may go to different LLM instances."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:28
+msgid ""
+"Sharing KV caches also reduces TTFT and GPU computation by eliminating "
+"redundant calculations across different LLM instances."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:30
+msgid "See :ref:`share_kv_cache` for more details."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:33
+msgid "Disaggregated Prefill"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:35
+msgid ""
+"Disaggregated prefill separates the prefill and decode phases across "
+"different compute resources. This approach:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:37
+msgid "Allows specialized hardware allocation for each phase of inference"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:38
+msgid "Enables more efficient resource utilization in distributed settings"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:39
+msgid ""
+"Improves overall system throughput by optimizing for the different "
+"computational patterns of prefill vs. decode"
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:41
+msgid ""
+"This architecture is particularly valuable in large-scale deployment "
+"scenarios where maximizing resource efficiency and keeping a stable "
+"generation speed are both important."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:43
+msgid "See :ref:`disaggregated_prefill` for more details."
+msgstr ""
+
+#: ../../source/getting_started/quickstart/index.rst:46
+msgid "Detailed Examples"
+msgstr ""
+

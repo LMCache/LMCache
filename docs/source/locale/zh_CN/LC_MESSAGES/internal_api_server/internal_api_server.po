@@ -1,0 +1,87 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/internal_api_server/internal_api_server.rst:4
+msgid "Configuring the Internal API Server"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:6
+msgid ""
+"The ``internal_api_server`` provides APIs for managing the LMCache "
+"engine. Below are the configuration options and usage examples."
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:9
+msgid "Configuration Parameters"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:11
+msgid "The following parameters can be configured in the YAML file:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:34
+msgid "Testing the Server"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:36
+msgid "You can test the server by querying the relevant endpoints."
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:38
+msgid "`/metrics` endpoint for metrics:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:44
+msgid "`/conf` endpoint for configuration:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:50
+msgid "`/meta` endpoint for metadata:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:56
+msgid "`/threads` endpoint for threads:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:62
+msgid "`/loglevel` endpoint for log level:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:73
+msgid "`/run_script` endpoint for running script:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:82
+msgid "`scratch.py`:"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:103
+msgid "How to extend the Internal API Server"
+msgstr ""
+
+#: ../../source/internal_api_server/internal_api_server.rst:105
+msgid ""
+"You can extend the ``internal_api_server`` by adding new endpoint files "
+"to the `lmcache/v1/internal_api_server/` directory. Ensure your new file "
+"name ends with `_api.py`. Additionally, you need to define a `router = "
+"APIRouter()` in your file and add your endpoints to it."
+msgstr ""
+
