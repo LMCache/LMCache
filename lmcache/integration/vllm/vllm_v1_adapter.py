@@ -1300,7 +1300,6 @@ class LMCacheConnectorV1Impl:
 
         lookup_id = request.request_id
 
-        # ForkedPdb().set_trace()
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,
             lookup_id=lookup_id,

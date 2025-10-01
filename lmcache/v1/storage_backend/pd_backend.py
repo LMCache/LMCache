@@ -325,11 +325,9 @@ class PDBackend(AllocatorBackendInterface):
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         assert isinstance(key, CacheEngineKey)
         with self.data_lock:
-            if self.data.get(key, None):
-                # NOTE(novahow): pin causes failed to allocate in L40S in TP=(2,2),
-                # disable for now
-                # if pin:
-                #     mem_obj.ref_count_up()
+            if mem_obj := self.data.get(key, None):
+                if pin:
+                    mem_obj.ref_count_up()
                 return True
             return False
 
@@ -425,6 +423,64 @@ class PDBackend(AllocatorBackendInterface):
             last_chunk_toks=last_chunk_toks,
         )
 
+    def _process_single_rank_put_task(
+        self,
+        executor: cf.ThreadPoolExecutor,
+        alloc_request: AllocRequest,
+        mem_objs: List[MemoryObj],
+        receiver: TPRankRecvInfo,
+        receiver_rank: int,
+    ) -> tuple[Optional[cf.Future], set[int]]:
+        """
+        Process a single rank put task.
+
+        :param alloc_request: The allocation request.
+        :param mem_objs: The memory objects to allocate.
+        :param receiver: The receiver information.
+        :param receiver_rank: The rank of the receiver.
+        """
+        alloc_response = self._remote_allocate(receiver.receiver_id, alloc_request)
+        already_sent_indexes = set(alloc_response.already_sent_indexes)
+        remote_indexes = alloc_response.remote_indexes
+
+        mem_objs_to_send = []
+        for idx, mem_obj in enumerate(mem_objs):
+            if idx not in already_sent_indexes:
+                mem_objs_to_send.append(mem_obj)
+
+        task = None
+        if mem_objs_to_send:
+            # TODO(Jiayi): make this decoupled with transfer channel
+            # Construct transfer spec
+            channel_transfer_spec = {
+                "receiver_id": receiver.receiver_id,
+                "remote_indexes": remote_indexes,
+            }
+
+            blocks_data = self.transfer_channel.get_block_descs(
+                receiver_rank,
+                self.dp_ratio,
+            )
+            self.transfer_channel.update_agent_from_blocks_data(
+                blocks_data, receiver.receiver_id
+            )
+
+            # TODO(Jiayi): Consider making this real async
+            # Perform the actual transfer
+            task = executor.submit(
+                self.transfer_channel.batched_write,
+                mem_objs_to_send,
+                channel_transfer_spec,
+            )
+        else:
+            logger.debug(
+                f"All memory objects have been already sent"
+                f" to the remote peer {receiver}."
+                " Skipping transfer."
+            )
+
+        return (task, already_sent_indexes)
+
     # TODO(Jiayi): make this async in the future
     def batched_submit_put_task(
         self,
@@ -474,52 +530,16 @@ class PDBackend(AllocatorBackendInterface):
             for receiver_rank, receiver in enumerate(
                 receiver_info.get_group_receivers()
             ):
-                alloc_response = self._remote_allocate(
-                    receiver.receiver_id, alloc_request
+                task, already_sent_indexes = self._process_single_rank_put_task(
+                    executor, alloc_request, memory_objs, receiver, receiver_rank
                 )
-                already_sent_indexes = alloc_response.already_sent_indexes
-                remote_indexes = alloc_response.remote_indexes
-                all_sent_indexes[receiver_rank] = set(already_sent_indexes)
-                mem_objs_to_send = []
-                for idx, mem_obj in enumerate(memory_objs):
-                    if idx not in already_sent_indexes:
-                        mem_objs_to_send.append(mem_obj)
-                        any_remote_indexes.add(idx)
+                all_sent_indexes[receiver_rank] = already_sent_indexes
+                if task is not None:
+                    blocking_send_tasks.append(task)
+                    for idx in range(len(memory_objs)):
+                        if idx not in already_sent_indexes:
+                            any_remote_indexes.add(idx)
 
-                if mem_objs_to_send:
-                    # TODO(Jiayi): make this decoupled with transfer channel
-                    # Construct transfer spec
-                    channel_transfer_spec = {
-                        "receiver_id": receiver.receiver_id,
-                        "remote_indexes": remote_indexes,
-                    }
-
-                    blocks_data = self.transfer_channel.get_block_descs(
-                        receiver_rank,
-                        self.dp_ratio,
-                    )
-                    self.transfer_channel.update_agent_from_blocks_data(
-                        blocks_data, receiver.receiver_id
-                    )
-
-                    # TODO(Jiayi): Consider making this real async
-                    # Perform the actual transfer
-                    blocking_send_tasks.append(
-                        executor.submit(
-                            self.transfer_channel.batched_write,
-                            objects=mem_objs_to_send,
-                            transfer_spec=channel_transfer_spec,
-                        )
-                    )
-                else:
-                    logger.debug(
-                        f"All memory objects have been already sent"
-                        f" to the remote peer {receiver}."
-                        " Skipping transfer."
-                    )
-
-                # Filter out already sent memory objects and free them
-            mem_objs_to_send = []
             # take intersection of all_sent_indexes
             already_sent = set.intersection(*all_sent_indexes)
             for idx, mem_obj in enumerate(memory_objs):
@@ -576,7 +596,9 @@ class PDBackend(AllocatorBackendInterface):
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
             key.update_rank_info_from_nixl(self.tp_world_size, self.tp_rank)
-            if self.contains(key, pin=True):
+            # NOTE(novahow): pin causes failed to allocate in L40S in TP=(2,2),
+            # disable for now
+            if self.contains(key, pin=False):
                 already_send_indexes.append(idx)
                 continue
 

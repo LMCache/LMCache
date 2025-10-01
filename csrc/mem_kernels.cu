@@ -162,14 +162,13 @@ __device__ __forceinline__ int64_t page_buffer_offset_unilateral(
   return token_idx * scalars_per_token + scalar_offset;
 }
 
-template <bool transpose = false>
-__device__ __forceinline__ int64_t
-key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
-                 const int scalar_offset, const int scalars_per_token,
-                 const int num_tokens, const int num_layers, const int num_kv) {
+__device__ __forceinline__ int64_t key_value_offset(
+    const int k_or_v, const int layer_idx, const int token_idx,
+    const int scalar_offset, const int scalars_per_token, const int num_tokens,
+    const int num_layers, const int num_kv, const bool transpose) {
   if (transpose) {
     // [2LTD->DT2L], T is full chunk size
-    return scalar_offset * num_kv * num_layers * num_tokens +
+    return scalar_offset * num_tokens * num_kv * num_layers +
            token_idx * num_kv * num_layers + k_or_v * num_layers + layer_idx;
   }
   return k_or_v * num_layers * num_tokens * scalars_per_token +
@@ -233,7 +232,7 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
  * key_value[block.z, block.y, block.x, thread.x] <=> ptrs[block.y][block.z,
  * slot_id, thread.x]
  */
-template <typename scalar_t, bool DIRECTION, bool transpose = false>
+template <typename scalar_t, bool DIRECTION>
 __global__ void load_and_reshape_multi_layer_kernel(
     scalar_t* __restrict__ key_value,           // [2, num_layer, num_tokens,
                                                 // scalars_per_token]
@@ -242,12 +241,13 @@ __global__ void load_and_reshape_multi_layer_kernel(
                                                 // scalars_per_token]
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
-    const int page_buffer_size) {
+    const int page_buffer_size, bool transpose) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
   const int k_or_v = blockIdx.z;
   const int tid = threadIdx.x;
   const int num_threads = blockDim.x;
+  const int num_kv = gridDim.z;
 
   const int64_t slot_idx = slot_mapping[token_id];
   int64_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
@@ -258,9 +258,9 @@ __global__ void load_and_reshape_multi_layer_kernel(
 
   /** Copy the data from page buffer to key_value **/
   for (int i = tid; i < scalars_per_token; i += num_threads) {
-    const int64_t lmcache_offset = key_value_offset<transpose>(
-        k_or_v, layer_id, token_id, i, scalars_per_token, num_tokens,
-        num_layers, gridDim.z);
+    const int64_t lmcache_offset =
+        key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
+                         num_tokens, num_layers, num_kv, transpose);
 
     const int64_t vllm_offset = page_buffer_offset(
         k_or_v, slot_idx, i, scalars_per_token, page_buffer_size);
@@ -290,6 +290,7 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   const int k_or_v = blockIdx.z;
   const int tid = threadIdx.x;
   const int num_threads = blockDim.x;
+  const int num_kv = gridDim.z;
 
   const int64_t slot_idx = slot_mapping[token_id];
   int64_t* key_ptr = paged_buffer_ptrs[layer_id];
@@ -303,7 +304,7 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   for (int i = tid; i < scalars_per_token; i += num_threads) {
     const int64_t lmcache_offset =
         key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
-                         num_tokens, num_layers, gridDim.z);
+                         num_tokens, num_layers, num_kv, false);
 
     const int64_t sgl_offset =
         page_buffer_offset_unilateral(slot_idx, i, scalars_per_token);
@@ -405,34 +406,18 @@ void multi_layer_kv_transfer(
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (transpose) {
-    if (not direction) {
-      lmc::load_and_reshape_multi_layer_kernel<int64_t, false, true>
-          <<<grid, block, 0, stream>>>(
-              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
-              (int)key_value.size(2), num_layers, page_buffer_size);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-    } else {
-      lmc::load_and_reshape_multi_layer_kernel<int64_t, true, true>
-          <<<grid, block, 0, stream>>>(
-              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
-              (int)key_value.size(2), num_layers, page_buffer_size);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
+  if (not direction) {
+    lmc::load_and_reshape_multi_layer_kernel<int64_t, false>
+        <<<grid, block, 0, stream>>>(
+            key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
+            (int)key_value.size(2), num_layers, page_buffer_size, transpose);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
-    if (not direction) {
-      lmc::load_and_reshape_multi_layer_kernel<int64_t, false, false>
-          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                       slot_mapping_ptr, num_qwords, num_tokens,
-                                       num_layers, page_buffer_size);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-    } else {
-      lmc::load_and_reshape_multi_layer_kernel<int64_t, true, false>
-          <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                       slot_mapping_ptr, num_qwords, num_tokens,
-                                       num_layers, page_buffer_size);
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
+    lmc::load_and_reshape_multi_layer_kernel<int64_t, true>
+        <<<grid, block, 0, stream>>>(
+            key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
+            (int)key_value.size(2), num_layers, page_buffer_size, transpose);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 }
 
