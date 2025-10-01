@@ -4,6 +4,7 @@ from typing import Any, Optional, Union
 import json
 import os
 import re
+import uuid
 
 # Third Party
 import yaml
@@ -176,8 +177,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "lmcache_instance_id": {
-        "type": str,
-        "default": "lmcache_default_instance",
+        "type": Optional[str],
+        "default": None,
         "env_converter": str,
     },
     "controller_pull_url": {
@@ -404,6 +405,9 @@ def _create_config_class():
     from dataclasses import make_dataclass
 
     def _post_init(self):
+        # Generate random instance ID if not set
+        if not self.lmcache_instance_id:
+            self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
         self.validate()
 
     cls = make_dataclass(
