@@ -240,3 +240,10 @@ class AuditConnector(RemoteConnector):
             f"Cost:{cost:.6f}ms"
         )
         return error_code
+
+    def remove_sync(self, key: CacheEngineKey) -> bool:
+        """Remove key audit log synchronized"""
+        self.logger.debug(f"[REMOTE_AUDIT]REMOVE_SYNC|START|Key:{key}")
+        result = self.real_connector.remove_sync(key)
+        self.logger.info(f"[REMOTE_AUDIT]REMOVE_SYNC|{result}|Key: {key}")
+        return result

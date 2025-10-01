@@ -275,5 +275,15 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def remove_sync(self, key: CacheEngineKey) -> bool:
+        """
+        Remove a memory object.
+
+        :param CacheEngineKey key: The key of the MemoryObj.
+
+        :return: a bool indicates whether remove is successful.
+        """
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}>"

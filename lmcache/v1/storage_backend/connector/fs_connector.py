@@ -195,6 +195,24 @@ class FSConnector(RemoteConnector):
                 await aiofiles.os.unlink(temp_path)  # Remove corrupted file
             raise
 
+    def remove_sync(self, key: CacheEngineKey) -> bool:
+        """
+        Remove the file associated with the given key.
+
+        Args:
+            key: The key to remove.
+
+        Returns:
+            bool: True if the file was successfully removed, False otherwise.
+        """
+        file_path = self._get_file_path(key)
+        try:
+            os.remove(file_path)
+            return True
+        except OSError as e:
+            logger.error(f"Failed to remove file {file_path}: {e}")
+            return False
+
     @no_type_check
     async def list(self) -> List[str]:
         """List all keys in file system"""
