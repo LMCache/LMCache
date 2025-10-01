@@ -135,12 +135,7 @@ It will run automatically when you add a commit. You can also run it manually on
 Unit tests
 ^^^^^^^^^^
 
-.. note::
-    The Unit tests require `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ to be installed. Please follow the details in the NIXL GitHub repo to install.
-    The NIXL unit tests also require `vLLM <https://github.com/vllm-project/vllm>`_ and `msgpack <https://github.com/msgpack/msgpack-python/>`_.
-    If you are unable to install NIXL you can circumvent the NIXL unit tests by using the following pytest flags: `--ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py --ignore=tests/v1/test_nixl_storage.py`.
-
-When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
+When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break existing code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
 
 Running unit tests is as simple as:
 
@@ -148,11 +143,9 @@ Running unit tests is as simple as:
 
     pytest
 
-Alternatively, running unit tests (minus NIXL tests) is as follows:
+.. note::
 
-.. code-block:: bash
-
-    pytest --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py --ignore=tests/v1/test_nixl_storage.py
+    ``vLLM`` (``pip install vllm``) and the dependencies in ``requirements/test.txt`` need to be installed prior to running unit tests.
 
 By default, all tests found within the tests directory are run. However, specific unit tests can run by passing filenames, classes and/or methods to `pytest`. The following example invokes a single test method "test_lm_connector" that is declared in the "tests/test_connector.py" file:
 
@@ -160,9 +153,14 @@ By default, all tests found within the tests directory are run. However, specifi
 
     pytest tests/test_connector.py::test_lm_connector
 
-.. warning::
+.. note::
 
-    Currently, unit tests do not run on non Linux NVIDIA GPU platforms. If you don't have access to this platform to run unit tests locally, rely on the continuous integration system to run the tests for now.
+    Some unit tests require a NVIDIA GPU. This means that on a non Linux NVIDIA GPU system, the full suite of tests will not be run (tests requiring CUDA will be skipped). The Buildkite continuous integration (CI)  system executes a full run of all the tests.
+
+.. note::
+
+    The `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ unit tests require NIXL to be to be installed. This is not installed by LMCache by and therefore requires you to install it separately. Please follow the details in the NIXL GitHub repo to install.
+    If the NIXL package is not installed, the NIXL unit tests are skipped.
 
 Building the docs
 ^^^^^^^^^^^^^^^^^

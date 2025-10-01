@@ -38,8 +38,6 @@ jobs:
     strategy:
       matrix:
         python:
-          # Disable 3.9 until code supports it in https://github.com/LMCache/LMCache/pull/1584
-          # - "3.9"
           - "3.10"
           - "3.11"
           - "3.12"
@@ -74,11 +72,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install vllm
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
-          python -m pip install torch==2.7.1 torchaudio==2.7.1 torchvision==0.22.1
 
-      - name: "Run non-CUDA unit tests (v1/storage_backend)"
+      - name: "Run non-CUDA unit tests"
         run: |
-          pytest tests/v1/storage_backend/
+          pytest
 
