@@ -177,7 +177,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "lmcache_instance_id": {
-        "type": str,
+        "type": Optional[str],
         "default": None,
         "env_converter": str,
     },
@@ -406,7 +406,7 @@ def _create_config_class():
 
     def _post_init(self):
         # Generate random instance ID if not set
-        if self.lmcache_instance_id is None:
+        if not self.lmcache_instance_id:
             self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
         self.validate()
 
