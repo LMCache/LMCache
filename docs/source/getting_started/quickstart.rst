@@ -22,7 +22,7 @@ Start vLLM with LMCache using a single command:
 
    # The chunk size here is only for illustration purpose, use default one (256) later
    LMCACHE_CHUNK_SIZE=8 \
-   vllm serve Qwen/Qwen2.5-8B \
+   vllm serve Qwen/Qwen3-8B \
        --port 8000 --kv-transfer-config \
        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
@@ -39,7 +39,7 @@ Now let's see LMCache working! Open a new terminal and send your first request:
    curl http://localhost:8000/v1/completions \
      -H "Content-Type: application/json" \
      -d '{
-       "model": "Qwen/Qwen2.5-8B",
+       "model": "Qwen/Qwen3-8B",
        "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
        "max_tokens": 100,
        "temperature": 0.7
@@ -60,7 +60,7 @@ Now send a second request with a prefix that overlaps with the first:
    curl http://localhost:8000/v1/completions \
      -H "Content-Type: application/json" \
      -d '{
-       "model": "Qwen/Qwen2.5-8B",
+       "model": "Qwen/Qwen3-8B",
        "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
        "max_tokens": 100,
        "temperature": 0.7
