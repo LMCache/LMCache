@@ -89,7 +89,7 @@ The only difference between the two configurations is the ``lmcache_instance_id`
     lmcache_worker_ports: 8501
 
     extra_config:
-    lookup_backoff_time: 0.001
+      lookup_backoff_time: 0.001
 
 Setup and Usage
 ---------------
