@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Optional, Union
+import ast
 import json
 import os
 import re
@@ -70,6 +71,33 @@ def _to_bool(
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ["true", "1"]
+
+
+def _parse_quoted_string(value: str) -> str:
+    """Parse a string that may be surrounded by quotes and handle escape characters.
+
+    Args:
+        value: The input string that may be quoted
+
+    Returns:
+        The unquoted string with escape characters properly handled
+    """
+    if not value:
+        return value
+
+    value = value.strip()
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        try:
+            evaluated = ast.literal_eval(value)
+            if isinstance(evaluated, str):
+                return evaluated
+        except (ValueError, SyntaxError):
+            # If ast.literal_eval fails, it's not a valid Python literal.
+            # Fall back to simply stripping the outer quotes.
+            return value[1:-1]
+
+    return value
 
 
 # Configuration aliases and deprecated mappings
@@ -650,11 +678,15 @@ def _update_config_from_env(self):
     for name, config in _CONFIG_DEFINITIONS.items():
         if name in resolved_config:
             try:
-                value = resolved_config[name]
+                # Parse quoted strings and handle escape characters
+                raw_value = resolved_config[name]  # Keep original value for logging
+                value = _parse_quoted_string(raw_value)
                 converted_value = config["env_converter"](value)
                 setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
-                logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
+                logger.warning(
+                    f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
+                )
                 # Keep existing value if conversion fails
 
     return self
