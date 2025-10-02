@@ -14,24 +14,6 @@ Prerequisites
 - **NIXL**: Install from `NIXL <https://github.com/ai-dynamo/nixl>`_
 - **LMCache**: Install from :ref:`installation_guide`
 
-.. Port Configuration
-.. ------------------
-
-.. The P2P sharing setup uses the following ports (they are arbitrary and can be changed):
-
-.. - **LMCache Controller**: 
-..   - Port 8300: Pull messages from LMCache workers
-..   - Port 8400: Reply requests to LMCache workers
-..   - Port 9000: Controller main port
-
-.. - **vLLM Engines**: 
-..   - Port 8010: vLLM engine 1
-..   - Port 8011: vLLM engine 2
-
-.. - **P2P Communication**:
-..   - Port 8200, 8202: P2P initialization ports
-..   - Port 8201, 8203: P2P lookup ports
-
 Configuration
 -------------
 
