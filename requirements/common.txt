@@ -3,6 +3,8 @@ aiofiles
 aiohttp
 awscrt
 cufile-python
+fastapi
+httpx
 msgspec
 numpy
 nvtx
@@ -29,3 +31,4 @@ sortedcontainers
 # 4. this torch version may also be overridden inside of LMCache/docker/Dockerfile
 torch
 transformers >= 4.51.1
+uvicorn
