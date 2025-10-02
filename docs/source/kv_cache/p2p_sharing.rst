@@ -63,7 +63,7 @@ The only difference between the two configurations is the ``lmcache_instance_id`
     lmcache_worker_ports: 8500
 
     extra_config:
-    lookup_backoff_time: 0.001
+      lookup_backoff_time: 0.001
 
 **Instance 2 Configuration (example2.yaml)**:
 
