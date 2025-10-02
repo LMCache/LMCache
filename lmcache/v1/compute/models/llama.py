@@ -1,62 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# Third Party
-import torch
-
-# Local
-from .base import LMCBaseModel
-
-# TODO(Jiayi): A few things need to be tested/supported:
-# TP, PP, Multimodal
+# First Party
+from lmcache.v1.compute.models.base import LMCBaseModel
 
 
 class LMCLlamaModel(LMCBaseModel):
-    """LMC Llama model implementation, inheriting from base model class"""
-
-    def __init__(
-        self,
-        vllm_model,
-        blender,
-        enable_sparse: bool = False,
-    ):
-        # Call parent initialization with all common logic
-        super().__init__(vllm_model, blender, enable_sparse)
-
-    def _init_rotary_embedding(self):
-        """Llama-specific rotary embedding initialization"""
-        rotary_emb = self.vllm_model.model.layers[0].self_attn.rotary_emb
-        head_dim = rotary_emb.head_size
-        max_position_embeddings = rotary_emb.max_position_embeddings
-        rope_scaling = None  # Llama defaults to no rope_scaling
-        base = rotary_emb.base
-        is_neox_style = rotary_emb.is_neox_style
-        dtype = rotary_emb.dtype
-
-        # First Party
-        from lmcache.v1.compute.positional_encoding import get_fused_rope
-
-        self.fused_rotary_emb = get_fused_rope(
-            head_dim,
-            rotary_dim=head_dim,
-            max_position=max_position_embeddings,
-            base=base,
-            rope_scaling=rope_scaling,
-            is_neox_style=is_neox_style,
-            dtype=dtype,
-        )
-
-    def preprocess_attention_qk(
-        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, attn_layer
-    ):
-        """
-        Llama model Q/K preprocessing - no special processing needed
-
-        Args:
-            q: Query tensor
-            k: Key tensor
-            positions: token positions for positional encoding
-            attn_layer: Attention layer
-
-        Returns:
-            tuple: (q, k) - returned as-is
-        """
-        return q, k
+    def _process_qkv(self, q, k, v, layer):
+        """Process QKV tensors for LLaMa model (no additional processing)."""
+        return q, k, v
