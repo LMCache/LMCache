@@ -336,7 +336,7 @@ Running the Example
 1. First, run the script without LMCache:
 
    .. code-block:: bash
-
+       export VLLM_WORKER_MULTIPROC_METHOD=spawn
        python cpu-offloading.py 
 
    You'll see output like:
@@ -351,7 +351,7 @@ Running the Example
 2. Now, run with LMCache enabled:
 
    .. code-block:: bash
-
+       export VLLM_WORKER_MULTIPROC_METHOD=spawn
        python cpu-offloading.py --enable-lmcache
 
    You'll see output like:
