@@ -3,3 +3,4 @@ local_disk.yaml
 local_cpu_mla.yaml
 pd.yaml
 multi_device.yaml
+async.yaml
