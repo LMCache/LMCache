@@ -284,7 +284,7 @@ def test_valkey_connector(url, autorelease_v1):
     # Test 5: Retrieve and verify data
     future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
     future.result()
-    
+
     # Cleanup
     close_asyncio_loop(async_loop, async_thread)
     memory_allocator.close()

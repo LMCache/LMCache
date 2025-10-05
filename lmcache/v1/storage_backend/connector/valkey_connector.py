@@ -6,7 +6,7 @@ import asyncio
 import inspect
 
 # Third Party
-from glide import GlideClient, GlideClusterClient, NodeAddress, ClusterBatch, Batch
+from glide import Batch, ClusterBatch, GlideClient, GlideClusterClient, NodeAddress
 
 # First Party
 from lmcache.logging import init_logger
@@ -19,11 +19,13 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
+
 class Priorities(IntEnum):
     PEEK = auto()
     PREFETCH = auto()
     GET = auto()
     PUT = auto()
+
 
 class ValkeyConnector(RemoteConnector):
     def __init__(
@@ -35,14 +37,13 @@ class ValkeyConnector(RemoteConnector):
         password: str,
         database_id: Optional[int] = None,
     ):
-        
         if ":" in url:
             host, port_str = url.split(":", 1)
             port = int(port_str)
         else:
             host = url
             port = 6379  # Default Valkey port
-            
+
         self.host = host
         self.port = port
         self.database_id = database_id
@@ -51,35 +52,37 @@ class ValkeyConnector(RemoteConnector):
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
         self.executor = AsyncPQExecutor(loop)
-        
+
         # Create connection properly using async create
-        self.connection = None
-        self._init_connection()
+        self.connection = self._init_connection()
 
     def _init_connection(self):
         """Initialize GlideClient connection with credentials and database"""
+
         async def create_connection():
+            # Third Party
             from glide import GlideClientConfiguration, ServerCredentials
-            
+
             # Setup credentials if provided
             credentials = None
             if self.username or self.password:
                 credentials = ServerCredentials(self.username, self.password)
-            
+
             # Build config with optional database_id
             config_kwargs = {
-                'addresses': [NodeAddress(self.host, self.port)],
-                'credentials': credentials,
+                "addresses": [NodeAddress(self.host, self.port)],
+                "credentials": credentials,
             }
-            
+
             if self.database_id is not None:
-                config_kwargs['database_id'] = self.database_id
-            
+                config_kwargs["database_id"] = self.database_id
+
             config = GlideClientConfiguration(**config_kwargs)
             return await GlideClient.create(config)
-        
+
         future = asyncio.run_coroutine_threadsafe(create_connection(), self.loop)
-        self.connection = future.result(timeout=1.0)
+        connection = future.result(timeout=1.0)
+        return connection
 
     def _get_keys(self, key: CacheEngineKey) -> Tuple[str, str]:
         """Generate metadata and kv_bytes keys"""
@@ -99,9 +102,8 @@ class ValkeyConnector(RemoteConnector):
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         future = asyncio.run_coroutine_threadsafe(
-            self.executor.submit_job(
-                self._exists, key=key, priority=Priorities.PEEK
-            ), self.loop
+            self.executor.submit_job(self._exists, key=key, priority=Priorities.PEEK),
+            self.loop,
         )
         return future.result()
 
@@ -109,12 +111,12 @@ class ValkeyConnector(RemoteConnector):
         metadata_key, kv_key = self._get_keys(key)
 
         results = await self.connection.mget([metadata_key, kv_key])
-        
+
         if len(results) != 2:
             return None
-            
+
         metadata_bytes, kv_bytes = results[0], results[1]
-        
+
         if metadata_bytes is None:
             return None
 
@@ -172,15 +174,15 @@ class ValkeyConnector(RemoteConnector):
         metadata_bytes = RemoteMetadata(
             len(kv_bytes), kv_shape, kv_dtype, memory_format
         ).serialize()
-        
+
         metadata_key, kv_key = self._get_keys(key)
-        
+
         # Use batch to set both keys in one operation
         # kv bytes needs to be set first to avoid race condition
         batch = Batch(False)
         batch.set(kv_key, kv_bytes)
         batch.set(metadata_key, metadata_bytes)
-        
+
         await self.connection.exec(batch, raise_on_error=False)
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -218,29 +220,31 @@ class ValkeyClusterConnector(RemoteConnector):
         self.username = username
         self.password = password
         self.hosts_and_ports = hosts_and_ports
-        
+
         # Create connection
-        self._init_connection()
+        self.connection = self._init_connection()
 
     def _init_connection(self):
         """Initialize GlideClusterClient connection with credentials"""
+
         async def create_connection():
+            # Third Party
             from glide import GlideClusterClientConfiguration, ServerCredentials
-            
+
             # Setup credentials if provided
             credentials = None
             if self.username or self.password:
                 credentials = ServerCredentials(self.username, self.password)
-            
+
             addresses = [NodeAddress(host, port) for host, port in self.hosts_and_ports]
             config = GlideClusterClientConfiguration(
-                addresses=addresses,
-                credentials=credentials
+                addresses=addresses, credentials=credentials
             )
             return await GlideClusterClient.create(config)
-        
+
         future = asyncio.run_coroutine_threadsafe(create_connection(), self.loop)
-        self.connection = future.result(timeout=1.0)
+        connection = future.result(timeout=1.0)
+        return connection
 
     def _get_keys_with_hash_tag(self, key: CacheEngineKey) -> Tuple[str, str]:
         """Generate metadata and kv_bytes keys with hash tag for same slot placement"""
@@ -258,25 +262,24 @@ class ValkeyClusterConnector(RemoteConnector):
         return await self.executor.submit_job(
             self._exists, key=key, priority=Priorities.PEEK
         )
-    
+
     def exists_sync(self, key: CacheEngineKey) -> bool:
         future = asyncio.run_coroutine_threadsafe(
-            self.executor.submit_job(
-                self._exists, key=key, priority=Priorities.PEEK
-            ), self.loop
+            self.executor.submit_job(self._exists, key=key, priority=Priorities.PEEK),
+            self.loop,
         )
         return future.result()
 
     async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         metadata_key, kv_key = self._get_keys_with_hash_tag(key)
-        
+
         results = await self.connection.mget([metadata_key, kv_key])
-        
+
         if len(results) != 2:
             return None
-            
+
         metadata_bytes, kv_bytes = results[0], results[1]
-        
+
         if metadata_bytes is None:
             return None
 
@@ -336,13 +339,13 @@ class ValkeyClusterConnector(RemoteConnector):
         ).serialize()
 
         metadata_key, kv_key = self._get_keys_with_hash_tag(key)
-        
+
         # Use cluster batch to set both keys in one operation
         # kv bytes needs to be set first to avoid race condition
         batch = ClusterBatch(False)
         batch.set(kv_key, kv_bytes)
         batch.set(metadata_key, metadata_bytes)
-        
+
         await self.connection.exec(batch, raise_on_error=False)
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):

@@ -295,7 +295,7 @@ class MockValkey:
 
     async def get(self, key):
         return self.store.get(key, None)
-    
+
     async def mget(self, keys):
         result = []
         for key in keys:
@@ -311,7 +311,7 @@ class MockValkey:
     async def exec(self, batch, raise_on_error=True):
         """Execute batch operations by processing batch.commands"""
         results = []
-        
+
         # Process each command in the batch
         for command_code, args in batch.commands:
             if command_code == 1517:  # SET command
@@ -321,7 +321,7 @@ class MockValkey:
             else:
                 # Unknown command, just append None
                 results.append(None)
-                
+
         return results
 
     async def close(self):
