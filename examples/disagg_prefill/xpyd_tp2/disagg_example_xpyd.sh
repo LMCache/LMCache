@@ -121,6 +121,7 @@ main() {
         --port 9487 \
         --prefiller-host localhost \
         --prefiller-port 7100 \
+        --prefiller-init-port 8300,8301 \
         --num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 7200  \
@@ -129,20 +130,20 @@ main() {
         --proxy-host localhost \
         --proxy-port 7500 \
         --num-decoders 1 \
-        > >(tee proxy2.log)   2>&1 &
+        > >(tee proxy.log)   2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
 
     # Launch the decoder
-    bash disagg_vllm_launcher.sh decoder1 meta-llama/Llama-3.1-8B-Instruct \
-        > >(tee decoder1.log) 2>&1 &
+    bash disagg_vllm_launcher.sh decoder meta-llama/Llama-3.1-8B-Instruct \
+        > >(tee decoder.log) 2>&1 &
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
 
     # Launch the prefillers next
-    bash disagg_vllm_launcher.sh prefiller1 meta-llama/Llama-3.1-8B-Instruct \
-        > >(tee prefiller1.log) 2>&1 &
+    bash disagg_vllm_launcher.sh prefiller meta-llama/Llama-3.1-8B-Instruct \
+        > >(tee prefiller.log) 2>&1 &
     prefiller_pid=$!
     PIDS+=($prefiller_pid)
 

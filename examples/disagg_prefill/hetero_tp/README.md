@@ -22,7 +22,7 @@ The script will:
 
 1. Launch 1 decoder instances listening on port 7200 with TP=1
 2. Launch 1 prefill instances listening on ports 7100, with TP=2
-3. Launch a proxy server that uses round-robin to distribute requests between the prefill instances and decode instances, listening on port 9100
+3. Launch a proxy server that uses round-robin to distribute requests between the prefill instances and decode instances, listening on port 9487
 
 Press `Ctrl+C` to stop the servers.
 
@@ -31,7 +31,7 @@ Press `Ctrl+C` to stop the servers.
 If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
 
 ```bash
-python benchmark_serving.py --port 9100 --seed $(date +%s) \
+python benchmark_serving.py --port 9487 --seed $(date +%s) \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name random --random-input-len 7500 --random-output-len 200 \
     --num-prompts 30 --burstiness 100 --request-rate 1 --ignore-eos
@@ -41,25 +41,25 @@ Expected output from the benchmark script:
 
 ```plaintext
 ============ Serving Benchmark Result ============
-Successful requests:                     30
-Benchmark duration (s):                  31.34
-Total input tokens:                      224970
-Total generated tokens:                  6000
-Request throughput (req/s):              0.96
-Output token throughput (tok/s):         191.44
-Total Token throughput (tok/s):          7369.36
+Successful requests:                     30        
+Benchmark duration (s):                  32.40     
+Total input tokens:                      224970    
+Total generated tokens:                  5970      
+Request throughput (req/s):              0.93      
+Output token throughput (tok/s):         184.24    
+Total Token throughput (tok/s):          7127.02   
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          313.41
-Median TTFT (ms):                        272.83
-P99 TTFT (ms):                           837.32
+Mean TTFT (ms):                          264.33    
+Median TTFT (ms):                        263.41    
+P99 TTFT (ms):                           283.25    
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          8.84
-Median TPOT (ms):                        8.72
-P99 TPOT (ms):                           11.35
+Mean TPOT (ms):                          10.90     
+Median TPOT (ms):                        10.89     
+P99 TPOT (ms):                           11.12     
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           8.84
-Median ITL (ms):                         8.61
-P99 ITL (ms):                            11.43
+Mean ITL (ms):                           10.92     
+Median ITL (ms):                         10.56     
+P99 ITL (ms):                            26.60     
 ==================================================
 ```
 
@@ -68,15 +68,14 @@ P99 ITL (ms):                            11.43
 #### Server Scripts
 - `disagg_vllm_launcher.sh` - Launches individual vLLM servers for prefill/decode, and also launches the proxy server.
 - `disagg_proxy_server.py` - FastAPI proxy server that coordinates between prefiller and decoder
-- `disagg_example_xpyd.sh` - Main script to run the example
+- `disagg_example_asym_tp.sh` - Main script to run the example
 
 #### Configuration
 - `configs/lmcache-prefiller-config.yaml` - Configuration for prefiller server
-- `configs/lmcache-decoder-1-config.yaml` - Configuration for decoder server 1
-- `configs/lmcache-decoder-2-config.yaml` - Configuration for decoder server 2
+- `configs/lmcache-decoder-config.yaml` - Configuration for decoder server
 
 #### Log Files
 The main script generates several log files:
-- `prefiller1.log` and `prefiller2.log` - Logs from the prefill servers
-- `decoder1.log` and `decoder2.log` - Logs from the decode server
+- `prefiller.log` - Logs from the prefill servers
+- `decoder.log` - Logs from the decode server
 - `proxy.log` - Logs from the proxy server

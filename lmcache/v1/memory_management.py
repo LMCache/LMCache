@@ -33,22 +33,22 @@ logger = init_logger(__name__)
 
 class MemoryFormat(Enum):
     UNDEFINED = 0
-    """[2, num_layers, num_tokens, hidden_dim]
-    """
+
     # KV_BLOB = 1
     KV_2LTD = auto()
-    """[num_tokens, 2, hidden_dim]
+    """[2, num_layers, num_tokens, hidden_dim]
     """
     # LAYER_KV_BLOB = 2
     KV_T2D = auto()
+    """[num_tokens, 2, hidden_dim]
+    """
+    KV_2TD = auto()
     """[2, num_tokens, hidden_dim]
     """
 
-    KV_2TD = auto()
+    BINARY = auto()
     """Compressed binary array format
     """
-    BINARY = auto()
-
     BINARY_BUFFER = auto()
 
     KV_MLA_FMT = auto()
@@ -1136,15 +1136,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             )
             return None
 
-        # TODO(novahow): this is not a clean call for token_dim
-        # since self.shape may be [KV_2LTHD] while fmt is [KV_2LTD].
-        # NOTE(novahow): when transpose is True, we always allocate
-        # the full chunk size for proper sharding in asymmetric TP.
-        if self.transpose:
-            shape = list(shape)
-            token_dim = fmt.token_dim()
-            shape[token_dim] = self.shape[token_dim]
-            shape = torch.Size(shape)
+        shape = self._update_shape(fmt, shape)
+
         # TODO (Jiayi): This is a bit redundant.
         free_block.meta.shape = shape
         free_block.meta.fmt = fmt
@@ -1198,11 +1191,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
             # FIXME: think about whether pareant_allocator
             # should be updated here.
-            if self.transpose:
-                shape = list(shape)
-                token_dim = fmt.token_dim()
-                shape[token_dim] = self.shape[token_dim]
-                shape = torch.Size(shape)
+            shape = self._update_shape(fmt, shape)
 
             free_block.meta.shape = shape
             free_block.meta.fmt = fmt
@@ -1313,6 +1302,22 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
+
+    def _update_shape(self, fmt: MemoryFormat, shape: torch.Size):
+        # TODO(novahow): this is not a clean call for token_dim
+        # since self.shape may be [KV_2LTHD] while fmt is [KV_2LTD].
+        # NOTE(novahow): when transpose is True, we always allocate
+        # the full chunk size for proper sharding in asymmetric TP.
+        if not self.transpose:
+            return shape
+
+        assert fmt == MemoryFormat.KV_2LTD, (
+            "Now Only KV_2LTD is supported when transpose is True."
+        )
+
+        shape = list(shape)
+        shape[fmt.token_dim()] = self.shape[self.fmt.token_dim()]
+        return torch.Size(shape)
 
     @property
     def metadata(self):
@@ -1588,7 +1593,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 transpose=transpose,
             )
         else:
-            self.pin_allocator = TensorMemoryAllocator(self.buffer, transpose=transpose)
+            assert not transpose, (
+                "Transpose is only supported for paged memory allocator"
+            )
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
         self.align_bytes = self.pin_allocator.align_bytes
 

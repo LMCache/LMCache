@@ -398,7 +398,8 @@ void multi_layer_kv_transfer(
     k_or_v_size = 1;
   }
 
-  assert(transpose or (num_tokens == (int)key_value.size(2)));
+  int key_value_tokens = key_value.size(2);
+  assert(transpose or (num_tokens == key_value_tokens));
 
   dim3 grid(num_tokens, num_layers, k_or_v_size);
   dim3 block(std::min(num_qwords, 128));
@@ -410,13 +411,13 @@ void multi_layer_kv_transfer(
     lmc::load_and_reshape_multi_layer_kernel<int64_t, false>
         <<<grid, block, 0, stream>>>(
             key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
-            (int)key_value.size(2), num_layers, page_buffer_size, transpose);
+            key_value_tokens, num_layers, page_buffer_size, transpose);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
     lmc::load_and_reshape_multi_layer_kernel<int64_t, true>
         <<<grid, block, 0, stream>>>(
             key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_qwords,
-            (int)key_value.size(2), num_layers, page_buffer_size, transpose);
+            key_value_tokens, num_layers, page_buffer_size, transpose);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 }
