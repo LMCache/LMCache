@@ -290,7 +290,7 @@ run_p2p_lmcache() {
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
-        --env UCX_TLS=rc
+        --env UCX_TLS=tcp
         --ipc host
         --shm-size 4G
     )
@@ -352,7 +352,7 @@ run_p2p_lmcache() {
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
-        --env UCX_TLS=rc
+        --env UCX_TLS=tcp
         --ipc host
         --shm-size 4G
     )
