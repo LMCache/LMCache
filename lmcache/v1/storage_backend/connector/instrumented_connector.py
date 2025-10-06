@@ -114,5 +114,8 @@ class InstrumentedRemoteConnector(RemoteConnector):
     ):
         return await self._connector.batched_put(keys, memory_objs)
 
+    def remove_sync(self, key: CacheEngineKey) -> bool:
+        return self._connector.remove_sync(key)
+
     def __repr__(self) -> str:
         return f"InstrumentedRemoteConnector({self._connector})"

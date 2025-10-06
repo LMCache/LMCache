@@ -1,7 +1,7 @@
 .. _quickstart_examples:
 
-Quickstart Examples
-===================
+More Examples
+=============
 
 This section provides quick examples to help you get started with LMCache's key features.
 

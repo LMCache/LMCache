@@ -71,6 +71,7 @@ Documentation
    :caption: Getting Started
 
    getting_started/installation
+   getting_started/quickstart
    getting_started/quickstart/index
    getting_started/benchmarking
    getting_started/troubleshoot
@@ -85,6 +86,7 @@ Documentation
 
    kv_cache/storage_backends/index
    kv_cache/caching_policies
+   kv_cache/p2p_sharing
 
 :raw-html:`<br />`
 
@@ -163,5 +165,5 @@ Documentation
    community/meetings
    community/blogs
 
-raw-html:`<br />`
+:raw-html:`<br />`
    
