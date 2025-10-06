@@ -21,6 +21,7 @@ docker1:
     - "LMCACHE_LMCACHE_INSTANCE_ID=lmcache_instance_1"
     - "LMCACHE_LMCACHE_WORKER_PORTS=8500"
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
+    - "LMCACHE_SAVE_UNFULL_CHUNK=False"
     - "PYTHONHASHSEED=123"
   pull-port: 8300
   reply-port: 8400
@@ -38,6 +39,7 @@ docker2:
     - "LMCACHE_LMCACHE_INSTANCE_ID=lmcache_instance_2"
     - "LMCACHE_LMCACHE_WORKER_PORTS=8501"
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
+    - "LMCACHE_SAVE_UNFULL_CHUNK=False"
     - "PYTHONHASHSEED=123"
   pull-port: 8300
   reply-port: 8400
