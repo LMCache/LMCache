@@ -517,7 +517,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
             int: The estimated chunk budget for concurrent allocations
         """
         logger.info("Attempting to calculate chunk budget for async loading")
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
         )
