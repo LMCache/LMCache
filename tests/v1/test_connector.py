@@ -283,7 +283,8 @@ def test_valkey_connector(url, autorelease_v1):
 
     # Test 5: Retrieve and verify data
     future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
-    future.result()
+    retrieved_memory_obj = future.result()
+    check_mem_obj_equal([retrieved_memory_obj], [memory_obj])
 
     # Cleanup
     close_asyncio_loop(async_loop, async_thread)
@@ -340,7 +341,8 @@ def test_valkey_cluster_connector(url, autorelease_v1):
 
     # Test 5: Retrieve and verify data
     future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
-    future.result()
+    retrieved_memory_obj = future.result()
+    check_mem_obj_equal([retrieved_memory_obj], [memory_obj])
 
     # Cleanup
     close_asyncio_loop(async_loop, async_thread)
