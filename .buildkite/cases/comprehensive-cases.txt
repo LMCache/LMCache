@@ -4,3 +4,4 @@ local_cpu_mla.yaml
 pd.yaml
 multi_device.yaml
 async.yaml
+p2p.yaml

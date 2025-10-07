@@ -272,6 +272,123 @@ run_pd_lmcache() {
     sleep 10
 }
 
+run_p2p_lmcache() {
+    local docker1="$1"
+    local vllm1="$2"
+    local docker2="$3"
+    local vllm2="$4"
+    local cfg_name="$5"
+    LOGFILE1="/tmp/build_${BUILD_ID}_${cfg_name}1.log"
+    LOGFILE2="/tmp/build_${BUILD_ID}_${cfg_name}2.log"
+
+    ########## Instance 1 ##########
+    # docker args
+    docker1_args=(
+        --runtime nvidia
+        --network host
+        --gpus "device=0"
+        --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --env VLLM_USE_FLASHINFER_SAMPLER=0
+        --env HF_TOKEN="$HF_TOKEN"
+        --env UCX_TLS=tcp
+        --ipc host
+        --shm-size 4G
+    )
+    while IFS= read -r e; do
+        [[ -n $e ]] && docker1_args+=(--env "$e")
+    done < <(yq -r '.env[]?' <<<"$docker1")
+    pull=$(yq -er '."pull-port"' <<<"$docker1" 2>/dev/null)
+    docker1_args+=(--env "LMCACHE_CONTROLLER_PULL_URL=localhost:$pull")
+    reply=$(yq -er '."reply-port"' <<<"$docker1" 2>/dev/null)
+    docker1_args+=(--env "LMCACHE_CONTROLLER_REPLY_URL=localhost:$reply")
+
+    # vllm args
+    vllm1_model="$(yq -r '.model' <<<"$vllm1")"
+    mapfile -t vllm1_cli_args < <(yq -r '.args // [] | .[]' <<<"$vllm1")
+    cmd_args1=(
+        lmcache/vllm-openai:build-latest
+        "$vllm1_model"
+    )
+    cmd_args1+=("${vllm1_cli_args[@]}")
+    cmd_args1+=("--port" "$PORT1")
+
+    ##### Controller part start #####
+    if [ ! -d ".venv" ]; then
+        UV_PYTHON=python3 uv -q venv
+    fi
+    source .venv/bin/activate
+    uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
+    uv pip install torch==2.7.1 httpx fastapi uvicorn > /dev/null 2>&1
+    uv pip install -e "$ORIG_DIR" --no-build-isolation > /dev/null 2>&1
+    # Start controller
+    PYTHONHASHSEED=123 lmcache_controller \
+        --host localhost \
+        --port "$PORT" \
+        --monitor-ports "{\"pull\": ${pull}, \"reply\": ${reply}}" \
+        > "/tmp/build_${BUILD_ID}_${cfg_name}_controller.log" 2>&1 &
+    sleep 10
+    ##### Controller part end #####
+
+    # Start docker
+    CID1=$(
+        docker run -d \
+            "${docker1_args[@]}" \
+            "${cmd_args1[@]}"
+    )
+
+    # Health check
+    wait_for_openai_api_server "$PORT1" "$vllm1_model" "$CID1"
+
+    # Logging
+    touch "$LOGFILE1"
+    docker logs -f "$CID1" >>"$LOGFILE1" 2>&1 &
+
+    ########## Instance 2 ##########
+    # docker args
+    docker2_args=(
+        --runtime nvidia
+        --network host
+        --gpus "device=1"
+        --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --env VLLM_USE_FLASHINFER_SAMPLER=0
+        --env HF_TOKEN="$HF_TOKEN"
+        --env UCX_TLS=tcp
+        --ipc host
+        --shm-size 4G
+    )
+    while IFS= read -r e; do
+        [[ -n $e ]] && docker2_args+=(--env "$e")
+    done < <(yq -r '.env[]?' <<<"$docker2")
+    pull=$(yq -er '."pull-port"' <<<"$docker2" 2>/dev/null)
+    docker2_args+=(--env "LMCACHE_CONTROLLER_PULL_URL=localhost:$pull")
+    reply=$(yq -er '."reply-port"' <<<"$docker2" 2>/dev/null)
+    docker2_args+=(--env "LMCACHE_CONTROLLER_REPLY_URL=localhost:$reply")
+
+    # vllm args
+    vllm2_model="$(yq -r '.model' <<<"$vllm2")"
+    mapfile -t vllm2_cli_args < <(yq -r '.args // [] | .[]' <<<"$vllm2")
+    cmd_args2=(
+        lmcache/vllm-openai:build-latest
+        "$vllm2_model"
+    )
+    cmd_args2+=("${vllm2_cli_args[@]}")
+    cmd_args2+=("--port" "$PORT2")
+
+    # Start docker
+    CID2=$(
+        docker run -d \
+            "${docker2_args[@]}" \
+            "${cmd_args2[@]}"
+    )
+
+    # Health check
+    wait_for_openai_api_server "$PORT2" "$vllm2_model" "$CID2"
+
+    # Logging
+    touch "$LOGFILE2"
+    docker logs -f "$CID2" >>"$LOGFILE2" 2>&1 &
+}
+
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo " "
@@ -315,6 +432,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
 
 run_long_doc_qa() {
     local workload_config="$1"
+    local port="$2"
 
     echo "→ Running long_doc_qa with customed workload config:"
     printf '%s\n' "$workload_config"
@@ -349,7 +467,7 @@ run_long_doc_qa() {
     uv -q pip install openai pandas matplotlib
     python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
         "${workload_args[@]}" \
-        --port="$PORT" \
+        --port="$port" \
         --output="response.txt"
 }
 
@@ -433,6 +551,15 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         decoder_vllm_args="$(yq '.["vllm-decoder"]' "$cfg_file")"
         run_pd_lmcache "$prefiller_docker_args" "$prefiller_vllm_args" "$decoder_docker_args" "$decoder_vllm_args" "$cfg_name" 
         model="$(yq -r '.["vllm-prefiller"].model' "$cfg_file")"
+    elif [[ "$feature_type" == "p2p" ]]; then
+        PORT1=$(find_available_port 8177)
+        docker1_args="$(yq '.["docker1"]' "$cfg_file")"
+        vllm1_args="$(yq '.["vllm1"]' "$cfg_file")"
+        PORT2=$(find_available_port 8277)
+        docker2_args="$(yq '.["docker2"]' "$cfg_file")"
+        vllm2_args="$(yq '.["vllm2"]' "$cfg_file")"
+        run_p2p_lmcache "$docker1_args" "$vllm1_args" "$docker2_args" "$vllm2_args" "$cfg_name" 
+        model="$(yq -r '.["vllm1"].model' "$cfg_file")"
     elif [[ -z "$feature_type" ]]; then
         docker_args="$(yq '.docker' "$cfg_file")"
         vllm_args="$(yq '.vllm' "$cfg_file")"
@@ -446,7 +573,13 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         test_vllmopenai_server_with_lmcache_integrated "$model"
     elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
-        run_long_doc_qa "$workload_yaml"
+        if [[ "$feature_type" == "p2p" ]]; then
+            tmp_workload_yaml=$(jq 'del(."expected-latency")' <<< "$workload_yaml")
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
+            run_long_doc_qa "$workload_yaml" "$PORT2"
+        else
+            run_long_doc_qa "$workload_yaml" "$PORT"
+        fi
     fi
 
     cleanup 0
