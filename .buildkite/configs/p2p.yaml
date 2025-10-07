@@ -10,7 +10,7 @@ feature:
 
 docker1:
   env:
-    - "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
+    - "LMCACHE_MAX_LOCAL_CPU_SIZE=60"
     - "LMCACHE_ENABLE_ASYNC_LOADING=True"
     - "LMCACHE_ENABLE_P2P=True"
     - "LMCACHE_P2P_HOST=localhost"
@@ -28,7 +28,7 @@ docker1:
 
 docker2:
   env:
-    - "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
+    - "LMCACHE_MAX_LOCAL_CPU_SIZE=60"
     - "LMCACHE_ENABLE_ASYNC_LOADING=True"
     - "LMCACHE_ENABLE_P2P=True"
     - "LMCACHE_P2P_HOST=localhost"
