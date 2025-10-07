@@ -552,10 +552,10 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         run_pd_lmcache "$prefiller_docker_args" "$prefiller_vllm_args" "$decoder_docker_args" "$decoder_vllm_args" "$cfg_name" 
         model="$(yq -r '.["vllm-prefiller"].model' "$cfg_file")"
     elif [[ "$feature_type" == "p2p" ]]; then
-        PORT1=$(find_available_port 8100)
+        PORT1=$(find_available_port 8177)
         docker1_args="$(yq '.["docker1"]' "$cfg_file")"
         vllm1_args="$(yq '.["vllm1"]' "$cfg_file")"
-        PORT2=$(find_available_port 8200)
+        PORT2=$(find_available_port 8277)
         docker2_args="$(yq '.["docker2"]' "$cfg_file")"
         vllm2_args="$(yq '.["vllm2"]' "$cfg_file")"
         run_p2p_lmcache "$docker1_args" "$vllm1_args" "$docker2_args" "$vllm2_args" "$cfg_name" 
