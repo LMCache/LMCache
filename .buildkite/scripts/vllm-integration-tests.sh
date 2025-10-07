@@ -324,7 +324,7 @@ run_p2p_lmcache() {
     PYTHONHASHSEED=123 lmcache_controller \
         --host localhost \
         --port "$PORT" \
-        --monitor-ports "{\"pull\": ${pull}, \"reply\": ${reply}" \
+        --monitor-ports "{\"pull\": ${pull}, \"reply\": ${reply}}" \
         > "/tmp/build_${BUILD_ID}_${cfg_name}_controller.log" 2>&1 &
     sleep 10
     ##### Controller part end #####
