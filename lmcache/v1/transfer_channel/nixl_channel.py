@@ -555,10 +555,11 @@ class NixlChannel(BaseTransferChannel):
         for thread in self.running_threads:
             thread.join()
         self.zmq_context.term()
-        self.agent.deregister_memory(self.reg_descs)
-        self.agent.release_dlist_handle(self.xfer_handler)
+        self.nixl_agent.deregister_memory(self.nixl_wrapper.reg_descs)
+        self.nixl_agent.release_dlist_handle(self.nixl_wrapper.xfer_handler)
+
         for remote_xfer_handler in self.remote_xfer_handlers_dict.values():
-            self.agent.release_dlist_handle(remote_xfer_handler)
+            self.nixl_agent.release_dlist_handle(remote_xfer_handler)
 
 
 @dataclass
