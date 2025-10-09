@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test mode implementation for basic checks"""
 
+# Standard
+import asyncio
+
 # First Party
 from lmcache.v1.check import check_mode
 
@@ -18,21 +21,28 @@ from lmcache.v1.check.utils import (
 
 async def async_contains_storage_manager(storage_manager, key):
     """Async wrapper for storage manager contains method"""
-    return storage_manager.contains(key) is not None
+    # Use asyncio.to_thread to make the synchronous call truly async
+    # This allows for proper timeout handling and non-blocking execution
+    result = await asyncio.to_thread(storage_manager.contains, key)
+    return result is not None
 
 
 async def async_get_storage_manager(storage_manager, key):
     """Async wrapper for storage manager get method"""
-    return storage_manager.get(key)
+    # Use asyncio.to_thread to make the synchronous call truly async
+    # This allows for proper timeout handling and non-blocking execution
+    return await asyncio.to_thread(storage_manager.get, key)
 
 
 async def async_submit_put_storage_manager(storage_manager, key, memory_obj):
     """Async wrapper for storage manager batched_put"""
     try:
-        # Use batched_put with single item
-        # Note: batched_put will handle ref_count_down internally
-        storage_manager.batched_put([key], [memory_obj])
-        wait_put_tasks_complete(find_remote_backend(storage_manager))
+        # Use asyncio.to_thread to make the synchronous calls truly async
+        # This allows for proper timeout handling and non-blocking execution
+        await asyncio.to_thread(storage_manager.batched_put, [key], [memory_obj])
+        await asyncio.to_thread(
+            wait_put_tasks_complete, find_remote_backend(storage_manager)
+        )
         return True
     except Exception as e:
         print(f"Put task failed for key: {key}, error: {e}")
