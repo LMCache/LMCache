@@ -14,7 +14,8 @@ def parse_args():
     parser.add_argument(
         "--mode",
         required=True,
-        help="Operation mode (e.g. test, gen). Use 'list' to show available modes",
+        help="Operation mode (e.g. test_remote, test_storage_manager). "
+        "Use 'list' to show available modes",
     )
     parser.add_argument("--model", default=model_name, help="model name")
     parser.add_argument(
