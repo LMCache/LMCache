@@ -273,19 +273,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # Get reserve memory size from config
         reserve_cpu_size = config.reserve_local_cpu_size
 
-        # Handle first rank special case
-        if metadata is not None:
-            save_only_first_rank = (
-                config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
-                and metadata.use_mla
-            )
-
-            if save_only_first_rank and metadata.is_first_rank():
-                # Use first_rank_reserve_local_cpu_size if available
-                reserve_cpu_size = config.get_extra_config_value(
-                    "first_rank_reserve_local_cpu_size", reserve_cpu_size
-                )
-
+        # TODO(baoloongmao): For disable save_only_first_rank case,
+        #  we need to avoid multi-rank race condition in future.
+        #  But for enable save_only_first_rank case,
+        #  we can handle reserve memory simply since non-first ranks
+        #  do not allocate memory.
         # Effective memory: min(configured_size, available_memory - reserve_size)
         if system_available_memory_gb > 0:
             max_usable_memory = max(0, system_available_memory_gb - reserve_cpu_size)
