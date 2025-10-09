@@ -6,7 +6,9 @@ cufile-python
 fastapi
 httpx
 msgspec
-numpy
+nixl
+# nixl uses numba which requires numpy<=2.2
+numpy<=2.2
 nvtx
 prometheus_client >= 0.18.0
 psutil
