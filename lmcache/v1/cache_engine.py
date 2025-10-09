@@ -689,22 +689,23 @@ class LMCacheEngine:
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
+        res = 0
         try:
-            end = 0
-            prev_end = 0
-
             if pin:
                 assert lookup_id is not None, "lookup_id is required when pin is True"
 
-            for start, end, key in self.token_database.process_tokens(
+            chunk_infos = self.token_database.process_tokens(
                 tokens=tokens,
                 hashes=hashes,
                 offsets=offsets,
                 request_configs=request_configs,
-            ):
-                assert isinstance(key, CacheEngineKey)
+            )
 
-                if self.use_layerwise:
+            # TODO: support batched_contains when layerwise is enabled
+            if self.use_layerwise:
+                for start, end, key in chunk_infos:
+                    assert isinstance(key, CacheEngineKey)
+
                     # TODO(Jiayi): Optimize by checking only the existence of the key
                     # of one layer
                     key_all_layers = key.split_layers(self.num_layers)
@@ -720,26 +721,27 @@ class LMCacheEngine:
                             self.lookup_pins[lookup_id].extend(  # type: ignore
                                 key_all_layers
                             )
-                        prev_end = end
+                        res = end
                         continue
-                    end = prev_end
-                    return prev_end
-                else:
-                    if self.storage_manager.contains(key, search_range, pin):
+                    return res
+            else:
+                keys = [chunk_info[2] for chunk_info in chunk_infos]
+                contains_res = self.storage_manager.batched_contains(
+                    keys, search_range, pin, True
+                )
+                assert len(contains_res) == len(keys)
+                for start, end, key, location in zip(chunk_infos, contains_res):
+                    if location:
                         if pin:
-                            self.lookup_pins[lookup_id].append(  # type: ignore
-                                key
-                            )
-                        prev_end = end
+                            self.lookup_pins[lookup_id].append(key)
+                        res = end
                         continue
-
-                    end = prev_end
-                    return prev_end
+                    return res
 
             # all tokens where found, return the maximal end
-            return end
+            return res
         finally:
-            self.stats_monitor.on_lookup_finished(lookup_request_id, end)
+            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()

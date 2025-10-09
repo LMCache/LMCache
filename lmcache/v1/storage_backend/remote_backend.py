@@ -161,6 +161,17 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Returning False")
             return False
 
+    def batched_contains(
+        self, keys: List[CacheEngineKey], pin: bool = False, should_stop: bool = True
+    ) -> List[bool]:
+        return self.connection.batched_contains(keys, should_stop)
+
+    def support_batched_contains(self) -> bool:
+        return (
+            self.connection is not None
+            and self.connection.support_batched_contains()
+        )
+
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:
             return key in self.put_tasks

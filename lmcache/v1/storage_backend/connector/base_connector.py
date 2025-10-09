@@ -285,5 +285,13 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def batched_contains(
+        self, keys: List[CacheEngineKey], should_stop: bool = True
+    ) -> List[bool]:
+        raise NotImplementedError
+
+    def support_batched_contains(self) -> bool:
+        return False
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}>"
