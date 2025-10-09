@@ -195,6 +195,7 @@ class RegistrationController:
         """
         Query worker info.
         """
+        event_id = msg.event_id
         worker_infos = []
         if msg.instance_id not in self.worker_mapping:
             logger.warning(f"instance {msg.instance_id} not registered.")
@@ -209,4 +210,4 @@ class RegistrationController:
                 else:
                     logger.warning(f"worker {worker_key} not registered.")
 
-        return QueryWorkerInfoRetMsg(worker_infos)
+        return QueryWorkerInfoRetMsg(event_id=event_id, worker_infos=worker_infos)

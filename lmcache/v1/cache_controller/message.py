@@ -438,6 +438,7 @@ class CheckFinishMsg(OrchMsg):
 class QueryWorkerInfoMsg(OrchMsg):
     """Query worker info message"""
 
+    event_id: str
     instance_id: str
     worker_ids: Optional[list[int]]
 
@@ -545,6 +546,7 @@ class CheckFinishRetMsg(OrchRetMsg):
 class QueryWorkerInfoRetMsg(OrchRetMsg):
     """Query worker info return message"""
 
+    event_id: str
     worker_infos: list[WorkerInfo]
 
     def describe(self) -> str:
