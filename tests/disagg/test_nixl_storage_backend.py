@@ -34,7 +34,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda",  # Assuming we are using CUDA for the test
+        device="cuda" if torch.cuda.is_available() else "cpu",
     )
     for i in range(num_objs):
         keys.append(
@@ -61,7 +61,8 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 
 def create_test_config(
-    buffer_device: str = "cuda", backend: str = "GDS_MT"
+    buffer_device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    backend: str = "GDS_MT" if torch.cuda.is_available() else "POSIX",
 ) -> LMCacheEngineConfig:
     """Create a test configuration for NixlStorageBackend"""
     config = LMCacheEngineConfig()
@@ -227,13 +228,21 @@ def test_nixl_storage_backend_put_get():
 @pytest.mark.no_shared_allocator
 def test_nixl_storage_backend_different_backends():
     """Test NixlStorageBackend with different backend types"""
-    backends = [
-        ("GDS_MT", "cuda"),
-        ("GDS_MT", "cpu"),
-        ("GDS", "cuda"),
-        ("GDS", "cpu"),
-        ("POSIX", "cpu"),
-    ]
+    backends = (
+        [
+            ("GDS_MT", "cuda"),
+            ("GDS", "cuda"),
+            ("GDS_MT", "cpu"),
+            ("GDS", "cpu"),
+            ("POSIX", "cpu"),
+        ]
+        if torch.cuda.is_available()
+        else [
+            ("GDS_MT", "cpu"),
+            ("GDS", "cpu"),
+            ("POSIX", "cpu"),
+        ]
+    )
 
     for backend_type, device in backends:
         config = create_test_config(buffer_device=device, backend=backend_type)
