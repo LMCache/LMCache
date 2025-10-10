@@ -577,7 +577,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         with self.cpu_lock:
             for key in self.hot_cache:
                 memory_obj = self.hot_cache[key]
-                if memory_obj.can_evict:
+                if not memory_obj.can_evict:
                     continue
                 clear_keys.append(key)
                 num_cleared_tokens += memory_obj.get_num_tokens()
