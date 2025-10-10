@@ -517,7 +517,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
             int: The estimated chunk budget for concurrent allocations
         """
         logger.info("Attempting to calculate chunk budget for async loading")
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
         )
@@ -550,6 +549,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
+        assert hasattr(self.memory_allocator, "align_bytes")
         alignment = self.memory_allocator.align_bytes
         aligned_chunk_bytes = ((chunk_bytes + alignment - 1) // alignment) * alignment
 

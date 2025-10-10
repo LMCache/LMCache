@@ -44,9 +44,26 @@ To contribute to this repo, you'll use the Fork and Pull model common in many op
 - Run unit tests and fix any broken tests
 - Submit a pull request with detailed descriptions
 
-When your contribution is ready, you can create a pull request. Pull requests are often referred to as "PRs". In general, we follow the standard `GitHub pull request <https://help.github.com/en/articles/about-pull-requests>`_ process. Follow the template to provide details about your pull request to the maintainers. It's best to break your contribution into smaller PRs with incremental changes, and include a good description of the changes. We require new unit tests to be contributed with any new functionality added.
+When your contribution is ready, you can create a pull request. Pull requests are often referred to as "PRs". In general, we follow the standard `GitHub pull request <https://help.github.com/en/articles/about-pull-requests>`_ process. Follow the template to provide details about your pull request to the maintainers.
 
-Before sending pull requests, make sure your changes pass code quality checks and unit tests. These checks will run with the pull request builds. Alternatively, you can run the checks manually on your local machine `as specified in Development <#development>`_ .
+Please try to classify PRs for easy understanding of the type of changes. The PR title is prefixed appropriately to indicate the type of change. Please use one of the following:
+
+- [Bugfix] for bug fixes
+- [Build] for build fixes and improvements
+- [CI] for continuous integration fixes and iimprovements
+- [Core] for changes in the core LMCache logic (e.g., ``LMCacheEngine``, ``Backend`` etc.)
+- [Doc] for documentation fixes and improvements
+- [Misc] for PRs that do not fit the above categories. Please use this sparingly
+- [Model] for adding a new model or improving an existing model. Model name should appear in the title
+- [Test] for unit tests
+
+.. note::
+
+    If the PR spans more than one category, please include all relevant prefixes
+
+It's best to break your contribution into smaller PRs with incremental changes, and include a good description of the changes. We require new unit tests to be contributed with any new functionality added and docs if user facing changes.
+
+Before sending pull requests, make sure your changes pass code quality checks and unit tests. These checks will run when the pull request builds. Alternatively, you can run the checks manually on your local machine `as specified in Development <#development>`_ .
 
 DCO and Signed-off-by
 ^^^^^^^^^^^^^^^^^^^^^

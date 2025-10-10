@@ -1877,6 +1877,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             dtype,
             fmt,
         )
+        self.align_bytes = self.cpu_allocator.align_bytes
 
     def allocate(
         self,

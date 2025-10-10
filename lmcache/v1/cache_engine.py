@@ -978,11 +978,9 @@ class LMCacheEngine:
         if self.save_only_first_rank:
             if self.metadata.is_first_rank():
                 num_removed = self._clear(tokens, locations, request_configs)
-                self.broadcast_object_fn(num_removed, self.metadata.first_rank)
                 return num_removed
             else:
-                num_removed = self.broadcast_object_fn(None, self.metadata.first_rank)
-                return int(num_removed)
+                return 0
         return self._clear(tokens, locations, request_configs)
 
     def _clear(
