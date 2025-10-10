@@ -119,11 +119,15 @@ def test_nixl_storage_config():
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_nixl_storage_backend_basic():
     """Test basic NixlStorageBackend operations"""
     config = create_test_config()
     metadata = create_test_metadata()
 
+    thread_loop = None
+    thread = None
+    backend = None
     try:
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)
@@ -154,10 +158,14 @@ def test_nixl_storage_backend_basic():
             assert obj.tensor.shape == shape
             assert obj.tensor.dtype == dtype
 
+    except Exception:
+        raise
     finally:
-        if thread_loop.is_running():
+        if backend:
+            backend.close()
+        if thread_loop and thread_loop.is_running():
             thread_loop.call_soon_threadsafe(thread_loop.stop)
-        if thread.is_alive():
+        if thread and thread.is_alive():
             thread.join()
         # Cleanup temporary directory
         if os.path.exists(config.extra_config["nixl_path"]):
@@ -165,11 +173,15 @@ def test_nixl_storage_backend_basic():
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_nixl_storage_backend_put_get():
     """Test put and get operations in NixlStorageBackend"""
     config = create_test_config()
     metadata = create_test_metadata()
 
+    thread_loop = None
+    thread = None
+    backend = None
     try:
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)
@@ -215,10 +227,14 @@ def test_nixl_storage_backend_put_get():
             backend.remove(key)
             assert not backend.contains(key)
 
+    except Exception:
+        raise
     finally:
-        if thread_loop.is_running():
+        if backend:
+            backend.close()
+        if thread_loop and thread_loop.is_running():
             thread_loop.call_soon_threadsafe(thread_loop.stop)
-        if thread.is_alive():
+        if thread and thread.is_alive():
             thread.join()
         # Cleanup temporary directory
         if os.path.exists(config.extra_config["nixl_path"]):
@@ -226,6 +242,7 @@ def test_nixl_storage_backend_put_get():
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_nixl_storage_backend_different_backends():
     """Test NixlStorageBackend with different backend types"""
     backends = (
@@ -248,6 +265,9 @@ def test_nixl_storage_backend_different_backends():
         config = create_test_config(buffer_device=device, backend=backend_type)
         metadata = create_test_metadata()
 
+        thread_loop = None
+        thread = None
+        backend = None
         try:
             thread_loop = asyncio.new_event_loop()
             thread = threading.Thread(target=thread_loop.run_forever)
@@ -264,10 +284,14 @@ def test_nixl_storage_backend_different_backends():
             assert obj is not None
             assert obj.tensor is not None
 
+        except Exception:
+            raise
         finally:
-            if thread_loop.is_running():
+            if backend:
+                backend.close()
+            if thread_loop and thread_loop.is_running():
                 thread_loop.call_soon_threadsafe(thread_loop.stop)
-            if thread.is_alive():
+            if thread and thread.is_alive():
                 thread.join()
             # Cleanup temporary directory
             if os.path.exists(config.extra_config["nixl_path"]):
@@ -304,6 +328,9 @@ if __name__ == "__main__":
     config = create_test_config(buffer_device=args.device, backend=args.backend)
     metadata = create_test_metadata()
 
+    thread_loop = None
+    thread = None
+    backend = None
     try:
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)
@@ -349,10 +376,14 @@ if __name__ == "__main__":
 
         logger.info("All tests passed successfully!")
 
+    except Exception:
+        raise
     finally:
-        if thread_loop.is_running():
+        if backend:
+            backend.close()
+        if thread_loop and thread_loop.is_running():
             thread_loop.call_soon_threadsafe(thread_loop.stop)
-        if thread.is_alive():
+        if thread and thread.is_alive():
             thread.join()
         # Cleanup temporary directory
         if os.path.exists(config.extra_config["nixl_path"]):
