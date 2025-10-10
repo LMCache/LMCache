@@ -58,6 +58,10 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             False,
         )
 
+        # Ensure we're not using CUDA for CPU tests
+        if config.nixl_buffer_device == "cpu":
+            config.extra_config["enable_cuda"] = False
+
         backends = CreateStorageBackends(
             config,
             metadata,
@@ -134,6 +138,7 @@ def test_nixl_gds_mt_cuda_backend():
 
     config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS_MT"
+    config.extra_config["enable_cuda"] = True
 
     run(config, shape, dtype)
 
@@ -148,6 +153,7 @@ def test_nixl_gds_mt_cpu_backend():
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS_MT"
+    config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
 
@@ -163,6 +169,7 @@ def test_nixl_gds_cuda_backend():
 
     config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS"
+    config.extra_config["enable_cuda"] = True
 
     run(config, shape, dtype)
 
@@ -177,6 +184,7 @@ def test_nixl_gds_cpu_backend():
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS"
+    config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
 
@@ -191,5 +199,6 @@ def test_nixl_posix_backend():
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
