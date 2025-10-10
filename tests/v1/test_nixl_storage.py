@@ -41,6 +41,8 @@ def run(config: LMCacheEngineConfig, shape, dtype):
     )
     bad_key = create_key("deadbeefdeadbeef")
 
+    thread_loop = None
+    thread = None
     try:
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)
@@ -112,14 +114,17 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
         bad_obj = nixl_backend.get_blocking(bad_key)
         assert bad_obj is None
+    except Exception:
+        raise
     finally:
-        if thread_loop.is_running():
+        if thread_loop and thread_loop.is_running():
             thread_loop.call_soon_threadsafe(thread_loop.stop)
-        if thread.is_alive():
+        if thread and thread.is_alive():
             thread.join()
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_nixl_gds_mt_cuda_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
@@ -148,6 +153,7 @@ def test_nixl_gds_mt_cpu_backend():
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_nixl_gds_cuda_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
