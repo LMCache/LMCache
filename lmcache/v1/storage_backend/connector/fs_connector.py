@@ -174,6 +174,7 @@ class FSConnector(RemoteConnector):
                         assert num_read_tail is not None
                         num_read = num_read_ahead + num_read_tail
                     # reshape and check
+                    assert num_read is not None
                     memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
 
             return memory_obj
