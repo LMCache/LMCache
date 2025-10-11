@@ -58,9 +58,7 @@ class FSConnector(RemoteConnector):
         relative_tmp_dir = (
             None
             if config is None
-            else config.get_extra_config_value(
-                "fs_connector_relative_tmp_dir", None
-            )
+            else config.get_extra_config_value("fs_connector_relative_tmp_dir", None)
         )
         self.relative_tmp_dir = None
         if relative_tmp_dir is not None:
@@ -70,9 +68,7 @@ class FSConnector(RemoteConnector):
         self.read_ahead_size = (
             None
             if config is None
-            else config.get_extra_config_value(
-                "fs_connector_read_ahead_size", None
-            )
+            else config.get_extra_config_value("fs_connector_read_ahead_size", None)
         )
 
         logger.info(
@@ -170,8 +166,10 @@ class FSConnector(RemoteConnector):
                     if self.read_ahead_size is None:
                         num_read = await f.readinto(buffer)
                     else:
-                        num_read_ahead = await f.readinto(buffer[:self.read_ahead_size])
-                        num_read_tail = await f.readinto(buffer[self.read_ahead_size:])
+                        num_read_ahead = await f.readinto(
+                            buffer[: self.read_ahead_size]
+                        )
+                        num_read_tail = await f.readinto(buffer[self.read_ahead_size :])
                         num_read = num_read_ahead + num_read_tail
                     # reshape and check
                     memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
