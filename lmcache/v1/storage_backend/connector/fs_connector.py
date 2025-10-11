@@ -169,7 +169,9 @@ class FSConnector(RemoteConnector):
                         num_read_ahead = await f.readinto(
                             buffer[: self.read_ahead_size]
                         )
+                        assert num_read_ahead is not None
                         num_read_tail = await f.readinto(buffer[self.read_ahead_size :])
+                        assert num_read_tail is not None
                         num_read = num_read_ahead + num_read_tail
                     # reshape and check
                     memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
