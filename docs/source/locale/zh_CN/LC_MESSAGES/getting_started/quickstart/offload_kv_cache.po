@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"POT-Creation-Date: 2025-10-11 10:29+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -33,7 +33,10 @@ msgid ""
 "different destinations. See "
 ":ref:`getting_started/quickstart/offload_kv_cache:Supported offloading "
 "destinations` for more details."
-msgstr "除了 CPU 内存，LMCache 还支持将 KV 缓存卸载到许多不同的目标。详见 :ref:`getting_started/quickstart/offload_kv_cache:Supported offloading destinations` 。"
+msgstr ""
+"除了 CPU 内存，LMCache 还支持将 KV 缓存卸载到许多不同的目标。详见 "
+":ref:`getting_started/quickstart/offload_kv_cache:Supported offloading "
+"destinations` 。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:13
 msgid "Prerequisites"
@@ -64,7 +67,13 @@ msgid ""
 " See the `examples README <https://github.com/vllm-"
 "project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ "
 "to understand how to run the script for vLLM v1."
-msgstr "本节演示如何在离线推理场景中使用 LMCache 和 vLLM 进行 CPU 内存卸载。我们使用的示例脚本可在 `vLLM 示例 <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/cpu_offload_lmcache.py>`_ 中找到。请参阅 `示例 README <https://github.com/vllm-project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ 了解如何为 vLLM v1 运行脚本。"
+msgstr ""
+"本节演示如何在离线推理场景中使用 LMCache 和 vLLM 进行 CPU 内存卸载。我们使用的示例脚本可在 `vLLM 示例 "
+"<https://github.com/vllm-"
+"project/vllm/blob/main/examples/others/lmcache/cpu_offload_lmcache.py>`_ "
+"中找到。请参阅 `示例 README <https://github.com/vllm-"
+"project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ "
+"了解如何为 vLLM v1 运行脚本。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:28
 msgid "First, set up the necessary environment variables for LMCache:"
@@ -122,7 +131,9 @@ msgid ""
 "limits, storage backends, and more. We'll cover advanced configuration "
 "options in later examples. For now, let's run a minimal example with "
 "default configuration."
-msgstr "LMCache 支持通过 ``lmcache_config.yaml`` 文件进行广泛配置，您可以在其中自定义块大小、内存限制、存储后端等。我们将在后续示例中介绍高级配置选项。现在，让我们使用默认配置运行一个最简单的示例。"
+msgstr ""
+"LMCache 支持通过 ``lmcache_config.yaml`` "
+"文件进行广泛配置，您可以在其中自定义块大小、内存限制、存储后端等。我们将在后续示例中介绍高级配置选项。现在，让我们使用默认配置运行一个最简单的示例。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:107
 msgid ""
@@ -229,7 +240,9 @@ msgid ""
 "size of KV cache exceeds GPU memory, LMCache allows you to store and "
 "reuse the cache from CPU memory, resulting in much faster subsequent "
 "generations for prompts with shared prefixes."
-msgstr "第二种情况下的显著加速展示了 LMCache 如何有效管理 KV 缓存卸载到 CPU 内存。当 KV 缓存的总大小超过 GPU 内存时，LMCache 允许您从 CPU 内存中存储和重用缓存，从而使具有共享前缀的提示的后续生成速度更快。"
+msgstr ""
+"第二种情况下的显著加速展示了 LMCache 如何有效管理 KV 缓存卸载到 CPU 内存。当 KV 缓存的总大小超过 GPU "
+"内存时，LMCache 允许您从 CPU 内存中存储和重用缓存，从而使具有共享前缀的提示的后续生成速度更快。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:369
 msgid "Supported offloading destinations"
@@ -262,4 +275,39 @@ msgstr ":doc:`Redis <../../kv_cache/storage_backends/redis>`"
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:378
 msgid ":doc:`ValKey <../../kv_cache/storage_backends/valkey>`"
 msgstr ":doc:`ValKey <../../kv_cache/storage_backends/valkey>`"
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:381
+msgid "Troubleshooting"
+msgstr "故障排除"
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:383
+msgid "If you encounter the following error:"
+msgstr "如果您遇到以下错误："
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:390
+msgid "You can resolve this issue using one of the following methods:"
+msgstr "您可以通过以下任一方法解决此问题："
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:392
+msgid "Set ``VLLM_WORKER_MULTIPROC_METHOD=spawn`` in the environment variables."
+msgstr "在环境变量中设置 ``VLLM_WORKER_MULTIPROC_METHOD=spawn``。"
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:393
+msgid ""
+"Or update the Python code to guard usage of vllm behind a if ``__name__ "
+"== '__main__':`` block."
+msgstr ""
+"或者更新 Python 代码，将 vLLM 的使用放在 ``if __name__ == '__main__':`` "
+"块中。"
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:404
+msgid ""
+"For details, please refer to the `vLLM Troubleshooting Guide: Python "
+"multiprocessing "
+"<https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-"
+"multiprocessing>`_."
+msgstr ""
+"有关详细信息，请参阅 `vLLM 故障排除指南：Python 多进程 "
+"<https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-"
+"multiprocessing>`_。"
 

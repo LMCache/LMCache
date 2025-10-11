@@ -189,11 +189,8 @@ poedit source/locale/zh_CN/LC_MESSAGES/index.po
 # 检查翻译统计
 make i18n-stat
 
-# 查找未翻译条目
-grep -r 'msgstr ""' source/locale/zh_CN/LC_MESSAGES/
-
-# 查找模糊翻译
-grep -r 'fuzzy' source/locale/zh_CN/LC_MESSAGES/
+# 查找需要翻译的文件（筛选出有 fuzzy 或 untranslated 的文件）
+make i18n-stat | grep -E "(fuzzy|untranslated)" | grep -v "0 fuzzy, 0 untranslated"
 ```
 
 ## 🧪 测试和验证

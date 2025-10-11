@@ -1,0 +1,150 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-10-11 10:29+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/kv_cache/p2p_sharing.rst:4
+msgid "P2P KV Cache Sharing"
+msgstr "P2P KV缓存共享"
+
+#: ../../source/kv_cache/p2p_sharing.rst:6
+msgid ""
+"P2P (Peer-to-Peer) KV cache sharing enables direct cache transfer between"
+" multiple serving engine instances without requiring a centralized cache "
+"server. This approach provides high-performance cache sharing with "
+"reduced latency and improved scalability, especially beneficial in "
+"distributed inference scenarios."
+msgstr ""
+"P2P（点对点）KV缓存共享支持多个服务引擎实例之间直接进行缓存传输，无需"
+"集中式缓存服务器。这种方法提供高性能的缓存共享，具有低延迟和更好的可扩展性，"
+"在分布式推理场景中特别有益。"
+
+#: ../../source/kv_cache/p2p_sharing.rst:8
+msgid ""
+"LMCache supports P2P sharing through a controller-based architecture "
+"using NIXL (NVIDIA Inference Xfer Library) for optimized data transfer "
+"between instances."
+msgstr ""
+"LMCache通过基于控制器的架构支持P2P共享，使用NIXL（NVIDIA推理传输库）"
+"在实例之间进行优化的数据传输。"
+
+#: ../../source/kv_cache/p2p_sharing.rst:11
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/kv_cache/p2p_sharing.rst:13
+msgid "**Multi-GPU Setup**: Your server should have at least 2 GPUs"
+msgstr "**多GPU设置**：您的服务器应至少配备2个GPU"
+
+#: ../../source/kv_cache/p2p_sharing.rst:14
+msgid "**NIXL**: Install from `NIXL <https://github.com/ai-dynamo/nixl>`_"
+msgstr "**NIXL**：从 `NIXL <https://github.com/ai-dynamo/nixl>`_ 安装"
+
+#: ../../source/kv_cache/p2p_sharing.rst:15
+msgid "**LMCache**: Install from :ref:`installation_guide`"
+msgstr "**LMCache**：从 :ref:`installation_guide` 安装"
+
+#: ../../source/kv_cache/p2p_sharing.rst:18
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/kv_cache/p2p_sharing.rst:20
+msgid "Create two configuration files for the P2P sharing setup."
+msgstr "为P2P共享设置创建两个配置文件。"
+
+#: ../../source/kv_cache/p2p_sharing.rst:22
+msgid ""
+"The only difference between the two configurations is the "
+"``lmcache_instance_id`` and the ``p2p_init_ports`` and "
+"``p2p_lookup_ports`` and ``lmcache_worker_ports``."
+msgstr ""
+"两个配置之间唯一的区别是 ``lmcache_instance_id``、``p2p_init_ports``、"
+"``p2p_lookup_ports`` 和 ``lmcache_worker_ports``。"
+
+#: ../../source/kv_cache/p2p_sharing.rst:24
+msgid "**Instance 1 Configuration (example1.yaml)**:"
+msgstr "**实例1配置 (example1.yaml)**："
+
+#: ../../source/kv_cache/p2p_sharing.rst:50
+msgid "**Instance 2 Configuration (example2.yaml)**:"
+msgstr "**实例2配置 (example2.yaml)**："
+
+#: ../../source/kv_cache/p2p_sharing.rst:77
+msgid "Setup and Usage"
+msgstr "设置与使用"
+
+#: ../../source/kv_cache/p2p_sharing.rst:79
+msgid "**Step 1: Start the LMCache Controller**"
+msgstr "**步骤1：启动LMCache控制器**"
+
+#: ../../source/kv_cache/p2p_sharing.rst:85
+msgid ""
+"Make sure that the 8300 and 8400 ports are set up in "
+"**controller_pull_url** and **controller_reply_url** in the configuration"
+" files. Port 9000 is the controller main port, which is arbitrary and can"
+" be changed."
+msgstr ""
+"确保在配置文件中，8300和8400端口已在 **controller_pull_url** 和 "
+"**controller_reply_url** 中设置。端口9000是控制器主端口，它是任意的，可以更改。"
+
+#: ../../source/kv_cache/p2p_sharing.rst:88
+msgid "**Step 2: Start vLLM Engines with LMCache Workers**"
+msgstr "**步骤2：启动带有LMCache Worker的vLLM引擎**"
+
+#: ../../source/kv_cache/p2p_sharing.rst:90
+msgid "Start vLLM engine 1 at port 8010:"
+msgstr "在端口8010启动vLLM引擎1："
+
+#: ../../source/kv_cache/p2p_sharing.rst:100
+msgid "Start vLLM engine 2 at port 8011:"
+msgstr "在端口8011启动vLLM引擎2："
+
+#: ../../source/kv_cache/p2p_sharing.rst:110
+msgid "**Step 3: Test P2P Cache Sharing**"
+msgstr "**步骤3：测试P2P缓存共享**"
+
+#: ../../source/kv_cache/p2p_sharing.rst:112
+msgid "Send a request to vLLM engine 1 to populate the cache:"
+msgstr "向vLLM引擎1发送请求以填充缓存："
+
+#: ../../source/kv_cache/p2p_sharing.rst:124
+msgid ""
+"Send the same request to vLLM engine 2 to demonstrate cache retrieval "
+"from **engine 1**:"
+msgstr ""
+"向vLLM引擎2发送相同的请求，以演示从 **引擎1** 检索缓存："
+
+#: ../../source/kv_cache/p2p_sharing.rst:137
+msgid "Expected Output"
+msgstr "预期输出"
+
+#: ../../source/kv_cache/p2p_sharing.rst:139
+msgid ""
+"When the second request successfully retrieves cache from the first "
+"instance, you should see logs similar to:"
+msgstr ""
+"当第二个请求成功从第一个实例检索到缓存时，您应该会看到类似于以下的日志："
+
+#: ../../source/kv_cache/p2p_sharing.rst:146
+msgid ""
+"These logs indicate successful P2P connection establishment and high-"
+"throughput cache retrieval."
+msgstr ""
+"这些日志表明P2P连接建立成功，并实现了高吞吐量的缓存检索。"
+

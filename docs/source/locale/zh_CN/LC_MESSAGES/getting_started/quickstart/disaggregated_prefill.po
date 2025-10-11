@@ -234,6 +234,9 @@ msgid ""
 "tokens 5170, LMCache hit tokens: 5169, need to load: 5169 "
 "(vllm_v1_adapter.py:543:lmcache.integration.vllm.vllm_v1_adapter)"
 msgstr ""
+"LMCache INFO: Reqid: cmpl-b8bf01cbe47e4d108732ceeb4158d310-0, Total "
+"tokens 5170, LMCache hit tokens: 5169, need to load: 5169 "
+"(vllm_v1_adapter.py:543:lmcache.integration.vllm.vllm_v1_adapter)"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:187
 msgid "The proxy server will log the TTFT of the prefiller node:"

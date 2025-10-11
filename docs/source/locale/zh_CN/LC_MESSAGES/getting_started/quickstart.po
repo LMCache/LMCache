@@ -1,0 +1,154 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-10-11 10:29+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.13.1\n"
+
+#: ../../source/getting_started/quickstart.rst:4
+msgid "Quickstart"
+msgstr "快速开始"
+
+#: ../../source/getting_started/quickstart.rst:6
+msgid ""
+"This guide will help you get LMCache up and running quickly within 2 "
+"minutes. You'll see LMCache in action with a complete end-to-end example."
+msgstr ""
+"本指南将帮助您在2分钟内快速启动和运行LMCache。"
+"您将通过一个完整的端到端示例看到LMCache的实际运行效果。"
+
+#: ../../source/getting_started/quickstart.rst:9
+msgid "(Terminal 1) Install LMCache"
+msgstr "（终端1）安装LMCache"
+
+#: ../../source/getting_started/quickstart.rst:11
+msgid "First, install LMCache with these three commands:"
+msgstr "首先，使用以下三个命令安装LMCache："
+
+#: ../../source/getting_started/quickstart.rst:19
+msgid "Start vLLM with LMCache using a single command:"
+msgstr "使用单个命令启动带有LMCache的vLLM："
+
+#: ../../source/getting_started/quickstart.rst:30
+msgid ""
+"If you want to customize configurations further, you can create a "
+"configuration file. See the :doc:`../api_reference/configurations` page "
+"to learn about all available options."
+msgstr ""
+"如果您想进一步自定义配置，可以创建一个配置文件。"
+"请查看 :doc:`../api_reference/configurations` 页面了解所有可用的选项。"
+
+#: ../../source/getting_started/quickstart.rst:33
+msgid "(Terminal 2) Test LMCache in Action"
+msgstr "（终端2）测试LMCache的实际运行"
+
+#: ../../source/getting_started/quickstart.rst:35
+msgid ""
+"Now let's see LMCache working! Open a new terminal and send your first "
+"request:"
+msgstr ""
+"现在让我们看看LMCache的运行效果！打开一个新的终端并发送您的第一个请求："
+
+#: ../../source/getting_started/quickstart.rst:48
+msgid "You should see LMCache logs like this:"
+msgstr "您应该看到类似这样的LMCache日志："
+
+#: ../../source/getting_started/quickstart.rst:54
+msgid ""
+"**What this means:** The 27 tokens from your prompt are being stored in "
+"CPU RAM because this is the first time the system processes this text. "
+"LMCache is caching the KV cache for future reuse."
+msgstr ""
+"**这意味着：** 您提示中的27个token被存储在CPU RAM中，"
+"因为这是系统第一次处理这段文本。LMCache正在缓存KV缓存以供将来重用。"
+
+#: ../../source/getting_started/quickstart.rst:56
+msgid "Now send a second request with a prefix that overlaps with the first:"
+msgstr "现在发送第二个请求，其前缀与第一个请求重叠："
+
+#: ../../source/getting_started/quickstart.rst:69
+msgid "You should see logs like this:"
+msgstr "您应该看到类似这样的日志："
+
+#: ../../source/getting_started/quickstart.rst:78
+msgid "**What this means:**"
+msgstr "**这意味着：**"
+
+#: ../../source/getting_started/quickstart.rst:80
+msgid "**Total tokens 32**: The new prompt has 32 tokens after tokenization"
+msgstr "**总token数32**：新提示在token化后有32个token"
+
+#: ../../source/getting_started/quickstart.rst:81
+msgid ""
+"**LMCache hit tokens: 24**: 24 tokens were found in the cache (24 is a "
+"multiple of 8, our chunk size in this example)"
+msgstr ""
+"**LMCache命中token数：24**：在缓存中找到了24个token（24是8的倍数，在这个示例中8是我们的块大小）"
+
+#: ../../source/getting_started/quickstart.rst:82
+msgid ""
+"**Need to load: 8**: vLLM has automatic prefix caching enabled with block"
+" size 16. Although there are 24 hit tokens, 16 are already in GPU RAM "
+"managed by vLLM, so LMCache only needs to load 24-16=8 tokens"
+msgstr ""
+"**需要加载：8**：vLLM启用了自动前缀缓存，块大小为16。虽然有24个命中token，"
+"但其中16个已经在vLLM管理的GPU RAM中，所以LMCache只需要加载24-16=8个token"
+
+#: ../../source/getting_started/quickstart.rst:83
+msgid ""
+"**Why 24 hit tokens instead of 27?** LMCache hashes every 8 tokens "
+"incrementally (8, 16, 24, 27). When the new request comes in, it checks "
+"every 8-token chunk, so it uses the 24-token hash instead of checking the"
+" 27-token hash"
+msgstr ""
+"**为什么是24个命中token而不是27个？** LMCache每8个token递增地进行哈希"
+"（8、16、24、27）。当新请求到来时，它检查每个8-token块，所以它使用24-token哈希而不是检查27-token哈希"
+
+#: ../../source/getting_started/quickstart.rst:84
+msgid ""
+"**Stored another 8 tokens**: The new 8 tokens form a complete chunk that "
+"gets hashed and stored in CPU RAM for future use"
+msgstr ""
+"**存储了另外8个token**：新的8个token形成一个完整的块，被哈希并存储在CPU RAM中供将来使用"
+
+#: ../../source/getting_started/quickstart.rst:86
+msgid ""
+"🎉 **Congratulations!** You've just seen LMCache automatically cache and "
+"reuse KV caches, reducing computation for overlapping text."
+msgstr ""
+"🎉 **恭喜！** 您刚刚看到LMCache自动缓存和重用KV缓存，减少了重叠文本的计算量。"
+
+#: ../../source/getting_started/quickstart.rst:89
+msgid "Next Steps"
+msgstr "后续步骤"
+
+#: ../../source/getting_started/quickstart.rst:91
+msgid ""
+"**Performance Testing**: Try the :doc:`benchmarking` section to "
+"experience LMCache's performance benefits with more comprehensive "
+"examples"
+msgstr ""
+"**性能测试**：尝试 :doc:`benchmarking` 部分，通过更全面的示例体验LMCache的性能优势"
+
+#: ../../source/getting_started/quickstart.rst:92
+msgid ""
+"**More Examples**: Explore the :doc:`quickstart/index` section for "
+"detailed examples including KV cache sharing across instances and "
+"disaggregated prefill"
+msgstr ""
+"**更多示例**：探索 :doc:`quickstart/index` 部分，查看详细示例，包括跨实例的KV缓存共享和分离式预填充"
+

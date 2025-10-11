@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"POT-Creation-Date: 2025-10-11 10:29+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -34,7 +34,10 @@ msgid ""
 "filesystem backend can work with a WekaFS mount, this particular backend "
 "is optimized for Weka's characteristics. It leverages GPUDirect Storage "
 "for I/O and it allows data-sharing between multiple LMCache instances."
-msgstr "WekaFS 是一个高性能的分布式文件系统，是 LMCache 中 KV 缓存卸载的受支持选项。尽管本地文件系统后端可以与 WekaFS 挂载一起工作，但这个特定的后端针对 Weka 的特性进行了优化。它利用 GPUDirect Storage 进行 I/O 操作，并允许多个 LMCache 实例之间的数据共享。"
+msgstr ""
+"WekaFS 是一个高性能的分布式文件系统，是 LMCache 中 KV 缓存卸载的受支持选项。尽管本地文件系统后端可以与 WekaFS "
+"挂载一起工作，但这个特定的后端针对 Weka 的特性进行了优化。它利用 GPUDirect Storage 进行 I/O 操作，并允许多个 "
+"LMCache 实例之间的数据共享。"
 
 #: ../../source/kv_cache/storage_backends/weka.rst:15
 msgid "Ways to configure LMCache WEKA Offloading"
@@ -74,7 +77,10 @@ msgid ""
 "has 80GiBs of VRAM would be to start with 8GiB and set ``--gpu-memory-"
 "utilization 0.85`` and depending on your workflow fine-tune it from "
 "there."
-msgstr "该后端目前预注册缓冲区空间以加速 cuFile 操作。此缓冲区空间在 VRAM 中注册，因此在设置时应考虑来自 ``vllm`` 的 ``--gpu-memory-utilization`` 等选项。例如，对于通常具有 80GiB VRAM 的 H100，一个好的经验法则是从 8GiB 开始，设置 ``--gpu-memory-utilization 0.85``，然后根据您的工作流程从中进行微调。"
+msgstr ""
+"该后端目前预注册缓冲区空间以加速 cuFile 操作。此缓冲区空间在 VRAM 中注册，因此在设置时应考虑来自 ``vllm`` 的 "
+"``--gpu-memory-utilization`` 等选项。例如，对于通常具有 80GiB VRAM 的 H100，一个好的经验法则是从 "
+"8GiB 开始，设置 ``--gpu-memory-utilization 0.85``，然后根据您的工作流程从中进行微调。"
 
 #: ../../source/kv_cache/storage_backends/weka.rst:70
 msgid "Setup Example"
@@ -101,8 +107,8 @@ msgid ""
 msgstr "已安装 vllm 和 lmcache（:doc:`安装指南 <../../getting_started/installation>`）"
 
 #: ../../source/kv_cache/storage_backends/weka.rst:82
-msgid "Hugging Face access to ``meta-llama/Llama-3.1-70B-Instruct``"
-msgstr "对 ``meta-llama/Llama-3.1-70B-Instruct`` 的 Hugging Face 访问权限"
+msgid "Hugging Face access to ``meta-llama/Llama-3.1-8B-Instruct``"
+msgstr "对 ``meta-llama/Llama-3.1-8B-Instruct`` 的 Hugging Face 访问权限"
 
 #: ../../source/kv_cache/storage_backends/weka.rst:88
 msgid "**Step 1. Create cache directory under your Weka mount:**"

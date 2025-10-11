@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"POT-Creation-Date: 2025-10-11 10:29+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,39 +27,39 @@ msgstr "欢迎使用 LMCache"
 msgid "Getting Started"
 msgstr "快速开始"
 
-#: ../../source/index.rst:82
+#: ../../source/index.rst:84
 msgid "KV Cache offloading and sharing"
 msgstr "KV 缓存卸载与共享"
 
-#: ../../source/index.rst:91
+#: ../../source/index.rst:94
 msgid "Disaggregated prefill"
 msgstr "分离式预填充"
 
-#: ../../source/index.rst:100
+#: ../../source/index.rst:103
 msgid "KV Cache management"
 msgstr "KV 缓存管理"
 
-#: ../../source/index.rst:108
+#: ../../source/index.rst:111
 msgid "KV Cache Optimizations"
 msgstr "KV 缓存优化"
 
-#: ../../source/index.rst:118
+#: ../../source/index.rst:121
 msgid "Use LMCache in production"
 msgstr "在生产环境中使用 LMCache"
 
-#: ../../source/index.rst:128
+#: ../../source/index.rst:131
 msgid "Internal API Server"
 msgstr "内部 API 服务器"
 
-#: ../../source/index.rst:136
+#: ../../source/index.rst:139
 msgid "Developer Guide"
 msgstr "开发者指南"
 
-#: ../../source/index.rst:148
+#: ../../source/index.rst:151
 msgid "API Reference"
 msgstr "API 参考"
 
-#: ../../source/index.rst:159
+#: ../../source/index.rst:162
 msgid "Community"
 msgstr "社区"
 
@@ -91,7 +91,10 @@ msgid ""
 "`Join LMCache slack workspace "
 "<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
 "5Amprc9k5hcIdXT7XevTaQ>`_"
-msgstr "`加入 LMCache Slack 工作区 <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_"
+msgstr ""
+"`加入 LMCache Slack 工作区 "
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
+"5Amprc9k5hcIdXT7XevTaQ>`_"
 
 #: ../../source/index.rst:50
 msgid "Our papers:"
@@ -121,20 +124,19 @@ msgstr ""
 "`Do Large Language Models Need a Content Delivery Network? "
 "<https://arxiv.org/abs/2409.13761>`_"
 
-#: ../../source/index.rst:56 ../../source/index.rst:80
-#: ../../source/index.rst:89 ../../source/index.rst:98
-#: ../../source/index.rst:106 ../../source/index.rst:116
-#: ../../source/index.rst:126 ../../source/index.rst:134
-#: ../../source/index.rst:146 ../../source/index.rst:157
+#: ../../source/index.rst:56 ../../source/index.rst:82
+#: ../../source/index.rst:92 ../../source/index.rst:101
+#: ../../source/index.rst:109 ../../source/index.rst:119
+#: ../../source/index.rst:129 ../../source/index.rst:137
+#: ../../source/index.rst:149 ../../source/index.rst:160
+#: ../../source/index.rst:169
 msgid ":raw-html:`<br />`"
 msgstr ":raw-html:`<br />`"
-
 
 #: ../../source/index.rst:60
 msgid "Documentation"
 msgstr "文档"
 
-#: ../../source/index.rst:166
-msgid "raw-html:`<br />`"
-msgstr "raw-html:`<br />`"
+#~ msgid "raw-html:`<br />`"
+#~ msgstr "raw-html:`<br />`"
 

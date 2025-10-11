@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-30 15:50+0000\n"
+"POT-Creation-Date: 2025-10-11 10:29+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,8 +20,8 @@ msgstr ""
 "Generated-By: Babel 2.13.1\n"
 
 #: ../../source/getting_started/quickstart/index.rst:4
-msgid "Quickstart Examples"
-msgstr "快速开始示例"
+msgid "More Examples"
+msgstr "更多示例"
 
 #: ../../source/getting_started/quickstart/index.rst:6
 msgid ""
@@ -127,4 +127,7 @@ msgstr "详见 :ref:`disaggregated_prefill` 。"
 #: ../../source/getting_started/quickstart/index.rst:46
 msgid "Detailed Examples"
 msgstr "详细示例"
+
+#~ msgid "Quickstart Examples"
+#~ msgstr "快速开始示例"
 
