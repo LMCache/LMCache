@@ -21,61 +21,61 @@ msgstr ""
 
 #: ../../source/internal_api_server/internal_api_server.rst:4
 msgid "Configuring the Internal API Server"
-msgstr ""
+msgstr "配置内部 API 服务器"
 
 #: ../../source/internal_api_server/internal_api_server.rst:6
 msgid ""
 "The ``internal_api_server`` provides APIs for managing the LMCache "
 "engine. Below are the configuration options and usage examples."
-msgstr ""
+msgstr "``internal_api_server`` 提供用于管理 LMCache 引擎的 API。以下是配置选项和使用示例。"
 
 #: ../../source/internal_api_server/internal_api_server.rst:9
 msgid "Configuration Parameters"
-msgstr ""
+msgstr "配置参数"
 
 #: ../../source/internal_api_server/internal_api_server.rst:11
 msgid "The following parameters can be configured in the YAML file:"
-msgstr ""
+msgstr "可以在 YAML 文件中配置以下参数："
 
 #: ../../source/internal_api_server/internal_api_server.rst:34
 msgid "Testing the Server"
-msgstr ""
+msgstr "测试服务器"
 
 #: ../../source/internal_api_server/internal_api_server.rst:36
 msgid "You can test the server by querying the relevant endpoints."
-msgstr ""
+msgstr "您可以通过查询相关端点来测试服务器。"
 
 #: ../../source/internal_api_server/internal_api_server.rst:38
 msgid "`/metrics` endpoint for metrics:"
-msgstr ""
+msgstr "`/metrics` 端点用于指标："
 
 #: ../../source/internal_api_server/internal_api_server.rst:44
 msgid "`/conf` endpoint for configuration:"
-msgstr ""
+msgstr "`/conf` 端点用于配置："
 
 #: ../../source/internal_api_server/internal_api_server.rst:50
 msgid "`/meta` endpoint for metadata:"
-msgstr ""
+msgstr "`/meta` 端点用于元数据："
 
 #: ../../source/internal_api_server/internal_api_server.rst:56
 msgid "`/threads` endpoint for threads:"
-msgstr ""
+msgstr "`/threads` 端点用于线程："
 
 #: ../../source/internal_api_server/internal_api_server.rst:62
 msgid "`/loglevel` endpoint for log level:"
-msgstr ""
+msgstr "`/loglevel` 端点用于日志级别："
 
 #: ../../source/internal_api_server/internal_api_server.rst:73
 msgid "`/run_script` endpoint for running script:"
-msgstr ""
+msgstr "`/run_script` 端点用于运行脚本："
 
 #: ../../source/internal_api_server/internal_api_server.rst:82
 msgid "`scratch.py`:"
-msgstr ""
+msgstr "`scratch.py`："
 
 #: ../../source/internal_api_server/internal_api_server.rst:103
 msgid "How to extend the Internal API Server"
-msgstr ""
+msgstr "如何扩展内部 API 服务器"
 
 #: ../../source/internal_api_server/internal_api_server.rst:105
 msgid ""
@@ -83,5 +83,5 @@ msgid ""
 "to the `lmcache/v1/internal_api_server/` directory. Ensure your new file "
 "name ends with `_api.py`. Additionally, you need to define a `router = "
 "APIRouter()` in your file and add your endpoints to it."
-msgstr ""
+msgstr "您可以通过向 `lmcache/v1/internal_api_server/` 目录添加新的端点文件来扩展 ``internal_api_server``。确保您的新文件名以 `_api.py` 结尾。此外，您需要在文件中定义 `router = APIRouter()` 并将您的端点添加到其中。"
 

@@ -21,9 +21,9 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/valkey.rst:2
 msgid "ValKey"
-msgstr ""
+msgstr "ValKey"
 
 #: ../../source/kv_cache/storage_backends/valkey.rst:4
 msgid "Coming soon..."
-msgstr ""
+msgstr "即将推出..."
 

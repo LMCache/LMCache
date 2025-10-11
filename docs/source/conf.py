@@ -44,8 +44,8 @@ copybutton_prompt_is_regexp = True
 autosectionlabel_prefix_document = True
 
 # -- Internationalization configuration --------------------------------------
-locale_dirs = ['locale/']   # 翻译文件的路径
-gettext_compact = False     # 为每个文档生成单独的 .pot 文件
+locale_dirs = ["locale/"]  # translation file path
+gettext_compact = False  # generate separate .pot files for each document
 
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):

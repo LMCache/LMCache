@@ -21,9 +21,9 @@ msgstr ""
 
 #: ../../source/getting_started/faq.rst:2
 msgid "FAQ"
-msgstr ""
+msgstr "常见问题"
 
 #: ../../source/getting_started/faq.rst:4
 msgid "Coming soon..."
-msgstr ""
+msgstr "即将推出..."
 

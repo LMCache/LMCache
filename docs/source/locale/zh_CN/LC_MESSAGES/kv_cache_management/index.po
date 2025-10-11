@@ -21,45 +21,45 @@ msgstr ""
 
 #: ../../source/kv_cache_management/index.rst:2
 msgid "LMCache Controller"
-msgstr ""
+msgstr "LMCache 控制器"
 
 #: ../../source/kv_cache_management/index.rst:4
 msgid ""
 "LMCache Controller exposes a set of APIs for users and orchestrators to "
 "manage the KV cache."
-msgstr ""
+msgstr "LMCache 控制器为用户和编排器提供一组 API 来管理 KV 缓存。"
 
 #: ../../source/kv_cache_management/index.rst:6
 msgid "Currently, the controller provides the following APIs:"
-msgstr ""
+msgstr "目前，控制器提供以下 API："
 
 #: ../../source/kv_cache_management/index.rst:8
 msgid ":ref:`Clear <clear>`: Clear the KV caches."
-msgstr ""
+msgstr ":ref:`Clear <clear>`：清除 KV 缓存。"
 
 #: ../../source/kv_cache_management/index.rst:9
 msgid ":ref:`Compress <compress>`: Compress the KV cache."
-msgstr ""
+msgstr ":ref:`Compress <compress>`：压缩 KV 缓存。"
 
 #: ../../source/kv_cache_management/index.rst:10
 msgid ":ref:`Health <health>`: Check the health status of cache workers."
-msgstr ""
+msgstr ":ref:`Health <health>`：检查缓存工作器的健康状态。"
 
 #: ../../source/kv_cache_management/index.rst:11
 msgid ":ref:`Lookup <lookup>`: Lookup the KV cache for a given list of tokens."
-msgstr ""
+msgstr ":ref:`Lookup <lookup>`：查找给定 token 列表的 KV 缓存。"
 
 #: ../../source/kv_cache_management/index.rst:12
 msgid ":ref:`Move <move>`: Move the KV cache to a different location."
-msgstr ""
+msgstr ":ref:`Move <move>`：将 KV 缓存移动到不同位置。"
 
 #: ../../source/kv_cache_management/index.rst:13
 msgid ":ref:`Pin <pin>`: Persist the KV cache to prevent it from being evicted."
-msgstr ""
+msgstr ":ref:`Pin <pin>`：持久化 KV 缓存以防止被驱逐。"
 
 #: ../../source/kv_cache_management/index.rst:14
 msgid ""
 ":ref:`CheckFinish <check_finish>`: Check whether a (non-blocking) control"
 " event has finished or not."
-msgstr ""
+msgstr ":ref:`CheckFinish <check_finish>`：检查（非阻塞）控制事件是否已完成。"
 

@@ -21,9 +21,9 @@ msgstr ""
 
 #: ../../source/api_reference/storage_backends.rst:2
 msgid "Adding new storage backends"
-msgstr ""
+msgstr "添加新的存储后端"
 
 #: ../../source/api_reference/storage_backends.rst:4
 msgid "Coming soon..."
-msgstr ""
+msgstr "即将推出..."
 

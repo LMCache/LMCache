@@ -21,14 +21,14 @@ msgstr ""
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:4
 msgid "Example: Disaggregated prefill"
-msgstr ""
+msgstr "示例：分离式预填充"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:6
 msgid ""
 "With LMCache as a KV cache transfer library, we can run disaggregated "
 "prefill with vLLM. Right now, LMCache uses NIXL as a transport layer to "
 "enable fast KV cache transfer via NVLink, RDMA, or TCP."
-msgstr ""
+msgstr "使用 LMCache 作为 KV 缓存传输库，我们可以在 vLLM 中运行分离式预填充。目前，LMCache 使用 NIXL 作为传输层，通过 NVLink、RDMA 或 TCP 实现快速的 KV 缓存传输。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:9
 msgid ""
@@ -36,51 +36,51 @@ msgid ""
 "using a single prefiller and decoder setup (1P1D) on a single machine. "
 "The architecture splits the LLM inference into two stages: prefill and "
 "decode, running on separate GPUs for better resource utilization."
-msgstr ""
+msgstr "本指南演示如何在单台机器上使用单个预填充器和解码器设置（1P1D）运行 LMCache 分离式预填充。该架构将 LLM 推理分为两个阶段：预填充和解码，运行在不同的 GPU 上以实现更好的资源利用。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:13
 msgid "Prerequisites"
-msgstr ""
+msgstr "前置要求"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:15
 msgid "Before you begin, ensure you have:"
-msgstr ""
+msgstr "开始之前，请确保您已具备："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:17
 msgid "At least 2 GPUs"
-msgstr ""
+msgstr "至少 2 个 GPU"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:18
 msgid "Python packages installed:"
-msgstr ""
+msgstr "已安装的 Python 包："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:19
 msgid "``lmcache`` (0.2.1 or above)"
-msgstr ""
+msgstr "``lmcache``（0.2.1 或更高版本）"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:20
 msgid ""
 "``nixl`` (Install instructions `here <https://github.com/ai-"
 "dynamo/nixl>`_)"
-msgstr ""
+msgstr "``nixl``（安装说明请参见 `这里 <https://github.com/ai-dynamo/nixl>`_）"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:21
 msgid "``vllm`` (latest main branch)"
-msgstr ""
+msgstr "``vllm``（最新主分支）"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:22
 msgid "``httpx``, ``fastapi``, and ``uvicorn``"
-msgstr ""
+msgstr "``httpx``、``fastapi`` 和 ``uvicorn``"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:23
 msgid ""
 "A valid Hugging Face token (``HF_TOKEN``) with access to Llama 3.1 8B "
 "models"
-msgstr ""
+msgstr "有效的 Hugging Face token（``HF_TOKEN``），并可访问 Llama 3.1 8B 模型"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:25
 msgid "(Recommended) A machine with NVLink or RDMA enabled GPUs"
-msgstr ""
+msgstr "（推荐）具有 NVLink 或 RDMA 功能的 GPU 的机器"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:29
 msgid ""
@@ -88,145 +88,145 @@ msgid ""
 "verify the NVLink or RDMA connection. Please refer to this link: `UCX "
 "Performance Test <https://ucx-py.readthedocs.io/en/latest/ucx-"
 "debug.html>`_."
-msgstr ""
+msgstr "您可以使用 ``ucx_perftest`` 检查 GPU 到 GPU 的内存传输并验证 NVLink 或 RDMA 连接。请参阅此链接：`UCX 性能测试 <https://ucx-py.readthedocs.io/en/latest/ucx-debug.html>`_。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:33
 msgid "Architecture Overview"
-msgstr ""
+msgstr "架构概述"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:35
 msgid "The disaggregated prefill setup consists of three main components:"
-msgstr ""
+msgstr "分离式预填充设置包含三个主要组件："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:37
 msgid ""
 "**Prefiller Server (Port 8100)**: Handles the prefill phase of LLM "
 "inference"
-msgstr ""
+msgstr "**预填充服务器（端口 8100）**：处理 LLM 推理的预填充阶段"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:38
 msgid "**Decoder Server (Port 8200)**: Manages the decoding/generation phase"
-msgstr ""
+msgstr "**解码服务器（端口 8200）**：管理解码/生成阶段"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:39
 msgid "**Proxy Server (Port 9000)**: Coordinates between prefiller and decoder"
-msgstr ""
+msgstr "**代理服务器（端口 9000）**：协调预填充器和解码器"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:42
 msgid "Configuration"
-msgstr ""
+msgstr "配置"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:44
 msgid "**Prefiller Server Configuration** (``lmcache-prefiller-config.yaml``):"
-msgstr ""
+msgstr "**预填充服务器配置**（``lmcache-prefiller-config.yaml``）："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:59
 msgid "**Decoder Server Configuration** (``lmcache-decoder-config.yaml``):"
-msgstr ""
+msgstr "**解码服务器配置**（``lmcache-decoder-config.yaml``）："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:76
 msgid "Step-by-Step Setup"
-msgstr ""
+msgstr "分步设置"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:78
 msgid "**Environment Setup**"
-msgstr ""
+msgstr "**环境设置**"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:80
 msgid "Set your Hugging Face token before running the vLLM servers."
-msgstr ""
+msgstr "在运行 vLLM 服务器之前设置您的 Hugging Face 令牌。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:86
 msgid "**Launch the vLLM + LMCache Inference Servers**"
-msgstr ""
+msgstr "**启动 vLLM + LMCache 推理服务器**"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:88
 msgid "You can launch the components individually:"
-msgstr ""
+msgstr "您可以单独启动各个组件："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:90
 msgid "Launch Decoder (on GPU 1):"
-msgstr ""
+msgstr "启动解码器（在 GPU 1 上）："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:103
 msgid "Launch Prefiller (on GPU 0):"
-msgstr ""
+msgstr "启动预填充器（在 GPU 0 上）："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:116
 msgid "Launch a proxy server to coordinate between prefiller and decoder:"
-msgstr ""
+msgstr "启动代理服务器以协调预填充器和解码器："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:118
 msgid ""
 "The code for the proxy server is available `in vLLM repo "
 "<https://github.com/vllm-"
 "project/vllm/blob/main/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py>`_."
-msgstr ""
+msgstr "代理服务器的代码可在 `vLLM 仓库 <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_proxy_server.py>`_ 中找到。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:138
 msgid ""
 "The ``UCX_TLS`` environment variable is used to specify the transport "
 "layer for UCX (the example uses NVLink) The ``CUDA_VISIBLE_DEVICES`` "
 "environment variable is used to specify the GPUs to use for the servers."
-msgstr ""
+msgstr "``UCX_TLS`` 环境变量用于指定 UCX 的传输层（示例使用 NVLink）。``CUDA_VISIBLE_DEVICES`` 环境变量用于指定服务器使用的 GPU。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:142
 msgid "**Verify Setup**"
-msgstr ""
+msgstr "**验证设置**"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:144
 msgid "The servers are ready when you can access:"
-msgstr ""
+msgstr "当您可以访问以下地址时，服务器就准备好了："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:146
 msgid "Prefiller: ``http://localhost:7100/v1/completions``"
-msgstr ""
+msgstr "预填充器：``http://localhost:7100/v1/completions``"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:147
 msgid "Decoder: ``http://localhost:7200/v1/completions``"
-msgstr ""
+msgstr "解码器：``http://localhost:7200/v1/completions``"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:148
 msgid "Proxy: ``http://localhost:9100/v1/completions``"
-msgstr ""
+msgstr "代理：``http://localhost:9100/v1/completions``"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:151
 msgid "Usage"
-msgstr ""
+msgstr "使用方法"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:153
 msgid ""
 "Send requests to the proxy server (port 9000) using either the "
 "completions or chat completions endpoint:"
-msgstr ""
+msgstr "使用 completions 或 chat completions 端点向代理服务器（端口 9000）发送请求："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:165
 msgid ""
 "You can also test the setup with the following command, which runs the "
 "`benchmark_serving.py <https://github.com/vllm-"
 "project/vllm/blob/main/vllm/benchmarks/benchmark_serving.py>`_ from vLLM."
-msgstr ""
+msgstr "您也可以使用以下命令测试设置，该命令会运行 vLLM 的 `benchmark_serving.py <https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/benchmark_serving.py>`_。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:177
 msgid "Monitoring"
-msgstr ""
+msgstr "监控"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:179
 msgid "The prefiller instance will log the throughput of KV cache transfer:"
-msgstr ""
+msgstr "预填充实例将记录 KV 缓存传输的吞吐量："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:181
 msgid ""
 "LMCache INFO: Store 5271 tokens takes: 6.5000 ms, throughput: 98.9889 "
 "GB/s; offload_time: 2.6594 ms, put_time: 3.4539 ms "
 "(cache_engine.py:190:lmcache.v1.cache_engine)"
-msgstr ""
+msgstr "LMCache INFO: 存储 5271 个 tokens 耗时：6.5000 ms，吞吐量：98.9889 GB/s；offload_time: 2.6594 ms, put_time: 3.4539 ms (cache_engine.py:190:lmcache.v1.cache_engine)"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:183
 msgid ""
 "The decoder instance will log how many tokens are fetched from the "
 "LMCache:"
-msgstr ""
+msgstr "解码器实例将记录从 LMCache 获取的 token 数量："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:185
 msgid ""
@@ -237,33 +237,33 @@ msgstr ""
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:187
 msgid "The proxy server will log the TTFT of the prefiller node:"
-msgstr ""
+msgstr "代理服务器将记录预填充节点的 TTFT："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:201
 msgid "Troubleshooting"
-msgstr ""
+msgstr "故障排查"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:203
 msgid "Common issues and solutions:"
-msgstr ""
+msgstr "常见问题和解决方案："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:205
 msgid "**GPU Requirements**: Ensure you have at least 2 GPUs available"
-msgstr ""
+msgstr "**GPU 要求**：确保至少有 2 个可用的 GPU"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:206
 msgid "**Port Conflicts**: Check if ports used above are available"
-msgstr ""
+msgstr "**端口冲突**：检查上述使用的端口是否可用"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:207
 msgid ""
 "**HF Token**: Verify your token starts with ``hf_`` and has necessary "
 "model access"
-msgstr ""
+msgstr "**HF Token**：验证您的 token 以 ``hf_`` 开头并具有必要的模型访问权限"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:208
 msgid ""
 "**CUDA Errors**: Ensure CUDA_VISIBLE_DEVICES is set correctly for each "
 "server"
-msgstr ""
+msgstr "**CUDA 错误**：确保为每个服务器正确设置了 CUDA_VISIBLE_DEVICES"
 

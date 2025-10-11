@@ -21,164 +21,173 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/s3.rst:2
 msgid "S3 Backend"
-msgstr ""
+msgstr "S3 后端"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:5
 msgid "Example Configurations"
-msgstr ""
+msgstr "示例配置"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:8
 msgid "Basic S3 Configuration"
-msgstr ""
+msgstr "基本 S3 配置"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:24
 msgid "S3 Express One Zone"
-msgstr ""
+msgstr "S3 Express 单区域"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:43
 msgid "CoreWeave (S3-compatible)"
-msgstr ""
+msgstr "CoreWeave（S3 兼容）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:64
 msgid ""
 "**Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that "
 "caches for GPU locality. Set `s3_enable_s3express: False` for non-AWS "
 "services."
-msgstr ""
+msgstr "**注意**：`cwlota.com` 是 CoreWeave 的 S3 兼容云存储，可为 GPU 本地性缓存。对于非 AWS 服务，设置 `s3_enable_s3express: False`。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:67
 msgid "Configuration Parameters"
-msgstr ""
+msgstr "配置参数"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:69
 msgid "**remote_url**: S3 bucket URL (`s3://bucket-name`)"
-msgstr ""
+msgstr "**remote_url**：S3 存储桶 URL（`s3://bucket-name`）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:70
 msgid ""
 "**save_unfull_chunk**: Save partial chunks (default: True, **must be "
 "False for S3**)"
-msgstr ""
+msgstr "**save_unfull_chunk**：保存部分块（默认：True，**对于 S3 必须为 False**）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:71
 msgid "**enable_async_loading**: Async loading (default: False)"
-msgstr ""
+msgstr "**enable_async_loading**：异步加载（默认：False）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:72
 msgid "**blocking_timeout_secs**: Timeout seconds (default: 10)"
-msgstr ""
+msgstr "**blocking_timeout_secs**：超时秒数（默认：10）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:75
 msgid "S3-Specific (in extra_config)"
-msgstr ""
+msgstr "S3 专用（在 extra_config 中）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:77
 msgid "**s3_region**: AWS region for S3 client (required)"
-msgstr ""
+msgstr "**s3_region**：S3 客户端的 AWS 区域（必需）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:78
 msgid ""
 "**s3_max_io_concurrency**: Max concurrent I/O operations for event loop "
 "group (controls AWS CRT threading)"
-msgstr ""
+msgstr "**s3_max_io_concurrency**：事件循环组的最大并发 I/O 操作数（控制 AWS CRT 线程）"
+"**s3_max_io_concurrency**：事件循环组的最大并发 I/O 操作数（控制 AWS CRT 线程）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:79
 msgid ""
 "**s3_max_inflight_reqs**: Max simultaneous S3 requests (creates this many"
 " /dev/shm buffers and semaphore limit)"
-msgstr ""
+msgstr "**s3_max_inflight_reqs**：最大同时 S3 请求数（创建这么多 /dev/shm 缓冲区和信号量限制）"
+"**s3_max_inflight_reqs**：最大同时 S3 请求数（创建这么多 /dev/shm 缓冲区和信号量限制）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:80
 msgid ""
 "**s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation ([\"h2\", "
 "\"http/1.1\"])"
-msgstr ""
+msgstr "**s3_prefer_http2**：启用带 ALPN 协商的 HTTP/2（[\"h2\", \"http/1.1\"]）"
+"**s3_prefer_http2**：启用带 ALPN 协商的 HTTP/2（[\"h2\", \"http/1.1\"]）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:81
 msgid ""
 "**s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT "
 "client"
-msgstr ""
+msgstr "**s3_enable_s3express**：在 AWS CRT 客户端中启用 S3 Express One Zone 支持"
+"**s3_enable_s3express**：在 AWS CRT 客户端中启用 S3 Express One Zone 支持"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:82
 msgid ""
 "**s3_file_prefix**: Prefix for S3 object keys (e.g., `cache` becomes "
 "`/cache/key_name`). Avoid leading/trailing slashes."
 msgstr ""
+"**s3_file_prefix**：S3 对象键的前缀（例如，`cache` 变为 `/cache/key_name`）。避免前导/尾随斜杠。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:83
 msgid ""
 "**save_chunk_meta**: Whether to save chunk metadata with data (set False "
 "for performance)"
 msgstr ""
+"**save_chunk_meta**：是否与数据一起保存块元数据（为性能设置为 False）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:85
 msgid ""
 "The effective concurrency is limited by the minimum of "
 "`s3_max_io_concurrency` and `s3_max_inflight_reqs`."
 msgstr ""
+"有效并发数受 `s3_max_io_concurrency` 和 `s3_max_inflight_reqs` 的最小值限制。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:88
 msgid "/dev/shm Configuration"
-msgstr ""
+msgstr "/dev/shm 配置"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:90
 msgid ""
 "/dev/shm is used as the tmpfs that S3 can use to transfer only into RAM "
 "instead of having to touch a block device."
 msgstr ""
+"/dev/shm 用作 tmpfs，S3 可以使用它仅传输到 RAM 中，而不必接触块设备。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:93
 msgid "Memory Requirements and Configuration Calculation"
-msgstr ""
+msgstr "内存需求和配置计算"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:95
 msgid "Calculate total memory needed:"
-msgstr ""
+msgstr "计算所需的总内存："
 
 #: ../../source/kv_cache/storage_backends/s3.rst:102
 msgid "Calculate s3_max_inflight_reqs based on /dev/shm:"
-msgstr ""
+msgstr "基于 /dev/shm 计算 s3_max_inflight_reqs："
 
 #: ../../source/kv_cache/storage_backends/s3.rst:108
 msgid "Check current size:"
-msgstr ""
+msgstr "检查当前大小："
 
 #: ../../source/kv_cache/storage_backends/s3.rst:114
 msgid "Increase size:"
-msgstr ""
+msgstr "增加大小："
 
 #: ../../source/kv_cache/storage_backends/s3.rst:120
 msgid "Clean up LMCache files:"
-msgstr ""
+msgstr "清理 LMCache 文件："
 
 #: ../../source/kv_cache/storage_backends/s3.rst:127
 msgid "Troubleshooting"
-msgstr ""
+msgstr "故障排除"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:129
 msgid "**Memory:**:"
-msgstr ""
+msgstr "**内存**："
 
 #: ../../source/kv_cache/storage_backends/s3.rst:131
 msgid "Check: `df -h /dev/shm`"
-msgstr ""
+msgstr "检查：`df -h /dev/shm`"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:133
 msgid ""
 "Fix: Increase `/dev/shm` size or reduce `s3_max_inflight_reqs` or "
 "`max_local_cpu_size`"
 msgstr ""
+"修复：增加 `/dev/shm` 大小或减少 `s3_max_inflight_reqs` 或 `max_local_cpu_size`"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:135
 msgid "Clean: `rm -f /dev/shm/my_shm_*`"
-msgstr ""
+msgstr "清理：`rm -f /dev/shm/my_shm_*`"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:137
 msgid "**Latency**::"
-msgstr ""
+msgstr "**延迟**："
 
 #: ../../source/kv_cache/storage_backends/s3.rst:141
 msgid "Consider S3 Express One Zone"
-msgstr ""
+msgstr "考虑使用 S3 Express One Zone"
 

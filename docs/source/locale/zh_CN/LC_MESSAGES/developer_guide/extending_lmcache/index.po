@@ -22,32 +22,32 @@ msgstr ""
 #: ../../source/developer_guide/extending_lmcache/index.rst:2
 #: ../../source/developer_guide/extending_lmcache/index.rst:108
 msgid "Extending LMCache"
-msgstr ""
+msgstr "扩展 LMCache"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:4
 msgid ""
 "LMCache is designed to be extensible, allowing integration of custom "
 "functionality without modifying the core. The main extension mechanisms "
 "are:"
-msgstr ""
+msgstr "LMCache 设计为可扩展的，允许在不修改核心代码的情况下集成自定义功能。主要的扩展机制有："
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:6
 msgid ""
 "**External Storage Backend Framework** – integrate new storage backends "
 "(custom cache storage modules) via a standardized interface."
-msgstr ""
+msgstr "**外部存储后端框架** – 通过标准化接口集成新的存储后端（自定义缓存存储模块）。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:7
 msgid ""
 "**External Remote Connector Framework** – integrate new remote KV store "
 "connectors for external/distributed storage systems."
-msgstr ""
+msgstr "**外部远程连接器框架** – 为外部/分布式存储系统集成新的远程 KV 存储连接器。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:8
 msgid ""
 "**Plugin Framework** – run custom scripts as separate processes alongside"
 " LMCache for added functionality."
-msgstr ""
+msgstr "**插件框架** – 将自定义脚本作为独立进程与 LMCache 并行运行以添加功能。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:34
 msgid ""
@@ -60,22 +60,26 @@ msgid ""
 " disk storage, NVIDIA NIXL (GPU peer-to-peer), and remote stores like "
 "Redis, InfiniStore, Mooncake, etc."
 msgstr ""
+"**外部存储后端**（图表底部部分）使 LMCache 能够与新的存储或传输系统进行交互。开发人员可以实现标准化的 "
+"``StorageBackendInterface`` 来创建自定义存储后端模块。这些外部后端在运行时由 LMCache 加载（通过配置），作为 "
+"LMCache 自带的内置后端的补充。内置后端包括内存 CPU 缓存、本地磁盘存储、NVIDIA NIXL（GPU 点对点）以及 "
+"Redis、InfiniStore、Mooncake 等远程存储。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:36
 msgid "To add an external backend, you need to:"
-msgstr ""
+msgstr "要添加外部后端，您需要："
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:38
 msgid ""
 "**Implement** a Python class inheriting from the LMCache "
 "``StorageBackendInterface``, overriding all required methods."
-msgstr ""
+msgstr "**实现**一个继承自 LMCache ``StorageBackendInterface`` 的 Python 类，覆盖所有必需的方法。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:39
 msgid ""
 "**Install** this backend package in the LMCache environment (so that "
 "LMCache can import it)."
-msgstr ""
+msgstr "**安装**此后端包到 LMCache 环境中（以便 LMCache 可以导入它）。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:40
 msgid ""
@@ -83,6 +87,8 @@ msgid ""
 "`external_backends` list and specifying the module path and class name in"
 " the configuration’s `extra_config`. For example:"
 msgstr ""
+"**配置** LMCache 使用它，方法是在 `external_backends` 列表中添加一个条目，并在配置的 "
+"`extra_config` 中指定模块路径和类名。例如："
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:49
 msgid ""
@@ -92,6 +98,9 @@ msgid ""
 "higher priority for cache lookups (i.e. LMCache will check those backends"
 " first when retrieving KV entries)."
 msgstr ""
+"可以同时启用多个外部后端。它们在 LMCache "
+"启动期间初始化。请注意，后端的顺序可能很重要：如果使用多个后端，列表中靠前的后端在缓存查找时具有更高的优先级（即 LMCache 在检索 KV "
+"条目时会首先检查这些后端）。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:51
 msgid ""
@@ -102,6 +111,9 @@ msgid ""
 "connectors exist for Redis, InfiniStore, and MooncakeStore. To extend "
 "LMCache with a new remote connector, you should:"
 msgstr ""
+"**外部远程连接器**（图表中间部分）允许 LMCache 的远程存储层连接到新的外部 KV 存储系统。LMCache 的 "
+"`RemoteBackend` 使用连接器实现来与各种外部存储通信。例如，内置连接器包括 Redis、InfiniStore 和 "
+"MooncakeStore。要使用新的远程连接器扩展 LMCache，您应该："
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:53
 msgid ""
@@ -110,6 +122,8 @@ msgid ""
 " `RemoteConnector` base and providing methods to connect, put, get, etc.,"
 " for your storage system."
 msgstr ""
+"**实现**一个遵循 LMCache 远程连接器接口的类（类似于现有连接器）。这通常涉及继承 `RemoteConnector` "
+"基类并为您的存储系统提供连接、put、get 等方法。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:54
 msgid ""
@@ -119,6 +133,9 @@ msgid ""
 "`foo://`, you will want LMCache to use your class whenever a remote URL "
 "starts with `foo://`."
 msgstr ""
+"**公开**您的连接器以供动态加载。每个远程连接器都与 `remote_url` 中的 URI "
+"方案关联。例如，如果您为名为\"FooStore\"的新存储创建了一个方案为 `foo://` 的连接器，您希望 LMCache 在远程 URL "
+"以 `foo://` 开头时使用您的类。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:55
 msgid ""
@@ -126,6 +143,8 @@ msgid ""
 "versions, LMCache supports dynamic loading of external connectors via "
 "configuration. For example, you might include in `extra_config`:"
 msgstr ""
+"**配置** LMCache 以识别和加载连接器。在最新版本中，LMCache 支持通过配置动态加载外部连接器。例如，您可以在 "
+"`extra_config` 中包含："
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:63
 msgid ""
@@ -133,6 +152,8 @@ msgid ""
 "`foo://...`, it will import and use the `FooStoreConnector` class for "
 "remote operations."
 msgstr ""
+"通过此配置，当 LMCache 看到类似 `foo://...` 的 `remote_url` 时，它将导入并使用 "
+"`FooStoreConnector` 类进行远程操作。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:65
 msgid ""
@@ -142,6 +163,8 @@ msgid ""
 "typically handles connection setup, data serialization, read/write "
 "operations, and error handling for the external store."
 msgstr ""
+"通过实现自定义连接器并如上所述进行配置，您可以在不更改 LMCache 核心代码的情况下集成新的远程后端（数据库、分布式 KV "
+"存储等）。`RemoteConnector` 接口通常处理外部存储的连接设置、数据序列化、读/写操作和错误处理。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:67
 msgid ""
@@ -154,10 +177,13 @@ msgid ""
 "and metrics, custom cache management policies, health checks, or "
 "integration with external systems."
 msgstr ""
+"**插件框架**（图表顶部部分）允许在 LMCache 进程旁边运行自定义脚本。插件由 LMCache "
+"的插件启动器作为独立子进程启动。插件可以针对特定的 LMCache 角色——调度器（控制器）、工作进程或所有节点——取决于其文件名。它们可以用 "
+"Python、Bash 或其他脚本语言编写，适用于日志记录和指标、自定义缓存管理策略、健康检查或与外部系统集成等任务。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:69
 msgid "Key points and usage of the plugin system:"
-msgstr ""
+msgstr "插件系统的关键点和用法："
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:71
 msgid ""
@@ -165,10 +191,12 @@ msgid ""
 "the LMCache config file. Set the `plugin_locations` in your YAML config "
 "to point to directories containing plugin scripts. For example:"
 msgstr ""
+"**配置：**您可以通过环境变量和 LMCache 配置文件启用插件。在 YAML 配置中设置 `plugin_locations` "
+"以指向包含插件脚本的目录。例如："
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:79
 msgid "At runtime, LMCache will scan these directories for plugin files."
-msgstr ""
+msgstr "在运行时，LMCache 将扫描这些目录以查找插件文件。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:81
 msgid ""
@@ -180,6 +208,10 @@ msgid ""
 " worker). - `LMCACHE_PLUGIN_WORKER_COUNT`: total number of worker "
 "processes in the LMCache cluster."
 msgstr ""
+"**环境变量：**LMCache 通过环境变量向插件提供上下文：- `LMCACHE_PLUGIN_ROLE`：插件运行所在的进程角色（例如 "
+"`SCHEDULER` 或 `WORKER`）。- `LMCACHE_PLUGIN_CONFIG`：通过 LMCache 传递的任何插件配置的 "
+"JSON 字符串。- `LMCACHE_PLUGIN_WORKER_ID`：当前工作进程的 ID（如果在工作进程上运行）。- "
+"`LMCACHE_PLUGIN_WORKER_COUNT`：LMCache 集群中工作进程的总数。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:87
 msgid ""
@@ -197,6 +229,15 @@ msgid ""
 " underscores separating, e.g. `worker_2_custom.py` has three parts, which"
 " targets worker ID 2 specifically)."
 msgstr ""
+"**命名约定：**插件文件名决定了它们的执行位置：- 以 **`scheduler_`** "
+"为前缀的文件仅在调度器进程上运行。*（示例：`scheduler_metrics.py` 仅在调度器上运行。）*- 以 **`worker_`**"
+" 为前缀的文件在工作进程上运行。如果包含数字工作进程 ID（例如 "
+"`worker_0_health.sh`），则插件仅在该特定工作进程上运行。如果不包含 ID（例如 "
+"`worker_logcollector.py`），则插件将在**所有**工作进程上运行。- 以 **`all_`** "
+"为前缀的文件（或任何没有角色前缀的文件）在所有 LMCache 进程上运行（包括调度器和每个工作进程）。*（示例：`all_monitor.sh`"
+" 在每个 LMCache 节点上运行。）*- 文件名中的角色名称不区分大小写。确保工作进程 "
+"ID（如果指定）是数字并且是文件名的一部分（使用下划线分隔，例如 `worker_2_custom.py` 有三个部分，专门针对工作进程 ID "
+"2）。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:93
 msgid ""
@@ -213,6 +254,12 @@ msgid ""
 " process). They will be automatically terminated when the parent LMCache "
 "process exits, ensuring no orphan processes."
 msgstr ""
+"**执行模型：**当 LMCache 启动时，`PluginLauncher` 定位并将每个插件作为子进程启动：1. "
+"**解释器选择：**插件启动器检查脚本的 shebang（例如 `#!...`）以决定使用哪个解释器。如果未提供 "
+"shebang，则根据文件扩展名回退（``.py`` 使用默认的 Python 解释器，``.sh`` 使用 Bash 等）。2. "
+"**输出处理：**插件进程的 stdout 和 stderr 被 LMCache 捕获并使用前缀（插件名称）记录，因此插件输出会出现在 "
+"LMCache 日志中，方便调试/监控。3. **生命周期：**插件在 LMCache "
+"进程启动时启动（如果其命名表明它们应该在该进程中运行）。当父 LMCache 进程退出时，它们将自动终止，确保不会有孤儿进程。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:98
 msgid ""
@@ -229,11 +276,15 @@ msgid ""
 "detect if it hangs, and ensure it does not block LMCache’s normal "
 "operation."
 msgstr ""
+"**最佳实践：**编写插件时，请考虑以下指导原则以确保它们与 LMCache 顺利配合：- 保持插件在资源使用和启动时间方面轻量级，以免拖慢 "
+"LMCache 进程。- 使用清晰且描述性的文件名以反映其用途。- 在插件脚本中包含适当的错误处理，以避免未处理的异常导致问题。- 在脚本顶部使用"
+" shebang 行以提高可移植性（以便调用正确的解释器）。- 在使用前验证任何配置输入（来自 `LMCACHE_PLUGIN_CONFIG` "
+"或其他地方）。- 如果插件执行冗长的操作，请实现超时或定期日志记录，以便检测是否挂起，并确保它不会阻塞 LMCache 的正常操作。"
 
 #: ../../source/developer_guide/extending_lmcache/index.rst:106
 msgid ""
 "Together, these extension points – custom storage backends, remote "
 "connectors, and plugin scripts – let users tailor LMCache's functionality"
 " and integrate with external systems in a modular, maintainable way."
-msgstr ""
+msgstr "这些扩展点——自定义存储后端、远程连接器和插件脚本——共同使用户能够以模块化、可维护的方式定制 LMCache 的功能并与外部系统集成。"
 

@@ -21,9 +21,9 @@ msgstr ""
 
 #: ../../source/getting_started/troubleshoot.rst:2
 msgid "TroubleShoot"
-msgstr ""
+msgstr "故障排查"
 
 #: ../../source/getting_started/troubleshoot.rst:4
 msgid "Coming soon..."
-msgstr ""
+msgstr "即将推出..."
 

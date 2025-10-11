@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:4
 msgid "Example: Offload KV cache to CPU"
-msgstr ""
+msgstr "示例：将 KV 缓存卸载到 CPU"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:6
 msgid "In this example, we will show you how to offload KV cache to CPU memory."
-msgstr ""
+msgstr "在本示例中，我们将向您展示如何将 KV 缓存卸载到 CPU 内存。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:9
 msgid ""
@@ -33,27 +33,27 @@ msgid ""
 "different destinations. See "
 ":ref:`getting_started/quickstart/offload_kv_cache:Supported offloading "
 "destinations` for more details."
-msgstr ""
+msgstr "除了 CPU 内存，LMCache 还支持将 KV 缓存卸载到许多不同的目标。详见 :ref:`getting_started/quickstart/offload_kv_cache:Supported offloading destinations` 。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:13
 msgid "Prerequisites"
-msgstr ""
+msgstr "前置要求"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:15
 msgid "Before you begin, make sure you have:"
-msgstr ""
+msgstr "开始之前，请确保您已具备："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:17
 msgid "vLLM v1 with LMCache installed (see :doc:`Installation <../installation>`)"
-msgstr ""
+msgstr "已安装 vLLM v1 和 LMCache（参见 :doc:`安装 <../installation>` ）"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:18
 msgid "A GPU that can run a LLM"
-msgstr ""
+msgstr "一块可以运行大语言模型的 GPU"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:22
 msgid "Use CPU offloading in offline inference"
-msgstr ""
+msgstr "在离线推理中使用 CPU 卸载"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:24
 msgid ""
@@ -64,56 +64,56 @@ msgid ""
 " See the `examples README <https://github.com/vllm-"
 "project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ "
 "to understand how to run the script for vLLM v1."
-msgstr ""
+msgstr "本节演示如何在离线推理场景中使用 LMCache 和 vLLM 进行 CPU 内存卸载。我们使用的示例脚本可在 `vLLM 示例 <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/cpu_offload_lmcache.py>`_ 中找到。请参阅 `示例 README <https://github.com/vllm-project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ 了解如何为 vLLM v1 运行脚本。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:28
 msgid "First, set up the necessary environment variables for LMCache:"
-msgstr ""
+msgstr "首先，为 LMCache 设置必要的环境变量："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:41
 msgid "Next, configure vLLM with LMCache integration:"
-msgstr ""
+msgstr "接下来，配置 vLLM 以集成 LMCache："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:61
 msgid "Now you can run inference with automatic KV cache offloading:"
-msgstr ""
+msgstr "现在您可以运行推理，KV 缓存将自动卸载："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:80
 msgid "When the inference is complete, clean up the LMCache backend:"
-msgstr ""
+msgstr "推理完成后，清理 LMCache 后端："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:89
 msgid ""
 "During inference, LMCache will automatically handle storing and managing "
 "KV cache in CPU memory. You can monitor this through the logs, which will"
 " show messages like::"
-msgstr ""
+msgstr "在推理过程中，LMCache 将自动处理在 CPU 内存中存储和管理 KV 缓存。您可以通过日志监控此过程，日志将显示类似以下的消息："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:93
 msgid ""
 "This indicates that the KV cache has been successfully offloaded to CPU "
 "memory."
-msgstr ""
+msgstr "这表明 KV 缓存已成功卸载到 CPU 内存。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:96
 msgid "Adjust ``gpu_memory_utilization`` based on your GPU's available memory"
-msgstr ""
+msgstr "根据 GPU 的可用内存调整 ``gpu_memory_utilization``"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:97
 msgid ""
 "The CPU offloading buffer size can be adjusted through "
 "``LMCACHE_MAX_LOCAL_CPU_SIZE``"
-msgstr ""
+msgstr "CPU 卸载缓冲区大小可以通过 ``LMCACHE_MAX_LOCAL_CPU_SIZE`` 调整"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:100
 msgid "Use CPU offloading in online inference"
-msgstr ""
+msgstr "在在线推理中使用 CPU 卸载"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:102
 msgid ""
 "This section demonstrates how to use CPU memory offloading in online "
 "serving scenarios."
-msgstr ""
+msgstr "本节演示如何在在线服务场景中使用 CPU 内存卸载。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:105
 msgid ""
@@ -122,105 +122,105 @@ msgid ""
 "limits, storage backends, and more. We'll cover advanced configuration "
 "options in later examples. For now, let's run a minimal example with "
 "default configuration."
-msgstr ""
+msgstr "LMCache 支持通过 ``lmcache_config.yaml`` 文件进行广泛配置，您可以在其中自定义块大小、内存限制、存储后端等。我们将在后续示例中介绍高级配置选项。现在，让我们使用默认配置运行一个最简单的示例。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:107
 msgid ""
 "Launch the vLLM server with LMCache integration using environment "
 "variables. Here's an example command:"
-msgstr ""
+msgstr "使用环境变量启动集成 LMCache 的 vLLM 服务器。以下是示例命令："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:118
 msgid "Key parameters explained:"
-msgstr ""
+msgstr "关键参数说明："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:120
 msgid "``LMCACHE_CONFIG_FILE``: Path to the LMCache configuration file."
-msgstr ""
+msgstr "``LMCACHE_CONFIG_FILE``：LMCache 配置文件的路径。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:121
 msgid "``--kv-transfer-config``: Configures LMCache integration"
-msgstr ""
+msgstr "``--kv-transfer-config``：配置 LMCache 集成"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:122
 msgid "``kv_connector``: Specifies the LMCache connector"
-msgstr ""
+msgstr "``kv_connector``：指定 LMCache 连接器"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:123
 msgid "``kv_role``: Set to \"kv_both\" for both storing and loading KV cache"
-msgstr ""
+msgstr "``kv_role``：设置为 \"kv_both\" 以同时存储和加载 KV 缓存"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:125
 msgid ""
 "Once the server is running, you can send requests to it using curl. "
 "Here's an example of how to send a request to the vLLM server with "
 "LMCache integration:"
-msgstr ""
+msgstr "服务器运行后，您可以使用 curl 向其发送请求。以下是如何向集成了 LMCache 的 vLLM 服务器发送请求的示例："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:138
 msgid "You should see the following logs:"
-msgstr ""
+msgstr "您应该看到以下日志："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:145
 msgid ""
 "Once you send the same curl request again, you should see the following "
 "logs:"
-msgstr ""
+msgstr "当您再次发送相同的 curl 请求时，您应该看到以下日志："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:154
 msgid "Example: CPU offloading benefits"
-msgstr ""
+msgstr "示例：CPU 卸载的优势"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:156
 msgid ""
 "This section demonstrates the performance benefits of using CPU "
 "offloading with LMCache. We'll use a script that generates multiple "
 "prompts and compare the performance with and without LMCache."
-msgstr ""
+msgstr "本节演示使用 LMCache 进行 CPU 卸载的性能优势。我们将使用一个生成多个提示的脚本，并比较有无 LMCache 时的性能。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:159
 msgid "Prerequisites (Setup)"
-msgstr ""
+msgstr "前置要求（设置）"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:161
 msgid "At least 24GB GPU memory"
-msgstr ""
+msgstr "至少 24GB GPU 显存"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:162
 msgid "Sufficient CPU memory (LMCache will use 15 GB by default in this example)."
-msgstr ""
+msgstr "足够的 CPU 内存（在本示例中 LMCache 默认将使用 15 GB）。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:165
 msgid "Example script"
-msgstr ""
+msgstr "示例脚本"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:167
 msgid "Save the following script as ``cpu-offloading.py``:"
-msgstr ""
+msgstr "将以下脚本保存为 ``cpu-offloading.py``："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:334
 msgid "Running the Example"
-msgstr ""
+msgstr "运行示例"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:336
 msgid "First, run the script without LMCache:"
-msgstr ""
+msgstr "首先，在不使用 LMCache 的情况下运行脚本："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:342
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:357
 msgid "You'll see output like:"
-msgstr ""
+msgstr "您将看到类似这样的输出："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:348
 msgid ""
 "Without LMCache, there's no speedup between runs even if vLLM has prefix "
 "caching enabled. This is because the KV cache exceeds GPU memory and "
 "can't be reused."
-msgstr ""
+msgstr "没有 LMCache 时，即使 vLLM 启用了前缀缓存，运行之间也没有加速效果。这是因为 KV 缓存超出了 GPU 内存，无法重用。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:351
 msgid "Now, run with LMCache enabled:"
-msgstr ""
+msgstr "现在，启用 LMCache 运行："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:363
 msgid ""
@@ -229,37 +229,37 @@ msgid ""
 "size of KV cache exceeds GPU memory, LMCache allows you to store and "
 "reuse the cache from CPU memory, resulting in much faster subsequent "
 "generations for prompts with shared prefixes."
-msgstr ""
+msgstr "第二种情况下的显著加速展示了 LMCache 如何有效管理 KV 缓存卸载到 CPU 内存。当 KV 缓存的总大小超过 GPU 内存时，LMCache 允许您从 CPU 内存中存储和重用缓存，从而使具有共享前缀的提示的后续生成速度更快。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:369
 msgid "Supported offloading destinations"
-msgstr ""
+msgstr "支持的卸载目标"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:371
 msgid "LMCache now supports offloading KV cache to the following destinations:"
-msgstr ""
+msgstr "LMCache 现在支持将 KV 缓存卸载到以下目标："
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:373
 msgid ":doc:`CPU memory <../../kv_cache/storage_backends/cpu_ram>`"
-msgstr ""
+msgstr ":doc:`CPU 内存 <../../kv_cache/storage_backends/cpu_ram>`"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:374
 msgid ":doc:`Local file system <../../kv_cache/storage_backends/local_storage>`"
-msgstr ""
+msgstr ":doc:`本地文件系统 <../../kv_cache/storage_backends/local_storage>`"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:375
 msgid ":doc:`Mooncake Storage <../../kv_cache/storage_backends/mooncake>`"
-msgstr ""
+msgstr ":doc:`Mooncake 存储 <../../kv_cache/storage_backends/mooncake>`"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:376
 msgid ":doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`"
-msgstr ""
+msgstr ":doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:377
 msgid ":doc:`Redis <../../kv_cache/storage_backends/redis>`"
-msgstr ""
+msgstr ":doc:`Redis <../../kv_cache/storage_backends/redis>`"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:378
 msgid ":doc:`ValKey <../../kv_cache/storage_backends/valkey>`"
-msgstr ""
+msgstr ":doc:`ValKey <../../kv_cache/storage_backends/valkey>`"
 

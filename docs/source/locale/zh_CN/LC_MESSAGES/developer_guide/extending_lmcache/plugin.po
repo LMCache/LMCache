@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:2
 msgid "Extending LMCache: Plugin"
-msgstr ""
+msgstr "扩展 LMCache：插件"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:4
 msgid ""
@@ -29,41 +29,41 @@ msgid ""
 "running custom scripts alongside LMCache processes. Plugins can be "
 "written in Python and Bash for now, and are managed by the "
 "``PluginLauncher`` class."
-msgstr ""
+msgstr "LMCache 插件系统允许开发人员通过在 LMCache 进程旁边运行自定义脚本来扩展功能。目前插件可以用 Python 和 Bash 编写，并由 ``PluginLauncher`` 类管理。"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:7
 msgid "Key Use Cases"
-msgstr ""
+msgstr "主要用例"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:8
 msgid "Start metric reporters for centralized monitoring"
-msgstr ""
+msgstr "启动指标报告器进行集中监控"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:9
 msgid "Implement log reporters for log collection systems"
-msgstr ""
+msgstr "实现日志报告器用于日志收集系统"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:10
 msgid "Report process-level metrics to alerting systems"
-msgstr ""
+msgstr "向告警系统报告进程级指标"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:11
 msgid "Implement health checks and service discovery"
-msgstr ""
+msgstr "实现健康检查和服务发现"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:12
 msgid "Custom cache management operations"
-msgstr ""
+msgstr "自定义缓存管理操作"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:15
 msgid "Configuration"
-msgstr ""
+msgstr "配置"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:16
 msgid ""
 "Plugins are configured through environment variables and configuration "
 "files:"
-msgstr ""
+msgstr "插件通过环境变量和配置文件进行配置："
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:18
 msgid ""
@@ -72,37 +72,37 @@ msgid ""
 "containing plugin configuration - ``LMCACHE_PLUGIN_WORKER_ID``: Current "
 "worker ID - ``LMCACHE_PLUGIN_WORKER_COUNT``: Total worker count in "
 "cluster"
-msgstr ""
+msgstr "环境变量：- ``LMCACHE_PLUGIN_ROLE``：进程角色（例如 ``SCHEDULER``、``WORKER``）- ``LMCACHE_PLUGIN_CONFIG``：包含插件配置的 JSON 字符串 - ``LMCACHE_PLUGIN_WORKER_ID``：当前工作进程 ID - ``LMCACHE_PLUGIN_WORKER_COUNT``：集群中的工作进程总数"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:24
 msgid "Configuration File (``lmcache.yaml``):"
-msgstr ""
+msgstr "配置文件（``lmcache.yaml``）："
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:35
 msgid "Plugin Naming Convention"
-msgstr ""
+msgstr "插件命名约定"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:36
 msgid "Plugin filenames determine execution targets:"
-msgstr ""
+msgstr "插件文件名决定执行目标："
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:38
 msgid ""
 "Role-Specific Plugins: - Format: "
 "``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - Examples:"
-msgstr ""
+msgstr "角色特定插件：- 格式：``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - 示例："
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:42
 msgid "``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``"
-msgstr ""
+msgstr "``scheduler_foo_plugin.py``：仅在 ``SCHEDULER`` 上运行"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:43
 msgid "``worker_0_test.sh``: Runs only on worker ID 0"
-msgstr ""
+msgstr "``worker_0_test.sh``：仅在工作进程 ID 0 上运行"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:44
 msgid "``all_plugin.sh``: Runs on all workers"
-msgstr ""
+msgstr "``all_plugin.sh``：在所有工作进程上运行"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:46
 msgid ""
@@ -111,75 +111,75 @@ msgid ""
 "least three parts separated by underscores (e.g., "
 "`worker_<ID>_<DESCRIPTION>.ext`). A file named `worker_<DESCRIPTION>.ext`"
 " will run on all workers."
-msgstr ""
+msgstr "注意事项：- 角色名称不区分大小写 - 指定时工作进程 ID 必须是数字 - 要针对特定的工作进程 ID，文件名必须至少有三个部分，用下划线分隔（例如 `worker_<ID>_<DESCRIPTION>.ext`）。名为 `worker_<DESCRIPTION>.ext` 的文件将在所有工作进程上运行。"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:52
 msgid "Execution Model"
-msgstr ""
+msgstr "执行模型"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:53
 msgid ""
 "**Interpreter Detection**: - Uses shebang line (e.g., "
 "``#!/opt/venv/bin/python``) - Fallback interpreters:"
-msgstr ""
+msgstr "**解释器检测**：- 使用 shebang 行（例如 ``#!/opt/venv/bin/python``）- 后备解释器："
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:57
 msgid "``.py`` → ``python``"
-msgstr ""
+msgstr "``.py`` → ``python``"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:58
 msgid "``.sh`` → ``bash``"
-msgstr ""
+msgstr "``.sh`` → ``bash``"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:60
 msgid ""
 "**Output Handling**: - Stdout/stderr captured continuously - Logged with "
 "plugin name prefix"
-msgstr ""
+msgstr "**输出处理**：- 持续捕获 Stdout/stderr - 使用插件名称前缀记录"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:64
 msgid ""
 "**Process Management**: - Launched as subprocesses - Terminated when "
 "parent process exits"
-msgstr ""
+msgstr "**进程管理**：- 作为子进程启动 - 当父进程退出时终止"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:69
 msgid "Example Plugins"
-msgstr ""
+msgstr "示例插件"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:70
 msgid "Python Plugin (``scheduler_foo_plugin.py``):"
-msgstr ""
+msgstr "Python 插件（``scheduler_foo_plugin.py``）："
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:76
 msgid "Bash Plugin (``all_plugin.sh``):"
-msgstr ""
+msgstr "Bash 插件（``all_plugin.sh``）："
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:83
 msgid "Best Practices"
-msgstr ""
+msgstr "最佳实践"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:84
 msgid "Keep plugins lightweight and efficient"
-msgstr ""
+msgstr "保持插件轻量且高效"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:85
 msgid "Use descriptive naming conventions"
-msgstr ""
+msgstr "使用描述性的命名约定"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:86
 msgid "Implement graceful error handling"
-msgstr ""
+msgstr "实现优雅的错误处理"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:87
 msgid "Include shebang for portability"
-msgstr ""
+msgstr "包含 shebang 以提高可移植性"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:88
 msgid "Validate configuration inputs"
-msgstr ""
+msgstr "验证配置输入"
 
 #: ../../source/developer_guide/extending_lmcache/plugin.rst:89
 msgid "Add timeout mechanisms for long operations"
-msgstr ""
+msgstr "为长时间操作添加超时机制"
 

@@ -69,51 +69,57 @@ msgstr "欢迎使用 LMCache！"
 
 #: ../../source/index.rst:12
 msgid "LMCache"
-msgstr ""
+msgstr "LMCache"
 
 #: ../../source/index.rst:25
 msgid ""
 "We are currently in the process of upgrading our documentation to provide"
 " better guidance and examples. Some sections may be under construction. "
 "Thank you for your patience!"
-msgstr ""
+msgstr "我们正在升级文档以提供更好的指导和示例。部分章节可能正在建设中。感谢您的耐心等待！"
 
 #: ../../source/index.rst:46
 msgid "For more information, check out the following:"
-msgstr ""
+msgstr "更多信息，请查看以下内容："
 
 #: ../../source/index.rst:48
 msgid "`LMCache blogs <https://lmcache.github.io>`_"
-msgstr ""
+msgstr "`LMCache 博客 <https://lmcache.github.io>`_"
 
 #: ../../source/index.rst:49
 msgid ""
 "`Join LMCache slack workspace "
 "<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
 "5Amprc9k5hcIdXT7XevTaQ>`_"
-msgstr ""
+msgstr "`加入 LMCache Slack 工作区 <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_"
 
 #: ../../source/index.rst:50
 msgid "Our papers:"
-msgstr ""
+msgstr "我们的论文："
 
 #: ../../source/index.rst:52
 msgid ""
 "`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
 "Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 msgstr ""
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
+"Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 
 #: ../../source/index.rst:53
 msgid ""
 "`CacheBlend: Fast Large Language Model Serving with Cached Knowledge "
 "Fusion <https://arxiv.org/abs/2405.16444>`_"
 msgstr ""
+"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge "
+"Fusion <https://arxiv.org/abs/2405.16444>`_"
 
 #: ../../source/index.rst:54
 msgid ""
 "`Do Large Language Models Need a Content Delivery Network? "
 "<https://arxiv.org/abs/2409.13761>`_"
 msgstr ""
+"`Do Large Language Models Need a Content Delivery Network? "
+"<https://arxiv.org/abs/2409.13761>`_"
 
 #: ../../source/index.rst:56 ../../source/index.rst:80
 #: ../../source/index.rst:89 ../../source/index.rst:98
@@ -121,13 +127,14 @@ msgstr ""
 #: ../../source/index.rst:126 ../../source/index.rst:134
 #: ../../source/index.rst:146 ../../source/index.rst:157
 msgid ":raw-html:`<br />`"
-msgstr ""
+msgstr ":raw-html:`<br />`"
+
 
 #: ../../source/index.rst:60
 msgid "Documentation"
-msgstr ""
+msgstr "文档"
 
 #: ../../source/index.rst:166
 msgid "raw-html:`<br />`"
-msgstr ""
+msgstr "raw-html:`<br />`"
 

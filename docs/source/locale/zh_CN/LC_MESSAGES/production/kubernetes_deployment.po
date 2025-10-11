@@ -21,9 +21,9 @@ msgstr ""
 
 #: ../../source/production/kubernetes_deployment.rst:2
 msgid "Kubernetes deployment"
-msgstr ""
+msgstr "Kubernetes 部署"
 
 #: ../../source/production/kubernetes_deployment.rst:4
 msgid "Coming soon..."
-msgstr ""
+msgstr "即将推出..."
 

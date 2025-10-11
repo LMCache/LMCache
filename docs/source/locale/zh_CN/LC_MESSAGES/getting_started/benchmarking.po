@@ -21,15 +21,15 @@ msgstr ""
 
 #: ../../source/getting_started/benchmarking.rst:2
 msgid "Benchmarking"
-msgstr ""
+msgstr "基准测试"
 
 #: ../../source/getting_started/benchmarking.rst:4
 msgid "This is a simple tutorial on how to deploy and benchmark LMCache."
-msgstr ""
+msgstr "这是一个关于如何部署和对 LMCache 进行基准测试的简单教程。"
 
 #: ../../source/getting_started/benchmarking.rst:7
 msgid "Workload Generator -- Long Doc QA:"
-msgstr ""
+msgstr "负载生成器 -- 长文档问答："
 
 #: ../../source/getting_started/benchmarking.rst:9
 msgid ""
@@ -42,7 +42,7 @@ msgid ""
 "repeated 2 hit and 2 miss pattern through all the documents). You can "
 "also choose the number of times to repeat prompts and the mode of "
 "repetition (random, tile, interleave)."
-msgstr ""
+msgstr "长文档问答（位于 ``benchmarks/long_doc_qa/``）是一个高度灵活的流量模拟器，可向您的服务引擎发送长上下文查询（\"文档\"）。一些可配置的参数包括：文档中的词元数（默认为 10000）、发送到模型的文档数量（默认为 20）、每个请求的输出词元数（默认为 100），以及缓存命中/未命中比率（例如 2:2 表示通过所有文档重复 2 次命中和 2 次未命中的模式）。您还可以选择重复提示词的次数以及重复模式（随机、平铺、交错）。"
 
 #: ../../source/getting_started/benchmarking.rst:13
 msgid ""
@@ -50,25 +50,25 @@ msgid ""
 "LMCache and generate the appropriate traffic through Long Doc QA. It will"
 " also help you determine the tensor parallelism and the amount of CPU RAM"
 " to deploy LMCache with based on the specifications of your hardware."
-msgstr ""
+msgstr "LMCache 提供了一个简单的长文档问答推荐器，可帮助您部署 LMCache 并通过长文档问答生成适当的流量。它还将根据您的硬件规格帮助您确定张量并行度和部署 LMCache 所需的 CPU 内存量。"
 
 #: ../../source/getting_started/benchmarking.rst:16
 msgid ""
 "First set your ``HF_TOKEN`` environment variable with access to the model"
 " you want to benchmark. Then run the recommendation script:"
-msgstr ""
+msgstr "首先设置您的 ``HF_TOKEN`` 环境变量以访问您要进行基准测试的模型。然后运行推荐脚本："
 
 #: ../../source/getting_started/benchmarking.rst:23
 msgid "Example #1:"
-msgstr ""
+msgstr "示例 #1："
 
 #: ../../source/getting_started/benchmarking.rst:68
 msgid "Llama 8B vLLM Metrics:"
-msgstr ""
+msgstr "Llama 8B vLLM 指标："
 
 #: ../../source/getting_started/benchmarking.rst:81
 msgid "Llama 8B LMCache Metrics:"
-msgstr ""
+msgstr "Llama 8B LMCache 指标："
 
 #: ../../source/getting_started/benchmarking.rst:93
 msgid ""
@@ -77,17 +77,17 @@ msgid ""
 "offloading, even with KV Cache reuse, there is no improvement in TTFT nor"
 " throughput. With offloading, we can see significant performance "
 "improvements to the query round."
-msgstr ""
+msgstr "预热轮次是模型第一次看到文档。查询轮次是模型第二次看到文档。在没有卸载的情况下，即使有 KV 缓存重用，TTFT 和吞吐量也没有改进。使用卸载后，我们可以看到查询轮次的显著性能改进。"
 
 #: ../../source/getting_started/benchmarking.rst:96
 msgid "Example #2:"
-msgstr ""
+msgstr "示例 #2："
 
 #: ../../source/getting_started/benchmarking.rst:138
 msgid "Llama 70B vLLM Metrics:"
-msgstr ""
+msgstr "Llama 70B vLLM 指标："
 
 #: ../../source/getting_started/benchmarking.rst:151
 msgid "Llama 70B LMCache Metrics:"
-msgstr ""
+msgstr "Llama 70B LMCache 指标："
 

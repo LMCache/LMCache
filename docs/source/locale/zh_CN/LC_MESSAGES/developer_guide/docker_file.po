@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/developer_guide/docker_file.rst:2
 msgid "Dockerfile"
-msgstr ""
+msgstr "Dockerfile"
 
 #: ../../source/developer_guide/docker_file.rst:4
 msgid ""
@@ -29,24 +29,24 @@ msgid ""
 "integrated with vLLM. More information about deploying LMCache image "
 "using Docker can be found here - :ref:`Docker deployment guide "
 "<docker_deployment>`."
-msgstr ""
+msgstr "我们提供了一个 Dockerfile 来帮助您构建集成了 vLLM 的 LMCache 容器镜像。有关使用 Docker 部署 LMCache 镜像的更多信息，请参阅这里 - :ref:`Docker 部署指南 <docker_deployment>`。"
 
 #: ../../source/developer_guide/docker_file.rst:8
 msgid "Building the container image"
-msgstr ""
+msgstr "构建容器镜像"
 
 #: ../../source/developer_guide/docker_file.rst:10
 msgid ""
 "You can build the LMCache (integrated with vLLM) image using Docker from "
 "source via the provided Dockerfile. The Dockerfile is located at `docker "
 "<https://github.com/LMCache/LMCache/tree/dev/docker>`_."
-msgstr ""
+msgstr "您可以通过提供的 Dockerfile 使用 Docker 从源代码构建 LMCache（集成了 vLLM）镜像。Dockerfile 位于 `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_。"
 
 #: ../../source/developer_guide/docker_file.rst:13
 msgid ""
 "To build the container image, run the following command from the root "
 "directory of the LMCache repository:"
-msgstr ""
+msgstr "要构建容器镜像，请从 LMCache 仓库的根目录运行以下命令："
 
 #: ../../source/developer_guide/docker_file.rst:19
 msgid ""
@@ -54,5 +54,5 @@ msgid ""
 "See example build file in `docker "
 "<https://github.com/LMCache/LMCache/tree/dev/docker>`_ for explanation of"
 " all arguments."
-msgstr ""
+msgstr "将 `<IMAGE_NAME>` 和 `<TAG>` 替换为您想要的镜像名称和标签。有关所有参数的说明，请参阅 `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_ 中的示例构建文件。"
 

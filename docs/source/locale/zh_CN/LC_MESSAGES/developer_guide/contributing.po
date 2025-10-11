@@ -21,44 +21,44 @@ msgstr ""
 
 #: ../../source/developer_guide/contributing.rst:2
 msgid "Contributing Guide"
-msgstr ""
+msgstr "贡献指南"
 
 #: ../../source/developer_guide/contributing.rst:4
 msgid ""
 "Thank you for your interest in contributing to LMCache! We welcome and "
 "accept all kinds of contributions, no matter how small or large. There "
 "are several ways you can contribute to the project:"
-msgstr ""
+msgstr "感谢您对为 LMCache 做出贡献的兴趣！我们欢迎并接受各种类型的贡献，无论大小。您可以通过以下几种方式为项目做出贡献："
 
 #: ../../source/developer_guide/contributing.rst:6
 msgid "Identify and report any issues or bugs"
-msgstr ""
+msgstr "识别并报告任何问题或错误"
 
 #: ../../source/developer_guide/contributing.rst:7
 msgid "Request or add support for a new model"
-msgstr ""
+msgstr "请求或添加对新模型的支持"
 
 #: ../../source/developer_guide/contributing.rst:8
 msgid "Suggest or implement new features"
-msgstr ""
+msgstr "建议或实现新功能"
 
 #: ../../source/developer_guide/contributing.rst:9
 msgid "Improve documentation or contribute a how-to guide"
-msgstr ""
+msgstr "改进文档或贡献操作指南"
 
 #: ../../source/developer_guide/contributing.rst:11
 msgid ""
 "A comprehensive list of good first issues can be found in the issue "
 "`[Onboarding]: Welcoming contributors with good first issues! "
 "<https://github.com/LMCache/LMCache/issues/627>`_."
-msgstr ""
+msgstr "可以在议题 `[入职]: 欢迎贡献者，提供适合首次贡献的问题！<https://github.com/LMCache/LMCache/issues/627>`_ 中找到适合首次贡献的问题的完整列表。"
 
 #: ../../source/developer_guide/contributing.rst:13
 msgid ""
 "If you'd like to support our community further, then answering queries, "
 "offering PR reviews, and assisting others are also impactful ways to "
 "contribute and take LMCache further."
-msgstr ""
+msgstr "如果您想进一步支持我们的社区，回答问题、提供 PR 审查和帮助他人也是有影响力的贡献方式，可以推动 LMCache 发展。"
 
 #: ../../source/developer_guide/contributing.rst:15
 msgid ""
@@ -67,32 +67,32 @@ msgid ""
 "<https://x.com/lmcache>`_ and see the latest of what we are up to. If "
 "using LMCache helped your project or product in any way, you can simply "
 "offer your appreciation by starring our repository!"
-msgstr ""
+msgstr "最后，您可以通过提高对 LMCache 的认识来支持我们。欢迎分享我们的博客文章，在 X 上关注我们的账号 `LMCache <https://x.com/lmcache>`_，了解我们的最新动态。如果使用 LMCache 对您的项目或产品有任何帮助，您可以通过给我们的仓库加星来表达您的赞赏！"
 
 #: ../../source/developer_guide/contributing.rst:18
 msgid "License"
-msgstr ""
+msgstr "许可证"
 
 #: ../../source/developer_guide/contributing.rst:20
 msgid ""
 "See the `LICENSE <https://github.com/LMCache/LMCache/blob/dev/LICENSE>`_ "
 "file for details."
-msgstr ""
+msgstr "详细信息请参阅 `LICENSE <https://github.com/LMCache/LMCache/blob/dev/LICENSE>`_ 文件。"
 
 #: ../../source/developer_guide/contributing.rst:23
 msgid "Code of Conduct"
-msgstr ""
+msgstr "行为准则"
 
 #: ../../source/developer_guide/contributing.rst:25
 msgid ""
 "This project adheres to the `Code of Conduct "
 "<https://github.com/LMCache/LMCache/blob/dev/CODE_OF_CONDUCT.md>`_. By "
 "participating, you are expected to uphold this code."
-msgstr ""
+msgstr "本项目遵循 `行为准则 <https://github.com/LMCache/LMCache/blob/dev/CODE_OF_CONDUCT.md>`_。参与时，您需要遵守此准则。"
 
 #: ../../source/developer_guide/contributing.rst:28
 msgid "Contribution Guidelines"
-msgstr ""
+msgstr "贡献指南"
 
 #: ../../source/developer_guide/contributing.rst:30
 msgid ""
@@ -103,11 +103,11 @@ msgid ""
 "and there is always a need for more test coverage. If you see something "
 "that you think should be fixed, take ownership! Here is how you get "
 "started."
-msgstr ""
+msgstr "开源项目总是欢迎帮助，总有可以改进的地方。例如，文档（就像您现在阅读的文本）总是可以改进，代码总是可以更清晰，变量或函数总是可以重命名或添加注释，而且总是需要更多的测试覆盖。如果您看到您认为应该修复的东西，请承担责任！以下是您入门的方法。"
 
 #: ../../source/developer_guide/contributing.rst:33
 msgid "How Can I Contribute?"
-msgstr ""
+msgstr "如何贡献？"
 
 #: ../../source/developer_guide/contributing.rst:35
 msgid ""
@@ -118,14 +118,14 @@ msgid ""
 "bug, it's best to `write an issue "
 "<https://github.com/LMCache/LMCache/issues/new>`_ first to discuss it "
 "with maintainers."
-msgstr ""
+msgstr "贡献时，从查看 `问题 <https://github.com/LMCache/LMCache/issues>`_ 开始很有用。在选择问题、编写代码或更新文档后，创建拉取请求，您的工作将被审查和合并。如果您要添加新功能或发现错误，最好先 `创建问题 <https://github.com/LMCache/LMCache/issues/new>`_ 与维护者讨论。"
 
 #: ../../source/developer_guide/contributing.rst:37
 msgid ""
 "If you discover a security vulnerability, please follow the instructions "
 "in the `Security doc "
 "<https://github.com/LMCache/LMCache/blob/dev/SECURITY.md>`_."
-msgstr ""
+msgstr "如果您发现安全漏洞，请遵循 `安全文档 <https://github.com/LMCache/LMCache/blob/dev/SECURITY.md>`_ 中的说明。"
 
 #: ../../source/developer_guide/contributing.rst:39
 msgid ""
@@ -134,27 +134,27 @@ msgid ""
 "`The GitHub Workflow Guide "
 "<https://github.com/kubernetes/community/blob/master/contributors/guide"
 "/github-workflow.md>`_ from Kubernetes. In short:"
-msgstr ""
+msgstr "要为此仓库做贡献，您将使用许多开源仓库中常见的 Fork 和 Pull 模型。有关此过程的详细信息，请查看 Kubernetes 的 `GitHub 工作流指南 <https://github.com/kubernetes/community/blob/master/contributors/guide/github-workflow.md>`_。简而言之："
 
 #: ../../source/developer_guide/contributing.rst:41
 msgid "Fork the repository"
-msgstr ""
+msgstr "Fork 仓库"
 
 #: ../../source/developer_guide/contributing.rst:42
 msgid "Create a branch"
-msgstr ""
+msgstr "创建分支"
 
 #: ../../source/developer_guide/contributing.rst:43
 msgid "Run code style checks and fix any issues"
-msgstr ""
+msgstr "运行代码风格检查并修复任何问题"
 
 #: ../../source/developer_guide/contributing.rst:44
 msgid "Run unit tests and fix any broken tests"
-msgstr ""
+msgstr "运行单元测试并修复任何失败的测试"
 
 #: ../../source/developer_guide/contributing.rst:45
 msgid "Submit a pull request with detailed descriptions"
-msgstr ""
+msgstr "提交带有详细描述的拉取请求"
 
 #: ../../source/developer_guide/contributing.rst:47
 msgid ""
@@ -166,7 +166,7 @@ msgid ""
 "contribution into smaller PRs with incremental changes, and include a "
 "good description of the changes. We require new unit tests to be "
 "contributed with any new functionality added."
-msgstr ""
+msgstr "当您的贡献准备好时，您可以创建拉取请求。拉取请求通常称为 \"PR\"。一般来说，我们遵循标准的 `GitHub 拉取请求 <https://help.github.com/en/articles/about-pull-requests>`_ 流程。遵循模板向维护者提供有关拉取请求的详细信息。最好将您的贡献分解为带有增量更改的较小 PR，并包含对更改的良好描述。我们要求为添加的任何新功能贡献新的单元测试。"
 
 #: ../../source/developer_guide/contributing.rst:49
 msgid ""
@@ -174,11 +174,11 @@ msgid ""
 "checks and unit tests. These checks will run with the pull request "
 "builds. Alternatively, you can run the checks manually on your local "
 "machine `as specified in Development <#development>`_ ."
-msgstr ""
+msgstr "在发送拉取请求之前，请确保您的更改通过代码质量检查和单元测试。这些检查将在拉取请求构建时运行。或者，您可以在本地机器上手动运行检查，`如开发部分所述 <#development>`_。"
 
 #: ../../source/developer_guide/contributing.rst:52
 msgid "DCO and Signed-off-by"
-msgstr ""
+msgstr "DCO 和 Signed-off-by"
 
 #: ../../source/developer_guide/contributing.rst:54
 msgid ""
@@ -186,18 +186,18 @@ msgid ""
 "<https://github.com/LMCache/LMCache/blob/dev/DCO>`_. Commits must include"
 " a :code:`Signed-off-by` header which certifies agreement with the terms "
 "of the `DCO <https://github.com/LMCache/LMCache/blob/dev/DCO>`_."
-msgstr ""
+msgstr "为项目贡献更改时，您必须同意 `DCO <https://github.com/LMCache/LMCache/blob/dev/DCO>`_。提交必须包含 :code:`Signed-off-by` 标头，以证明同意 `DCO <https://github.com/LMCache/LMCache/blob/dev/DCO>`_ 的条款。"
 
 #: ../../source/developer_guide/contributing.rst:58
 msgid ""
 "Using :code:`-s` or :code:`--signoff` flag with :code:`git commit` will "
 "automatically add this header. The flags can also be used with "
 ":code:`--amend` if you forget to sign your last commit."
-msgstr ""
+msgstr "在 :code:`git commit` 中使用 :code:`-s` 或 :code:`--signoff` 标志将自动添加此标头。如果您忘记签署上次提交，这些标志也可以与 :code:`--amend` 一起使用。"
 
 #: ../../source/developer_guide/contributing.rst:61
 msgid "Code Review"
-msgstr ""
+msgstr "代码审查"
 
 #: ../../source/developer_guide/contributing.rst:63
 msgid ""
@@ -205,110 +205,110 @@ msgid ""
 " may make suggestions to fix before merging. It will be easier for your "
 "pull request to receive reviews if you consider the criteria the "
 "reviewers follow while working. Remember to:"
-msgstr ""
+msgstr "一旦您创建了拉取请求，维护者将审查您的代码，并可能在合并前提出修改建议。如果您在工作时考虑审查者遵循的标准，您的拉取请求将更容易获得审查。请记住："
 
 #: ../../source/developer_guide/contributing.rst:65
 msgid "Document the code well to help future contributors and maintainers"
-msgstr ""
+msgstr "编写良好的代码文档以帮助未来的贡献者和维护者"
 
 #: ../../source/developer_guide/contributing.rst:66
 msgid "Follow the project coding conventions for consistency and best practices"
-msgstr ""
+msgstr "遵循项目编码规范以保持一致性和最佳实践"
 
 #: ../../source/developer_guide/contributing.rst:67
 msgid "Include sufficient tests to maintain robustness of the code"
-msgstr ""
+msgstr "包含足够的测试以保持代码的健壮性"
 
 #: ../../source/developer_guide/contributing.rst:68
 msgid ""
 "Add or update documentation in :code:`/docs` if PR modifies user facing "
 "behavior to help people using LMCache"
-msgstr ""
+msgstr "如果 PR 修改了面向用户的行为，请在 :code:`/docs` 中添加或更新文档，以帮助使用 LMCache 的用户"
 
 #: ../../source/developer_guide/contributing.rst:69
 msgid "Run coding style checks to ensure consistency and correctness"
-msgstr ""
+msgstr "运行代码风格检查以确保一致性和正确性"
 
 #: ../../source/developer_guide/contributing.rst:70
 msgid ""
 "Run tests locally and ensure they pass and don't break the existing code "
 "base"
-msgstr ""
+msgstr "在本地运行测试并确保它们通过且不会破坏现有代码库"
 
 #: ../../source/developer_guide/contributing.rst:71
 msgid "Write detailed commit messages to help future contributors and maintainers"
-msgstr ""
+msgstr "编写详细的提交消息以帮助未来的贡献者和维护者"
 
 #: ../../source/developer_guide/contributing.rst:72
 msgid ""
 "Break large changes into a logical series of smaller patches, which are "
 "easy to understand individually and combine to solve a broader issue"
-msgstr ""
+msgstr "将大型更改拆分为逻辑上的一系列较小补丁，这些补丁易于单独理解并组合起来解决更广泛的问题"
 
 #: ../../source/developer_guide/contributing.rst:76
 msgid ""
 "Maintainers will perform \"squash and merge\" actions on PRs in this "
 "repo, so it doesn't matter how many commits your PR has, as they will end"
 " up being a single commit after merging."
-msgstr ""
+msgstr "维护者将对此仓库中的 PR 执行 \"压缩并合并\" 操作，因此您的 PR 有多少次提交并不重要，因为它们在合并后最终会成为单个提交。"
 
 #: ../../source/developer_guide/contributing.rst:79
 msgid "Development"
-msgstr ""
+msgstr "开发"
 
 #: ../../source/developer_guide/contributing.rst:82
 msgid "Set up your dev environment"
-msgstr ""
+msgstr "设置开发环境"
 
 #: ../../source/developer_guide/contributing.rst:84
 msgid "The following prerequisites are required:"
-msgstr ""
+msgstr "需要以下前置条件："
 
 #: ../../source/developer_guide/contributing.rst:86
 msgid "OS: Linux"
-msgstr ""
+msgstr "操作系统：Linux"
 
 #: ../../source/developer_guide/contributing.rst:87
 msgid ""
 "GPU: NVIDIA compute capability 7.0+ (e.g., V100, T4, RTX20xx, A100, L4, "
 "H100, etc.)"
-msgstr ""
+msgstr "GPU：NVIDIA 计算能力 7.0+（例如 V100、T4、RTX20xx、A100、L4、H100 等）"
 
 #: ../../source/developer_guide/contributing.rst:88
 msgid "CUDA 12.8+"
-msgstr ""
+msgstr "CUDA 12.8+"
 
 #: ../../source/developer_guide/contributing.rst:90
 msgid "The following tools are required:"
-msgstr ""
+msgstr "需要以下工具："
 
 #: ../../source/developer_guide/contributing.rst:92
 msgid "`git <https://git-scm.com>`_"
-msgstr ""
+msgstr "`git <https://git-scm.com>`_"
 
 #: ../../source/developer_guide/contributing.rst:93
 msgid "`python <https://www.python.org>`_ (v3.10 -- v3.13)"
-msgstr ""
+msgstr "`python <https://www.python.org>`_（v3.10 -- v3.13）"
 
 #: ../../source/developer_guide/contributing.rst:94
 msgid "`pip <https://pypi.org/project/pip/>`_ (v23.0+)"
-msgstr ""
+msgstr "`pip <https://pypi.org/project/pip/>`_（v23.0+）"
 
 #: ../../source/developer_guide/contributing.rst:96
 msgid ""
 "The first step is to install the necessary Python packages required for "
 "development. The commands to do this are as follows:"
-msgstr ""
+msgstr "第一步是安装开发所需的必要 Python 包。执行此操作的命令如下："
 
 #: ../../source/developer_guide/contributing.rst:106
 msgid ""
 "Before pushing changes to GitHub, you need to run the coding style checks"
 " and unit tests as shown below."
-msgstr ""
+msgstr "在将更改推送到 GitHub 之前，您需要运行代码风格检查和单元测试，如下所示。"
 
 #: ../../source/developer_guide/contributing.rst:109
 msgid "Coding style"
-msgstr ""
+msgstr "代码风格"
 
 #: ../../source/developer_guide/contributing.rst:111
 msgid ""
@@ -316,51 +316,51 @@ msgid ""
 "coding style for Python and `Google C++ style guide "
 "<https://google.github.io/styleguide/cppguide.html>`_ for C++. We use the"
 " following tools to enforce the coding style:"
-msgstr ""
+msgstr "LMCache 遵循 Python 的 `pep8 <https://peps.python.org/pep-0008/>`_ 编码风格和 C++ 的 `Google C++ 风格指南 <https://google.github.io/styleguide/cppguide.html>`_。我们使用以下工具来强制执行代码风格："
 
 #: ../../source/developer_guide/contributing.rst:113
 msgid ""
 "Python linting and formatting: `Ruff <https://docs.astral.sh/ruff/>`_, "
 "and `isort <https://pycqa.github.io/isort/>`_"
-msgstr ""
+msgstr "Python 代码检查和格式化：`Ruff <https://docs.astral.sh/ruff/>`_ 和 `isort <https://pycqa.github.io/isort/>`_"
 
 #: ../../source/developer_guide/contributing.rst:114
 msgid "Python static code checking: `mypy <https://github.com/python/mypy>`_"
-msgstr ""
+msgstr "Python 静态代码检查：`mypy <https://github.com/python/mypy>`_"
 
 #: ../../source/developer_guide/contributing.rst:115
 msgid ""
 "Spell checking: `codespell <https://github.com/codespell-"
 "project/codespell>`_"
-msgstr ""
+msgstr "拼写检查：`codespell <https://github.com/codespell-project/codespell>`_"
 
 #: ../../source/developer_guide/contributing.rst:116
 msgid ""
 "C++ formatting: `clang-format "
 "<https://clang.llvm.org/docs/ClangFormat.html>`_"
-msgstr ""
+msgstr "C++ 格式化：`clang-format <https://clang.llvm.org/docs/ClangFormat.html>`_"
 
 #: ../../source/developer_guide/contributing.rst:118
 msgid ""
 "The tools are managed by `pre-commit <https://pre-commit.com/>`_. It is "
 "installed as follows:"
-msgstr ""
+msgstr "这些工具由 `pre-commit <https://pre-commit.com/>`_ 管理。安装方法如下："
 
 #: ../../source/developer_guide/contributing.rst:125
 msgid ""
 "It will run automatically when you add a commit. You can also run it "
 "manually on all files with the following command:"
-msgstr ""
+msgstr "它会在您添加提交时自动运行。您也可以使用以下命令在所有文件上手动运行它："
 
 #: ../../source/developer_guide/contributing.rst:133
 msgid ""
 "For all new code added, please write docstrings in `sphinx-doc format "
 "<https://sphinx-rtd-tutorial.readthedocs.io/en/latest/docstrings.html>`_."
-msgstr ""
+msgstr "对于所有添加的新代码，请使用 `sphinx-doc 格式 <https://sphinx-rtd-tutorial.readthedocs.io/en/latest/docstrings.html>`_ 编写文档字符串。"
 
 #: ../../source/developer_guide/contributing.rst:136
 msgid "Unit tests"
-msgstr ""
+msgstr "单元测试"
 
 #: ../../source/developer_guide/contributing.rst:139
 msgid ""
@@ -373,7 +373,7 @@ msgid ""
 "following pytest flags: `--ignore=tests/disagg "
 "--ignore=tests/v1/test_pos_kernels.py "
 "--ignore=tests/v1/test_nixl_storage.py`."
-msgstr ""
+msgstr "单元测试需要安装 `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_。请按照 NIXL GitHub 仓库中的详细信息进行安装。NIXL 单元测试还需要 `vLLM <https://github.com/vllm-project/vllm>`_ 和 `msgpack <https://github.com/msgpack/msgpack-python/>`_。如果您无法安装 NIXL，可以使用以下 pytest 标志绕过 NIXL 单元测试：`--ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py --ignore=tests/v1/test_nixl_storage.py`。"
 
 #: ../../source/developer_guide/contributing.rst:143
 msgid ""
@@ -383,15 +383,15 @@ msgid ""
 " framework is setup to run all files in the `tests "
 "<https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which "
 "have a prefix or posfix of \"test\"."
-msgstr ""
+msgstr "进行更改时，在推送更改之前运行测试。运行单元测试可确保您的贡献不会破坏现有代码。我们使用 `pytest <https://docs.pytest.org/>`_ 框架运行单元测试。该框架设置为运行 `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ 目录中前缀或后缀为 \"test\" 的所有文件。"
 
 #: ../../source/developer_guide/contributing.rst:145
 msgid "Running unit tests is as simple as:"
-msgstr ""
+msgstr "运行单元测试非常简单："
 
 #: ../../source/developer_guide/contributing.rst:151
 msgid "Alternatively, running unit tests (minus NIXL tests) is as follows:"
-msgstr ""
+msgstr "或者，运行单元测试（不包括 NIXL 测试）如下："
 
 #: ../../source/developer_guide/contributing.rst:157
 msgid ""
@@ -400,42 +400,42 @@ msgid ""
 "to `pytest`. The following example invokes a single test method "
 "\"test_lm_connector\" that is declared in the \"tests/test_connector.py\""
 " file:"
-msgstr ""
+msgstr "默认情况下，会运行 tests 目录中找到的所有测试。但是，可以通过向 `pytest` 传递文件名、类和/或方法来运行特定的单元测试。以下示例调用在 \"tests/test_connector.py\" 文件中声明的单个测试方法 \"test_lm_connector\"："
 
 #: ../../source/developer_guide/contributing.rst:165
 msgid ""
 "Currently, unit tests do not run on non Linux NVIDIA GPU platforms. If "
 "you don't have access to this platform to run unit tests locally, rely on"
 " the continuous integration system to run the tests for now."
-msgstr ""
+msgstr "目前，单元测试不在非 Linux NVIDIA GPU 平台上运行。如果您无法访问此平台在本地运行单元测试，目前请依赖持续集成系统来运行测试。"
 
 #: ../../source/developer_guide/contributing.rst:168
 msgid "Building the docs"
-msgstr ""
+msgstr "构建文档"
 
 #: ../../source/developer_guide/contributing.rst:170
 msgid "Install the dependencies:"
-msgstr ""
+msgstr "安装依赖项："
 
 #: ../../source/developer_guide/contributing.rst:176
 msgid ""
 "After that, you can build the docs (from :code:`docs/` directory) using "
 "`make`:"
-msgstr ""
+msgstr "之后，您可以使用 `make` 构建文档（从 :code:`docs/` 目录）："
 
 #: ../../source/developer_guide/contributing.rst:183
 msgid ""
 "Serve docs page locally at http://localhost:8000: :code:`python -m "
 "http.server -d build/html/`"
-msgstr ""
+msgstr "在本地 http://localhost:8000 提供文档页面：:code:`python -m http.server -d build/html/`"
 
 #: ../../source/developer_guide/contributing.rst:186
 msgid "Thank You"
-msgstr ""
+msgstr "谢谢"
 
 #: ../../source/developer_guide/contributing.rst:188
 msgid ""
 "Thank you for your contribution to LMCache and making it a better, and "
 "accessible framework for all."
-msgstr ""
+msgstr "感谢您对 LMCache 的贡献，让它成为一个更好、更易用的框架，造福所有人。"
 

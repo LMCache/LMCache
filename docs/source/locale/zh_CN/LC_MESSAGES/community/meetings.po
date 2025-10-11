@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/community/meetings.rst:2
 msgid "Community meetings"
-msgstr ""
+msgstr "社区会议"
 
 #: ../../source/community/meetings.rst:4
 msgid ""
@@ -30,38 +30,43 @@ msgid ""
 "in contributing to the LMCache projects (core LMCache or Production "
 "Stack), we encourage you to join the meetings."
 msgstr ""
+"LMCache 定期举办社区会议，讨论更新、新功能请求以及社区反馈。如果您有兴趣为 "
+"LMCache 项目（核心 LMCache 或 Production Stack）做出贡献，我们鼓励您参加这些会议。"
 
 #: ../../source/community/meetings.rst:9
 msgid "Meeting schedule"
-msgstr ""
+msgstr "会议安排"
 
 #: ../../source/community/meetings.rst:10
 msgid "The LMCache community meetings held separately for each project:"
-msgstr ""
+msgstr "LMCache 社区会议为每个项目单独举行："
 
 #: ../../source/community/meetings.rst:12
 msgid "LMCache - `Github <https://github.com/LMCache/LMCache/>`__"
-msgstr ""
+msgstr "LMCache - `Github <https://github.com/LMCache/LMCache/>`__"
 
 #: ../../source/community/meetings.rst:13
 msgid ""
 "Production Stack - `Github <https://github.com/vllm-project/production-"
 "stack>`__"
 msgstr ""
+"Production Stack - `Github <https://github.com/vllm-project/production-"
+"stack>`__"
 
 #: ../../source/community/meetings.rst:16
 msgid "LMCache Project"
-msgstr ""
+msgstr "LMCache 项目"
 
 #: ../../source/community/meetings.rst:18
 msgid ""
 "The LMCache community meeting is held bi-weekly on **Tuesdays** at "
 "**9:00-9:30 AM PT**."
 msgstr ""
+"LMCache 社区会议每两周举行一次，时间为 **周二** **上午 9:00-9:30（太平洋时间）**。"
 
 #: ../../source/community/meetings.rst:20
 msgid "Please find the meeting invite link below:"
-msgstr ""
+msgstr "请参考以下会议邀请链接："
 
 #: ../../source/community/meetings.rst:22
 #: ../../source/community/meetings.rst:32
@@ -69,12 +74,16 @@ msgid ""
 "**Meeting link**: `Zoom link "
 "<https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_"
 msgstr ""
+"**会议链接**：`Zoom 链接 "
+"<https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_"
 
 #: ../../source/community/meetings.rst:23
 msgid ""
 "**Calendar Invite**: `Google Calendar "
 "<https://drive.usercontent.google.com/u/0/uc?id=15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn&export=download>`__"
 msgstr ""
+"**日历邀请**：`Google 日历 "
+"<https://drive.usercontent.google.com/u/0/uc?id=15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn&export=download>`__"
 
 #: ../../source/community/meetings.rst:24
 msgid ""
@@ -82,28 +91,36 @@ msgid ""
 "<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
 "5Amprc9k5hcIdXT7XevTaQ>`_"
 msgstr ""
+"**Slack 频道**：`#lmcache "
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
+"5Amprc9k5hcIdXT7XevTaQ>`_"
 
 #: ../../source/community/meetings.rst:27
 msgid "vLLM Production Stack Project"
-msgstr ""
+msgstr "vLLM Production Stack 项目"
 
 #: ../../source/community/meetings.rst:29
 msgid ""
 "The Production Stack community meeting is held bi-weekly on **Tuesdays** "
 "at **5:30-6:00 PM PT**. Please find the meeting invite link below:"
 msgstr ""
+"Production Stack 社区会议每两周举行一次，时间为 **周二** **下午 5:30-6:00（太平洋时间）**。请参考以下会议邀请链接："
 
 #: ../../source/community/meetings.rst:33
 msgid ""
 "**Calendar Invite**: `Google Calendar "
 "<https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`__"
 msgstr ""
+"**日历邀请**：`Google 日历 "
+"<https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`__"
 
 #: ../../source/community/meetings.rst:34
 msgid ""
 "**Slack Channel**: `#production-stack <https://vllm-"
 "dev.slack.com/archives/C089SMEAKRA>`_"
 msgstr ""
+"**Slack 频道**：`#production-stack <https://vllm-"
+"dev.slack.com/archives/C089SMEAKRA>`_"
 
 #: ../../source/community/meetings.rst:38
 msgid ""
@@ -111,4 +128,6 @@ msgid ""
 "community meetings. Meeting notes are available here: `Meeting notes "
 "<https://docs.google.com/document/d/1vX0g2q3j4x5m7J6z8Q9Gk4Z5l7f3K8h0nqYwW1a2c4o/edit?usp=sharing>`_."
 msgstr ""
+"LMCache 和 Production Stack 社区会议使用相同的 Zoom 会议链接。会议记录可在此处查看：`会议记录 "
+"<https://docs.google.com/document/d/1vX0g2q3j4x5m7J6z8Q9Gk4Z5l7f3K8h0nqYwW1a2c4o/edit?usp=sharing>`_。"
 

@@ -18,19 +18,19 @@ help:
 html-zh:
 	@$(SPHINXBUILD) -b html -D language=zh_CN "$(SOURCEDIR)" "$(BUILDDIR)/html/zh_CN" $(SPHINXOPTS) $(O)
 	@echo ""
-	@echo "中文文档已生成在 $(BUILDDIR)/html/zh_CN/"
+	@echo "Chinese documentation generated in $(BUILDDIR)/html/zh_CN/"
 
 # Build both English and Chinese documentation
 html-all: html html-zh
 	@echo ""
-	@echo "英文文档: $(BUILDDIR)/html/"
-	@echo "中文文档: $(BUILDDIR)/html/zh_CN/"
+	@echo "English documentation: $(BUILDDIR)/html/"
+	@echo "Chinese documentation: $(BUILDDIR)/html/zh_CN/"
 
 # Update translation files
 i18n-update: gettext
 	sphinx-intl update -p $(BUILDDIR)/gettext -l zh_CN
 	@echo ""
-	@echo "翻译文件已更新，请编辑 $(SOURCEDIR)/locale/zh_CN/LC_MESSAGES/ 下的 .po 文件"
+	@echo "Translation files updated, please edit the .po files in $(SOURCEDIR)/locale/zh_CN/LC_MESSAGES/"
 
 # Show translation statistics
 i18n-stat:

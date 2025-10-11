@@ -21,32 +21,32 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:2
 msgid "Configurable Storage Backends"
-msgstr ""
+msgstr "可配置存储后端"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:4
 msgid ""
 "LMCache supports integrating custom storage backends through dynamic "
 "loading or plug and play capability. This allows extending cache storage "
 "capabilities without modifying core code."
-msgstr ""
+msgstr "LMCache 支持通过动态加载或即插即用功能集成自定义存储后端。这允许在不修改核心代码的情况下扩展缓存存储功能。"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:7
 msgid "Backend Definition Requirements"
-msgstr ""
+msgstr "后端定义要求"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:8
 msgid "Inherit from ``ConfigurableStorageBackendInterface``"
-msgstr ""
+msgstr "继承自 ``ConfigurableStorageBackendInterface``"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:9
 msgid ""
 "Implement all the abstract methods of the parent interface of "
 "``ConfigurableStorageBackendInterface``- ``StorageBackendInterface``"
-msgstr ""
+msgstr "实现 ``ConfigurableStorageBackendInterface`` 的父接口 ``StorageBackendInterface`` 的所有抽象方法"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:10
 msgid "Package as an installable Python module"
-msgstr ""
+msgstr "打包为可安装的 Python 模块"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:14
 msgid ""
@@ -54,46 +54,46 @@ msgid ""
 "loading system will use when loading configurable storage backends. If "
 "you wish to implement a constructor, it should have the same parameter "
 "signature and call the interface constructor."
-msgstr ""
+msgstr "接口构造函数是 LMCache 加载系统在加载可配置存储后端时将使用的实例化契约。如果您希望实现构造函数，它应该具有相同的参数签名并调用接口构造函数。"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:18
 msgid "How to Integrate the Backend with LMCache"
-msgstr ""
+msgstr "如何将后端与 LMCache 集成"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:19
 msgid "Install your backend package in the LMCache environment"
-msgstr ""
+msgstr "在 LMCache 环境中安装您的后端包"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:20
 msgid ""
 "Add ``external_backends`` and its related ``module_path`` and "
 "``class_name`` to ``extra_config`` section of LMCache configuration as "
 "follows:"
-msgstr ""
+msgstr "将 ``external_backends`` 及其相关的 ``module_path`` 和 ``class_name`` 添加到 LMCache 配置的 ``extra_config`` 部分，如下所示："
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:32
 msgid "An example configuration for a logging backend is as follows:"
-msgstr ""
+msgstr "日志后端的示例配置如下："
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:46
 msgid ""
 "Backends are initialized in order during LMCache startup - earlier "
 "backends have higher priority during cache lookups"
-msgstr ""
+msgstr "后端在 LMCache 启动期间按顺序初始化 - 较早的后端在缓存查找期间具有更高的优先级"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:47
 msgid ""
 "``external_backends.<backend_name>`` distinguishes the different dynamic "
 "loaded backends"
-msgstr ""
+msgstr "``external_backends.<backend_name>`` 区分不同的动态加载后端"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:50
 msgid "Backend Implementation Example"
-msgstr ""
+msgstr "后端实现示例"
 
 #: ../../source/kv_cache/storage_backends/external_backend.rst:51
 msgid ""
 "A sample backend implementation can be viewed at "
 "https://github.com/opendataio/lmc_external_log_backend/"
-msgstr ""
+msgstr "示例后端实现可以在 https://github.com/opendataio/lmc_external_log_backend/ 查看"
 

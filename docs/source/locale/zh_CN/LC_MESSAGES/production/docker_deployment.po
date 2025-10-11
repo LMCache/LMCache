@@ -21,17 +21,17 @@ msgstr ""
 
 #: ../../source/production/docker_deployment.rst:4
 msgid "Docker deployment"
-msgstr ""
+msgstr "Docker 部署"
 
 #: ../../source/production/docker_deployment.rst:7
 msgid "Running the container image"
-msgstr ""
+msgstr "运行容器镜像"
 
 #: ../../source/production/docker_deployment.rst:9
 msgid ""
 "You can run the LMCache integrated with vLLM image using Docker as "
 "follows:"
-msgstr ""
+msgstr "您可以使用 Docker 运行集成了 vLLM 的 LMCache 镜像，方法如下："
 
 #: ../../source/production/docker_deployment.rst:26
 msgid ""
@@ -39,17 +39,17 @@ msgid ""
 "<https://hub.docker.com/r/lmcache/vllm-openai>`_. See example run file in"
 " `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more "
 "details."
-msgstr ""
+msgstr "镜像名称和标签可以在 DockerHub 上找到 - `LMCache/vllm-openai <https://hub.docker.com/r/lmcache/vllm-openai>`_。有关更多详细信息，请参阅 `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_ 中的示例运行文件。"
 
 #: ../../source/production/docker_deployment.rst:31
 msgid "DockerHub contains the following image types:"
-msgstr ""
+msgstr "DockerHub 包含以下镜像类型："
 
 #: ../../source/production/docker_deployment.rst:33
 msgid ""
 "Nightly build images of LMCache and vLLM latest code (e.g. tagged with "
 "`latest-nightly` and `nightly-<date>`)"
-msgstr ""
+msgstr "LMCache 和 vLLM 最新代码的每日构建镜像（例如标记为 `latest-nightly` 和 `nightly-<date>`）"
 
 #: ../../source/production/docker_deployment.rst:34
 msgid ""
@@ -57,11 +57,11 @@ msgid ""
 "exact version of vllm a version of lmcache was built with can be "
 "discovered by consulting the compatibility matrix inside of `installation"
 " <../installation.rst>`_)"
-msgstr ""
+msgstr "LMCache 和 vLLM 稳定版本的镜像（标记为 `v0.x.x`，可以通过查看 `installation <../installation.rst>`_ 中的兼容性矩阵来发现 lmcache 版本构建时使用的确切 vllm 版本）"
 
 #: ../../source/production/docker_deployment.rst:36
 msgid ""
 "Lightweight image that cannot run PD disaggregation (tagged with "
 "`lightweight`)"
-msgstr ""
+msgstr "无法运行 PD 分离的轻量级镜像（标记为 `lightweight`）"
 

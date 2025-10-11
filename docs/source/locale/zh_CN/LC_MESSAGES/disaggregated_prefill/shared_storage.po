@@ -21,9 +21,9 @@ msgstr ""
 
 #: ../../source/disaggregated_prefill/shared_storage.rst:2
 msgid "Using shared storage"
-msgstr ""
+msgstr "使用共享存储"
 
 #: ../../source/disaggregated_prefill/shared_storage.rst:4
 msgid "Coming soon..."
-msgstr ""
+msgstr "即将推出..."
 
