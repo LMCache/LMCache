@@ -23,13 +23,7 @@ class FsConnectorAdapter(ConnectorAdapter):
 
         logger.info(f"Creating FS connector for URL: {context.url}")
         parse_url = parse_remote_url(context.url)
-        relative_tmp_dir = (
-            None
-            if context.config is None
-            else context.config.get_extra_config_value(
-                "fs_connector_relative_tmp_dir", None
-            )
-        )
+
         return FSConnector(
-            parse_url.path, context.loop, context.local_cpu_backend, relative_tmp_dir
+            parse_url.path, context.loop, context.local_cpu_backend, context.config
         )
