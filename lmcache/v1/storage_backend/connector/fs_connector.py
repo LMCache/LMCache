@@ -157,6 +157,7 @@ class FSConnector(RemoteConnector):
                 # Read the actual data into allocated memory
                 buffer = memory_obj.byte_array
                 if self.save_chunk_meta:
+                    # if save chunk meta, read meta will trigger read ahead if fs supported
                     num_read = await f.readinto(buffer)
                     if num_read != len(buffer):
                         raise RuntimeError(
@@ -168,11 +169,15 @@ class FSConnector(RemoteConnector):
                     else:
                         if not isinstance(buffer, memoryview):
                             buffer = memoryview(buffer)
+
+                        # trigger read head if fs supported
                         num_read_ahead = await f.readinto(
                             buffer[: self.read_ahead_size]
                         )
                         assert num_read_ahead <= self.read_ahead_size
 
+                        # if num_read_ahead == self.read_ahead_size,
+                        # means there may still be some remaining content
                         if num_read_ahead == self.read_ahead_size:
                             num_read_tail = await f.readinto(
                                 buffer[self.read_ahead_size :]
