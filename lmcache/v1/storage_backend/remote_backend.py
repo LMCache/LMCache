@@ -9,7 +9,7 @@ import time
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
@@ -87,6 +87,15 @@ class RemoteBackend(StorageBackendInterface):
 
         # Start the remote monitor thread (if ping is supported)
         self.remote_monitor.start()
+
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.remote_put_task_num.set_function(
+                lambda: len(self.put_tasks)
+            )
 
     def __str__(self):
         return self.__class__.__name__
@@ -450,7 +459,17 @@ class RemoteBackend(StorageBackendInterface):
         return True
 
     def remove(self, key, force=True):
-        raise NotImplementedError("Remote backend does not support remove now.")
+        if self.connection is None:
+            logger.warning("Connection is None in remove, returning False")
+            return False
+
+        try:
+            return self.connection.remove_sync(key)
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove key {key} from remote backend, error: {e}"
+            )
+            return False
 
     def get_allocator_backend(self):
         return self.local_cpu_backend

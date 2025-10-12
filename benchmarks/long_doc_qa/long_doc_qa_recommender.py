@@ -42,9 +42,7 @@ def get_tensor_parallel_recommendation(model_name: str):
     usable_per_gpu_memory = (
         per_gpu_memory * 0.9 - intermediate_buffer - minimum_kv_cache_buffer
     )
-    print(
-        "Estimated usable gpu memory for model weights per gpu: {usable_per_gpu_memory}"
-    )
+    print(f"Usable gpu memory for model weights per gpu: {usable_per_gpu_memory}")
     initial_tp = math.ceil(total_model_weights_gb / usable_per_gpu_memory)
     # round up to a power of 2
     return 2 ** math.ceil(math.log2(initial_tp))
@@ -158,6 +156,7 @@ def main(model_name: str):
             f"but {model_name} requires {tp} tensor parallelism to run on your hardware"
         )
         return
+    print("This will take a while...")
     per_gpu_kv_cache_GiB, tokens_in_prefix_cache = get_prefix_cache_token_size(
         model_name, tp
     )
@@ -186,9 +185,7 @@ def main(model_name: str):
 
 def build_argument_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model", type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct"
-    )
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B")
     return parser
 
 

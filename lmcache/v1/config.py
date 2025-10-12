@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Optional, Union
+import ast
 import json
 import os
 import re
+import uuid
 
 # Third Party
 import yaml
@@ -69,6 +71,33 @@ def _to_bool(
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ["true", "1"]
+
+
+def _parse_quoted_string(value: str) -> str:
+    """Parse a string that may be surrounded by quotes and handle escape characters.
+
+    Args:
+        value: The input string that may be quoted
+
+    Returns:
+        The unquoted string with escape characters properly handled
+    """
+    if not value:
+        return value
+
+    value = value.strip()
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        try:
+            evaluated = ast.literal_eval(value)
+            if isinstance(evaluated, str):
+                return evaluated
+        except (ValueError, SyntaxError):
+            # If ast.literal_eval fails, it's not a valid Python literal.
+            # Fall back to simply stripping the outer quotes.
+            return value[1:-1]
+
+    return value
 
 
 # Configuration aliases and deprecated mappings
@@ -176,8 +205,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "lmcache_instance_id": {
-        "type": str,
-        "default": "lmcache_default_instance",
+        "type": Optional[str],
+        "default": None,
         "env_converter": str,
     },
     "controller_pull_url": {
@@ -356,6 +385,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": 3000,
         "env_converter": int,
     },
+    "hit_miss_ratio": {
+        "type": Optional[float],
+        "default": None,
+        "env_converter": float,
+    },
 }
 
 
@@ -399,6 +433,9 @@ def _create_config_class():
     from dataclasses import make_dataclass
 
     def _post_init(self):
+        # Generate random instance ID if not set
+        if not self.lmcache_instance_id:
+            self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
         self.validate()
 
     cls = make_dataclass(
@@ -429,6 +466,15 @@ def _create_config_class():
 
 def _validate_config(self):
     """Validate configuration"""
+    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
+    if self.enable_async_loading or self.use_layerwise:
+        logger.warning(
+            "Automatically setting save_unfull_chunk=False because "
+            "enable_async_loading=True or use_layerwise=True to prevent "
+            "CPU memory fragmentation"
+        )
+        self.save_unfull_chunk = False
+
     if self.enable_p2p:
         assert self.enable_controller
         assert self.controller_pull_url is not None
@@ -632,11 +678,15 @@ def _update_config_from_env(self):
     for name, config in _CONFIG_DEFINITIONS.items():
         if name in resolved_config:
             try:
-                value = resolved_config[name]
+                # Parse quoted strings and handle escape characters
+                raw_value = resolved_config[name]  # Keep original value for logging
+                value = _parse_quoted_string(raw_value)
                 converted_value = config["env_converter"](value)
                 setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
-                logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
+                logger.warning(
+                    f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
+                )
                 # Keep existing value if conversion fails
 
     return self

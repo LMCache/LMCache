@@ -336,8 +336,8 @@ class TensorMemoryObj(MemoryObj):
         parent_allocator: Optional["MemoryAllocatorInterface"],
     ):
         assert metadata.dtype is not None, "dtype must be specified for TensorMemoryObj"
+        super().__init__(metadata)
         self.raw_data = raw_data
-        self.meta = metadata
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
@@ -486,7 +486,7 @@ class BytesBufferMemoryObj(MemoryObj):
         self.raw_data = raw_bytes
         if metadata is None:
             bytes_shape = torch.Size([len(self.raw_data), 0, 0, 0])
-            self.meta = MemoryObjMetadata(
+            metadata = MemoryObjMetadata(
                 shape=bytes_shape,
                 dtype=None,
                 address=0,
@@ -495,8 +495,7 @@ class BytesBufferMemoryObj(MemoryObj):
                 pin_count=0,
                 fmt=MemoryFormat.BINARY_BUFFER,
             )
-        else:
-            self.meta = metadata
+        super().__init__(metadata)
         self.valid = True
 
     def invalidate(self):
@@ -801,7 +800,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return TensorMemoryObj(
             raw_data=self.buffer[block.start : block.start + raw_size],
             metadata=MemoryObjMetadata(
-                shape, dtype, block.start, aligned_size, 1, False, fmt
+                shape, dtype, block.start, aligned_size, 1, 0, fmt
             ),
             parent_allocator=self,
         )
@@ -876,7 +875,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 TensorMemoryObj(
                     raw_data=raw_data,
                     metadata=MemoryObjMetadata(
-                        shape, dtype, temp_start, unit_aligned_size, 1, False, fmt
+                        shape, dtype, temp_start, unit_aligned_size, 1, 0, fmt
                     ),
                     parent_allocator=self,
                 )
@@ -1525,6 +1524,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         else:
             self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
+        self.align_bytes = self.pin_allocator.align_bytes
+
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
         self.buffer_allocator = BufferAllocator("cpu")
@@ -1876,6 +1877,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             dtype,
             fmt,
         )
+        self.align_bytes = self.cpu_allocator.align_bytes
 
     def allocate(
         self,

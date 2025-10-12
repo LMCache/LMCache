@@ -102,7 +102,7 @@ Create your ``mooncake-config.yaml``:
 
     LMCACHE_CONFIG_FILE="mooncake-config.yaml" \
     vllm serve \
-        meta-llama/Llama-3.1-70B-Instruct \
+        meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 65536 \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
@@ -116,7 +116,7 @@ Test the integration with a sample request:
     curl -X POST "http://localhost:8000/v1/completions" \
          -H "Content-Type: application/json" \
          -d '{
-           "model": "meta-llama/Llama-3.1-70B-Instruct",
+           "model": "meta-llama/Llama-3.1-8B-Instruct",
            "prompt": "The future of AI is",
            "max_tokens": 100,
            "temperature": 0.7

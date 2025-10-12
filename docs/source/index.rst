@@ -46,7 +46,7 @@ Welcome to LMCache!
 For more information, check out the following:
 
 * `LMCache blogs <https://lmcache.github.io>`_
-* `Join LMCache slack workspace <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_
+* `Join LMCache slack workspace <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-j2hPn0AdzcfyykatTBXSTg>`_
 * Our papers:
 
   * `CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_
@@ -71,8 +71,10 @@ Documentation
    :caption: Getting Started
 
    getting_started/installation
+   getting_started/quickstart
    getting_started/quickstart/index
    getting_started/benchmarking
+   getting_started/kv_cache_calculator
    getting_started/troubleshoot
    getting_started/faq
    
@@ -85,6 +87,7 @@ Documentation
 
    kv_cache/storage_backends/index
    kv_cache/caching_policies
+   kv_cache/p2p_sharing
 
 :raw-html:`<br />`
 
@@ -111,6 +114,7 @@ Documentation
 
    kv_cache_optimizations/compression/index
    kv_cache_optimizations/blending
+   kv_cache_optimizations/layerwise
 
 :raw-html:`<br />`
 
@@ -162,5 +166,5 @@ Documentation
    community/meetings
    community/blogs
 
-raw-html:`<br />`
+:raw-html:`<br />`
    

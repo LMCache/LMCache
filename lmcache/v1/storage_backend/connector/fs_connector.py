@@ -114,6 +114,7 @@ class FSConnector(RemoteConnector):
         """Get data from file system"""
         file_path = self._get_file_path(key)
 
+        memory_obj = None
         try:
             async with aiofiles.open(file_path, "rb") as f:
                 if self.save_chunk_meta:
@@ -154,11 +155,11 @@ class FSConnector(RemoteConnector):
 
             return memory_obj
 
-        except FileNotFoundError:
-            # Key does not exist is normal case
-            return None
         except Exception as e:
-            logger.error(f"Failed to read from file {file_path}: {str(e)}")
+            if not isinstance(e, FileNotFoundError):
+                logger.error(f"Failed to read from file {file_path}: {str(e)}")
+            if memory_obj is not None:
+                memory_obj.ref_count_down()
             return None
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -193,6 +194,24 @@ class FSConnector(RemoteConnector):
             if await aiofiles.os.path.exists(temp_path):
                 await aiofiles.os.unlink(temp_path)  # Remove corrupted file
             raise
+
+    def remove_sync(self, key: CacheEngineKey) -> bool:
+        """
+        Remove the file associated with the given key.
+
+        Args:
+            key: The key to remove.
+
+        Returns:
+            bool: True if the file was successfully removed, False otherwise.
+        """
+        file_path = self._get_file_path(key)
+        try:
+            os.remove(file_path)
+            return True
+        except OSError as e:
+            logger.error(f"Failed to remove file {file_path}: {e}")
+            return False
 
     @no_type_check
     async def list(self) -> List[str]:

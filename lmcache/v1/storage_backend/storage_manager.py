@@ -2,7 +2,15 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Coroutine,
+    Generator,
+    List,
+    Optional,
+    Sequence,
+)
 import asyncio
 import functools
 import threading
@@ -92,6 +100,77 @@ def allocate_and_copy_objects(
     return keys[: len(allocated_objects)], allocated_objects
 
 
+class WeightedSemaphore:
+    def __init__(self, chunk_budget: int):
+        # it is physically impossible to have more fragmentation than 50%
+        # when all of the chunks are of the same size (save_unfull_chunk=False)
+        # so we can safely allocate half of the chunk budget for concurrent requests
+        self._concurrent_budget_cap = chunk_budget // 2
+        self._chunk_budget_cap = chunk_budget
+        self._current_chunks = self._concurrent_budget_cap
+        self._cond = asyncio.Condition()
+
+    async def acquire(self, n: int = 1) -> None:
+        if n > self._chunk_budget_cap:
+            raise ValueError(
+                f"Trying to acquire {n} chunks, "
+                f"Cannot acquire more than {self._chunk_budget_cap} chunks"
+                "Please set the max local cpu size to a larger value"
+            )
+
+        async with self._cond:
+            logger.info(f"WeightedSemaphore: Attempting to acquire {n} chunks")
+            if n <= self._concurrent_budget_cap:
+                await self._cond.wait_for(lambda: self._current_chunks >= n)
+                self._current_chunks -= n
+            else:
+                # Oversized case: require exclusive access
+                await self._cond.wait_for(
+                    lambda: self._current_chunks == self._concurrent_budget_cap
+                )
+                # Reserve everything
+                self._current_chunks = 0
+            logger.info(
+                f"WeightedSemaphore: Acquired {n} chunks, "
+                f"remaining chunks: {self._current_chunks}"
+            )
+
+    async def release(self, n: int = 1) -> None:
+        async with self._cond:
+            if n <= self._concurrent_budget_cap:
+                self._current_chunks += n
+            else:
+                self._current_chunks = self._concurrent_budget_cap
+            self._cond.notify_all()
+
+
+class AsyncSerializer:
+    """
+    Prevent race conditions where multiple batched_get's cause the local CPU
+    backend to allocate memory objects in parallel and get deadlocked.
+    """
+
+    def __init__(
+        self,
+        allocator_backend: AllocatorBackendInterface,
+        loop: asyncio.AbstractEventLoop,
+    ):
+        self.chunk_budget = allocator_backend.calculate_chunk_budget()
+        self._sem = WeightedSemaphore(self.chunk_budget)
+        self.loop = loop
+
+    async def run(
+        self,
+        coro_fn: Coroutine[Any, Any, Any],
+        num_chunks: int,
+    ) -> Any:
+        await self._sem.acquire(num_chunks)
+        try:
+            return await coro_fn
+        finally:
+            await self._sem.release(num_chunks)
+
+
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
     """
@@ -105,6 +184,8 @@ class StorageManager:
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
+        self.config = config
+        self.metadata = metadata
         self.loop = asyncio.new_event_loop()
 
         self.thread = threading.Thread(
@@ -152,7 +233,12 @@ class StorageManager:
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
+            assert not self.config.save_unfull_chunk, (
+                "save_unfull_chunk should be automatically set to False when using "
+                "async loading."
+            )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
+            self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -356,7 +442,12 @@ class StorageManager:
             backend = self.storage_backends[location]
             # TODO(Jiayi): need to make async loading and layerwise compatible
             task = asyncio.run_coroutine_threadsafe(
-                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
+                self.async_serializer.run(
+                    backend.batched_get_non_blocking(
+                        "fake_lookup_id", keys_multi_chunk
+                    ),
+                    len(keys_multi_chunk),
+                ),
                 self.loop,
             )
             yield task
@@ -447,10 +538,13 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
 
             loading_task = asyncio.create_task(
-                backend.batched_get_non_blocking(
-                    lookup_id,
-                    keys[:num_hit_chunks],
-                    {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
+                self.async_serializer.run(
+                    backend.batched_get_non_blocking(
+                        lookup_id,
+                        keys[:num_hit_chunks],
+                        {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
+                    ),
+                    num_hit_chunks,
                 )
             )
             loading_task.add_done_callback(

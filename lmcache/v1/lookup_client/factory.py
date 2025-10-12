@@ -7,6 +7,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.lookup_client.hit_limit_lookup_client import HitLimitLookupClient
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 
 if TYPE_CHECKING:
@@ -47,7 +48,7 @@ class LookupClientFactory:
                 raise ValueError(
                     "Asynchronous loading is not supported for external lookup clients."
                 )
-            return LookupClientFactory._create_external_lookup_client(
+            client = LookupClientFactory._create_external_lookup_client(
                 config.external_lookup_client, vllm_config
             )
         else:
@@ -60,9 +61,13 @@ class LookupClientFactory:
             )
 
             if config.enable_async_loading:
-                return LMCacheAsyncLookupClient(vllm_config)
+                client = LMCacheAsyncLookupClient(vllm_config)
             else:
-                return LMCacheLookupClient(vllm_config)
+                client = LMCacheLookupClient(vllm_config)
+
+        if config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1:
+            return HitLimitLookupClient(client, config)
+        return client
 
     @staticmethod
     def create_lookup_server(

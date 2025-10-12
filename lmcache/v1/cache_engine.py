@@ -743,7 +743,6 @@ class LMCacheEngine:
             if pin:
                 self.storage_manager.touch_cache()
 
-    # FIXME
     @_lmcache_nvtx_annotate
     def move(
         self,
@@ -966,11 +965,10 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
-    def lookup_unpin(self, lookup_ids: list[str]) -> None:
-        for lookup_id in lookup_ids:
-            if lookup_id in self.lookup_pins:
-                self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
-                del self.lookup_pins[lookup_id]
+    def lookup_unpin(self, lookup_id: str) -> None:
+        if lookup_id in self.lookup_pins:
+            self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
+            del self.lookup_pins[lookup_id]
 
     @_lmcache_nvtx_annotate
     def clear(
@@ -983,11 +981,9 @@ class LMCacheEngine:
         if self.save_only_first_rank:
             if self.metadata.is_first_rank():
                 num_removed = self._clear(tokens, locations, request_configs)
-                self.broadcast_object_fn(num_removed, self.metadata.first_rank)
                 return num_removed
             else:
-                num_removed = self.broadcast_object_fn(None, self.metadata.first_rank)
-                return int(num_removed)
+                return 0
         return self._clear(tokens, locations, request_configs)
 
     def _clear(
