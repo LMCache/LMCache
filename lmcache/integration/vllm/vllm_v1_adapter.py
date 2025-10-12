@@ -436,7 +436,6 @@ def _calculate_mtp_layers(vllm_config, model_config):
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
-    kv_cache_config: Optional["KVCacheConfig"],
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -457,6 +456,9 @@ def _init_lmcache_engine(
     model_config = vllm_config.model_config
     parallel_config = vllm_config.parallel_config
     cache_config = vllm_config.cache_config
+    kv_cache_config = None
+    if hasattr(vllm_config, "kv_cache_config"):
+        kv_cache_config = vllm_config.kv_cache_config
 
     assert isinstance(lmcache_config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
@@ -602,7 +604,6 @@ class LMCacheConnectorV1Impl:
     def __init__(
         self,
         vllm_config: "VllmConfig",
-        kv_cache_config: Optional["KVCacheConfig"],
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
@@ -648,7 +649,6 @@ class LMCacheConnectorV1Impl:
             self.lmcache_engine = _init_lmcache_engine(
                 config,
                 vllm_config,
-                kv_cache_config,
             )
 
             self.use_layerwise = config.use_layerwise
