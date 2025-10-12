@@ -39,6 +39,9 @@ def run(config: LMCacheEngineConfig, shape, dtype):
     keys.append(
         create_key("e3229141e680fb413d2c5d3ebb416c4ad300d381e309fc9e417757b91406d268")
     )
+    keys.append(
+        create_key("e3229141e680fb413d2c5d3ebb416c4ad300d381e309fc9e417757b91406e379")
+    )
     bad_key = create_key("deadbeefdeadbeef")
 
     thread_loop = None
@@ -89,9 +92,15 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         objs[1].tensor[300, 400] = 1e-2
         objs[1].tensor[400, 300] = 1e-5
 
-        nixl_backend.batched_submit_put_task(keys, objs)
+        objs[2].tensor[300, 400] = 3e-2
+        objs[2].tensor[400, 300] = 4e-5
 
-        for key, obj in zip(keys, objs, strict=False):
+        # Insert first 2 keys
+        first_keys = keys[0:2]
+        first_objs = objs[0:2]
+        nixl_backend.batched_submit_put_task(first_keys, first_objs)
+
+        for key, obj in zip(first_keys, first_objs, strict=False):
             returned_memory_obj = nixl_backend.get_blocking(key)
             assert returned_memory_obj is not None
             assert returned_memory_obj.get_size() == obj.get_size()
@@ -101,10 +110,10 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert torch.equal(returned_memory_obj.tensor, obj.tensor)
 
         obj_list = asyncio.run(
-            nixl_backend.batched_get_non_blocking(lookup_id="test", keys=keys)
+            nixl_backend.batched_get_non_blocking(lookup_id="test", keys=first_keys)
         )
 
-        for i, obj in enumerate(objs):
+        for i, obj in enumerate(first_objs):
             returned_memory_obj = obj_list[i]
             assert returned_memory_obj is not None
             assert returned_memory_obj.get_size() == obj.get_size()
@@ -113,8 +122,59 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert returned_memory_obj.metadata.address != obj.metadata.address
             assert torch.equal(returned_memory_obj.tensor, obj.tensor)
 
-        bad_obj = nixl_backend.get_blocking(bad_key)
-        assert bad_obj is None
+        def test_eviction(new_idx, old_idx):
+            nixl_backend.batched_submit_put_task([keys[new_idx]], [objs[new_idx]])
+
+            obj = nixl_backend.get_blocking(keys[new_idx])
+            assert obj is not None
+            assert obj.tensor is not None
+            assert torch.equal(obj.tensor, objs[new_idx].tensor)
+
+            obj = nixl_backend.get_blocking(keys[old_idx])
+            assert obj is None
+
+        ######## Test bad key lookup #########
+        obj = nixl_backend.get_blocking(bad_key)
+        assert obj is None
+
+        ######## Test eviction #########
+        obj = nixl_backend.get_blocking(keys[0])
+        assert obj is not None
+
+        # At this point, key 0 & key 1 are cached. Key 1 is LRU key.
+        # Submitting key 2 should evict key 1.
+
+        test_eviction(new_idx=2, old_idx=1)
+
+        ######## Test pin #########
+        val = nixl_backend.pin(keys[2])
+        assert val is True
+
+        obj = nixl_backend.get_blocking(keys[0])
+        assert obj is not None
+
+        # At this point, key 0 & key 2 are cached.
+        # Key 2 is LRU key, but is pinned.
+        # Submitting key 1 should evict key 0.
+
+        test_eviction(new_idx=1, old_idx=0)
+
+        ######## Test unpin #########
+        val = nixl_backend.unpin(keys[2])
+        assert val is True
+
+        obj = nixl_backend.get_blocking(keys[1])
+        assert obj is not None
+
+        # At this point, key 1 & key 2 are cached.
+        # Key 2 is LRU key, and is now unpinned.
+        # Submitting key 0 should evict key 2.
+
+        test_eviction(new_idx=0, old_idx=2)
+
+        for backend in backends.values():
+            backend.close()
+
     except Exception:
         raise
     finally:
