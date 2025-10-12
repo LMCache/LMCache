@@ -21,7 +21,7 @@ Please find the meeting invite link below:
 
 - **Meeting link**: `Zoom link <https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_
 - **Calendar Invite**: `Google Calendar <https://drive.usercontent.google.com/u/0/uc?id=15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn&export=download>`__
-- **Slack Channel**: `#lmcache <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ>`_
+- **Slack Channel**: `#lmcache <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-j2hPn0AdzcfyykatTBXSTg>`_
 
 vLLM Production Stack Project
 +++++++++++++++++++++++++++++++
