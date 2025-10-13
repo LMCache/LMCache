@@ -221,6 +221,34 @@ class FSConnector(RemoteConnector):
             keys.extend([f.stem for f in base_path.glob("*.data")])
         return keys
 
+    def support_batched_async_contains(self) -> bool:
+        return True
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """Check how many keys exist in file system in batch
+
+        Args:
+            lookup_id: Identifier for this lookup operation
+            keys: List of keys to check
+            pin: Whether to pin the keys (not used in FS connector)
+
+        Returns:
+            Number of consecutive keys that exist, starting from the first key
+        """
+        num_hit_counts = 0
+        for key in keys:
+            if await self.exists(key):
+                num_hit_counts += 1
+            else:
+                # Return immediately when we encounter a missing key
+                return num_hit_counts
+        return num_hit_counts
+
     async def close(self):
         """Clean up resources"""
         logger.info("Closed the file system connector")
