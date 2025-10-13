@@ -818,14 +818,15 @@ class LMCacheConnectorV1Impl:
                 continue
 
             tokens = request.token_ids
+            total_tokens_len = len(tokens)
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = request.slot_mapping.cuda()
-            assert len(tokens) == len(slot_mapping)
+            assert total_tokens_len == len(slot_mapping)
 
             self._stats_monitor.update_interval_vllm_hit_tokens(
                 request.load_spec.vllm_cached_tokens
             )
-            token_mask = torch.ones(len(tokens), dtype=torch.bool)
+            token_mask = torch.ones(total_tokens_len, dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
                 // self._lmcache_chunk_size
@@ -855,6 +856,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         sync=sync,
+                        num_tokens=total_tokens_len,
                     )
                     # NOTE: retrieve for two layers at the first layer
                     next(layerwise_retriever)
@@ -868,6 +870,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                     req_id=request.req_id,
+                    num_tokens=total_tokens_len,
                 )
 
                 # Check the result

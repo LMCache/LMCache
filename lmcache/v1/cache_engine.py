@@ -445,7 +445,11 @@ class LMCacheEngine:
         tot_kv_size = 0
         t = time.perf_counter()
 
-        if mask is not None:
+        # in vllm_v1_adapter, the mask and tokens is only a slice, use mask or
+        # tokens to cal num_required_tokens may be inaccurate
+        if "num_tokens" in kwargs:
+            num_required_tokens = kwargs["num_tokens"]
+        elif mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
@@ -550,7 +554,9 @@ class LMCacheEngine:
             the GPU.
         """
 
-        if mask is not None:
+        if "num_tokens" in kwargs:
+            num_required_tokens = kwargs["num_tokens"]
+        elif mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)

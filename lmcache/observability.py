@@ -68,6 +68,9 @@ class LMCacheStats:
     retrieve_speed: List[float]  # Tokens per second
     store_speed: List[float]  # Tokens per second
 
+    # request cache hit rate
+    interval_request_cache_hit_rate: List[float]
+
 
 @dataclass
 class LookupRequestStats:
@@ -94,6 +97,11 @@ class RetrieveRequestStats:
         return (
             self.local_hit_tokens + self.remote_hit_tokens
         ) / self.time_to_retrieve()
+
+    def hit_rate(self):
+        if self.num_tokens == 0:
+            return 0
+        return self.local_hit_tokens / self.num_tokens
 
 
 @dataclass
@@ -384,6 +392,10 @@ class LMCStatsMonitor:
             [stats.store_speed() for stats in self.store_requests.values()]
         )
 
+        request_cache_hit_rate = [
+            stats.hit_rate() for stats in self.retrieve_requests.values() if stats.end_time != 0
+        ]
+
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
@@ -419,6 +431,7 @@ class LMCStatsMonitor:
             retrieve_speed=retrieve_speed,
             store_speed=store_speed,
             interval_vllm_hit_tokens=self.interval_vllm_hit_tokens,
+            interval_request_cache_hit_rate=request_cache_hit_rate,
         )
         self._clear()
         return ret
@@ -785,6 +798,25 @@ class PrometheusLogger:
             buckets=remote_time_to_get_sync,
         )
 
+        request_cache_hit_rate = [
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            1.0,
+        ]
+        self.histogram_request_cache_hit_rate = self._histogram_cls(
+            name="lmcache:request_cache_hit_rate",
+            documentation="Reqeust cache hit rate",
+            labelnames=labelnames,
+            buckets=request_cache_hit_rate,
+        )
+
         # Ping latency metrics: use a gauge to record the latest ping latency
         self.gauge_remote_ping_latency = self._gauge_cls(
             name="lmcache:remote_ping_latency",
@@ -926,6 +958,9 @@ class PrometheusLogger:
         self._log_histogram(
             self.histogram_remote_time_to_get_sync,
             stats.interval_remote_time_to_get_sync,
+        )
+        self._log_histogram(
+            self.histogram_request_cache_hit_rate, stats.interval_request_cache_hit_rate
         )
         self._log_gauge(
             self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
