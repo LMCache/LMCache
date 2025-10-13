@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Optional
 import uuid
 
 # Third Party

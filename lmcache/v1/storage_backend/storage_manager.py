@@ -379,7 +379,6 @@ class StorageManager:
 
         return None
 
-<<<<<<< HEAD
     def get_non_blocking(
         self,
         key: CacheEngineKey,
@@ -401,8 +400,6 @@ class StorageManager:
                 return task
         return None
 
-=======
->>>>>>> 523f8ae5a55aade2be9a83a366cddd6bc66cef8a
     def batched_get(
         self,
         keys: List[CacheEngineKey],

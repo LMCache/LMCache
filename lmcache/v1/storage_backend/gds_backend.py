@@ -556,6 +556,7 @@ class GdsBackend(AllocatorBackendInterface):
     def get_non_blocking(
         self,
         key: CacheEngineKey,
+        location: Optional[str] = None,
     ) -> Optional[Future]:
         # TODO: Using a dummy wrapper around prefetch for now.
         if not self.submit_prefetch_task(key):
