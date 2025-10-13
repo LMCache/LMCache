@@ -44,9 +44,26 @@ To contribute to this repo, you'll use the Fork and Pull model common in many op
 - Run unit tests and fix any broken tests
 - Submit a pull request with detailed descriptions
 
-When your contribution is ready, you can create a pull request. Pull requests are often referred to as "PRs". In general, we follow the standard `GitHub pull request <https://help.github.com/en/articles/about-pull-requests>`_ process. Follow the template to provide details about your pull request to the maintainers. It's best to break your contribution into smaller PRs with incremental changes, and include a good description of the changes. We require new unit tests to be contributed with any new functionality added.
+When your contribution is ready, you can create a pull request. Pull requests are often referred to as "PRs". In general, we follow the standard `GitHub pull request <https://help.github.com/en/articles/about-pull-requests>`_ process. Follow the template to provide details about your pull request to the maintainers.
 
-Before sending pull requests, make sure your changes pass code quality checks and unit tests. These checks will run with the pull request builds. Alternatively, you can run the checks manually on your local machine `as specified in Development <#development>`_ .
+Please try to classify PRs for easy understanding of the type of changes. The PR title is prefixed appropriately to indicate the type of change. Please use one of the following:
+
+- [Bugfix] for bug fixes
+- [Build] for build fixes and improvements
+- [CI] for continuous integration fixes and iimprovements
+- [Core] for changes in the core LMCache logic (e.g., ``LMCacheEngine``, ``Backend`` etc.)
+- [Doc] for documentation fixes and improvements
+- [Misc] for PRs that do not fit the above categories. Please use this sparingly
+- [Model] for adding a new model or improving an existing model. Model name should appear in the title
+- [Test] for unit tests
+
+.. note::
+
+    If the PR spans more than one category, please include all relevant prefixes
+
+It's best to break your contribution into smaller PRs with incremental changes, and include a good description of the changes. We require new unit tests to be contributed with any new functionality added and docs if user facing changes.
+
+Before sending pull requests, make sure your changes pass code quality checks and unit tests. These checks will run when the pull request builds. Alternatively, you can run the checks manually on your local machine `as specified in Development <#development>`_ .
 
 DCO and Signed-off-by
 ^^^^^^^^^^^^^^^^^^^^^
@@ -90,7 +107,7 @@ The following prerequisites are required:
 The following tools are required:
 
 - `git <https://git-scm.com>`_
-- `python <https://www.python.org>`_ (v3.9 -- v3.13)
+- `python <https://www.python.org>`_ (v3.10 -- v3.13)
 - `pip <https://pypi.org/project/pip/>`_ (v23.0+)
 
 The first step is to install the necessary Python packages required for development. The commands to do this are as follows:
@@ -135,12 +152,7 @@ It will run automatically when you add a commit. You can also run it manually on
 Unit tests
 ^^^^^^^^^^
 
-.. note::
-    The Unit tests require `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ to be installed. Please follow the details in the NIXL GitHub repo to install.
-    The NIXL unit tests also require `vLLM <https://github.com/vllm-project/vllm>`_ and `msgpack <https://github.com/msgpack/msgpack-python/>`_.
-    If you are unable to install NIXL you can circumvent the NIXL unit tests by using the following pytest flags: `--ignore=tests/disagg` and  `--ignore=tests/v1/test_pos_kernels.py`.
-
-When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break exiting code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
+When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break existing code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
 
 Running unit tests is as simple as:
 
@@ -148,11 +160,9 @@ Running unit tests is as simple as:
 
     pytest
 
-Alternatively, running unit tests (minus NIXL tests) is as follows:
+.. note::
 
-.. code-block:: bash
-
-    pytest --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py
+    ``vLLM`` (``pip install vllm``) and the dependencies in ``requirements/test.txt`` need to be installed prior to running unit tests.
 
 By default, all tests found within the tests directory are run. However, specific unit tests can run by passing filenames, classes and/or methods to `pytest`. The following example invokes a single test method "test_lm_connector" that is declared in the "tests/test_connector.py" file:
 
@@ -160,9 +170,14 @@ By default, all tests found within the tests directory are run. However, specifi
 
     pytest tests/test_connector.py::test_lm_connector
 
-.. warning::
+.. note::
 
-    Currently, unit tests do not run on non Linux NVIDIA GPU platforms. If you don't have access to this platform to run unit tests locally, rely on the continuous integration system to run the tests for now.
+    Some unit tests require a NVIDIA GPU. This means that on a non Linux NVIDIA GPU system, the full suite of tests will not be run (tests requiring CUDA will be skipped). The Buildkite continuous integration (CI)  system executes a full run of all the tests.
+
+.. note::
+
+    The `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ unit tests require NIXL to be to be installed. This is not installed by LMCache by and therefore requires you to install it separately. Please follow the details in the NIXL GitHub repo to install.
+    If the NIXL package is not installed, the NIXL unit tests are skipped.
 
 Building the docs
 ^^^^^^^^^^^^^^^^^
@@ -173,7 +188,7 @@ Install the dependencies:
 
     pip install -r requirements/docs.txt
 
-Build the docs (from :code:`docs/` directory):
+After that, you can build the docs (from :code:`docs/` directory) using `make`:
 
 .. code-block:: bash
 

@@ -3,12 +3,14 @@ aiofiles
 aiohttp
 awscrt
 cufile-python
-infinistore
+fastapi
+httpx
 msgspec
 numpy
 nvtx
 prometheus_client >= 0.18.0
 psutil
+py-cpuinfo
 pyyaml
 pyzmq >= 25.0.0
 redis
@@ -29,3 +31,4 @@ sortedcontainers
 # 4. this torch version may also be overridden inside of LMCache/docker/Dockerfile
 torch
 transformers >= 4.51.1
+uvicorn

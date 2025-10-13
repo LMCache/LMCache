@@ -5,7 +5,10 @@ import argparse
 import time
 
 # Third Party
+import pytest
 import torch
+
+pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
 from lmcache.logging import init_logger

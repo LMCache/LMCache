@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
 import json
@@ -20,11 +20,16 @@ import numpy as np
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryAllocatorInterface, MemoryObj
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.memory_management import (
+    CuFileMemoryAllocator,
+    MemoryFormat,
+    MemoryObj,
+)
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
 
@@ -155,7 +160,7 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     return bool_value
 
 
-class GdsBackend(StorageBackendInterface):
+class GdsBackend(AllocatorBackendInterface):
     """
     Originally based on the open sourced WekaGdsBackend, this is a backend that
     leverages NVIDIA's cuFile API to issue GDS requests directly to the
@@ -174,16 +179,16 @@ class GdsBackend(StorageBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        memory_allocator: MemoryAllocatorInterface,
         dst_device: str = "cuda",
     ):
         assert dst_device.startswith("cuda")
-        super().__init__(dst_device)
+        super().__init__(dst_device=dst_device)
 
         self.config = config
         self.loop = loop
-        self.memory_allocator = memory_allocator
+        self.memory_allocator = self.initialize_allocator(config, metadata)
         self.dst_device = dst_device
 
         assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
@@ -402,10 +407,13 @@ class GdsBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
-    ) -> None:
+        transfer_spec: Any = None,
+    ) -> Union[List[Future], None]:
+        futures = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            future = self.submit_put_task(key, memory_obj)
+            futures.append(future)
+        return futures
 
     async def _async_save_bytes_to_disk(
         self,
@@ -526,10 +534,8 @@ class GdsBackend(StorageBackendInterface):
         else:
             addr = ctypes.c_void_p(self.cufile_base_pointer)
             dev_offset = memory_obj.metadata.address
-        ret = self._load_gds(
-            path, offset, addr, memory_obj.get_physical_size(), dev_offset
-        )
-        if ret != memory_obj.get_physical_size():
+        ret = self._load_gds(path, offset, addr, memory_obj.get_size(), dev_offset)
+        if ret != memory_obj.get_size():
             if ret < 0:
                 logger.error(
                     f"Error loading {path}: ret: {ret} removing entry from cache"
@@ -541,7 +547,7 @@ class GdsBackend(StorageBackendInterface):
                 # remove the entry if it's a persistent problem.
                 logger.error(
                     f"Error loading {path}: got only {ret} bytes "
-                    f"out of {memory_obj.get_physical_size()}, ignoring"
+                    f"out of {memory_obj.get_size()}, ignoring"
                 )
             memory_obj.ref_count_down()
             return None
@@ -645,7 +651,7 @@ class GdsBackend(StorageBackendInterface):
                 fd,
                 file_size,
                 prot=mmap.PROT_READ,
-                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,
+                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
             )
             os.close(fd)
 
@@ -683,5 +689,49 @@ class GdsBackend(StorageBackendInterface):
     def remove(self, key: CacheEngineKey, force: bool = True):
         raise NotImplementedError("Remote backend does not support remove now.")
 
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> CuFileMemoryAllocator:
+        assert config.cufile_buffer_size is not None
+        return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
+
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        if busy_loop:
+            logger.warning("GDS Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("GDS Backend does not support eviction")
+
+        return self.memory_allocator.allocate(shape, dtype, fmt)
+
+    def batched_allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[list[MemoryObj]]:
+        if busy_loop:
+            logger.warning("GDS Backend does not support allocation with busy loop")
+        if eviction:
+            logger.warning("GDS Backend does not support eviction")
+
+        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+
+    def get_allocator_backend(self):
+        return self
+
+    def get_memory_allocator(self):
+        return self.memory_allocator
+
     def close(self) -> None:
+        self.memory_allocator.close()
         logger.info("GDS backend closed.")

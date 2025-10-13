@@ -17,13 +17,19 @@ class FsConnectorAdapter(ConnectorAdapter):
     def __init__(self) -> None:
         super().__init__("fs://")
 
-    def can_parse(self, url: str) -> bool:
-        return url.startswith(self.schema)
-
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         # Local
         from .fs_connector import FSConnector
 
         logger.info(f"Creating FS connector for URL: {context.url}")
         parse_url = parse_remote_url(context.url)
-        return FSConnector(parse_url.path, context.loop, context.local_cpu_backend)
+        relative_tmp_dir = (
+            None
+            if context.config is None
+            else context.config.get_extra_config_value(
+                "fs_connector_relative_tmp_dir", None
+            )
+        )
+        return FSConnector(
+            parse_url.path, context.loop, context.local_cpu_backend, relative_tmp_dir
+        )

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List
 import uuid
 
 # Third Party
@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 
 def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.enable_nixl:
+    if lmcache_config.enable_pd:
         return False
     else:
         return True
@@ -190,13 +190,6 @@ class LMCacheConnector:
             slot_mapping=slot_mapping,
             offset=offset,
         )
-
-    def prefetch(
-        self,
-        tokens: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-    ) -> None:
-        self.lmcache_engine.prefetch(tokens, mask)
 
     def chunk_size(self):
         return self.lmcache_engine.config.chunk_size

@@ -73,6 +73,9 @@ Basic cache settings that control the core functionality of LMCache.
    * - external_lookup_client
      - LMCACHE_EXTERNAL_LOOKUP_CLIENT
      - External KV lookup service URI (e.g., "mooncakestore://address"). If null, defaults to LMCache's internal lookup client. Default: null
+   * - priority_limit
+     - LMCACHE_PRIORITY_LIMIT
+     - Caches requests only if priority value ≤ limit. (**Not applicable for PD Disaggregation**) Type: int. Default: None
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
      - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}
@@ -84,7 +87,8 @@ Settings related to cache blending functionality.
 
 .. note::
 
-    Cache blending is not supported in the latest version. We are working on it and will add it back soon.
+    We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_.
+    We also have more :doc:`detailed documentation <../kv_cache_optimizations/blending>`.
 
 .. list-table::
    :header-rows: 1
@@ -96,12 +100,12 @@ Settings related to cache blending functionality.
    * - enable_blending
      - LMCACHE_ENABLE_BLENDING
      - Whether to enable blending. Values: true/false. Default: false
-   * - blend_recompute_ratio
-     - LMCACHE_BLEND_RECOMPUTE_RATIO
+   * - blend_recompute_ratios
+     - LMCACHE_BLEND_RECOMPUTE_RATIOS
      - Ratio of blending recompute. Default: 0.15
-   * - blend_min_tokens
-     - LMCACHE_BLEND_MIN_TOKENS
-     - Minimum number of tokens for blending. Default: 256
+   * - blend_check_layers
+     - LMCACHE_BLEND_CHECK_LAYERS
+     - Layers to determine the recomputed tokens. Default: 1
    * - blend_special_str
      - LMCACHE_BLEND_SPECIAL_STR
      - Separator string for blending. Default: " # # "
@@ -153,14 +157,14 @@ Settings for the KV cache controller functionality.
      - LMCACHE_LMCACHE_WORKER_PORT
      - Port number for LMCache worker
 
-Nixl (Disaggregated Prefill) Configurations
+Disaggregated Prefill Configurations
 -------------------------------------------
 
-Settings for Nixl-based disaggregated prefill functionality. The latest/default nixl backend/connector are implemented inside of `lmcache/v1/storage_backend/nixl_backend_v3` and `lmcache/v1/storage_backend/connector/nixl_connector_v3.py`.
+Settings for disaggregated prefill functionality. The latest/default PD is implemented inside of `lmcache/v1/storage_backend/pd_backend.py`.
 
 .. note::
 
-    When Nixl is enabled, the following restrictions apply (welcome contributions to remove these restrictions):
+    When PD is enabled, the following restrictions apply (welcome contributions to remove these restrictions):
     
     - remote_url must be null
     - save_decode_cache must be false
@@ -173,41 +177,38 @@ Settings for Nixl-based disaggregated prefill functionality. The latest/default 
    * - YAML Config Name
      - Environment Variable
      - Description
-   * - enable_nixl
-     - LMCACHE_ENABLE_NIXL
-     - Whether to enable Nixl. Values: true/false. Default: false
-   * - enable_xpyd
-     - LMCACHE_ENABLE_XPYD
-     - Should be true when enable_nixl=true to use latest v3 nixl backend/connector. Values: true/false. Default: false
-   * - nixl_role
-     - LMCACHE_NIXL_ROLE
-     - Nixl role. Values: "sender" (prefiller) or "receiver" (decoder). Required when enable_nixl=true
-   * - nixl_buffer_size
-     - LMCACHE_NIXL_BUFFER_SIZE
-     - Transport buffer size for Nixl in bytes. Required for both senders and receivers when enable_nixl=true
-   * - nixl_buffer_device
-     - LMCACHE_NIXL_BUFFER_DEVICE
-     - Device for Nixl buffer. Values: "cpu", "cuda". Required for both senders and receivers when enable_nixl=true
+   * - enable_pd
+     - LMCACHE_ENABLE_PD
+     - Whether to enable PD. Values: true/false. Default: false
+   * - transfer_channel
+     - LMCACHE_TRANSFER_CHANNEL
+     - Transfer channel used for PD. Values: "nixl". Default: none
+   * - pd_role
+     - LMCACHE_PD_ROLE
+     - PD role. Values: "sender" (prefiller) or "receiver" (decoder).
+   * - pd_buffer_size
+     - LMCACHE_PD_BUFFER_SIZE
+     - Transport buffer size for PD in bytes. Required for both senders and receivers when enable_pd=true
+   * - pd_buffer_device
+     - LMCACHE_PD_BUFFER_DEVICE
+     - Device for PD buffer. Values: "cpu", "cuda". Required for both senders and receivers when enable_pd=true
    * - nixl_backends
      - LMCACHE_NIXL_BACKENDS
      - List of Nixl transport backends. Useful for non-disaggregated use case (see below). UCX default is sufficient for disagg use case. Default: ["UCX"]
-   * - nixl_enable_gc
-     - LMCACHE_NIXL_ENABLE_GC
-     - Whether to enable Nixl garbage collection. Values: true/false. Default: false
-   * - nixl_peer_host
-     - LMCACHE_NIXL_PEER_HOST
+   * - pd_peer_host
+     - LMCACHE_PD_PEER_HOST
      - Host for peer connections. Required for receivers to bind to
-   * - nixl_peer_init_port
-     - LMCACHE_NIXL_PEER_INIT_PORT
+   * - pd_peer_init_port
+     - LMCACHE_PD_PEER_INIT_PORT
      - Initialization port for peer connections. Required for receivers to bind to
-   * - nixl_peer_alloc_port
-     - LMCACHE_NIXL_PEER_ALLOC_PORT
+   * - pd_peer_alloc_port
+     - LMCACHE_PD_PEER_ALLOC_PORT
      - Allocation port for peer connections. Required for receivers to bind to
-   * - nixl_proxy_host
-     - LMCACHE_NIXL_PROXY_HOST
+   * - pd_proxy_host
+     - LMCACHE_PD_PROXY_HOST
      - Host for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
-   * - nixl_proxy_port
-     - LMCACHE_NIXL_PROXY_PORT
+   * - pd_proxy_port
+     - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
 
 Nixl (as a storage backend) Configurations
@@ -223,8 +224,7 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
 
   
     extra_config: 
-      # enable_nixl_storage will disable disaggregated prefill mode, even if
-      # enable_nixl is true.
+      # enable_nixl_storage will disable disaggregated prefill mode.
       enable_nixl_storage: true
       nixl_backend: "POSIX"  # Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
       nixl_path: "/path/to/storage/"

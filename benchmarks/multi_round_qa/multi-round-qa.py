@@ -42,6 +42,9 @@ class WorkloadConfig:
     # Whether to include user id in request header
     enable_user_id: bool
 
+    # Whether strictly cap active sessions at num_users
+    enforce_strict_concurrent_users: bool = False
+
 
 @dataclass
 class UserConfig:
@@ -374,6 +377,10 @@ class UserSessionManager:
         if self.use_sharegpt:
             self._load_sharegpt_data()
 
+        self.enforce_strict_concurrent_users = (
+            workload_config.enforce_strict_concurrent_users
+        )
+
     def _load_sharegpt_data(self):
         with open("ShareGPT.json", "r", encoding="utf-8") as file:
             self.sharegpt_data = json.load(file)
@@ -419,6 +426,19 @@ class UserSessionManager:
                 self.session_summaries.append(session.summary())
         self.sessions = [s for s in self.sessions if not s.finished]
 
+    def _can_join_user(self, timestamp: float) -> bool:
+        # No new user session if gap_between_users time interval not meets
+        if timestamp - self.last_user_join <= self.gap_between_users:
+            return False
+
+        # No user seession if active user count is less than configured
+        if (
+            self.enforce_strict_concurrent_users
+            and len(self.sessions) >= self.workload_config.num_users
+        ):
+            return False
+        return True
+
     def step(self, timestamp: float, executor: RequestExecutor):
         if self.need_ramp_up:
             self._ramp_up(timestamp, self.ramp_up_time)
@@ -426,7 +446,8 @@ class UserSessionManager:
         if self.start_time is None:
             self.start_time = timestamp
 
-        if timestamp - self.last_user_join > self.gap_between_users:
+        # Check if can join new user session
+        if self._can_join_user(timestamp):
             self._create_user_session()
             self.last_user_join = timestamp
             logger.info(
@@ -635,6 +656,11 @@ def parse_arguments():
         action="store_true",
         help="Does not send requests to the endpoint (server)",
     )
+    parser.add_argument(
+        "--enforce-strict-concurrent-users",
+        action="store_true",
+        help="Strictly enforce concurrent users count to match --num-users",
+    )
     args = parser.parse_args()
     return args
 
@@ -688,6 +714,7 @@ def main():
         qps=args.qps,
         model=args.model,
         enable_user_id=args.request_with_user_id,
+        enforce_strict_concurrent_users=args.enforce_strict_concurrent_users,
     )
 
     manager = UserSessionManager(

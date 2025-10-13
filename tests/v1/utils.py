@@ -295,3 +295,15 @@ def check_kv_cache_device(kvs, device):
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+
+
+class DummyLMCacheAsyncLookupServer:
+    def __init__(self):
+        pass
+
+    def send_response_to_scheduler(
+        self,
+        lookup_id: str,
+        retrieved_length: int,
+    ) -> None:
+        pass

@@ -36,7 +36,7 @@ Plugin filenames determine which roles/worker_id they run on:
    - Examples:
      - `scheduler_foo_plugin.py`: Runs only on `SCHEDULER` role
      - `worker_0_test.sh`: Runs only on `WORKER` with `worker_id=0`
-     - `all_run_plugin.sh`: Runs on all nodes
+     - `all_plugin.sh`: Runs on all nodes
 
 Notes:
 - Role names are case-insensitive (e.g., `worker` = `WORKER`)
@@ -64,7 +64,7 @@ Plugins are executed as follows:
 
 ## Example Plugins
 1. Python Plugin (`scheduler_foo_plugin.py`)
-2. Bash Plugin (`all_run_plugin.sh`)
+2. Bash Plugin (`all_plugin.sh`)
 
 ## Best Practices
 1. Keep plugins lightweight

@@ -3,26 +3,20 @@
 Clear the KV cache
 ==================
 
-The ``clear`` interface is defined as the following: 
+The ``clear`` interface is defined as the following:
 
 .. code-block:: python
 
-    clear(instance_id: str, tokens: Optional[List[int]], locations: Optional[List[str]]) -> success: bool
+    clear(instance_id: str, location: str) -> event_id: str, num_tokens: int
 
-The function takes the ``instance_id`` and optionally ``tokens`` and ``locations`` as input. 
-The return value is a boolean indicating whether the ``clear`` operation was successful or not.
-If ``tokens`` and ``locations`` are not provided, all the KV caches on the given instance will be cleared.
+The function removes the KV cache stored at ``location`` for the specified
+``instance_id``. It returns an ``event_id`` and the number of tokens scheduled
+for clearing.
 
 Example usage:
 ---------------------------------------
 
-First, we need to start the lmcache controller at port 9000 and the monitor at port 9001:
-
-.. code-block:: bash
-
-    python -m lmcache.v1.api_server --port 9000 --monitor-port 9001
-
-Second, we need a yaml file ``example.yaml`` to properly configure the lmcache instance:
+First, create a yaml file ``example.yaml`` to configure the lmcache instance:
 
 .. code-block:: yaml
 
@@ -33,55 +27,66 @@ Second, we need a yaml file ``example.yaml`` to properly configure the lmcache i
     # cache controller configurations
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
-    controller_url: "localhost:9001"
-    distributed_url: "localhost:8002"
-    lmcache_worker_port: 8001
+    controller_pull_url: "localhost:9001"
+    lmcache_worker_ports: 8001
 
-Third, we need to start the vllm/lmcache instance:
+    # Peer identifiers
+    p2p_host: "localhost"
+    p2p_init_ports: 8200
+
+Start the vllm/lmcache instance at port 8000:
 
 .. code-block:: bash
 
-    LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct --max-model-len 4096  --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+    CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096 \
+      --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
-Then, we can send a request to vllm: 
+Start the lmcache controller at port 9000 and the monitor at port 9001:
+
+.. code-block:: bash
+
+    lmcache_controller --host localhost --port 9000 --monitor-port 9001
+
+Send a request to vllm:
 
 .. code-block:: bash
 
     curl -X POST http://localhost:8000/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        "prompt": "Explain the significance of KV cache in language models.",
-        "max_tokens": 10
-    }'
+      -H "Content-Type: application/json" \
+      -d '{
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "prompt": "Explain the significance of KV cache in language models.",
+            "max_tokens": 10
+          }'
 
-We send a ``clear`` request to the lmcache controller:
+Clear the KV cache in the system:
 
 .. code-block:: bash
 
     curl -X POST http://localhost:9000/clear \
-    -H "Content-Type: application/json" \
-    -d '{
-        "instance_id": "lmcache_default_instance_id",
-        "location": "LocalCPUBackend"
-    }'
+      -H "Content-Type: application/json" \
+      -d '{
+            "instance_id": "lmcache_default_instance",
+            "location": "LocalCPUBackend"
+          }'
 
-We should be able to see the response like this:
+
+The controller responds with a message similar to:
 
 .. code-block:: text
 
-    {"success": True}
+    {"event_id": "xxx", "num_tokens": 12}
 
-This indicates all the KV caches on the ``lmcache_default_instance`` have been cleared.
-
-We can further verify this by sending a ``lookup`` request to the lmcache controller:
+This indicates that the KV cache for 12 tokens has been scheduled for clearing.
+We can verify the cache has been cleared by performing a lookup:
 
 .. code-block:: bash
 
     curl -X POST http://localhost:9000/lookup \
-    -H "Content-Type: application/json" \
-    -d '{
-        "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
-    }'
+      -H "Content-Type: application/json" \
+      -d '{
+            "tokens": [128000, 849, 21435, 279, 26431, 315, 85748, 6636, 304, 4221, 4211, 13]
+          }'
 
-We should be able to see an empty the response, indicating the KV cache for the given tokens has been cleared.
+The lookup should return an empty result, confirming that the KV cache has been
+cleared for the given tokens.
