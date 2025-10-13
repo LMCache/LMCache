@@ -691,10 +691,7 @@ class LMCacheEngine:
 
         res = 0
         try:
-            if pin:
-                assert lookup_id is not None, "lookup_id is required when pin is True"
-
-            chunk_infos = self.token_database.process_tokens(
+            chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
                 hashes=hashes,
                 offsets=offsets,
@@ -703,7 +700,7 @@ class LMCacheEngine:
 
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
-                for start, end, key in chunk_infos:
+                for start, end, key in chunk_info_iterator:
                     assert isinstance(key, CacheEngineKey)
 
                     # TODO(Jiayi): Optimize by checking only the existence of the key
@@ -718,6 +715,9 @@ class LMCacheEngine:
                             found = True
                     if found:
                         if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
                             self.lookup_pins[lookup_id].extend(  # type: ignore
                                 key_all_layers
                             )
@@ -725,14 +725,25 @@ class LMCacheEngine:
                         continue
                     return res
             else:
-                keys = [chunk_info[2] for chunk_info in chunk_infos]
-                contains_res = self.storage_manager.batched_contains(
+                chunk_info_list = []
+                keys = []
+                for chunk_info in chunk_info_iterator:
+                    assert isinstance(chunk_info[2], CacheEngineKey)
+                    chunk_info_list.append(chunk_info)
+                    keys.append(chunk_info[2])
+
+                batched_contains_res = self.storage_manager.batched_contains(
                     keys, search_range, pin, True
                 )
-                assert len(contains_res) == len(keys)
-                for start, end, key, location in zip(chunk_infos, contains_res):
-                    if location:
+                assert len(batched_contains_res) == len(chunk_info_list)
+                for (start, end, key), exists in zip(
+                    chunk_info_list, batched_contains_res, strict=False
+                ):
+                    if exists:
                         if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
                             self.lookup_pins[lookup_id].append(key)
                         res = end
                         continue

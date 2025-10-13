@@ -286,7 +286,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     def batched_contains(
-        self, keys: List[CacheEngineKey], should_stop: bool = True
+        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
     ) -> List[bool]:
         raise NotImplementedError
 

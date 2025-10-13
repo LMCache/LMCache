@@ -10,7 +10,6 @@ from typing import (
     List,
     Optional,
     Sequence,
-    Union,
 )
 import asyncio
 import functools
@@ -627,8 +626,8 @@ class StorageManager:
         keys: List[CacheEngineKey],
         search_range: Optional[List[str]] = None,
         pin: bool = False,
-        should_stop: bool = True,
-    ) -> List[Optional[Union[str, bool]]]:
+        stop_after_first_not_exits: bool = True,
+    ) -> List[bool]:
         """
         Check whether the key exists in the storage backend.
 
@@ -641,36 +640,45 @@ class StorageManager:
 
         :param bool pin: Whether to pin the key.
 
-        :param bool should_stop: Should stop when find the first non-exists key.
+        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
+        all subsequent results will return False directly.
 
-        return: The backend name or True if the key exists in the specified
-        storage backends else None or False.
+        return: True if the key exists in the specified storage backends else False.
         """
 
         # TODO: Only single-layer batched_contains is supported currently.
         # Only allocate backend is LocalCPUBackend and do not enable hot cache,
         # check another backend is supported batched_contains
-        if len(self.storage_backends) == 2 and not self.config.enable_pd and not self.config.local_cpu and (search_range is None or len(search_range) == 1):
+        if (
+            len(self.storage_backends) == 2
+            and not self.config.enable_pd
+            and not self.config.local_cpu
+            and (search_range is None or len(search_range) == 1)
+        ):
             for backend_name, backend in self.storage_backends.items():
                 if backend_name == "LocalCPUBackend":
                     continue
-                if (search_range is None or search_range[0] == backend_name) and backend.support_batched_contains():
-                    return backend.batched_contains(keys, pin, should_stop)
+                if (
+                    search_range is None or search_range[0] == backend_name
+                ) and backend.support_batched_contains():
+                    return backend.batched_contains(
+                        keys, pin, stop_after_first_not_exits
+                    )
 
         # default implementation
         contains_res = []
         for key in keys:
             res = self.contains(key, search_range, pin)
             if res is not None:
-                contains_res.append(res)
+                contains_res.append(True)
             else:
-                if should_stop:
+                if stop_after_first_not_exits:
                     # fill the contains_res with None
                     current_len = len(contains_res)
-                    contains_res.extend([None] * (len(keys) - current_len))
+                    contains_res.extend([False] * (len(keys) - current_len))
                     break
                 else:
-                    contains_res.append(res)
+                    contains_res.append(False)
 
         return contains_res
 
