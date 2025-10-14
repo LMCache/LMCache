@@ -12,6 +12,7 @@ import aiofiles.os
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -35,13 +36,14 @@ class FSConnector(RemoteConnector):
         base_paths_str: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        relative_tmp_dir: Optional[str],
+        config: Optional[LMCacheEngineConfig],
     ):
         """
         Args:
             base_paths_str: Comma separated storage paths
             loop: Asyncio event loop
             local_cpu_backend: Memory allocator interface
+            config: Lmcache engine config
         """
         # Parse comma separated paths
         self.base_paths = (
@@ -52,15 +54,27 @@ class FSConnector(RemoteConnector):
 
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
-        self.relative_tmp_dir = (
-            None if relative_tmp_dir is None else Path(relative_tmp_dir)
+
+        relative_tmp_dir = (
+            None
+            if config is None
+            else config.get_extra_config_value("fs_connector_relative_tmp_dir", None)
         )
-        if self.relative_tmp_dir is not None:
+        self.relative_tmp_dir = None
+        if relative_tmp_dir is not None:
+            self.relative_tmp_dir = Path(relative_tmp_dir)
             assert not self.relative_tmp_dir.is_absolute()
+
+        self.read_ahead_size = (
+            None
+            if config is None
+            else config.get_extra_config_value("fs_connector_read_ahead_size", None)
+        )
 
         logger.info(
             f"Initialized FSConnector with base paths {self.base_paths}, "
-            f"relative tmp dir: {self.relative_tmp_dir}"
+            f"relative tmp dir: {self.relative_tmp_dir}, "
+            f"read ahead size: {self.read_ahead_size}"
         )
         # Create directories for all paths
         for path in self.base_paths:
@@ -142,13 +156,37 @@ class FSConnector(RemoteConnector):
 
                 # Read the actual data into allocated memory
                 buffer = memory_obj.byte_array
-                num_read = await f.readinto(buffer)
                 if self.save_chunk_meta:
+                    # if save chunk meta, read meta will trigger
+                    # read ahead if fs supported
+                    num_read = await f.readinto(buffer)
                     if num_read != len(buffer):
                         raise RuntimeError(
                             f"Partial read data {len(buffer)} got {num_read}"
                         )
                 else:
+                    if self.read_ahead_size is None:
+                        num_read = await f.readinto(buffer)
+                    else:
+                        if not isinstance(buffer, memoryview):
+                            buffer = memoryview(buffer)
+
+                        # trigger read head if fs supported
+                        num_read_ahead = await f.readinto(
+                            buffer[: self.read_ahead_size]
+                        )
+                        assert num_read_ahead <= self.read_ahead_size
+
+                        # if num_read_ahead == self.read_ahead_size,
+                        # means there may still be some remaining content
+                        if num_read_ahead == self.read_ahead_size:
+                            num_read_tail = await f.readinto(
+                                buffer[self.read_ahead_size :]
+                            )
+                            assert num_read_tail is not None
+                            num_read = num_read_ahead + num_read_tail
+                        else:
+                            num_read = num_read_ahead
                     # reshape and check
                     assert num_read is not None
                     memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
