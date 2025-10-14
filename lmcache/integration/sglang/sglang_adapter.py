@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Optional
 import uuid
 
 # Third Party
 from sglang.srt.configs.model_config import ModelConfig
 import torch
+import torch.distributed as dist
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -208,12 +209,23 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         rank: int,
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers: List[Any] = []
         self.layer_load_layer: List[int] = []
         self.kvcaches = [k_pool, v_pool]
+        self.tp_group = tp_group
+        self.lookup_id_list: List[str] = []
+
+    @torch.no_grad()
+    def global_min_tokens(
+        self, local_tokens: int, tp_group: dist.ProcessGroup, device: torch.device
+    ):
+        t = torch.tensor([local_tokens], dtype=torch.int32, device=device)
+        dist.all_reduce(t, op=dist.ReduceOp.MIN, group=tp_group)
+        return int(t.item())
 
     def load_kv_layerwise(self, layer_id: int) -> None:
         if len(self.layerwise_retrievers) == 0:
@@ -230,6 +242,8 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         for i in sorted(indices_to_remove, reverse=True):
             del self.layerwise_retrievers[i]
             del self.layer_load_layer[i]
+            self.lmcache_engine.lookup_unpin([self.lookup_id_list[i]])
+            del self.lookup_id_list[i]
 
         return
 
@@ -243,26 +257,38 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
 
-        layerwise_retriever = self.lmcache_engine.retrieve_layer(
+        lookup_id = str(uuid.uuid4())
+        retrieve_token_num = self.lmcache_engine.lookup(
             token_ids,
-            mask=load_mask,
+            lookup_id=lookup_id,
+            pin=True,
+        )
+
+        retrieve_token_num = self.global_min_tokens(
+            retrieve_token_num, self.tp_group, self.rank
+        )
+
+        layerwise_retriever = self.lmcache_engine.retrieve_layer(
+            token_ids[:retrieve_token_num],
+            mask=load_mask[:retrieve_token_num],
             kvcaches=self.kvcaches,
-            slot_mapping=slot_mapping,
+            slot_mapping=slot_mapping[:retrieve_token_num],
             sync=False,
         )
 
-        retrieve_token_num = next(layerwise_retriever)
+        next(layerwise_retriever)
         # Load First Layer
         next(layerwise_retriever)
 
         if retrieve_token_num is None:
             return 0
 
-        retrieve_token_num = retrieve_token_num.item()
         self.layerwise_retrievers.append(layerwise_retriever)
         self.layer_load_layer.append(1)
 
-        return retrieve_token_num
+        self.lookup_id_list.append(lookup_id)
+
+        return retrieve_token_num - offset
 
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         slot_mapping = store_metadata.kv_indices.to(torch.int64).cuda()

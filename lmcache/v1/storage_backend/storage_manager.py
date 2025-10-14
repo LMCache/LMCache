@@ -379,6 +379,27 @@ class StorageManager:
 
         return None
 
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+        location: Optional[str] = None,
+    ) -> Optional[Future]:
+        """
+        Non-blocking function to get the memory object from the storages.
+        """
+        # TODO (Jiayi): incorporate prefetching here
+
+        # Search all backends for non-blocking get
+        for backend_name, backend in self.storage_backends.items():
+            if location and backend_name != location:
+                continue
+            # NOTE(Jiayi): bypass the allocator for now
+            task = backend.get_non_blocking(key)
+            if task:
+                # TODO (Jiayi): add write-back logic here
+                return task
+        return None
+
     def batched_get(
         self,
         keys: List[CacheEngineKey],

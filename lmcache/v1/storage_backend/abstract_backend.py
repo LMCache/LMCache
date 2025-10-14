@@ -116,6 +116,16 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+        location: Optional[str] = None,
+    ) -> Optional[Future]:
+        """
+        A non-blocking function to get the kv cache from the storage backend.
+        """
+        raise NotImplementedError
+
     async def batched_async_contains(
         self,
         lookup_id: str,
