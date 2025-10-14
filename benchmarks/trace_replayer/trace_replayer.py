@@ -38,7 +38,7 @@ class TraceReplayer:
     """Replays a trace of LLM requests against a specified model."""
     def __init__(self, model: str, 
                  base_url: str = "http://localhost:8000/v1", api_key: str = "EMPTY",
-                 max_duration: float = 100.0,
+                 max_duration: float = 60.0,
                  max_input_tokens: int = None):
         """
         Args:
