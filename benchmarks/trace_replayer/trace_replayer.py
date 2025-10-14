@@ -77,7 +77,6 @@ class TraceReplayer:
                             hash_ids = data.get('hash_ids', [])
                             
                             # Expand each hash_id into a TraceRequest
-                            # In load_trace(), modify input_length assignment:
                             for hid in hash_ids:
                                 requests.append(TraceRequest(
                                     req_id=str(hid),
@@ -103,9 +102,9 @@ class TraceReplayer:
             logger.error(f"Trace file {trace_file} not found")
             return []
 
-    def init_csv(self, filename: str = "summary.csv"):
+    def init_csv(self):
         """Initialize the CSV file for storing request results."""
-        self.csv_file = open(filename, 'w', newline='', encoding='utf-8')
+        self.csv_file = open(OUTPUT_FILENAME, 'w', newline='', encoding='utf-8')
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow(['req_id', 'ttft', 'input_token_len', 'output_token_len', 'launch_time', 'finish_time'])
         self.csv_file.flush()
@@ -201,19 +200,21 @@ class TraceReplayer:
             logger.warning("No requests to replay")
             return
 
-        self.init_csv(OUTPUT_FILENAME)
+        self.init_csv()
         start_time = time.time()
         logger.info(f"Starting trace replay with {len(requests)} requests over {self.max_duration}s")
 
+        tasks = []
         for request in requests:
             absolute_send_time = start_time + request.timestamp
             current_time = time.time()
             if absolute_send_time > current_time:
                 await asyncio.sleep(absolute_send_time - current_time)
-            asyncio.create_task(self.send_request(request))
+            task = asyncio.create_task(self.send_request(request))
+            tasks.append(task)
             logger.info(f"Launched request {request.req_id} at {request.timestamp:.2f}s (target output: {request.target_output_length})")
 
-        await asyncio.sleep(30)
+        await asyncio.gather(*tasks)
         self.close_csv()
 
     def print_summary(self):
