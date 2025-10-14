@@ -101,6 +101,7 @@ class RetrieveRequestStats:
     def hit_rate(self):
         if self.num_tokens == 0:
             return 0
+        assert self.local_hit_tokens <= self.num_tokens
         return self.local_hit_tokens / self.num_tokens
 
 
@@ -393,7 +394,9 @@ class LMCStatsMonitor:
         )
 
         request_cache_hit_rate = [
-            stats.hit_rate() for stats in self.retrieve_requests.values() if stats.end_time != 0
+            stats.hit_rate()
+            for stats in self.retrieve_requests.values()
+            if stats.end_time != 0
         ]
 
         ret = LMCacheStats(
