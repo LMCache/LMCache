@@ -14,7 +14,7 @@ from openai import AsyncOpenAI
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-OUTPUT_FILENAME = f"summary-{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.csv"
+OUTPUT_FILENAME = f"summary-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
 
 @dataclass
 class TraceRequest:
