@@ -240,14 +240,12 @@ class FSConnector(RemoteConnector):
         Returns:
             Number of consecutive keys that exist, starting from the first key
         """
-        num_hit_counts = 0
-        for key in keys:
-            if await self.exists(key):
-                num_hit_counts += 1
-            else:
-                # Return immediately when we encounter a missing key
-                return num_hit_counts
-        return num_hit_counts
+        tasks = [self.exists(key) for key in keys]
+        results = await asyncio.gather(*tasks)
+        try:
+            return results.index(False)
+        except ValueError:
+            return len(results)
 
     def support_batched_get_non_blocking(self) -> bool:
         return True
