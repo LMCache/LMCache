@@ -268,6 +268,16 @@ class LocalCPUBackend(AllocatorBackendInterface):
         Returns:
             The effective CPU memory size in GB
         """
+
+        save_only_first_rank = (
+            metadata is not None
+            and config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
+        )
+        if not save_only_first_rank:
+            # Do not adjust cpu_size if save_only_first_rank is False for now
+            return configured_cpu_size
+
         # Get the system available memory and calculate effective cpu_size
         system_available_memory_gb = SystemMemoryDetector.get_available_memory_gb()
         # Get reserve memory size from config
