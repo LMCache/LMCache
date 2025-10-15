@@ -679,11 +679,11 @@ class LMCacheEngine:
         """
 
         if tokens is not None:
-            self.stats_monitor.on_lookup_request(len(tokens))
+            lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
         else:
             assert offsets is not None
             assert hashes is not None
-            self.stats_monitor.on_lookup_request(sum(offsets))
+            lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
         try:
             end = 0
@@ -735,7 +735,7 @@ class LMCacheEngine:
             # all tokens where found, return the maximal end
             return end
         finally:
-            self.stats_monitor.on_lookup_finished(end)
+            self.stats_monitor.on_lookup_finished(lookup_request_id, end)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()

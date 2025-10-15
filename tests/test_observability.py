@@ -61,7 +61,7 @@ def test_update_local_storage_usage(stats_monitor):
 
 
 def test_on_lookup_request(stats_monitor):
-    stats_monitor.on_lookup_request(num_tokens=50)
+    lookup_request_id = stats_monitor.on_lookup_request(num_tokens=50)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_lookup_requests == 1
     assert stats.interval_lookup_tokens == 50
@@ -69,8 +69,8 @@ def test_on_lookup_request(stats_monitor):
 
 
 def test_on_lookup_finished(stats_monitor):
-    stats_monitor.on_lookup_request(num_tokens=100)
-    stats_monitor.on_lookup_finished(num_hit_tokens=80)
+    lookup_request_id = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_monitor.on_lookup_finished(request_id=lookup_request_id, num_hit_tokens=80)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_lookup_requests == 1
     assert stats.interval_lookup_tokens == 100
@@ -143,10 +143,10 @@ def test_retrieve_and_store_speed(stats_monitor):
 
 def test_multiple_lookup_operations(stats_monitor):
     # Test multiple lookup operations
-    stats_monitor.on_lookup_request(num_tokens=100)
-    stats_monitor.on_lookup_finished(num_hit_tokens=80)
-    stats_monitor.on_lookup_request(num_tokens=200)
-    stats_monitor.on_lookup_finished(num_hit_tokens=150)
+    lookup_request_id_1 = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_monitor.on_lookup_finished(request_id=lookup_request_id_1, num_hit_tokens=80)
+    lookup_request_id_2 = stats_monitor.on_lookup_request(num_tokens=200)
+    stats_monitor.on_lookup_finished(request_id=lookup_request_id_2, num_hit_tokens=150)
 
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_lookup_requests == 2
@@ -205,7 +205,7 @@ def test_combined_operations(stats_monitor):
 
 def test_stats_clearing(stats_monitor):
     # Add some data
-    stats_monitor.on_lookup_request(num_tokens=100)
+    lookup_request_id = stats_monitor.on_lookup_request(num_tokens=100)
     stats_monitor.update_interval_remote_read_metrics(read_bytes=1024)
     stats_monitor.update_remote_ping_latency(latency=25.0)
 

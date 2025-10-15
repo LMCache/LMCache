@@ -74,11 +74,21 @@ class LMCacheStats:
     p2p_time_to_transfer: List[float]
     p2p_transfer_speed: List[float]  # Tokens per second
 
+    # request cache hit rate
+    interval_request_cache_hit_rate: List[float]
+
 
 @dataclass
 class LookupRequestStats:
     num_tokens: int
     hit_tokens: int
+    start_time: float
+    end_time: float
+
+    def hit_rate(self):
+        if self.num_tokens == 0:
+            return 0
+        return self.hit_tokens / self.num_tokens
 
 
 @dataclass
@@ -187,25 +197,42 @@ class LMCStatsMonitor:
 
         self.retrieve_requests: Dict[int, RetrieveRequestStats] = {}
         self.store_requests: Dict[int, StoreRequestStats] = {}
+        self.lookup_requests: Dict[int, LookupRequestStats] = {}
 
         self.retrieve_request_id = 0
         self.store_request_id = 0
+        self.lookup_request_id = 0
 
     @thread_safe
-    def on_lookup_request(self, num_tokens: int):
+    def on_lookup_request(self, num_tokens: int) -> int:
         """
         This function is called when a lookup request is sent to the cache.
         It will record the number of tokens requested.
         """
+        curr_time = time.time()
+        lookup_stats = LookupRequestStats(
+            num_tokens=num_tokens,
+            hit_tokens=0,
+            start_time=curr_time,
+            end_time=0,
+        )
         self.interval_lookup_requests += 1
         self.interval_lookup_tokens += num_tokens
+        self.lookup_requests[self.lookup_request_id] = lookup_stats
+        self.lookup_request_id += 1
+        return self.lookup_request_id - 1
 
     @thread_safe
-    def on_lookup_finished(self, num_hit_tokens: int):
+    def on_lookup_finished(self, request_id: int, num_hit_tokens: int):
         """
         This function is called when a lookup request is finished.
         It will record the number of tokens hit.
         """
+        curr_time = time.time()
+        assert request_id in self.lookup_requests
+        lookup_stats = self.lookup_requests[request_id]
+        lookup_stats.hit_tokens = num_hit_tokens
+        lookup_stats.end_time = curr_time
         self.interval_lookup_hits += num_hit_tokens
 
     @thread_safe
@@ -403,6 +430,12 @@ class LMCStatsMonitor:
                 new_p2p_requests[request_id] = p2p_stats
         self.p2p_requests = new_p2p_requests
 
+        new_lookup_requests = {}
+        for request_id, lookup_stats in self.lookup_requests.items():
+            if lookup_stats.end_time == 0:
+                new_lookup_requests[request_id] = lookup_stats
+        self.lookup_requests = new_lookup_requests
+
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
         """
@@ -450,6 +483,12 @@ class LMCStatsMonitor:
             [stats.transfer_speed() for stats in self.p2p_requests.values()]
         )
 
+        request_cache_hit_rate = [
+            stats.hit_rate()
+            for stats in self.lookup_requests.values()
+            if stats.end_time != 0
+        ]
+
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
@@ -489,6 +528,7 @@ class LMCStatsMonitor:
             interval_p2p_transferred_tokens=self.interval_p2p_transferred_tokens,
             p2p_time_to_transfer=p2p_time_to_transfer,
             p2p_transfer_speed=p2p_transfer_speed,
+            interval_request_cache_hit_rate=request_cache_hit_rate,
         )
         self._clear()
         return ret
@@ -905,6 +945,25 @@ class PrometheusLogger:
             buckets=remote_time_to_get_sync,
         )
 
+        request_cache_hit_rate = [
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            1.0,
+        ]
+        self.histogram_request_cache_hit_rate = self._histogram_cls(
+            name="lmcache:request_cache_hit_rate",
+            documentation="Reqeust cache hit rate",
+            labelnames=labelnames,
+            buckets=request_cache_hit_rate,
+        )
+
         # Ping latency metrics: use a gauge to record the latest ping latency
         self.gauge_remote_ping_latency = self._gauge_cls(
             name="lmcache:remote_ping_latency",
@@ -1052,6 +1111,9 @@ class PrometheusLogger:
         self._log_histogram(
             self.histogram_remote_time_to_get_sync,
             stats.interval_remote_time_to_get_sync,
+        )
+        self._log_histogram(
+            self.histogram_request_cache_hit_rate, stats.interval_request_cache_hit_rate
         )
         self._log_gauge(
             self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
