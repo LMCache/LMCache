@@ -1,20 +1,29 @@
-import asyncio
+# SPDX-License-Identifier: Apache-2.0
+
+# Standard library
 import argparse
+import asyncio
 import csv
 import datetime
 import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
-from openai import AsyncOpenAI  
+# Third-party
+from openai import AsyncOpenAI
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 logger = logging.getLogger(__name__)
 
 OUTPUT_FILENAME = f"summary-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+
 
 @dataclass
 class TraceRequest:
@@ -39,7 +48,7 @@ class TraceReplayer:
     def __init__(self, model: str, 
                  base_url: str = "http://localhost:8000/v1", api_key: str = "EMPTY",
                  max_duration: float = 60.0,
-                 max_input_tokens: int = None):
+                 max_input_tokens: Optional[int] = None):
         """
         Args:
             model: Model name or path to serve requests.
@@ -57,7 +66,8 @@ class TraceReplayer:
 
     def load_trace(self, trace_file: str = "trace.jsonl") -> List[TraceRequest]:
         """
-        Load trace data from a JSONL file and expand hash_ids into individual TraceRequests.
+        Load trace data from a JSONL file and expand hash_ids into individual 
+        TraceRequests.
 
         Truncates input_length if max_input_tokens is provided.
 
@@ -81,7 +91,11 @@ class TraceReplayer:
                                 requests.append(TraceRequest(
                                     req_id=str(hid),
                                     timestamp=timestamp,
-                                    input_length=min(input_length, self.max_input_tokens) if self.max_input_tokens else input_length,
+                                    input_length=(
+                                        min(input_length, self.max_input_tokens)
+                                        if self.max_input_tokens
+                                        else input_length
+                                    ),
                                     target_output_length=output_length
                                 ))
                         except (json.JSONDecodeError, KeyError) as e:
@@ -94,9 +108,13 @@ class TraceReplayer:
                 min_timestamp = requests[0].timestamp
                 for req in requests:
                     req.timestamp -= min_timestamp
-                requests = [req for req in requests if req.timestamp <= self.max_duration]
+                requests = [r for r in requests if req.timestamp <= self.max_duration]
 
-            logger.info(f"Loaded {len(requests)} requests from {trace_file} (duration: {self.max_duration}s)")
+            logger.info(
+                f"Loaded {len(requests)} requests from {trace_file} "
+                f"(duration: {self.max_duration}s)"
+            )
+
             return requests
         except FileNotFoundError:
             logger.error(f"Trace file {trace_file} not found")
@@ -106,7 +124,13 @@ class TraceReplayer:
         """Initialize the CSV file for storing request results."""
         self.csv_file = open(OUTPUT_FILENAME, 'w', newline='', encoding='utf-8')
         self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(['req_id', 'ttft', 'input_token_len', 'output_token_len', 'launch_time', 'finish_time'])
+        self.csv_writer.writerow(
+            ['req_id', 'ttft', 
+             'input_token_len', 
+             'output_token_len', 
+             'launch_time', 
+             'finish_time']
+            )
         self.csv_file.flush()
 
     def write_result_to_csv(self, result: RequestResult):
@@ -160,8 +184,17 @@ class TraceReplayer:
                     response_content += content
 
             finish_time = time.time()
-            input_tokens = chunk.usage.prompt_tokens if hasattr(chunk, 'usage') and chunk.usage else 0
-            output_tokens = chunk.usage.completion_tokens if hasattr(chunk, 'usage') and chunk.usage else 0
+            input_tokens = (
+                chunk.usage.prompt_tokens
+                if hasattr(chunk, "usage") and chunk.usage
+                else 0
+            )
+            output_tokens = (
+                chunk.usage.completion_tokens
+                if hasattr(chunk, "usage") and chunk.usage
+                else 0
+            )
+
             ttft = (first_token_time - launch_time) if first_token_time else 0.0
 
             result = RequestResult(
@@ -202,7 +235,11 @@ class TraceReplayer:
 
         self.init_csv()
         start_time = time.time()
-        logger.info(f"Starting trace replay with {len(requests)} requests over {self.max_duration}s")
+        logger.info(
+            f"Starting trace replay with {len(requests)} requests "
+            f"over {self.max_duration}s"
+        )
+
 
         tasks = []
         for request in requests:
@@ -212,7 +249,11 @@ class TraceReplayer:
                 await asyncio.sleep(absolute_send_time - current_time)
             task = asyncio.create_task(self.send_request(request))
             tasks.append(task)
-            logger.info(f"Launched request {request.req_id} at {request.timestamp:.2f}s (target output: {request.target_output_length})")
+            logger.info(
+                f"Launched request {request.req_id} at {request.timestamp:.2f}s "
+                f"(target output: {request.target_output_length})"
+            )
+
 
         await asyncio.gather(*tasks)
         self.close_csv()
@@ -251,11 +292,32 @@ class TraceReplayer:
 
 async def main():
     parser = argparse.ArgumentParser(description="Trace Replayer for LLM benchmarking")
-    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model name or path")
-    parser.add_argument("--max_input_length", type=int, default=None,help="Optional max input length (tokens) to truncate requests if needed")
-    parser.add_argument("--trace_file", type=str, default="conversation_trace.jsonl", help="Trace JSONL file")
-    parser.add_argument("--max_duration", type=float, default=60.0, help="Max duration to replay trace (seconds)")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help="Model name or path",
+    )
+    parser.add_argument(
+        "--max_input_length",
+        type=int,
+        default=None,
+        help="Optional max input length (tokens) to truncate requests if needed",
+    )
+    parser.add_argument(
+        "--trace_file",
+        type=str,
+        default="conversation_trace.jsonl",
+        help="Trace JSONL file",
+    )
+    parser.add_argument(
+        "--max_duration",
+        type=float,
+        default=60.0,
+        help="Max duration to replay trace (seconds)",
+    )
     args = parser.parse_args()
+
 
     replayer = TraceReplayer(
         model=args.model,
