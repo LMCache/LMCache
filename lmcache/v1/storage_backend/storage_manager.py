@@ -239,7 +239,7 @@ class StorageManager:
                 "async loading."
             )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
-            self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
+        self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -441,10 +441,14 @@ class StorageManager:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
             # TODO(Jiayi): need to make async loading and layerwise compatible
-            coro = backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk)
-            serializer = self.async_serializer
-            if serializer is not None:
-                coro = serializer.run(coro, len(keys_multi_chunk))
+            assert self.async_serializer is not None, (
+                "Async serializer must be initialized via post_init before using "
+                "layerwise_batched_get."
+            )
+            coro = self.async_serializer.run(
+                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
+                len(keys_multi_chunk),
+            )
             task = asyncio.run_coroutine_threadsafe(coro, self.loop)
             yield task
 
@@ -533,17 +537,18 @@ class StorageManager:
 
             num_total_hit_chunks += num_hit_chunks
 
-            get_coro = backend.batched_get_non_blocking(
-                lookup_id,
-                keys[:num_hit_chunks],
-                {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
+            assert self.async_serializer is not None, (
+                "Async serializer must be initialized via post_init before using "
+                "async_lookup_and_prefetch."
             )
-            serializer = self.async_serializer
-            if serializer is not None:
-                get_coro = serializer.run(
-                    get_coro,
-                    num_hit_chunks,
-                )
+            get_coro = self.async_serializer.run(
+                backend.batched_get_non_blocking(
+                    lookup_id,
+                    keys[:num_hit_chunks],
+                    {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
+                ),
+                num_hit_chunks,
+            )
             loading_task = asyncio.create_task(get_coro)
             loading_task.add_done_callback(
                 functools.partial(
