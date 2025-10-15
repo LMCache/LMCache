@@ -441,7 +441,7 @@ class StorageManager:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
 
-            # Check if async_serializer is available (only when async loading is enabled)
+            # Check if async_serializer exists (exists when async loading enabled)
             if hasattr(self, "async_serializer"):
                 task = asyncio.run_coroutine_threadsafe(
                     self.async_serializer.run(

@@ -762,7 +762,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             else:
                 # flash attention: [num_layers, 2, num_blocks, block_size,
                 # num_heads, head_size]
-                # flash infer: [num_layers, num_blocks, 2, block_size, num_heads, head_size]
+                # flash infer:
+                # [num_layers, num_blocks, 2, block_size, num_heads, head_size]
                 assert kv_caches[0].shape[0] == 2 or kv_caches[0].shape[1] == 2, (
                     "The kv_caches should have shape [num_layers, 2, num_blocks, "
                     "block_size, num_heads, head_size] or "
