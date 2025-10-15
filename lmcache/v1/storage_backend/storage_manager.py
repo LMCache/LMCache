@@ -440,16 +440,26 @@ class StorageManager:
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
-            # TODO(Jiayi): need to make async loading and layerwise compatible
-            task = asyncio.run_coroutine_threadsafe(
-                self.async_serializer.run(
+            
+            # Check if async_serializer is available (only when async loading is enabled)
+            if hasattr(self, 'async_serializer'):
+                task = asyncio.run_coroutine_threadsafe(
+                    self.async_serializer.run(
+                        backend.batched_get_non_blocking(
+                            "fake_lookup_id", keys_multi_chunk
+                        ),
+                        len(keys_multi_chunk),
+                    ),
+                    self.loop,
+                )
+            else:
+                # Fallback to direct non-blocking get without serialization
+                task = asyncio.run_coroutine_threadsafe(
                     backend.batched_get_non_blocking(
                         "fake_lookup_id", keys_multi_chunk
                     ),
-                    len(keys_multi_chunk),
-                ),
-                self.loop,
-            )
+                    self.loop,
+                )
             yield task
 
     def prefetch_single_done_callback(

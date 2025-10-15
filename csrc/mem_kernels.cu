@@ -110,10 +110,14 @@ __global__ void single_layer_kv_transfer_kernel(
                                                   // or
                                                   // [2, num_tokens,
                                                   // num_heads*head_size]
+                                                  // or for MLA:
+                                                  // [num_tokens, aligned_head_size]
     scalar_t* __restrict__ vllm_key_value_cache,  // [2, num_blocks, block_size,
                                                   // num_heads, head_size] or
                                                   // [num_blocks, 2, block_size,
                                                   // num_heads, head_size]
+                                                  // or for MLA:
+                                                  // [num_blocks, block_size, head_size]
 
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int vllm_block_key_stride_in_64bit, const int vllm_value_offset,
@@ -130,6 +134,9 @@ __global__ void single_layer_kv_transfer_kernel(
   const int64_t block_offset = slot_idx % block_size;
   const int n = num_heads * head_size_in_64bit;
 
+  // Check if this is MLA format (no separate K/V)
+  const bool is_mla = (lmc_value_offset == 0 && vllm_value_offset == 0);
+
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
     const int64_t lmc_key_idx = token_idx * lmc_stride + i;
     const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
@@ -140,12 +147,21 @@ __global__ void single_layer_kv_transfer_kernel(
                                  block_offset * num_heads * head_size_in_64bit +
                                  head_idx * head_size_in_64bit + head_offset;
     const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
+    
     if (direction) {
+      // GPU to LMCache
       lmc_key_value_cache[lmc_key_idx] = vllm_key_value_cache[vllm_key_idx];
-      lmc_key_value_cache[lmc_value_idx] = vllm_key_value_cache[vllm_value_idx];
+      // For MLA, skip redundant copy since key and value are the same
+      if (!is_mla) {
+        lmc_key_value_cache[lmc_value_idx] = vllm_key_value_cache[vllm_value_idx];
+      }
     } else {
+      // LMCache to GPU
       vllm_key_value_cache[vllm_key_idx] = lmc_key_value_cache[lmc_key_idx];
-      vllm_key_value_cache[vllm_value_idx] = lmc_key_value_cache[lmc_value_idx];
+      // For MLA, skip redundant copy since key and value are the same
+      if (!is_mla) {
+        vllm_key_value_cache[vllm_value_idx] = lmc_key_value_cache[lmc_value_idx];
+      }
     }
   }
 }
@@ -496,6 +512,8 @@ void single_layer_kv_transfer(
     torch::Tensor& lmc_key_value_cache,  // [num_tokens, 2, num_heads*head_size]
                                          // or
                                          // [2, num_tokens, num_heads*head_size]
+                                         // or for MLA:
+                                         // [num_tokens, aligned_head_size]
 
     // torch::Tensor&
     //     vllm_key_cache,  // [num_blocks, block_size, num_heads, head_size]
@@ -506,6 +524,7 @@ void single_layer_kv_transfer(
         vllm_key_value_cache,  // [2, num_blocks, block_size, num_heads,
                                // head_size] for flash attention
     // [num_blocks, 2, block_size, num_heads, head_size] for flash infer
+    // [num_blocks, block_size, head_size] for MLA
 
     torch::Tensor& slot_mapping,  // [num_tokens]
     const bool direction,    // false: LMCache to PagedBuffer, true: PagedBuffer
@@ -514,12 +533,13 @@ void single_layer_kv_transfer(
                              // [num_tokens, 2, num_heads*head_size]
                              // false: lmc_key_value_cache is
                              // [2, num_tokens, num_heads*head_size]
-    const bool vllm_two_major  // true: vllm_key_value_cache is
+    const bool vllm_two_major,  // true: vllm_key_value_cache is
                                // [2, num_blocks, block_size, num_heads,
                                // head_size]
                                // false: vllm_key_value_cache is
                                // [num_blocks, 2, block_size, num_heads,
                                // head_size]
+    const bool use_mla  // true: use MLA format
 ) {
   // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
   // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
@@ -538,14 +558,28 @@ void single_layer_kv_transfer(
   int elements_per_entry = 8 / vllm_key_value_cache.element_size();
 
   int num_tokens = slot_mapping.size(0);
-  int num_heads = vllm_key_value_cache.size(3);
-  int head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
-
-  int block_size = vllm_key_value_cache.size(2);
+  int num_heads;
+  int head_size_in_64bit;
+  int block_size;
+  
+  if (use_mla) {
+    // MLA format: [num_blocks, block_size, head_size]
+    num_heads = 1;
+    block_size = vllm_key_value_cache.size(1);
+    head_size_in_64bit = vllm_key_value_cache.size(2) / elements_per_entry;
+  } else {
+    num_heads = vllm_key_value_cache.size(3);
+    head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
+    block_size = vllm_key_value_cache.size(2);
+  }
 
   int lmc_stride;
   int lmc_value_offset;
-  if (token_major) {
+  if (use_mla) {
+    // MLA format: [num_tokens, aligned_head_size]
+    lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
+    lmc_value_offset = 0;  // No separate K/V for MLA
+  } else if (token_major) {
     lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
     lmc_value_offset = lmc_key_value_cache.stride(1) / elements_per_entry;
   } else {
@@ -555,7 +589,11 @@ void single_layer_kv_transfer(
 
   int vllm_block_key_stride_in_64bit;
   int vllm_value_offset;
-  if (vllm_two_major) {
+  if (use_mla) {
+    // MLA format: [num_blocks, block_size, head_size]
+    vllm_block_key_stride_in_64bit = vllm_key_value_cache.stride(0) / elements_per_entry;
+    vllm_value_offset = 0;  // No separate K/V for MLA
+  } else if (vllm_two_major) {
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(1) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(0) / elements_per_entry;
