@@ -451,7 +451,9 @@ class LMCacheEngine:
             num_required_tokens = len(tokens)
 
         total_tokens = kwargs["total_tokens"] if "total_tokens" in kwargs else 0
-        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens, total_tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens, total_tokens
+        )
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
@@ -558,7 +560,9 @@ class LMCacheEngine:
             num_required_tokens = len(tokens)
 
         total_tokens = kwargs["total_tokens"] if "total_tokens" in kwargs else 0
-        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens, total_tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens, total_tokens
+        )
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
