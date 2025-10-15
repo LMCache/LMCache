@@ -1485,6 +1485,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            if self.buffer.numel() == 0:
+                return
             lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
@@ -1626,6 +1628,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            if self.buffer.numel() == 0:
+                return
             if self.numa_mapping:
                 lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
             else:
