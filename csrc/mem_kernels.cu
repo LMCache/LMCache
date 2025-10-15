@@ -111,13 +111,15 @@ __global__ void single_layer_kv_transfer_kernel(
                                                   // [2, num_tokens,
                                                   // num_heads*head_size]
                                                   // or for MLA:
-                                                  // [num_tokens, aligned_head_size]
+                                                  // [num_tokens,
+                                                  // aligned_head_size]
     scalar_t* __restrict__ vllm_key_value_cache,  // [2, num_blocks, block_size,
                                                   // num_heads, head_size] or
                                                   // [num_blocks, 2, block_size,
                                                   // num_heads, head_size]
                                                   // or for MLA:
-                                                  // [num_blocks, block_size, head_size]
+                                                  // [num_blocks, block_size,
+                                                  // head_size]
 
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int vllm_block_key_stride_in_64bit, const int vllm_value_offset,
@@ -147,20 +149,22 @@ __global__ void single_layer_kv_transfer_kernel(
                                  block_offset * num_heads * head_size_in_64bit +
                                  head_idx * head_size_in_64bit + head_offset;
     const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
-    
+
     if (direction) {
       // GPU to LMCache
       lmc_key_value_cache[lmc_key_idx] = vllm_key_value_cache[vllm_key_idx];
       // For MLA, skip redundant copy since key and value are the same
       if (!is_mla) {
-        lmc_key_value_cache[lmc_value_idx] = vllm_key_value_cache[vllm_value_idx];
+        lmc_key_value_cache[lmc_value_idx] =
+            vllm_key_value_cache[vllm_value_idx];
       }
     } else {
       // LMCache to GPU
       vllm_key_value_cache[vllm_key_idx] = lmc_key_value_cache[lmc_key_idx];
       // For MLA, skip redundant copy since key and value are the same
       if (!is_mla) {
-        vllm_key_value_cache[vllm_value_idx] = lmc_key_value_cache[lmc_value_idx];
+        vllm_key_value_cache[vllm_value_idx] =
+            lmc_key_value_cache[lmc_value_idx];
       }
     }
   }
@@ -534,12 +538,12 @@ void single_layer_kv_transfer(
                              // false: lmc_key_value_cache is
                              // [2, num_tokens, num_heads*head_size]
     const bool vllm_two_major,  // true: vllm_key_value_cache is
-                               // [2, num_blocks, block_size, num_heads,
-                               // head_size]
-                               // false: vllm_key_value_cache is
-                               // [num_blocks, 2, block_size, num_heads,
-                               // head_size]
-    const bool use_mla  // true: use MLA format
+                                // [2, num_blocks, block_size, num_heads,
+                                // head_size]
+                                // false: vllm_key_value_cache is
+                                // [num_blocks, 2, block_size, num_heads,
+                                // head_size]
+    const bool use_mla          // true: use MLA format
 ) {
   // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
   // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
@@ -561,7 +565,7 @@ void single_layer_kv_transfer(
   int num_heads;
   int head_size_in_64bit;
   int block_size;
-  
+
   if (use_mla) {
     // MLA format: [num_blocks, block_size, head_size]
     num_heads = 1;
@@ -591,7 +595,8 @@ void single_layer_kv_transfer(
   int vllm_value_offset;
   if (use_mla) {
     // MLA format: [num_blocks, block_size, head_size]
-    vllm_block_key_stride_in_64bit = vllm_key_value_cache.stride(0) / elements_per_entry;
+    vllm_block_key_stride_in_64bit =
+        vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = 0;  // No separate K/V for MLA
   } else if (vllm_two_major) {
     vllm_block_key_stride_in_64bit =

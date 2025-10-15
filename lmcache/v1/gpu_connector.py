@@ -732,7 +732,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         self.load_stream = torch.cuda.Stream()
         self.store_stream = torch.cuda.Stream()
-        
+
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -758,7 +758,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 k_cache_shape_per_layer = kv_caches[0].shape
                 max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
                 num_elements = k_cache_shape_per_layer.numel()
-                self.vllm_two_major = False # MLA doesn't need vllm_two_major
+                self.vllm_two_major = False  # MLA doesn't need vllm_two_major
             else:
                 # flash attention: [num_layers, 2, num_blocks, block_size,
                 # num_heads, head_size]
