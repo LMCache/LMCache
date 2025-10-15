@@ -24,7 +24,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
-from lmcache.v1.system_detection import NUMADetector
+from lmcache.v1.system_detection import NUMADetector, SystemMemoryDetector
 
 if TYPE_CHECKING:
     # First Party
@@ -250,6 +250,62 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # other backends might still (temporarily) hold the memory object.
         return True
 
+    def _calculate_effective_cpu_size(
+        self,
+        configured_cpu_size: float,
+        config: LMCacheEngineConfig,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ) -> float:
+        """
+        Calculate the effective CPU memory size based on system available memory
+        and reserve memory configuration.
+
+        Args:
+            configured_cpu_size: The configured CPU memory size in GB
+            config: The LMCache engine configuration
+            metadata: Optional metadata for first rank handling
+
+        Returns:
+            The effective CPU memory size in GB
+        """
+
+        save_only_first_rank = (
+            metadata is not None
+            and config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
+        )
+        if not save_only_first_rank:
+            # Do not adjust cpu_size if save_only_first_rank is False for now
+            return configured_cpu_size
+
+        # Get the system available memory and calculate effective cpu_size
+        system_available_memory_gb = SystemMemoryDetector.get_available_memory_gb()
+        # Get reserve memory size from config
+        reserve_cpu_size = config.reserve_local_cpu_size
+
+        # TODO(baoloongmao): For disable save_only_first_rank case,
+        #  we need to avoid multi-rank race condition in future.
+        #  But for enable save_only_first_rank case,
+        #  we can handle reserve memory simply since non-first ranks
+        #  do not allocate memory.
+        # Effective memory: min(configured_size, available_memory - reserve_size)
+        if system_available_memory_gb > 0:
+            max_usable_memory = max(0, system_available_memory_gb - reserve_cpu_size)
+            effective_cpu_size = min(configured_cpu_size, max_usable_memory)
+            logger.info(
+                f"Adjusted CPU memory size from {configured_cpu_size:.2f} GB "
+                f"to {effective_cpu_size:.2f} GB "
+                f"(system available: {system_available_memory_gb:.2f} GB, "
+                f"reserve: {reserve_cpu_size:.2f} GB)"
+            )
+            assert effective_cpu_size > 0
+            return effective_cpu_size
+        else:
+            logger.warning(
+                "Could not determine system available memory, using configured cpu_size"
+            )
+            return configured_cpu_size
+
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
@@ -266,16 +322,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             if save_only_first_rank and metadata.is_first_rank():
                 # Only the first rank will save the cache,
-                # so we need to set it lager than other ranks
-                cpu_size = (
-                    config.extra_config.get("first_rank_max_local_cpu_size", cpu_size)
-                    if config.extra_config
-                    else cpu_size
+                # so we need to set it larger than other ranks
+                cpu_size = config.get_extra_config_value(
+                    "first_rank_max_local_cpu_size", cpu_size
                 )
 
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
         logger.info(f"NUMA mapping {numa_mapping}")
+
+        # Calculate effective CPU memory size
+        cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
 
         if config.enable_p2p:
             assert metadata is not None
