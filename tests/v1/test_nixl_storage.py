@@ -41,6 +41,8 @@ def run(config: LMCacheEngineConfig, shape, dtype):
     )
     bad_key = create_key("deadbeefdeadbeef")
 
+    thread_loop = None
+    thread = None
     try:
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)
@@ -60,6 +62,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             config,
             metadata,
             thread_loop,
+            dst_device=config.nixl_buffer_device,  # Pass the device directly
         )
         assert len(backends) == 2  # NixlStorageBackend + LocalCPUBackend
         assert BACKEND_NAME in backends
@@ -112,14 +115,17 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
         bad_obj = nixl_backend.get_blocking(bad_key)
         assert bad_obj is None
+    except Exception:
+        raise
     finally:
-        if thread_loop.is_running():
+        if thread_loop and thread_loop.is_running():
             thread_loop.call_soon_threadsafe(thread_loop.stop)
-        if thread.is_alive():
+        if thread and thread.is_alive():
             thread.join()
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_nixl_gds_mt_cuda_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
@@ -127,8 +133,9 @@ def test_nixl_gds_mt_cuda_backend():
     dtype = torch.bfloat16
     shape = [2048, 2048]
 
-    config.nixl_buffer_device = "cuda"
+    config.nixl_buffer_device = "cuda:0"  # Use explicit device
     config.extra_config["nixl_backend"] = "GDS_MT"
+    config.extra_config["enable_cuda"] = True
 
     run(config, shape, dtype)
 
@@ -143,11 +150,13 @@ def test_nixl_gds_mt_cpu_backend():
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS_MT"
+    config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_nixl_gds_cuda_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
@@ -155,8 +164,9 @@ def test_nixl_gds_cuda_backend():
     dtype = torch.bfloat16
     shape = [2048, 2048]
 
-    config.nixl_buffer_device = "cuda"
+    config.nixl_buffer_device = "cuda:0"  # Use explicit device
     config.extra_config["nixl_backend"] = "GDS"
+    config.extra_config["enable_cuda"] = True
 
     run(config, shape, dtype)
 
@@ -171,6 +181,7 @@ def test_nixl_gds_cpu_backend():
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS"
+    config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
 
@@ -185,5 +196,6 @@ def test_nixl_posix_backend():
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
