@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Standard library
+# Standard
 from dataclasses import dataclass
 from typing import List, Optional
 import argparse
