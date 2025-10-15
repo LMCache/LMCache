@@ -68,6 +68,12 @@ class LMCacheStats:
     retrieve_speed: List[float]  # Tokens per second
     store_speed: List[float]  # Tokens per second
 
+    # P2P transfer metrics
+    interval_p2p_requests: int
+    interval_p2p_transferred_tokens: int
+    p2p_time_to_transfer: List[float]
+    p2p_transfer_speed: List[float]  # Tokens per second
+
 
 @dataclass
 class LookupRequestStats:
@@ -113,6 +119,23 @@ class StoreRequestStats:
         return self.num_tokens / self.time_to_store()
 
 
+@dataclass
+class P2PTransferRequestStats:
+    num_tokens: int
+    start_time: float
+    end_time: float
+
+    def time_to_transfer(self):
+        if self.end_time == 0:
+            return 0
+        return self.end_time - self.start_time
+
+    def transfer_speed(self):
+        if self.time_to_transfer() == 0:
+            return 0
+        return self.num_tokens / self.time_to_transfer()
+
+
 class LMCStatsMonitor:
     def __init__(self):
         # Interval metrics that will be reset after each log
@@ -126,6 +149,12 @@ class LMCStatsMonitor:
         self.interval_lookup_tokens = 0  # total requested tokens lookup
         self.interval_lookup_hits = 0  # total hit tokens lookup
         self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
+
+        # P2P transfer metrics
+        self.interval_p2p_requests = 0
+        self.interval_p2p_transferred_tokens = 0
+        self.p2p_requests: Dict[int, P2PTransferRequestStats] = {}
+        self.p2p_request_id = 0
 
         # remote backends read/write metrics
         self.interval_remote_read_requests = 0
@@ -233,6 +262,26 @@ class LMCStatsMonitor:
             store_stats.num_tokens = num_tokens
 
     @thread_safe
+    def on_p2p_transfer_request(self, num_tokens: int) -> int:
+        curr_time = time.time()
+        self.interval_p2p_requests += 1
+        self.p2p_requests[self.p2p_request_id] = P2PTransferRequestStats(
+            num_tokens=num_tokens,
+            start_time=curr_time,
+            end_time=0,
+        )
+        self.p2p_request_id += 1
+        return self.p2p_request_id - 1
+
+    @thread_safe
+    def on_p2p_transfer_finished(self, request_id: int):
+        curr_time = time.time()
+        assert request_id in self.p2p_requests
+        p2p_stats = self.p2p_requests[request_id]
+        self.interval_p2p_transferred_tokens += p2p_stats.num_tokens
+        p2p_stats.end_time = curr_time
+
+    @thread_safe
     def update_local_cache_usage(self, usage: int):
         self.local_cache_usage_bytes = usage
 
@@ -333,6 +382,9 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
 
+        self.interval_p2p_requests = 0
+        self.interval_p2p_transferred_tokens = 0
+
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
             if retrieve_stats.end_time == 0:
@@ -344,6 +396,12 @@ class LMCStatsMonitor:
             if store_stats.end_time == 0:
                 new_store_requests[request_id] = store_stats
         self.store_requests = new_store_requests
+
+        new_p2p_requests = {}
+        for request_id, p2p_stats in self.p2p_requests.items():
+            if p2p_stats.end_time == 0:
+                new_p2p_requests[request_id] = p2p_stats
+        self.p2p_requests = new_p2p_requests
 
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
@@ -384,6 +442,14 @@ class LMCStatsMonitor:
             [stats.store_speed() for stats in self.store_requests.values()]
         )
 
+        p2p_time_to_transfer = filter_out_invalid(
+            [stats.time_to_transfer() for stats in self.p2p_requests.values()]
+        )
+
+        p2p_transfer_speed = filter_out_invalid(
+            [stats.transfer_speed() for stats in self.p2p_requests.values()]
+        )
+
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
@@ -419,6 +485,10 @@ class LMCStatsMonitor:
             retrieve_speed=retrieve_speed,
             store_speed=store_speed,
             interval_vllm_hit_tokens=self.interval_vllm_hit_tokens,
+            interval_p2p_requests=self.interval_p2p_requests,
+            interval_p2p_transferred_tokens=self.interval_p2p_transferred_tokens,
+            p2p_time_to_transfer=p2p_time_to_transfer,
+            p2p_transfer_speed=p2p_transfer_speed,
         )
         self._clear()
         return ret
@@ -710,6 +780,56 @@ class PrometheusLogger:
             buckets=store_speed_buckets,
         )
 
+        # P2P transfer metrics
+        p2p_time_buckets = [
+            0.001,  # 1ms
+            0.005,  # 5ms
+            0.01,  # 10ms
+            0.02,  # 20ms
+            0.04,  # 40ms
+            0.06,  # 60ms
+            0.08,  # 80ms
+            0.1,  # 100ms
+            0.25,  # 250ms
+            0.5,  # 500ms
+            0.75,  # 750ms
+            1.0,  # 1s
+            2.5,  # 2.5s
+            5.0,  # 5s
+            7.5,  # 7.5s
+            10.0,  # 10s
+        ]
+        self.histogram_p2p_time_to_transfer = self._histogram_cls(
+            name="lmcache:p2p_time_to_transfer",
+            documentation="Time to transfer via P2P (seconds)",
+            labelnames=labelnames,
+            buckets=p2p_time_buckets,
+        )
+
+        p2p_speed_buckets = [
+            1,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768,
+            65536,
+        ]
+        self.histogram_p2p_transfer_speed = self._histogram_cls(
+            name="lmcache:p2p_transfer_speed",
+            documentation="P2P transfer speed (tokens per second)",
+            labelnames=labelnames,
+            buckets=p2p_speed_buckets,
+        )
+
         remote_time_to_get = [
             1,
             5,
@@ -916,6 +1036,12 @@ class PrometheusLogger:
         self._log_histogram(self.histogram_retrieve_speed, stats.retrieve_speed)
 
         self._log_histogram(self.histogram_store_speed, stats.store_speed)
+
+        self._log_histogram(
+            self.histogram_p2p_time_to_transfer, stats.p2p_time_to_transfer
+        )
+
+        self._log_histogram(self.histogram_p2p_transfer_speed, stats.p2p_transfer_speed)
 
         self._log_histogram(
             self.histogram_remote_time_to_get, stats.interval_remote_time_to_get
