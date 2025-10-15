@@ -80,7 +80,8 @@ class LookupRequestStats:
 
 @dataclass
 class RetrieveRequestStats:
-    num_tokens: int
+    requested_tokens: int  # Retrieve request tokens
+    total_tokens: int  # The total tokens of the prompt
     local_hit_tokens: int
     remote_hit_tokens: int  # Not used for now
     start_time: float
@@ -99,10 +100,10 @@ class RetrieveRequestStats:
         ) / self.time_to_retrieve()
 
     def hit_rate(self):
-        if self.num_tokens == 0:
+        if self.total_tokens == 0:
             return 0
-        assert self.local_hit_tokens <= self.num_tokens
-        return self.local_hit_tokens / self.num_tokens
+        assert (self.local_hit_tokens + self.remote_hit_tokens) <= self.total_tokens
+        return (self.local_hit_tokens + self.remote_hit_tokens) / self.total_tokens
 
 
 @dataclass
@@ -189,20 +190,21 @@ class LMCStatsMonitor:
         self.interval_lookup_hits += num_hit_tokens
 
     @thread_safe
-    def on_retrieve_request(self, num_tokens: int) -> int:
+    def on_retrieve_request(self, requested_tokens: int, total_tokens: int = 0) -> int:
         """
         Returns the internal "request id" that will be used in
         on_retrieve_finished
         """
         curr_time = time.time()
         retrieve_stats = RetrieveRequestStats(
-            num_tokens=num_tokens,
+            requested_tokens=requested_tokens,
+            total_tokens=total_tokens,
             local_hit_tokens=0,
             remote_hit_tokens=0,
             start_time=curr_time,
             end_time=0,
         )
-        self.interval_requested_tokens += num_tokens
+        self.interval_requested_tokens += requested_tokens
         self.interval_retrieve_requests += 1
         self.retrieve_requests[self.retrieve_request_id] = retrieve_stats
         self.retrieve_request_id += 1
@@ -396,7 +398,7 @@ class LMCStatsMonitor:
         request_cache_hit_rate = [
             stats.hit_rate()
             for stats in self.retrieve_requests.values()
-            if stats.end_time != 0
+            if (stats.end_time != 0 and stats.total_tokens != 0)
         ]
 
         ret = LMCacheStats(

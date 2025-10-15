@@ -445,15 +445,13 @@ class LMCacheEngine:
         tot_kv_size = 0
         t = time.perf_counter()
 
-        # in vllm_v1_adapter, the mask and tokens is only a slice, use mask or
-        # tokens to cal num_required_tokens may be inaccurate
-        if "num_tokens" in kwargs:
-            num_required_tokens = kwargs["num_tokens"]
-        elif mask is not None:
+        if mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
+
+        total_tokens = kwargs["total_tokens"] if "total_tokens" in kwargs else 0
+        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens, total_tokens)
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
@@ -516,7 +514,7 @@ class LMCacheEngine:
             " cost %.4f ms, throughput: %.4f GB/s;",
             retrieved_tokens,
             num_required_tokens,
-            len(tokens),
+            len(tokens) if total_tokens == 0 else total_tokens,
             tot_kv_size / 1024**3,
             onload_time * 1000,
             tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
@@ -554,13 +552,13 @@ class LMCacheEngine:
             the GPU.
         """
 
-        if "num_tokens" in kwargs:
-            num_required_tokens = kwargs["num_tokens"]
-        elif mask is not None:
+        if mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
+
+        total_tokens = kwargs["total_tokens"] if "total_tokens" in kwargs else 0
+        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens, total_tokens)
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
@@ -642,7 +640,7 @@ class LMCacheEngine:
         logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
+            f"out of total {len(tokens) if total_tokens == 0 else total_tokens} tokens"
         )
 
         yield ret_mask
