@@ -13,7 +13,7 @@ def stats_monitor():
 
 
 def test_on_retrieve_request(stats_monitor):
-    stats_monitor.on_retrieve_request(num_tokens=100)
+    stats_monitor.on_retrieve_request(requested_tokens=100)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_retrieve_requests == 1
     assert stats.retrieve_hit_rate == 0
@@ -23,7 +23,7 @@ def test_on_retrieve_request(stats_monitor):
 
 
 def test_on_retrieve_finished(stats_monitor):
-    request_id = stats_monitor.on_retrieve_request(num_tokens=100)
+    request_id = stats_monitor.on_retrieve_request(requested_tokens=100)
     stats_monitor.on_retrieve_finished(
         request_id=request_id,
         retrieved_tokens=100,
@@ -127,7 +127,7 @@ def test_remote_ping_errors(stats_monitor):
 
 def test_retrieve_and_store_speed(stats_monitor):
     # Test retrieve speed calculation
-    retrieve_id = stats_monitor.on_retrieve_request(num_tokens=1000)
+    retrieve_id = stats_monitor.on_retrieve_request(requested_tokens=1000)
     stats_monitor.on_retrieve_finished(request_id=retrieve_id, retrieved_tokens=1000)
 
     # Test store speed calculation
@@ -179,7 +179,7 @@ def test_mixed_remote_operations(stats_monitor):
 
 
 def test_combined_operations(stats_monitor):
-    retrieve_id = stats_monitor.on_retrieve_request(num_tokens=200)
+    retrieve_id = stats_monitor.on_retrieve_request(requested_tokens=200)
     stats_monitor.on_retrieve_finished(
         request_id=retrieve_id,
         retrieved_tokens=200,
