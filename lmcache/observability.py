@@ -959,7 +959,7 @@ class PrometheusLogger:
         ]
         self.histogram_request_cache_hit_rate = self._histogram_cls(
             name="lmcache:request_cache_hit_rate",
-            documentation="Reqeust cache hit rate",
+            documentation="Request cache hit rate",
             labelnames=labelnames,
             buckets=request_cache_hit_rate,
         )
