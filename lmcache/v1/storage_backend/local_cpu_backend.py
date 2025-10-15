@@ -298,6 +298,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 f"(system available: {system_available_memory_gb:.2f} GB, "
                 f"reserve: {reserve_cpu_size:.2f} GB)"
             )
+            assert effective_cpu_size > 0
             return effective_cpu_size
         else:
             logger.warning(
