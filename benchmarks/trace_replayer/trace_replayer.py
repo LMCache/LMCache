@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard library
+# Standard
+from dataclasses import dataclass
+from typing import List, Optional
 import argparse
 import asyncio
 import csv
@@ -8,16 +11,14 @@ import datetime
 import json
 import logging
 import time
-from dataclasses import dataclass
-from typing import List, Optional
 
+# Third Party
 # Third-party
 from openai import AsyncOpenAI
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 logger = logging.getLogger(__name__)
@@ -28,14 +29,17 @@ OUTPUT_FILENAME = f"summary-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S
 @dataclass
 class TraceRequest:
     """Represents a single request from the trace file."""
+
     req_id: str
     timestamp: float
     input_length: int
     target_output_length: int
 
+
 @dataclass
 class RequestResult:
     """Stores the result of a single request execution."""
+
     req_id: str
     ttft: float
     input_token_len: int
@@ -43,12 +47,18 @@ class RequestResult:
     launch_time: float
     finish_time: float
 
+
 class TraceReplayer:
     """Replays a trace of LLM requests against a specified model."""
-    def __init__(self, model: str, 
-                 base_url: str = "http://localhost:8000/v1", api_key: str = "EMPTY",
-                 max_duration: float = 60.0,
-                 max_input_tokens: Optional[int] = None):
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str = "http://localhost:8000/v1",
+        api_key: str = "EMPTY",
+        max_duration: float = 60.0,
+        max_input_tokens: Optional[int] = None,
+    ):
         """
         Args:
             model: Model name or path to serve requests.
@@ -66,7 +76,7 @@ class TraceReplayer:
 
     def load_trace(self, trace_file: str = "trace.jsonl") -> List[TraceRequest]:
         """
-        Load trace data from a JSONL file and expand hash_ids into individual 
+        Load trace data from a JSONL file and expand hash_ids into individual
         TraceRequests.
 
         Truncates input_length if max_input_tokens is provided.
@@ -76,28 +86,30 @@ class TraceReplayer:
         """
         requests = []
         try:
-            with open(trace_file, 'r', encoding='utf-8') as f:
+            with open(trace_file, "r", encoding="utf-8") as f:
                 for line_num, line in enumerate(f, 1):
                     if line.strip():
                         try:
                             data = json.loads(line.strip())
-                            timestamp = float(data['timestamp'])
-                            input_length = int(data.get('input_length', 0))
-                            output_length = int(data.get('output_length', 0))
-                            hash_ids = data.get('hash_ids', [])
-                            
+                            timestamp = float(data["timestamp"])
+                            input_length = int(data.get("input_length", 0))
+                            output_length = int(data.get("output_length", 0))
+                            hash_ids = data.get("hash_ids", [])
+
                             # Expand each hash_id into a TraceRequest
                             for hid in hash_ids:
-                                requests.append(TraceRequest(
-                                    req_id=str(hid),
-                                    timestamp=timestamp,
-                                    input_length=(
-                                        min(input_length, self.max_input_tokens)
-                                        if self.max_input_tokens
-                                        else input_length
-                                    ),
-                                    target_output_length=output_length
-                                ))
+                                requests.append(
+                                    TraceRequest(
+                                        req_id=str(hid),
+                                        timestamp=timestamp,
+                                        input_length=(
+                                            min(input_length, self.max_input_tokens)
+                                            if self.max_input_tokens
+                                            else input_length
+                                        ),
+                                        target_output_length=output_length,
+                                    )
+                                )
                         except (json.JSONDecodeError, KeyError) as e:
                             logger.warning(f"Skipping malformed line {line_num}: {e}")
                             continue
@@ -108,7 +120,7 @@ class TraceReplayer:
                 min_timestamp = requests[0].timestamp
                 for req in requests:
                     req.timestamp -= min_timestamp
-                requests = [r for r in requests if req.timestamp <= self.max_duration]
+                requests = [r for r in requests if r.timestamp <= self.max_duration]
 
             logger.info(
                 f"Loaded {len(requests)} requests from {trace_file} "
@@ -122,28 +134,33 @@ class TraceReplayer:
 
     def init_csv(self):
         """Initialize the CSV file for storing request results."""
-        self.csv_file = open(OUTPUT_FILENAME, 'w', newline='', encoding='utf-8')
+        self.csv_file = open(OUTPUT_FILENAME, "w", newline="", encoding="utf-8")
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow(
-            ['req_id', 'ttft', 
-             'input_token_len', 
-             'output_token_len', 
-             'launch_time', 
-             'finish_time']
-            )
+            [
+                "req_id",
+                "ttft",
+                "input_token_len",
+                "output_token_len",
+                "launch_time",
+                "finish_time",
+            ]
+        )
         self.csv_file.flush()
 
     def write_result_to_csv(self, result: RequestResult):
         """Write a single request result to the CSV file."""
         if self.csv_writer:
-            self.csv_writer.writerow([
-                result.req_id,
-                f"{result.ttft:.4f}",
-                result.input_token_len,
-                result.output_token_len,
-                f"{result.launch_time:.4f}",
-                f"{result.finish_time:.4f}"
-            ])
+            self.csv_writer.writerow(
+                [
+                    result.req_id,
+                    f"{result.ttft:.4f}",
+                    result.input_token_len,
+                    result.output_token_len,
+                    f"{result.launch_time:.4f}",
+                    f"{result.finish_time:.4f}",
+                ]
+            )
             self.csv_file.flush()
 
     def close_csv(self):
@@ -173,7 +190,7 @@ class TraceReplayer:
                 temperature=0,
                 stream=True,
                 max_tokens=request.target_output_length,
-                stream_options={"include_usage": True}
+                stream_options={"include_usage": True},
             )
 
             async for chunk in response:
@@ -203,7 +220,7 @@ class TraceReplayer:
                 input_token_len=input_tokens,
                 output_token_len=output_tokens,
                 launch_time=launch_time,
-                finish_time=finish_time
+                finish_time=finish_time,
             )
 
             self.write_result_to_csv(result)
@@ -218,7 +235,7 @@ class TraceReplayer:
                 input_token_len=0,
                 output_token_len=0,
                 launch_time=launch_time,
-                finish_time=finish_time
+                finish_time=finish_time,
             )
             self.write_result_to_csv(result)
             return result
@@ -240,7 +257,6 @@ class TraceReplayer:
             f"over {self.max_duration}s"
         )
 
-
         tasks = []
         for request in requests:
             absolute_send_time = start_time + request.timestamp
@@ -254,35 +270,36 @@ class TraceReplayer:
                 f"(target output: {request.target_output_length})"
             )
 
-
         await asyncio.gather(*tasks)
         self.close_csv()
 
     def print_summary(self):
         """Print a summary of all requests from the CSV file."""
         try:
+            # Third Party
             import pandas as pd
+
             df = pd.read_csv(OUTPUT_FILENAME)
             if len(df) == 0:
                 logger.warning("No completed requests to summarize")
                 return
 
             total_requests = len(df)
-            avg_ttft = df['ttft'].mean()
-            total_input_tokens = df['input_token_len'].sum()
-            total_output_tokens = df['output_token_len'].sum()
-            total_duration = df['finish_time'].max() - df['launch_time'].min()
+            avg_ttft = df["ttft"].mean()
+            total_input_tokens = df["input_token_len"].sum()
+            total_output_tokens = df["output_token_len"].sum()
+            total_duration = df["finish_time"].max() - df["launch_time"].min()
 
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("TRACE REPLAY SUMMARY")
-            print("="*60)
+            print("=" * 60)
             print(f"Total Requests: {total_requests}")
             print(f"Total Duration: {total_duration:.2f}s")
             print(f"Average TTFT: {avg_ttft:.4f}s")
             print(f"Total Input Tokens: {total_input_tokens}")
             print(f"Total Output Tokens: {total_output_tokens}")
-            print(f"Throughput: {total_requests/total_duration:.2f} req/s")
-            print("="*60)
+            print(f"Throughput: {total_requests / total_duration:.2f} req/s")
+            print("=" * 60)
 
         except ImportError:
             logger.warning("pandas not available, skipping summary")
@@ -318,11 +335,10 @@ async def main():
     )
     args = parser.parse_args()
 
-
     replayer = TraceReplayer(
         model=args.model,
         max_duration=args.max_duration,
-        max_input_tokens=args.max_input_length
+        max_input_tokens=args.max_input_length,
     )
 
     requests = replayer.load_trace(args.trace_file)
@@ -330,7 +346,7 @@ async def main():
     if not requests:
         logger.error("No requests loaded")
         return
-    
+
     # Replay the trace
     await replayer.replay_trace(requests)
 
