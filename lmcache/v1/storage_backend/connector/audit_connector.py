@@ -274,5 +274,3 @@ class AuditConnector(RemoteConnector):
             f"SUCCESS|result: {result}"
         )
         return result
-
-
