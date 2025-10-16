@@ -165,9 +165,7 @@ class LMCacheEngine:
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
             self.async_lookup_server = kwargs.pop("async_lookup_server")
-            self.storage_manager.post_init(
-                async_lookup_server=self.async_lookup_server
-            )
+            self.storage_manager.post_init(async_lookup_server=self.async_lookup_server)
         else:
             self.storage_manager.post_init()
         if not self.post_inited:
