@@ -251,7 +251,9 @@ class AuditConnector(RemoteConnector):
     def batched_contains(
         self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
     ) -> List[bool]:
-        self.logger.debug(f"[REMOTE_AUDIT][{self.real_connector}]:BATCHED_CONTAINS|START")
+        self.logger.debug(
+            f"[REMOTE_AUDIT][{self.real_connector}]:BATCHED_CONTAINS|START"
+        )
         t1 = time.perf_counter()
         result = self.real_connector.batched_contains(keys, stop_after_first_not_exits)
         t2 = time.perf_counter()
@@ -263,9 +265,14 @@ class AuditConnector(RemoteConnector):
         return result
 
     def support_batched_contains(self) -> bool:
-        self.logger.debug(f"[REMOTE_AUDIT]SUPPORT_BATCHED_CONTAINS|START")
+        self.logger.debug(
+            f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_BATCHED_CONTAINS|START"
+        )
         result = self.real_connector.support_batched_contains()
-        self.logger.info(f"[REMOTE_AUDIT]SUPPORT_BATCHED_CONTAINS|SUCCESS|result: {result}")
+        self.logger.info(
+            f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_BATCHED_CONTAINS|"
+            f"SUCCESS|result: {result}"
+        )
         return result
 
 
