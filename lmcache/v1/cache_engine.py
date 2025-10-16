@@ -136,11 +136,14 @@ class LMCacheEngine:
 
         self.use_layerwise = config.use_layerwise
         self.num_layers = metadata.kv_shape[0]
+        self.fmt = None
         if self.use_layerwise:
             if config.enable_blending:
                 self.fmt = MemoryFormat.KV_2TD
             else:
                 self.fmt = MemoryFormat.KV_T2D
+        if metadata.use_mla:
+            self.fmt = MemoryFormat.KV_MLA_FMT
 
         # NOTE(ApostaC): we haven't support lookup-cache yet
         self.lookup_cache: dict[CacheEngineKey, Any] = {}
@@ -256,6 +259,7 @@ class LMCacheEngine:
                 kv_shape,
                 kv_dtype,
                 busy_loop=self.force_store_wait,
+                fmt=self.fmt,
             )
             if memory_obj is None:
                 logger.warning(
