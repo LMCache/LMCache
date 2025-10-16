@@ -77,6 +77,9 @@ class TraceReplayer:
         Load trace data from a JSONL file and expand hash_ids into individual
         TraceRequests.
 
+        Each line should follow the Mooncake conversation_trace.jsonl format:
+        https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/conversation_trace.jsonl
+
         Truncates input_length if max_input_tokens is provided.
 
         Returns:
