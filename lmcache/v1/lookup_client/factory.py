@@ -89,16 +89,14 @@ class LookupClientFactory:
             "LMCache v1 config is expected for lookup server and client"
         )
 
-        # Only create the KV lookup API server on worker rank 0
-        # when there are multiple workers and when not using external lookup client
-        create_lookup_server_only_on_worker_0_for_mla = config.get_extra_config_value(
-            "create_lookup_server_only_on_worker_0_for_mla",
-            lmcache_engine.metadata.use_mla,
+        mla_lookup_server_worker_id = config.get_mla_lookup_server_worker_id(
+            lmcache_engine.metadata.use_mla
         )
+        assert mla_lookup_server_worker_id < lmcache_engine.metadata.world_size
 
         if config.external_lookup_client is None and (
-            not create_lookup_server_only_on_worker_0_for_mla
-            or lmcache_engine.metadata.worker_id == 0
+            mla_lookup_server_worker_id < 0
+            or lmcache_engine.metadata.worker_id == mla_lookup_server_worker_id
         ):
             # First Party
             from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
