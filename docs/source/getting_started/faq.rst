@@ -35,4 +35,7 @@ As shown in the table, after loading Qwen/Qwen3-32B for example, there is only e
      - 0.3052 GB
      - 32.06 GB × 4 (or 420,208 tokens)
      - 131,072 tokens
-     - 3.21x 
+     - 3.21x
+
+.. note::
+   You may also find this `VRAM Calculator <https://apxml.com/tools/vram-calculator>`_ useful for calculating the estimated spare GPU RAM for different models and configurations. 
