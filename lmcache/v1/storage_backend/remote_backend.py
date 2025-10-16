@@ -170,7 +170,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
         pin: bool = False,
-        stop_after_first_not_exits: bool = True
+        stop_after_first_not_exits: bool = True,
     ) -> List[bool]:
         if self.connection is None:
             logger.warning(
