@@ -67,7 +67,7 @@ def test_on_lookup_request(stats_monitor):
     assert stats.interval_lookup_requests == 1
     assert stats.interval_lookup_tokens == 50
     assert stats.lookup_hit_rate == 0
-    assert len(stats.interval_request_cache_hit_rate) == 0
+    assert len(stats.interval_lookup_hit_rates) == 0
     # on_lookup_finished is not called, lookup_requests is not clear
     assert len(stats_monitor.lookup_requests) == 1
 
@@ -81,8 +81,8 @@ def test_on_lookup_finished(stats_monitor):
     assert stats.interval_lookup_tokens == 100
     assert stats.interval_lookup_hits == 80
     assert stats.lookup_hit_rate == 0.8
-    assert len(stats.interval_request_cache_hit_rate) == 1
-    assert stats.interval_request_cache_hit_rate[0] == 0.8
+    assert len(stats.interval_lookup_hit_rates) == 1
+    assert stats.interval_lookup_hit_rates[0] == 0.8
     assert len(stats_monitor.lookup_requests) == 0
 
 
@@ -164,7 +164,7 @@ def test_multiple_lookup_operations(stats_monitor):
     assert stats.interval_lookup_tokens == 300
     assert stats.interval_lookup_hits == 230
     assert stats.lookup_hit_rate == 230 / 300
-    assert len(stats.interval_request_cache_hit_rate) == 2
+    assert len(stats.interval_lookup_hit_rates) == 2
     assert len(stats_monitor.lookup_requests) == 0
 
 
@@ -232,7 +232,7 @@ def test_stats_clearing(stats_monitor):
     assert stats.interval_remote_read_requests == 1
     assert stats.interval_remote_read_bytes == 1024
     assert stats.interval_remote_ping_latency == 25.0
-    assert len(stats.interval_request_cache_hit_rate) == 0
+    assert len(stats.interval_lookup_hit_rates) == 0
 
     # Get stats again - should be cleared
     stats2 = stats_monitor.get_stats_and_clear()
@@ -242,7 +242,7 @@ def test_stats_clearing(stats_monitor):
     assert stats2.interval_remote_read_requests == 0
     assert stats2.interval_remote_read_bytes == 0
     assert stats2.interval_remote_ping_latency == 0
-    assert len(stats2.interval_request_cache_hit_rate) == 0
+    assert len(stats2.interval_lookup_hit_rates) == 0
 
     assert len(stats_monitor.lookup_requests) == 1
 
@@ -255,8 +255,8 @@ def test_stats_clearing(stats_monitor):
     assert stats3.interval_remote_read_requests == 0
     assert stats3.interval_remote_read_bytes == 0
     assert stats3.interval_remote_ping_latency == 0
-    assert len(stats3.interval_request_cache_hit_rate) == 1
-    assert stats3.interval_request_cache_hit_rate[0] == 0.8
+    assert len(stats3.interval_lookup_hit_rates) == 1
+    assert stats3.interval_lookup_hit_rates[0] == 0.8
 
     assert len(stats_monitor.lookup_requests) == 0
 

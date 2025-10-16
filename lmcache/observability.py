@@ -74,16 +74,15 @@ class LMCacheStats:
     p2p_time_to_transfer: List[float]
     p2p_transfer_speed: List[float]  # Tokens per second
 
-    # request cache hit rate
-    interval_request_cache_hit_rate: List[float]
+    # request lookup hit rates
+    interval_lookup_hit_rates: List[float]
 
 
 @dataclass
 class LookupRequestStats:
     num_tokens: int
     hit_tokens: int
-    start_time: float
-    end_time: float
+    is_finished: bool
 
     def hit_rate(self):
         if self.num_tokens == 0:
@@ -209,12 +208,10 @@ class LMCStatsMonitor:
         This function is called when a lookup request is sent to the cache.
         It will record the number of tokens requested.
         """
-        curr_time = time.time()
         lookup_stats = LookupRequestStats(
             num_tokens=num_tokens,
             hit_tokens=0,
-            start_time=curr_time,
-            end_time=0,
+            is_finished=False,
         )
         self.interval_lookup_requests += 1
         self.interval_lookup_tokens += num_tokens
@@ -228,11 +225,10 @@ class LMCStatsMonitor:
         This function is called when a lookup request is finished.
         It will record the number of tokens hit.
         """
-        curr_time = time.time()
         assert request_id in self.lookup_requests
         lookup_stats = self.lookup_requests[request_id]
         lookup_stats.hit_tokens = num_hit_tokens
-        lookup_stats.end_time = curr_time
+        lookup_stats.is_finished = True
         self.interval_lookup_hits += num_hit_tokens
 
     @thread_safe
@@ -432,7 +428,7 @@ class LMCStatsMonitor:
 
         new_lookup_requests = {}
         for request_id, lookup_stats in self.lookup_requests.items():
-            if lookup_stats.end_time == 0:
+            if not lookup_stats.is_finished:
                 new_lookup_requests[request_id] = lookup_stats
         self.lookup_requests = new_lookup_requests
 
@@ -483,10 +479,10 @@ class LMCStatsMonitor:
             [stats.transfer_speed() for stats in self.p2p_requests.values()]
         )
 
-        request_cache_hit_rate = [
+        request_lookup_hit_rates = [
             stats.hit_rate()
             for stats in self.lookup_requests.values()
-            if stats.end_time != 0
+            if stats.is_finished
         ]
 
         ret = LMCacheStats(
@@ -528,7 +524,7 @@ class LMCStatsMonitor:
             interval_p2p_transferred_tokens=self.interval_p2p_transferred_tokens,
             p2p_time_to_transfer=p2p_time_to_transfer,
             p2p_transfer_speed=p2p_transfer_speed,
-            interval_request_cache_hit_rate=request_cache_hit_rate,
+            interval_lookup_hit_rates=request_lookup_hit_rates,
         )
         self._clear()
         return ret
@@ -1113,7 +1109,7 @@ class PrometheusLogger:
             stats.interval_remote_time_to_get_sync,
         )
         self._log_histogram(
-            self.histogram_request_cache_hit_rate, stats.interval_request_cache_hit_rate
+            self.histogram_request_cache_hit_rate, stats.interval_lookup_hit_rates
         )
         self._log_gauge(
             self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
