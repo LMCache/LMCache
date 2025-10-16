@@ -258,7 +258,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.dict.pop(key)
                 has_stored = True
 
-            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, False)
+            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, 0)
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
