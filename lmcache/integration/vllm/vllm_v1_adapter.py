@@ -110,20 +110,22 @@ def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
 
 def should_skip_cache_storage(request: "Request") -> bool:
     """Check if the request specifies to skip cache storage via kv_transfer_params.
-    
+
     Args:
         request: The request object
-        
+
     Returns:
         True if cache storage should be skipped, False otherwise
     """
-    if (kv_transfer_params := getattr(request, "kv_transfer_params", None)):
+    if kv_transfer_params := getattr(request, "kv_transfer_params", None):
         if "store_cache" in kv_transfer_params:
             should_skip = not kv_transfer_params["store_cache"]
             if should_skip:
-                logger.info("User has specified not to store the cache (store_cache: false)")
+                logger.info(
+                    "User has specified not to store the cache (store_cache: false)"
+                )
             return should_skip
-    
+
     return False
 
 
@@ -1333,11 +1335,15 @@ class LMCacheConnectorV1Impl:
                 if request.req_id in self._unfinished_requests
                 else False
             )
-            
-            skip_save = force_skip_save or (
-                self.config.priority_limit is not None
-                and request_priority > self.config.priority_limit
-            ) or user_skip_save
+
+            skip_save = (
+                force_skip_save
+                or (
+                    self.config.priority_limit is not None
+                    and request_priority > self.config.priority_limit
+                )
+                or user_skip_save
+            )
 
             request_tracker = RequestTracker.from_new_request(
                 self.config,
