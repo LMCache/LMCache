@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from concurrent.futures import Future
 from typing import (
     TYPE_CHECKING,
@@ -323,6 +323,54 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
+        # Track async completion per connector (cname). We only drop refs once
+        # all async futures across *all* backends for that cname have finished.
+        pending_counts = defaultdict(int)
+        locks = defaultdict(threading.Lock)
+        finalized: set[str] = set()
+
+        def _normalize_futures(futs: Any) -> list[Any]:
+            if futs is None:
+                return []
+            if hasattr(futs, "add_done_callback"):
+                return [futs]
+            if isinstance(futs, (list, tuple)):
+                return [f for f in futs if hasattr(f, "add_done_callback")]
+            return []
+
+        def _finalize(cn: str, objs: list[MemoryObj]) -> None:
+            if cn in finalized:
+                return
+            for memory_obj in objs:
+                try:
+                    memory_obj.ref_count_down()
+                except Exception:
+                    logger.exception("ref_count_down failed in batched_put finalize")
+            finalized.add(cn)
+
+        def _register_callbacks(cn: str, objs: list[MemoryObj], futs: Any) -> None:
+            futures = _normalize_futures(futs)
+            if not futures:
+                return
+
+            pending_counts[cn] += len(futures)
+            lock = locks[cn]
+
+            def _on_done(_fut, name=cn, arr=objs, lk=lock):
+                with lk:
+                    if pending_counts[name] > 0:
+                        pending_counts[name] -= 1
+                    if pending_counts[name] == 0:
+                        _finalize(name, arr)
+
+            for fut in futures:
+                try:
+                    fut.add_done_callback(_on_done)
+                except Exception:
+                    logger.exception(
+                        "Failed to register batched_put finalize callback"
+                    )
+
         # The dictionary from backend cname to objects and keys
         obj_dict: dict[
             str,
@@ -345,14 +393,22 @@ class StorageManager:
                 )
                 obj_dict[cname] = (new_keys, new_objs)
 
-            # NOTE: the handling of exists_in_put_tasks
-            # is done in the backend
+            # NOTE: the handling of exists_in_put_tasks is done in the backend
             ks, objs = obj_dict[cname]
-            backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
+            futs = backend.batched_submit_put_task(
+                ks, objs, transfer_spec=transfer_spec
+            )
 
+            _register_callbacks(cname, objs, futs)
+
+        # Finalize any cname with no async futures registered (sync path),
+        # or those not yet finalized due to zero pending futures.
         for cname, (ks, objs) in obj_dict.items():
-            for memory_obj in objs:
-                memory_obj.ref_count_down()
+            lock = locks[cname]
+            with lock:
+                if pending_counts[cname] != 0:
+                    continue
+                _finalize(cname, objs)
 
     def get(
         self,
