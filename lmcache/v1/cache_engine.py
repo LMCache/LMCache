@@ -33,6 +33,13 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
+from lmcache.v1.kv_events import (
+    MEDIUM_GPU,
+    BlockStored,
+    EventPublisherFactory,
+    KVCacheEvent,
+    KVEventBatch,
+)
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -127,6 +134,12 @@ class LMCacheEngine:
             event_manager=self.event_manager,
             lmcache_worker=self.lmcache_worker,
         )
+
+        # Publishing KV events
+        self.kv_event_publisher = EventPublisherFactory.create(
+            config,
+        )
+        self.kv_event_queue: List[KVCacheEvent] = []
 
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
@@ -306,6 +319,19 @@ class LMCacheEngine:
             put_time * 1000,
         )
 
+        self.kv_event_queue.append(
+            BlockStored(
+                block_hashes=None,
+                parent_block_hash=None,
+                token_ids=tokens,  # type: ignore[arg-type]
+                block_size=0,
+                lora_id=0,
+                medium=MEDIUM_GPU,
+            )
+        )
+        batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
+        self.kv_event_publisher.publish(batch)
+
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
 
     @_lmcache_nvtx_annotate
@@ -423,6 +449,16 @@ class LMCacheEngine:
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
         logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
+        self.kv_event_queue.append(
+            BlockStored(
+                block_hashes=None,
+                parent_block_hash=None,
+                token_ids=tokens,
+                block_size=0,
+                lora_id=0,
+                medium=MEDIUM_GPU,
+            )
+        )
         yield
 
     @_lmcache_nvtx_annotate
@@ -1054,6 +1090,9 @@ class LMCacheEngine:
             self.lmcache_worker.close()
 
         self.storage_manager.close()
+
+        if self.kv_event_publisher:
+            self.kv_event_publisher.shutdown()
 
         logger.info("LMCacheEngine closed.")
 

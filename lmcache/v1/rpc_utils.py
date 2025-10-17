@@ -27,13 +27,22 @@ def get_zmq_context(use_asyncio: bool = True):
 
 
 def get_zmq_socket(
-    context, socket_path: str, protocol: str, role, bind_or_connect: str
+    context,
+    socket_path: str,
+    protocol: str,
+    role,
+    bind_or_connect: str,
+    high_water_mark: int | None = None,
 ):
     """
     Create a ZeroMQ socket with the specified protocol and role.
     """
     socket_addr = f"{protocol}://{socket_path}"
     socket = context.socket(role)
+
+    if high_water_mark is not None:
+        socket.set_hwm(high_water_mark)
+
     if bind_or_connect == "bind":
         socket.bind(socket_addr)
     elif bind_or_connect == "connect":
