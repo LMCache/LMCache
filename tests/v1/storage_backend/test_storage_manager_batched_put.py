@@ -2,10 +2,10 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-import threading
-import time
 from types import SimpleNamespace
 from typing import Callable, Optional, cast
+import threading
+import time
 
 # First Party
 from lmcache.utils import CacheEngineKey
@@ -14,7 +14,6 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
-
 
 OnRelease = Optional[Callable[[], None]]
 
@@ -213,3 +212,27 @@ def test_batched_put_async_future_completes_from_thread():
     assert released.wait(timeout=1.0), "ref_count_down never triggered"
     assert mem_obj.meta.ref_count == 0
     assert mem_obj.down_calls == 1
+
+
+def test_batched_put_backend_returns_non_future_treated_as_sync():
+    allocator = DummyAllocatorBackend()
+    bad_async_return = object()  # lacks add_done_callback -> should be treated sync
+    async_backend = DummyBackend(allocator, bad_async_return)
+
+    manager = _make_manager(
+        OrderedDict(
+            {
+                "LocalCPUBackend": allocator,
+                "AsyncBackend": async_backend,
+            }
+        )
+    )
+
+    mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
+    keys = _make_keys(len(mem_objs))
+
+    manager.batched_put(keys, mem_objs)
+
+    for mem in mem_objs:
+        assert mem.meta.ref_count == 0
+        assert mem.down_calls == 1
