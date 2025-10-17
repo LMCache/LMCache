@@ -473,14 +473,6 @@ def _create_config_class():
 
 def _validate_config(self):
     """Validate configuration"""
-    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading or self.use_layerwise:
-        logger.warning(
-            "Automatically setting save_unfull_chunk=False because "
-            "enable_async_loading=True or use_layerwise=True to prevent "
-            "CPU memory fragmentation"
-        )
-        self.save_unfull_chunk = False
 
     if self.enable_p2p:
         assert self.enable_controller
@@ -705,6 +697,15 @@ def _update_config_from_env(self):
                     f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
                 )
                 # Keep existing value if conversion fails
+
+    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
+    if self.enable_async_loading or self.use_layerwise:
+        logger.warning(
+            "Automatically setting save_unfull_chunk=False because "
+            "enable_async_loading=True or use_layerwise=True to prevent "
+            "CPU memory fragmentation"
+        )
+        self.save_unfull_chunk = False
 
     return self
 
