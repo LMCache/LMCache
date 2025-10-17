@@ -368,9 +368,7 @@ class StorageManager:
                 try:
                     fut.add_done_callback(_on_done)
                 except Exception:
-                    logger.exception(
-                        "Failed to register batched_put finalize callback"
-                    )
+                    logger.exception("Failed to register batched_put finalize callback")
 
         # The dictionary from backend cname to objects and keys
         obj_dict: dict[
