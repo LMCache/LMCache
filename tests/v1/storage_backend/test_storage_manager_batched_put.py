@@ -3,7 +3,7 @@
 from collections import OrderedDict
 from concurrent.futures import Future
 from types import SimpleNamespace
-from typing import Callable, Optional, cast
+from typing import Callable, List, Optional, cast
 import threading
 import time
 
@@ -12,6 +12,7 @@ import pytest
 
 # First Party
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
@@ -90,7 +91,7 @@ def test_batched_put_sync_finalize_once():
     mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
     keys = _make_keys(len(mem_objs))
 
-    manager.batched_put(keys, mem_objs)
+    manager.batched_put(keys, cast(List[MemoryObj], mem_objs))
 
     for mem in mem_objs:
         assert mem.meta.ref_count == 0
@@ -114,7 +115,7 @@ def test_batched_put_async_single_future_finalizes_after_completion():
     mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
     keys = _make_keys(len(mem_objs))
 
-    manager.batched_put(keys, mem_objs)
+    manager.batched_put(keys, cast(List[MemoryObj], mem_objs))
     # Still pending because future not completed.
     for mem in mem_objs:
         assert mem.meta.ref_count == 1
@@ -144,7 +145,7 @@ def test_batched_put_async_list_of_futures_waits_for_all():
     mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
     keys = _make_keys(len(mem_objs))
 
-    manager.batched_put(keys, mem_objs)
+    manager.batched_put(keys, cast(List[MemoryObj], mem_objs))
 
     f1.set_result(None)
     for mem in mem_objs:
@@ -176,7 +177,7 @@ def test_batched_put_multiple_async_backends_same_cname_waits_for_all():
     mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
     keys = _make_keys(len(mem_objs))
 
-    manager.batched_put(keys, mem_objs)
+    manager.batched_put(keys, cast(List[MemoryObj], mem_objs))
 
     f1.set_result(None)
     for mem in mem_objs:
@@ -207,7 +208,7 @@ def test_batched_put_async_future_completes_from_thread():
     mem_obj = DummyMemoryObj(on_release=released.set)
     keys = _make_keys(1)
 
-    manager.batched_put(keys, [mem_obj])
+    manager.batched_put(keys, cast(List[MemoryObj], [mem_obj]))
     assert mem_obj.down_calls == 0
 
     def _complete():
@@ -238,7 +239,7 @@ def test_batched_put_backend_returns_non_future_treated_as_sync():
     mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
     keys = _make_keys(len(mem_objs))
 
-    manager.batched_put(keys, mem_objs)
+    manager.batched_put(keys, cast(List[MemoryObj], mem_objs))
 
     for mem in mem_objs:
         assert mem.meta.ref_count == 0
@@ -276,7 +277,7 @@ def test_batched_put_allocation_failure_still_releases_refs(
     mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
     keys = _make_keys(len(mem_objs))
 
-    manager.batched_put(keys, mem_objs)
+    manager.batched_put(keys, cast(List[MemoryObj], mem_objs))
 
     assert allocation_called, "allocate_and_copy_objects should be invoked"
     for mem in mem_objs:
