@@ -7,6 +7,9 @@ from typing import Callable, Optional, cast
 import threading
 import time
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.abstract_backend import (
@@ -43,6 +46,10 @@ class DummyAllocatorBackend:
     def batched_submit_put_task(self, keys, objs, transfer_spec=None):
         self.calls += 1
         return None
+
+
+class AltAllocatorBackend(DummyAllocatorBackend):
+    """Allocator with different cname to trigger allocate path."""
 
 
 class DummyBackend:
@@ -233,6 +240,45 @@ def test_batched_put_backend_returns_non_future_treated_as_sync():
 
     manager.batched_put(keys, mem_objs)
 
+    for mem in mem_objs:
+        assert mem.meta.ref_count == 0
+        assert mem.down_calls == 1
+
+
+def test_batched_put_allocation_failure_still_releases_refs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # First Party
+    from lmcache.v1.storage_backend import storage_manager as sm_module
+
+    allocator = DummyAllocatorBackend()
+    alt_allocator = AltAllocatorBackend()
+    failing_backend = DummyBackend(alt_allocator, None)
+
+    allocation_called = False
+
+    def fake_allocate(alloc, keys, objs, stream):
+        nonlocal allocation_called
+        allocation_called = True
+        return [], []
+
+    monkeypatch.setattr(sm_module, "allocate_and_copy_objects", fake_allocate)
+
+    manager = _make_manager(
+        OrderedDict(
+            {
+                "LocalCPUBackend": allocator,
+                "FailingBackend": failing_backend,
+            }
+        )
+    )
+
+    mem_objs = [DummyMemoryObj(), DummyMemoryObj()]
+    keys = _make_keys(len(mem_objs))
+
+    manager.batched_put(keys, mem_objs)
+
+    assert allocation_called, "allocate_and_copy_objects should be invoked"
     for mem in mem_objs:
         assert mem.meta.ref_count == 0
         assert mem.down_calls == 1
