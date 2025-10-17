@@ -354,8 +354,12 @@ class StorageManager:
             if not futures:
                 return
 
-            pending_counts[cn] += len(futures)
             lock = locks[cn]
+
+            # Increment under lock so callbacks firing synchronously see the
+            # pending count before attempting to decrement it.
+            with lock:
+                pending_counts[cn] += len(futures)
 
             def _on_done(_fut, name=cn, arr=objs, lk=lock):
                 with lk:
@@ -369,6 +373,11 @@ class StorageManager:
                     fut.add_done_callback(_on_done)
                 except Exception:
                     logger.exception("Failed to register batched_put finalize callback")
+                    with lock:
+                        if pending_counts[cn] > 0:
+                            pending_counts[cn] -= 1
+                        if pending_counts[cn] == 0:
+                            _finalize(cn, objs)
 
         # The dictionary from backend cname to objects and keys
         obj_dict: dict[
