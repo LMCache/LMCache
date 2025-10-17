@@ -6,6 +6,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Coroutine,
+    DefaultDict,
     Generator,
     List,
     Optional,
@@ -325,8 +326,8 @@ class StorageManager:
         """
         # Track async completion per connector (cname). We only drop refs once
         # all async futures across *all* backends for that cname have finished.
-        pending_counts = defaultdict(int)
-        locks = defaultdict(threading.Lock)
+        pending_counts: DefaultDict[str, int] = defaultdict(int)
+        locks: DefaultDict[str, threading.Lock] = defaultdict(threading.Lock)
         finalized: set[str] = set()
 
         def _normalize_futures(futs: Any) -> list[Any]:

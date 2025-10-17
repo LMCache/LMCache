@@ -3,12 +3,14 @@
 from collections import OrderedDict
 from concurrent.futures import Future
 from types import SimpleNamespace
-
-# Third Party
-import pytest
+from typing import cast
 
 # First Party
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.storage_backend.abstract_backend import (
+    AllocatorBackendInterface,
+    StorageBackendInterface,
+)
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 
@@ -53,16 +55,18 @@ class DummyBackend:
 
 
 def _make_keys(count: int):
-    return [
-        CacheEngineKey("fmt", "model", 1, 0, chunk_hash=i) for i in range(count)
-    ]
+    return [CacheEngineKey("fmt", "model", 1, 0, chunk_hash=i) for i in range(count)]
 
 
 def _make_manager(backends: OrderedDict[str, object]) -> StorageManager:
     manager = StorageManager.__new__(StorageManager)
-    manager.storage_backends = backends
+    manager.storage_backends = cast(
+        OrderedDict[str, StorageBackendInterface], backends
+    )
     # allocator backend keyed by LocalCPUBackend to match StorageManager expectations
-    manager.allocator_backend = backends["LocalCPUBackend"]
+    manager.allocator_backend = cast(
+        AllocatorBackendInterface, backends["LocalCPUBackend"]
+    )
     manager.internal_copy_stream = None
     return manager
 
