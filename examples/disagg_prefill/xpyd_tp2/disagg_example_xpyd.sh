@@ -121,7 +121,7 @@ main() {
         --port 9487 \
         --prefiller-host localhost \
         --prefiller-port 7100 \
-        --prefiller-init-port 8300,8301 \
+        --prefiller-tp-size 2 \
         --num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 7200  \

@@ -78,20 +78,13 @@ async def lifespan(app: FastAPI):
         pref_hosts, pref_ports, global_args.num_prefillers
     )
 
-    incremental_mode = (
-        len(pref_hosts) == 1 and len(pref_ports) == 1 and global_args.num_prefillers > 1
-    )
-    for i, (host, port) in enumerate(prefill_pairs):
+    for host, port in prefill_pairs:
         prefiller_base_url = f"http://{host}:{int(port)}"
         prefill_client = httpx.AsyncClient(timeout=None, base_url=prefiller_base_url)
-        if incremental_mode:
-            init_ports = [p + i for p in global_args.prefiller_init_port]
-        else:
-            init_ports = list(global_args.prefiller_init_port)
         app.state.prefill_clients.append(
             ClientInfo(
                 prefill_client,
-                init_port=init_ports,
+                tp_size=global_args.prefiller_tp_size,
             )
         )
 
@@ -195,14 +188,13 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--prefiller-host", type=csv_strs, default=["localhost"])
+    parser.add_argument("--prefiller-tp-size", type=int, default=1)
     parser.add_argument("--prefiller-port", type=csv_ints, default=[8100])
-    parser.add_argument("--prefiller-init-port", type=csv_ints, default=[8200])
-    parser.add_argument("--prefiller-alloc-port", type=csv_ints, default=[8300])
     parser.add_argument("--num-prefillers", type=int, default=1)
     parser.add_argument("--decoder-host", type=csv_strs, default=["localhost"])
-    parser.add_argument("--decoder-port", type=csv_ints, default=[8400])
-    parser.add_argument("--decoder-init-port", type=csv_ints, default=[8500])
-    parser.add_argument("--decoder-alloc-port", type=csv_ints, default=[8600])
+    parser.add_argument("--decoder-port", type=csv_ints, default=[8200])
+    parser.add_argument("--decoder-init-port", type=csv_ints, default=[8300])
+    parser.add_argument("--decoder-alloc-port", type=csv_ints, default=[8400])
 
     parser.add_argument("--num-decoders", type=int, default=1)
     parser.add_argument("--proxy-host", type=str, default="localhost")
@@ -216,8 +208,12 @@ def parse_args():
 class ClientInfo:
     client: httpx.AsyncClient
     host: Optional[str] = None
-    init_port: Optional[list[int]] = None
-    alloc_port: Optional[list[int]] = None
+    init_ports: Optional[list[int]] = None
+    alloc_ports: Optional[list[int]] = None
+    tp_size: Optional[int] = None
+
+    def __post_init__(self):
+        self.tp_size = self.tp_size or len(self.init_ports or [])
 
 
 # Initialize variables to hold the persistent clients
@@ -317,16 +313,14 @@ async def handle_completions(request: Request):
 
         # Pick decode client
         decode_client = round_robin_pick_client(app.state.decode_clients, counter)
-        assert len(decode_client.init_port or []) > 0, (
-            "Decode client init_port is empty"
-        )
-        num_decoder_tp_rank = len(decode_client.init_port or [])
+        assert decode_client.tp_size, "Decode client init_port is empty"
+        num_decoder_tp_rank = decode_client.tp_size
 
         disagg_spec = {
             "req_id": req_id,
             "receiver_host": decode_client.host,
-            "receiver_init_port": decode_client.init_port,
-            "receiver_alloc_port": decode_client.alloc_port,
+            "receiver_init_ports": decode_client.init_ports,
+            "receiver_alloc_ports": decode_client.alloc_ports,
             "receiver_tp_size": num_decoder_tp_rank,
         }
 
@@ -379,10 +373,10 @@ async def handle_completions(request: Request):
             ).encode()
 
             # Wait until decode node signals that kv is ready
-            assert len(prefill_client.init_port) > 0, (
-                "Prefill client init_port is empty"
+            num_prefiller_tp_rank = prefill_client.tp_size
+            assert num_prefiller_tp_rank, (
+                f"Prefill client tp_size is invalid: {num_prefiller_tp_rank}"
             )
-            num_prefiller_tp_rank = len(prefill_client.init_port or [])
             await wait_decode_kv_ready(req_id, num_prefiller_tp_rank)
 
             async for chunk in stream_service_response(
@@ -434,16 +428,14 @@ async def handle_chat_completions(request: Request):
         # Pick decode client
         decode_client = round_robin_pick_client(app.state.decode_clients, counter)
 
-        assert len(decode_client.init_port or []) > 0, (
-            "Decode client init_port is empty"
-        )
-        num_decoder_tp_rank = len(decode_client.init_port or [])
+        assert decode_client.tp_size, "Decode client init_ports is empty"
+        num_decoder_tp_rank = decode_client.tp_size
 
         disagg_spec = {
             "req_id": req_id,
             "receiver_host": decode_client.host,
-            "receiver_init_port": decode_client.init_port,
-            "receiver_alloc_port": decode_client.alloc_port,
+            "receiver_init_ports": decode_client.init_ports,
+            "receiver_alloc_ports": decode_client.alloc_ports,
             "receiver_tp_size": num_decoder_tp_rank,
         }
 
@@ -516,10 +508,10 @@ async def handle_chat_completions(request: Request):
                 "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
             ).encode()
 
-            assert len(prefill_client.init_port) > 0, (
-                "Prefill client init_port is empty"
+            num_prefiller_tp_rank = prefill_client.tp_size
+            assert num_prefiller_tp_rank, (
+                f"Prefill client tp_size is invalid: {num_prefiller_tp_rank}"
             )
-            num_prefiller_tp_rank = len(prefill_client.init_port)
             await wait_decode_kv_ready(req_id, num_prefiller_tp_rank)
 
             # Stream and convert completion format chunks to chat completion format

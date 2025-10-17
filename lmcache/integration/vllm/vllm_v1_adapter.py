@@ -101,10 +101,10 @@ class SaveSpec:
 @dataclass
 class DisaggSpec:
     req_id: str
-    receiver_id: list[str]
+    receiver_ids: list[str]
     receiver_host: str
-    receiver_init_port: list[int]
-    receiver_alloc_port: list[int]
+    receiver_init_ports: list[int]
+    receiver_alloc_ports: list[int]
     tp_size: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
@@ -1371,15 +1371,15 @@ class LMCacheConnectorV1Impl:
 
             receiver_ids = [
                 req_disagg_spec["receiver_host"] + str(_receiver_init_port)
-                for _receiver_init_port in req_disagg_spec["receiver_init_port"]
+                for _receiver_init_port in req_disagg_spec["receiver_init_ports"]
             ]
 
             disagg_spec = DisaggSpec(
                 req_id=req_disagg_spec["req_id"],
-                receiver_id=receiver_ids,
+                receiver_ids=receiver_ids,
                 receiver_host=req_disagg_spec["receiver_host"],
-                receiver_init_port=req_disagg_spec["receiver_init_port"],
-                receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
+                receiver_init_ports=req_disagg_spec["receiver_init_ports"],
+                receiver_alloc_ports=req_disagg_spec["receiver_alloc_ports"],
                 tp_size=req_disagg_spec["receiver_tp_size"],
             )
             tmp_disagg_tracker[request.request_id] = disagg_spec

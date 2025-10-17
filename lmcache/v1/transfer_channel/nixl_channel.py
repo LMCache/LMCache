@@ -581,6 +581,13 @@ class NixlChannel(BaseTransferChannel):
     def get_block_descs(
         self, remote_tp_group_rank: int, dp_ratio: int
     ) -> list[tuple[int, ...]]:
+        """
+        shard the local memory blocks for remote tensor parallel group.
+
+        :param remote_tp_group_rank: The rank of the remote tensor parallel group.
+        :param dp_ratio: The tensor parallel ratio between
+                         the remote decoder and local encoder.
+        """
         buffer_size = self.allocator_meta.buffer_size
         local_page_size = self.nixl_wrapper.page_size
         remote_page_size = local_page_size // dp_ratio
@@ -602,6 +609,9 @@ class NixlChannel(BaseTransferChannel):
     def update_agent_from_blocks_data(
         self, blocks_data: list[tuple[int, ...]], receiver_id: str
     ):
+        """
+        prepare the transfer handler for the remote receiver.
+        """
         self.nixl_wrapper.update_handler_from_blocks_data(blocks_data, receiver_id)
 
 

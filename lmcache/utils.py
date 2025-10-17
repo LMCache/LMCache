@@ -309,7 +309,7 @@ class CacheEngineKey:
             self.dtype,
             self.request_configs,
         )
-    def update_rank_info_from_nixl(
+    def update_rank_info_from_pd(
         self, world_size: Optional[int] = None, worker_id: Optional[int] = None
     ):
         self.world_size = world_size or self.world_size

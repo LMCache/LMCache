@@ -165,11 +165,12 @@ __device__ __forceinline__ int64_t page_buffer_offset_unilateral(
 __device__ __forceinline__ int64_t key_value_offset(
     const int k_or_v, const int layer_idx, const int token_idx,
     const int scalar_offset, const int scalars_per_token, const int num_tokens,
-    const int num_layers, const int num_kv, const bool transpose) {
+    const int num_layers, const int k_or_v_size, const bool transpose) {
   if (transpose) {
     // [2LTD->DT2L], T is full chunk size
-    return scalar_offset * num_tokens * num_kv * num_layers +
-           token_idx * num_kv * num_layers + k_or_v * num_layers + layer_idx;
+    return scalar_offset * num_tokens * k_or_v_size * num_layers +
+           token_idx * k_or_v_size * num_layers + k_or_v * num_layers +
+           layer_idx;
   }
   return k_or_v * num_layers * num_tokens * scalars_per_token +
          layer_idx * num_tokens * scalars_per_token +
@@ -247,7 +248,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
   const int k_or_v = blockIdx.z;
   const int tid = threadIdx.x;
   const int num_threads = blockDim.x;
-  const int num_kv = gridDim.z;
+  const int k_or_v_size = gridDim.z;
 
   const int64_t slot_idx = slot_mapping[token_id];
   int64_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
@@ -260,7 +261,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
   for (int i = tid; i < scalars_per_token; i += num_threads) {
     const int64_t lmcache_offset =
         key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
-                         num_tokens, num_layers, num_kv, transpose);
+                         num_tokens, num_layers, k_or_v_size, transpose);
 
     const int64_t vllm_offset = page_buffer_offset(
         k_or_v, slot_idx, i, scalars_per_token, page_buffer_size);
@@ -290,7 +291,7 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   const int k_or_v = blockIdx.z;
   const int tid = threadIdx.x;
   const int num_threads = blockDim.x;
-  const int num_kv = gridDim.z;
+  const int k_or_v_size = gridDim.z;
 
   const int64_t slot_idx = slot_mapping[token_id];
   int64_t* key_ptr = paged_buffer_ptrs[layer_id];
@@ -304,7 +305,7 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   for (int i = tid; i < scalars_per_token; i += num_threads) {
     const int64_t lmcache_offset =
         key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
-                         num_tokens, num_layers, num_kv, false);
+                         num_tokens, num_layers, k_or_v_size, false);
 
     const int64_t sgl_offset =
         page_buffer_offset_unilateral(slot_idx, i, scalars_per_token);

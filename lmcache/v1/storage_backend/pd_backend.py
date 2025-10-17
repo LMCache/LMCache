@@ -76,28 +76,28 @@ class TPRankRecvInfo:
     receiver_mem_alloc_url: str
 
 
-class NixlReceiverInfo:
+class PDReceiverInfo:
     def __init__(
         self,
         receiver_ids: list[str],
         receiver_host: str,
-        receiver_init_port: list[int],
-        receiver_alloc_port: list[int],
+        receiver_init_ports: list[int],
+        receiver_alloc_ports: list[int],
     ):
         self.receiver_ids = receiver_ids
         self.receiver_host = receiver_host
-        self.receiver_init_port = receiver_init_port
-        self.receiver_alloc_port = receiver_alloc_port
+        self.receiver_init_ports = receiver_init_ports
+        self.receiver_alloc_ports = receiver_alloc_ports
 
     def get_group_receivers(self) -> list[TPRankRecvInfo]:
-        assert len(self.receiver_ids) == len(self.receiver_init_port)
-        assert len(self.receiver_ids) == len(self.receiver_alloc_port)
+        assert len(self.receiver_ids) == len(self.receiver_init_ports)
+        assert len(self.receiver_ids) == len(self.receiver_alloc_ports)
         return [
             TPRankRecvInfo(
                 group_tp_rank=tp_rank,
                 receiver_id=self.receiver_ids[tp_rank],
-                receiver_init_url=f"{self.receiver_host}:{self.receiver_init_port[tp_rank]}",
-                receiver_mem_alloc_url=f"{self.receiver_host}:{self.receiver_alloc_port[tp_rank]}",
+                receiver_init_url=f"{self.receiver_host}:{self.receiver_init_ports[tp_rank]}",
+                receiver_mem_alloc_url=f"{self.receiver_host}:{self.receiver_alloc_ports[tp_rank]}",
             )
             for tp_rank in range(len(self.receiver_ids))
         ]
@@ -349,7 +349,7 @@ class PDBackend(AllocatorBackendInterface):
 
     def _ensure_peer_connection(
         self,
-        receiver_info: NixlReceiverInfo,
+        receiver_info: PDReceiverInfo,
     ) -> None:
         for receiver in receiver_info.get_group_receivers():
             receiver_id = receiver.receiver_id
@@ -423,64 +423,6 @@ class PDBackend(AllocatorBackendInterface):
             last_chunk_toks=last_chunk_toks,
         )
 
-    def _process_single_rank_put_task(
-        self,
-        executor: cf.ThreadPoolExecutor,
-        alloc_request: AllocRequest,
-        mem_objs: List[MemoryObj],
-        receiver: TPRankRecvInfo,
-        receiver_rank: int,
-    ) -> tuple[Optional[cf.Future], set[int]]:
-        """
-        Process a single rank put task.
-
-        :param alloc_request: The allocation request.
-        :param mem_objs: The memory objects to allocate.
-        :param receiver: The receiver information.
-        :param receiver_rank: The rank of the receiver.
-        """
-        alloc_response = self._remote_allocate(receiver.receiver_id, alloc_request)
-        already_sent_indexes = set(alloc_response.already_sent_indexes)
-        remote_indexes = alloc_response.remote_indexes
-
-        mem_objs_to_send = []
-        for idx, mem_obj in enumerate(mem_objs):
-            if idx not in already_sent_indexes:
-                mem_objs_to_send.append(mem_obj)
-
-        task = None
-        if mem_objs_to_send:
-            # TODO(Jiayi): make this decoupled with transfer channel
-            # Construct transfer spec
-            channel_transfer_spec = {
-                "receiver_id": receiver.receiver_id,
-                "remote_indexes": remote_indexes,
-            }
-
-            blocks_data = self.transfer_channel.get_block_descs(
-                receiver_rank,
-                self.dp_ratio,
-            )
-            self.transfer_channel.update_agent_from_blocks_data(
-                blocks_data, receiver.receiver_id
-            )
-
-            # TODO(Jiayi): Consider making this real async
-            # Perform the actual transfer
-            task = executor.submit(
-                self.transfer_channel.batched_write,
-                mem_objs_to_send,
-                channel_transfer_spec,
-            )
-        else:
-            logger.debug(
-                f"All memory objects have been already sent"
-                f" to the remote peer {receiver}."
-                " Skipping transfer."
-            )
-
-        return (task, already_sent_indexes)
-
     # TODO(Jiayi): make this async in the future
     def batched_submit_put_task(
         self,
@@ -496,24 +438,24 @@ class PDBackend(AllocatorBackendInterface):
 
         # TODO(novahow): is there better way to obtain receiver tp_size?
         self.dp_ratio = divide(
-            len(transfer_spec.receiver_init_port), self.tp_world_size
+            len(transfer_spec.receiver_init_ports), self.tp_world_size
         )
         # NOTE(novahow), assume dp_ratio = 2
         # rank 0 on P maps to rank [0,1] on D
-        receiver_init_port = transfer_spec.receiver_init_port[
+        receiver_init_ports = transfer_spec.receiver_init_ports[
             self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
         ]
-        receiver_alloc_port = transfer_spec.receiver_alloc_port[
+        receiver_alloc_ports = transfer_spec.receiver_alloc_ports[
             self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
         ]
-        receiver_ids = transfer_spec.receiver_id[
+        receiver_ids = transfer_spec.receiver_ids[
             self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
         ]
-        receiver_info = NixlReceiverInfo(
+        receiver_info = PDReceiverInfo(
             receiver_ids=receiver_ids,
             receiver_host=transfer_spec.receiver_host,
-            receiver_init_port=receiver_init_port,
-            receiver_alloc_port=receiver_alloc_port,
+            receiver_init_ports=receiver_init_ports,
+            receiver_alloc_ports=receiver_alloc_ports,
         )
 
         self._ensure_peer_connection(
@@ -524,35 +466,70 @@ class PDBackend(AllocatorBackendInterface):
         alloc_request = self._get_remote_alloc_request(keys, memory_objs)
         all_sent_indexes: list[set[int]] = [set() for _ in range(self.dp_ratio)]
         any_remote_indexes: set[int] = set()
+        alloc_responses: list[AllocResponse] = []
 
-        with cf.ThreadPoolExecutor(self.dp_ratio) as executor:
-            blocking_send_tasks = []
-            for receiver_rank, receiver in enumerate(
-                receiver_info.get_group_receivers()
-            ):
-                task, already_sent_indexes = self._process_single_rank_put_task(
-                    executor, alloc_request, memory_objs, receiver, receiver_rank
-                )
-                all_sent_indexes[receiver_rank] = already_sent_indexes
-                if task is not None:
-                    blocking_send_tasks.append(task)
-                    for idx in range(len(memory_objs)):
-                        if idx not in already_sent_indexes:
-                            any_remote_indexes.add(idx)
+        send_tasks: list[cf.Future] = []
+        for receiver_rank, receiver in enumerate(receiver_info.get_group_receivers()):
+            # TODO(novahow): make socket async so that we can asyncio.gather responses
+            alloc_response = self._remote_allocate(receiver.receiver_id, alloc_request)
+            alloc_responses.append(alloc_response)
 
-            # take intersection of all_sent_indexes
-            already_sent = set.intersection(*all_sent_indexes)
+        for receiver_rank, receiver in enumerate(receiver_info.get_group_receivers()):
+            alloc_response = alloc_responses[receiver_rank]
+            mem_objs_to_send = []
+            already_sent_indexes = set(alloc_response.already_sent_indexes)
             for idx, mem_obj in enumerate(memory_objs):
-                if idx in already_sent:
-                    mem_obj.ref_count_down()
+                if idx not in already_sent_indexes:
+                    mem_objs_to_send.append(mem_obj)
 
-            for task in cf.as_completed(blocking_send_tasks):
-                task.result()
+            all_sent_indexes[receiver_rank] = already_sent_indexes
+            if mem_objs_to_send:
+                # TODO(Jiayi): make this decoupled with transfer channel
+                # Construct transfer spec
+                channel_transfer_spec = {
+                    "receiver_id": receiver.receiver_id,
+                    "remote_indexes": alloc_response.remote_indexes,
+                }
 
-            # TODO(Jiayi): consider moving this to the transfer channel
-            # since we might want the transfer to be async.
-            for idx in any_remote_indexes:
-                memory_objs[idx].ref_count_down()
+                blocks_data = self.transfer_channel.get_block_descs(
+                    receiver_rank,
+                    self.dp_ratio,
+                )
+                self.transfer_channel.update_agent_from_blocks_data(
+                    blocks_data, receiver.receiver_id
+                )
+                send_task = asyncio.run_coroutine_threadsafe(
+                    self.transfer_channel.async_batched_write(
+                        memory_objs,
+                        channel_transfer_spec,
+                    ),
+                    self.loop,
+                )
+                send_tasks.append(send_task)
+            else:
+                logger.debug(
+                    f"All memory objects have been already sent"
+                    f" to the remote peer {receiver}."
+                    " Skipping transfer."
+                )
+
+            for idx in range(len(memory_objs)):
+                if idx not in already_sent_indexes:
+                    any_remote_indexes.add(idx)
+
+        # take intersection of all_sent_indexes
+        already_sent = set.intersection(*all_sent_indexes)
+        for idx, mem_obj in enumerate(memory_objs):
+            if idx in already_sent:
+                mem_obj.ref_count_down()
+
+        # Wait for all send tasks to complete
+        cf.wait(send_tasks)
+
+        # TODO(Jiayi): consider moving this to the transfer channel
+        # since we might want the transfer to be async.
+        for idx in any_remote_indexes:
+            memory_objs[idx].ref_count_down()
 
         if transfer_spec.is_last_prefill:
             # Notify the proxy that the transfer is done
@@ -595,7 +572,7 @@ class PDBackend(AllocatorBackendInterface):
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
-            key.update_rank_info_from_nixl(self.tp_world_size, self.tp_rank)
+            key.update_rank_info_from_pd(self.tp_world_size, self.tp_rank)
             # NOTE(novahow): pin causes failed to allocate in L40S in TP=(2,2),
             # disable for now
             if self.contains(key, pin=False):
