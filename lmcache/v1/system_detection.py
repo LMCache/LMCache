@@ -2,12 +2,19 @@
 # Standard
 from dataclasses import dataclass
 from typing import Optional
+import platform
 
 # Third Party
+import psutil
 import torch
 
 if torch.cuda.is_available():
-    from lmcache.c_ops import get_gpu_pci_bus_id
+    try:
+        # First Party
+        from lmcache.c_ops import get_gpu_pci_bus_id
+    except ImportError:
+        # Fallback if c_ops is not available
+        get_gpu_pci_bus_id = None
 
 # First Party
 from lmcache.logging import init_logger
@@ -19,6 +26,30 @@ logger = init_logger(__name__)
 @dataclass
 class NUMAMapping:
     gpu_to_numa_mapping: dict[int, int]
+
+
+class SystemMemoryDetector:
+    @staticmethod
+    def get_available_memory_gb() -> float:
+        """
+        Get system available memory in GB using psutil.
+        This method is cross-platform and doesn't require subprocess calls.
+
+        Returns:
+            Available memory in GB, or 0.0 if detection fails.
+        """
+        try:
+            # Use psutil to get virtual memory information
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024**3)
+
+            system = platform.system()
+            logger.info(f"{system} system available memory: {available_gb:.2f} GB")
+            return available_gb
+
+        except Exception as e:
+            logger.warning(f"Failed to get system available memory using psutil: {e}")
+            return 0.0
 
 
 class NUMADetector:

@@ -245,6 +245,8 @@ class PDBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
+        if fmt is None:
+            fmt = MemoryFormat.KV_2LTD
         # NOTE: no eviction and busy_loop in PD
         return self.memory_allocator.allocate(
             shape=shape, dtype=dtype, fmt=fmt, allocator_type="gpu"
@@ -261,6 +263,8 @@ class PDBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ):
+        if fmt is None:
+            fmt = MemoryFormat.KV_2LTD
         return self.memory_allocator.batched_allocate(
             shape, dtype, batch_size, fmt, allocator_type="gpu"
         )

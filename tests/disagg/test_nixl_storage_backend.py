@@ -2,6 +2,10 @@
 # Standard
 from typing import List, Tuple
 import argparse
+import asyncio
+import os
+import tempfile
+import threading
 import time
 
 # Third Party
@@ -11,11 +15,15 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
-from lmcache.v1.storage_backend.connector.nixl_connector import NixlConfig, NixlRole
-from lmcache.v1.storage_backend.nixl_backend import NixlBackend
+from lmcache.v1.storage_backend.nixl_storage_backend import (
+    NixlStorageBackend,
+    NixlStorageConfig,
+)
 
 logger = init_logger(__name__)
 
@@ -26,7 +34,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda",  # Assuming we are using CUDA for the test
+        device="cuda" if torch.cuda.is_available() else "cpu",
     )
     for i in range(num_objs):
         keys.append(
@@ -39,9 +47,7 @@ def generate_test_data(
             )
         )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
-        obj.tensor.fill_(
-            (i + 1) / num_objs
-        )  # Fill with some test data, e.g., the index
+        obj.tensor.fill_((i + 1) / num_objs)  # Fill with some test data
         objs.append(obj)
     return keys, objs
 
@@ -54,189 +60,331 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
     return gb / elapsed_time
 
 
-def send_and_measure_throughput(
-    backend: NixlBackend,
-    keys: List[CacheEngineKey],
-    objs: List[MemoryObj],
-    wait_time: float = 2.0,
-) -> float:
-    """Send objects through the backend and measure throughput.
-
-    Args:
-        backend: The NixlBackend instance
-        keys: List of cache engine keys
-        objs: List of memory objects to send
-        wait_time: Time to wait for receiver setup in seconds
-
-    Returns:
-        float: Throughput in GB/s
-    """
-    # Wait for the receiver to set up
-    time.sleep(wait_time)
-
-    total_size = sum(obj.get_size() for obj in objs)
-    logger.info("Sending %d objects...", len(objs))
-
-    backend.register_put_tasks(keys, [obj.metadata for obj in objs])
-    start_time = time.time()
-    backend.batched_submit_put_task(keys, objs)
-    backend.flush_put_tasks()
-    end_time = time.time()
-
-    elapsed_time = end_time - start_time
-    logger.info("Sent %d objects in %.6f seconds", len(objs), elapsed_time)
-    throughput = calculate_throughput(total_size, elapsed_time)
-    logger.info("Throughput: %.2f GB/s", throughput)
-
-    return throughput
+def create_test_config(
+    buffer_device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    backend: str = "GDS_MT" if torch.cuda.is_available() else "POSIX",
+) -> LMCacheEngineConfig:
+    """Create a test configuration for NixlStorageBackend"""
+    config = LMCacheEngineConfig()
+    config.nixl_buffer_size = 2**32  # 4GB
+    config.nixl_buffer_device = buffer_device
+    config.extra_config = {
+        "enable_nixl_storage": True,
+        "nixl_backend": backend,
+        "nixl_file_pool_size": 10,
+        "nixl_path": tempfile.mkdtemp(),  # Create a temporary directory for testing
+    }
+    return config
 
 
-def receive_and_verify_data(
-    backend: NixlBackend,
-    keys: List[CacheEngineKey],
-    num_objs: int,
-    timeout: float = 60.0,
-) -> bool:
-    """Receive and verify data through the backend.
+def create_test_metadata() -> LMCacheEngineMetadata:
+    """Create test metadata for NixlStorageBackend"""
+    return LMCacheEngineMetadata(
+        model_name="test_model",
+        worker_id=0,
+        world_size=1,
+        fmt="test",
+        kv_dtype=torch.bfloat16,
+        kv_shape=(
+            32,
+            2,
+            256,
+            1024,
+            128,
+        ),  # (num_layer, 2, chunk_size, num_kv_head, head_size)
+    )
 
-    Args:
-        backend: The NixlBackend instance
-        keys: List of cache engine keys to check
-        num_objs: Number of objects expected
-        timeout: Maximum time to wait for data in seconds
 
-    Returns:
-        bool: True if all data was received and verified correctly
-    """
-    logger.info("Waiting to receive data...")
+@pytest.mark.no_shared_allocator
+def test_nixl_storage_config():
+    """Test NixlStorageConfig creation and validation"""
+    config = create_test_config()
+    metadata = create_test_metadata()
 
-    # Poll until we receive all objects or timeout
-    received_count = 0
-    start_time = time.time()
+    nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
+    assert nixl_config.buffer_size == config.nixl_buffer_size
+    assert nixl_config.buffer_device == config.nixl_buffer_device
+    assert nixl_config.backend == config.extra_config["nixl_backend"]
+    assert nixl_config.file_pool_size == config.extra_config["nixl_file_pool_size"]
+    assert nixl_config.path == config.extra_config["nixl_path"]
 
-    while received_count < num_objs:
-        received_count = sum(1 for key in keys if backend.contains(key))
+    # Test validation
+    assert NixlStorageConfig.validate_nixl_backend("GDS", "cuda")
+    assert NixlStorageConfig.validate_nixl_backend("GDS", "cpu")
+    assert NixlStorageConfig.validate_nixl_backend("GDS_MT", "cuda")
+    assert NixlStorageConfig.validate_nixl_backend("GDS_MT", "cpu")
+    assert NixlStorageConfig.validate_nixl_backend("POSIX", "cpu")
+    assert not NixlStorageConfig.validate_nixl_backend("POSIX", "cuda")
+    assert not NixlStorageConfig.validate_nixl_backend("INVALID", "cpu")
 
-        if received_count == num_objs:
-            break
 
-        if time.time() - start_time > timeout:
-            logger.error(
-                "Timed out waiting for data. Received only %d/%d objects.",
-                received_count,
-                num_objs,
-            )
-            return False
+@pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_nixl_storage_backend_basic():
+    """Test basic NixlStorageBackend operations"""
+    config = create_test_config()
+    metadata = create_test_metadata()
 
-        time.sleep(0.1)  # Small sleep to avoid busy waiting
+    thread_loop = None
+    thread = None
+    backend = None
+    try:
+        thread_loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=thread_loop.run_forever)
+        thread.start()
 
-    passed_check = True
-    if received_count == num_objs:
-        logger.info("Received all %d objects", num_objs)
+        backend = NixlStorageBackend.CreateNixlStorageBackend(
+            config=config,
+            loop=thread_loop,
+            metadata=metadata,
+        )
 
-        # Verify the received data
-        for i, key in enumerate(keys):
-            received_obj = backend.get_blocking(key)
-            if received_obj is None or received_obj.tensor is None:
-                logger.error(f"Failed to retrieve object for key {key}")
-                passed_check = False
-                break
+        # Test allocation
+        shape = torch.Size([32, 2, 256, 1024])
+        dtype = torch.bfloat16
+        obj = backend.allocate(shape, dtype)
+        assert obj is not None
+        assert obj.tensor is not None
+        assert obj.tensor.shape == shape
+        assert obj.tensor.dtype == dtype
 
-            # Check if the received object matches the original object
-            expected_value = (i + 1) / num_objs
-            actual_mean = received_obj.tensor.mean().item()
+        # Test batched allocation
+        batch_size = 5
+        objs = backend.batched_allocate(shape, dtype, batch_size)
+        assert objs is not None
+        assert len(objs) == batch_size
+        for obj in objs:
+            assert obj.tensor is not None
+            assert obj.tensor.shape == shape
+            assert obj.tensor.dtype == dtype
 
-            # For bfloat16, we need some tolerance in the comparison
-            if abs(actual_mean - expected_value) > 0.01:
-                logger.error(
-                    "Mismatch for key %s: received mean %f but expected %f",
-                    key,
-                    actual_mean,
-                    expected_value,
-                )
-                passed_check = False
-                break
+    except Exception:
+        raise
+    finally:
+        if backend:
+            backend.close()
+        if thread_loop and thread_loop.is_running():
+            thread_loop.call_soon_threadsafe(thread_loop.stop)
+        if thread and thread.is_alive():
+            thread.join()
+        # Cleanup temporary directory
+        if os.path.exists(config.extra_config["nixl_path"]):
+            os.rmdir(config.extra_config["nixl_path"])
 
-        if passed_check:
-            logger.info("All data verified successfully!")
-        else:
-            logger.error("Data verification failed!")
 
+@pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_nixl_storage_backend_put_get():
+    """Test put and get operations in NixlStorageBackend"""
+    config = create_test_config()
+    metadata = create_test_metadata()
+
+    thread_loop = None
+    thread = None
+    backend = None
+    try:
+        thread_loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=thread_loop.run_forever)
+        thread.start()
+
+        backend = NixlStorageBackend.CreateNixlStorageBackend(
+            config=config,
+            loop=thread_loop,
+            metadata=metadata,
+        )
+
+        # Generate test data
+        keys, objs = generate_test_data(10, torch.Size([32, 2, 256, 1024]))
+
+        # Test contains before put
+        for key in keys:
+            assert not backend.contains(key)
+            assert not backend.exists_in_put_tasks(key)
+
+        # Test put
+        backend.batched_submit_put_task(keys, objs)
+
+        # Test get
+        for key, original_obj in zip(keys, objs, strict=False):
+            assert backend.contains(key)
+            retrieved_obj = backend.get_blocking(key)
+            assert retrieved_obj is not None
+            assert retrieved_obj.tensor is not None
+            assert torch.equal(retrieved_obj.tensor, original_obj.tensor)
+
+        # Test batched get
+        retrieved_objs = asyncio.run(
+            backend.batched_get_non_blocking(lookup_id="test", keys=keys)
+        )
+        assert len(retrieved_objs) == len(objs)
+        for retrieved_obj, original_obj in zip(retrieved_objs, objs, strict=False):
+            assert retrieved_obj is not None
+            assert retrieved_obj.tensor is not None
+            assert torch.equal(retrieved_obj.tensor, original_obj.tensor)
+
+        # Test remove
         for key in keys:
             backend.remove(key)
+            assert not backend.contains(key)
 
-        return passed_check
-    else:
-        logger.error("Only received %d/%d objects", received_count, num_objs)
-        return False
+    except Exception:
+        raise
+    finally:
+        if backend:
+            backend.close()
+        if thread_loop and thread_loop.is_running():
+            thread_loop.call_soon_threadsafe(thread_loop.stop)
+        if thread and thread.is_alive():
+            thread.join()
+        # Cleanup temporary directory
+        if os.path.exists(config.extra_config["nixl_path"]):
+            os.rmdir(config.extra_config["nixl_path"])
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_nixl_storage_backend_different_backends():
+    """Test NixlStorageBackend with different backend types"""
+    backends = (
+        [
+            ("GDS_MT", "cuda"),
+            ("GDS", "cuda"),
+            ("GDS_MT", "cpu"),
+            ("GDS", "cpu"),
+            ("POSIX", "cpu"),
+        ]
+        if torch.cuda.is_available()
+        else [
+            ("GDS_MT", "cpu"),
+            ("GDS", "cpu"),
+            ("POSIX", "cpu"),
+        ]
+    )
+
+    for backend_type, device in backends:
+        config = create_test_config(buffer_device=device, backend=backend_type)
+        metadata = create_test_metadata()
+
+        thread_loop = None
+        thread = None
+        backend = None
+        try:
+            thread_loop = asyncio.new_event_loop()
+            thread = threading.Thread(target=thread_loop.run_forever)
+            thread.start()
+
+            backend = NixlStorageBackend.CreateNixlStorageBackend(
+                config=config,
+                loop=thread_loop,
+                metadata=metadata,
+            )
+
+            # Basic allocation test
+            obj = backend.allocate(torch.Size([32, 2, 256, 1024]), torch.bfloat16)
+            assert obj is not None
+            assert obj.tensor is not None
+
+        except Exception:
+            raise
+        finally:
+            if backend:
+                backend.close()
+            if thread_loop and thread_loop.is_running():
+                thread_loop.call_soon_threadsafe(thread_loop.stop)
+            if thread and thread.is_alive():
+                thread.join()
+            # Cleanup temporary directory
+            if os.path.exists(config.extra_config["nixl_path"]):
+                os.rmdir(config.extra_config["nixl_path"])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Test NixlBackend with sender/receiver roles"
+        description="Test NixlStorageBackend with different configurations"
     )
     parser.add_argument(
-        "--role",
+        "--backend",
         type=str,
-        required=True,
-        choices=["sender", "receiver"],
-        help="Role of this instance (sender or receiver)",
+        default="GDS_MT",
+        choices=["GDS_MT", "GDS", "POSIX"],
+        help="NIXL backend type to use",
     )
     parser.add_argument(
-        "--host",
+        "--device",
         type=str,
-        default="localhost",
-        help="Host name/IP for connection",
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device to use for buffer",
     )
     parser.add_argument(
-        "--port", type=int, default=5555, help="Port number for connection"
-    )
-    parser.add_argument(
-        "--num-objs", type=int, default=100, help="Number of objects to send"
-    )
-    parser.add_argument(
-        "--num-rounds",
+        "--num-objs",
         type=int,
-        default=1,
-        help="Number of rounds to run the experiment",
+        default=100,
+        help="Number of objects to test with",
     )
     args = parser.parse_args()
 
-    # Generate test data
-    keys, objs = generate_test_data(args.num_objs, torch.Size([32, 2, 256, 1024]))
-    total_size = sum(obj.get_size() for obj in objs)
-    logger.info(
-        "Generated %d objects with total size %.2f MB",
-        len(objs),
-        total_size / (1024 * 1024),
-    )
+    # Create config and metadata
+    config = create_test_config(buffer_device=args.device, backend=args.backend)
+    metadata = create_test_metadata()
 
-    # Common configuration
-    config = NixlConfig(
-        role=NixlRole(args.role),
-        receiver_host=args.host,
-        receiver_port=args.port,
-        buffer_size=2**32,  # 4GB
-        buffer_device="cuda",
-    )
+    thread_loop = None
+    thread = None
+    backend = None
+    try:
+        thread_loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=thread_loop.run_forever)
+        thread.start()
 
-    # Create the NixlBackend
-    backend = NixlBackend(config)
+        # Create backend
+        backend = NixlStorageBackend.CreateNixlStorageBackend(
+            config=config,
+            loop=thread_loop,
+            metadata=metadata,
+        )
 
-    if args.role == "sender":
-        throughputs = []
-        for i in range(args.num_rounds):
-            logger.info("Round %d/%d", i + 1, args.num_rounds)
-            throughput = send_and_measure_throughput(backend, keys, objs)
-            throughputs.append(throughput)
-        avg_throughput = sum(throughputs) / len(throughputs)
-        logger.info("Average throughput: %.2f GB/s", avg_throughput)
-    else:  # receiver
-        for i in range(args.num_rounds):
-            logger.info("Round %d/%d", i + 1, args.num_rounds)
-            success = receive_and_verify_data(backend, keys, args.num_objs)
+        # Generate and test with data
+        keys, objs = generate_test_data(args.num_objs, torch.Size([32, 2, 256, 1024]))
+        total_size = sum(obj.get_size() for obj in objs)
+        logger.info(
+            "Generated %d objects with total size %.2f MB",
+            len(objs),
+            total_size / (1024 * 1024),
+        )
 
-    # Wait a bit before closing
-    time.sleep(2)
-    backend.close()
-    logger.info("Test completed")
+        # Test put performance
+        start_time = time.time()
+        backend.batched_submit_put_task(keys, objs)
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        throughput = calculate_throughput(total_size, elapsed_time)
+        logger.info("Put throughput: %.2f GB/s", throughput)
+
+        # Test get performance
+        start_time = time.time()
+        retrieved_objs = asyncio.run(
+            backend.batched_get_non_blocking(lookup_id="test", keys=keys)
+        )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        throughput = calculate_throughput(total_size, elapsed_time)
+        logger.info("Get throughput: %.2f GB/s", throughput)
+
+        # Verify data
+        for retrieved_obj, original_obj in zip(retrieved_objs, objs, strict=False):
+            assert torch.equal(retrieved_obj.tensor, original_obj.tensor)
+
+        logger.info("All tests passed successfully!")
+
+    except Exception:
+        raise
+    finally:
+        if backend:
+            backend.close()
+        if thread_loop and thread_loop.is_running():
+            thread_loop.call_soon_threadsafe(thread_loop.stop)
+        if thread and thread.is_alive():
+            thread.join()
+        # Cleanup temporary directory
+        if os.path.exists(config.extra_config["nixl_path"]):
+            os.rmdir(config.extra_config["nixl_path"])

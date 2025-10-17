@@ -253,12 +253,12 @@ class LocalDiskBackend(StorageBackendInterface):
 
         has_stored = False
         with self.disk_lock:
-            # Need to do reinsert to update cache recency
             if key in self.dict:
-                self.dict.pop(key)
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
                 has_stored = True
-
-            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, False)
+            else:
+                self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, 0)
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
@@ -343,11 +343,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
-        self.cache_policy.update_on_hit(key, self.dict)
-
-        self.disk_lock.release()
-
-        self.disk_lock.acquire()
         # Update cache recency
         self.cache_policy.update_on_hit(key, self.dict)
 
@@ -380,9 +375,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
 
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            self.cache_policy.update_on_hit(key, self.dict)
-
             path = self.dict[key].path
             dtype = self.dict[key].dtype
             shape = self.dict[key].shape
@@ -403,6 +395,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
             self.dict[key].pin()
 
+            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
             self.cache_policy.update_on_hit(key, self.dict)
 
