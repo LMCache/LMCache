@@ -254,9 +254,8 @@ class LocalDiskBackend(StorageBackendInterface):
         has_stored = False
         with self.disk_lock:
             if key in self.dict:
-                # Need to do reinsert to update cache recency
-                value = self.dict.pop(key)
-                self.dict[key] = value
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
                 has_stored = True
             else:
                 self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, 0)
