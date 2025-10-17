@@ -239,7 +239,9 @@ class StorageManager:
                 "async loading."
             )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
-        self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
+        # PDBackend has't supported calculate_chunk_budget
+        if not self.enable_pd:
+            self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
