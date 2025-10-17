@@ -508,8 +508,7 @@ def _validate_config(self):
 
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
-        assert self.extra_config.get("nixl_path") is not None
-        assert self.extra_config.get("nixl_file_pool_size") is not None
+        assert self.extra_config.get("nixl_pool_size") is not None
         assert self.nixl_buffer_size is not None
         assert self.nixl_buffer_device is not None
 
