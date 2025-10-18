@@ -1,4 +1,292 @@
 TroubleShoot
 ============
 
-Coming soon... 
+.. contents::
+   :local:
+   :depth: 2
+   :backlinks: none
+
+---------------------------------
+🕒 2025-08
+---------------------------------
+
+
+**🧭 Time**
+   2025-08-19
+
+**🚨 Issue**
+   Nginx 无法启动，提示端口占用。
+
+**🧩 Environment**
+   Ubuntu 22.04  
+   Nginx 1.24  
+   Gunicorn  
+
+**📋 Description**
+   尝试重启 Nginx 时出现错误：
+   ::
+      Job for nginx.service failed because the control process exited with error code.
+      systemd[1]: nginx.service: Failed with result 'exit-code'.
+
+**🔍 Analysis**
+   检查发现 80 端口被 `apache2` 占用：
+   ::
+      sudo lsof -i:80
+
+   输出结果：
+   ::
+      apache2   1234 root  ...  TCP *:http (LISTEN)
+
+**🛠️ Solution**
+   1. 停止 Apache 服务：
+    .. code-block:: bash
+         sudo systemctl stop apache2
+
+   2. 禁用开机自启：
+      ::
+         sudo systemctl disable apache2
+
+   3. 重启 Nginx：
+      ::
+         sudo systemctl restart nginx
+
+**✅ Result**
+   Nginx 启动成功，网站恢复访问。
+
+.. note::
+   这是一条说明。
+
+.. warning::
+   ⚠️ 请勿在生产环境执行此命令！
+
+.. tip::
+   可以使用 ``Ctrl + C`` 中断命令。
+
+.. code-block:: bash
+   :caption: 启动 Web 服务
+   :emphasize-lines: 2
+
+   sudo systemctl daemon-reload
+   sudo systemctl restart nginx
+
++------+--------+---------+
+| ID   | Name   | Status  |
++------+--------+---------+
+| 1    | Nginx  | OK      |
++------+--------+---------+
+| 2    | MySQL  | Timeout |
++------+--------+---------+
+
+====  ======  =====
+编号  名称    状态
+====  ======  =====
+1     Nginx   正常
+2     MySQL   超时
+====  ======  =====
+
+`OpenAI <https://openai.com>`_
+
+
+---------------------------------
+🕒 2025-08
+---------------------------------
+
+**🧭 Time**
+   2025-08-19 
+
+**🚨 Issue**
+    Adding a Trace Replayer script in benchmark
+
+**📋 Description**
+    A simple trace replayer for performance evaluation using workload traces from `Mooncake Trace Release <https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/conversation_trace.jsonl>`_ (JSONL format). Each trace line represents multiple chunked requests with timestamps, allowing you to simulate realistic request arrival patterns and measure metrics such as time-to-first-token (TTFT), token usage, and throughput.
+
+
+**⚙️ Steps**
+
+
+**Step 1: Start a model using vLLM**
+
+.. code-block:: bash
+
+   PYTHONHASHSEED=0 LMCACHE_MAX_LOCAL_CPU_SIZE=3 vllm serve meta-llama/Llama-3.1-8B-Instruct \
+       --kv-transfer-config '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}'
+
+**Step 2: Run the trace replayer**
+
+By default, the script uses the full Mooncake conversation trace ``conversation_trace.jsonl``.  
+Download and run it:
+
+.. code-block:: bash
+
+   wget https://github.com/kvcache-ai/Mooncake/raw/main/FAST25-release/traces/conversation_trace.jsonl -O conversation_trace.jsonl
+   python trace_replayer.py
+
+For quick testing, a truncated version (<500 lines) is included as ``sample_trace.jsonl``:
+
+.. code-block:: bash
+
+   python trace_replayer.py --trace_file sample_trace.jsonl
+
+
+**⚙️ Additional Arguments**
+
+The script allows specifying model, trace file, maximum input length, and replay duration via command-line arguments.
+
+**Example 1: Using a smaller model**
+
+.. code-block:: bash
+
+   # Load and run the model:
+   vllm serve "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+   # Run the trace replayer with max_input_length to avoid exceeding model context length:
+   python trace_replayer.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --max_input_length 2048
+
+**Example 2: Specifying a custom trace file and max duration**
+
+.. code-block:: bash
+
+   python trace_replayer.py --trace_file <file_name>.jsonl --max_duration 120.0
+
+
+**📚 Argument Reference**
+
+
+**--model**
+   🧠 Trace with different models.
+
+**--max_input_length**
+   ✂️ Truncate input length if the model's max context length is smaller than the trace input.
+
+**--trace_file**
+   📄 Specify an alternative trace file.
+
+**--max_duration**
+   ⏱️ Maximum duration to replay the trace (in seconds).
+
+
+**📊 Notes**
+
+- **`--max_input_length`**  
+  Optional. Use this to truncate inputs if JSONL requests exceed the model’s maximum context length.  
+  Omitting this may cause requests to fail for smaller models.
+
+- **Metrics Collected**  
+  TTFT (time-to-first-token), input/output tokens, and request throughput.
+
+- **CSV Output**  
+  Detailed request statistics are saved automatically to ``summary-<timestamp>.csv``.
+
+
+**🏁 Example Output**
+
+When completed successfully, you’ll see an output summary similar to:
+
+.. code-block:: text
+
+   ✅ Trace replay completed.
+   Summary file: summary-2025-10-17-1430.csv
+   Average TTFT: 1.23s | Throughput: 412 tokens/s | Total requests: 498
+
+----
+
+**🧭 Time**
+   2025-08-28
+
+**🚨 Issue**
+     Fix crash caused by raised runtime error due to inconsistent number of hit tokens across tp ranks
+
+**📋 Description**
+    It is possible for different TP ranks to have different numbers of hit tokens, for example, when using the Mooncake Store backend. Since the Mooncake Store backend is unaware of the TP information associated with keys, during eviction it may remove the KV cache generated by only a subset of TP ranks. This can lead to inconsistencies in the number of hit tokens observed across ranks.
+    In previous versions, such inconsistencies would raise a runtime error, which was not properly caught at higher levels, ultimately causing the process to crash.
+
+    .. image:: https://private-user-images.githubusercontent.com/13486004/481593203-5d47a835-23c0-4db8-bbec-4ac0e5c1caf3.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjA3MDM5ODUsIm5iZiI6MTc2MDcwMzY4NSwicGF0aCI6Ii8xMzQ4NjAwNC80ODE1OTMyMDMtNWQ0N2E4MzUtMjNjMC00ZGI4LWJiZWMtNGFjMGU1YzFjYWYzLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTEwMTclMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMDE3VDEyMjEyNVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTUxZTYzODQ3MDJjZGYyY2RiYjkwZjgzOTVhODhkNDA1MTJlOGE3N2M0MzgxZDQxM2Q1ZWFjNmE5YzkyNTU0MWUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.IJsg6GxwgX4kKJSgt3OVil84mrsxvjgC16CujMzP9Q4
+        :alt: Log information
+        :width: 100%
+        :align: center
+**🛠️ Solution**
+    `Links <https://github.com/LMCache/LMCache/pull/1426>`_ to the PR that fixes this issue.
+
+----
+
+**🧭 Time**
+   2025-08-28
+
+**🚨 Issue**
+    Support multiple backends at the same time
+
+**📋 Description**
+    does LMCache support heterogeneous multi-tier caching, where tiers span from GPU memory to CPU memory to external backends? Specifically, can we configure multiple heterogeneous backends (e.g., Redis, local disk, etc.) to be used simultaneously, along with GPU and CPU memory, and does LMCache support migration of data across these tiers and backends?
+
+**🛠️ Solution**
+    `Added in the q3 roadmap <https://github.com/LMCache/LMCache/issues/1253>`_
+
+----
+
+---------------------------------
+🕒 2025-09
+---------------------------------
+
+**🧭 Time**
+    2025-09-01
+
+**🚨 Issue**
+    PD Fix config setting
+
+**📋 Description**
+    1. nixl_peer_host is used in decoder.
+    2. Fix env_converter is not called when needed (e.g., nixl_init_port).
+    3. Fix bool error in env_converter.
+
+**🛠️ Solution**
+    `Links <https://github.com/LMCache/LMCache/pull/1391>`_ to the PR that fixes this issue.
+
+----
+
+**🧭 Time**
+    2025-09-01
+
+**🚨 Issue**
+    PD Fix config setting
+    Prefiller can start normally, but decoder cannot.
+
+**📋 Description**
+    1. nixl_peer_host is used in decoder.
+    2. Fix env_converter is not called when needed (e.g., nixl_init_port).
+    3. Fix bool error in env_converter.
+
+**🛠️ Solution**
+    `Links <https://github.com/LMCache/LMCache/pull/1391>`_ to the PR that fixes this issue.
+
+----
+
+**🧭 Time**
+    2025-09-23
+
+**🚨 Issue**
+    Playing around with lmcache integration with sglang
+
+**📋 Description**
+    TypeError: LMCacheLayerwiseConnector.__init__() got an unexpected keyword argument 'tp_group'
+
+**🔴 Status:** Unresolved  
+
+
+----
+
+---------------------------------
+🕒 2025-10
+---------------------------------
+
+**🧭 Time**
+    2025-10-01
+
+**🚨 Issue**
+   Lmcache metrics error
+
+**📋 Description**
+    For lmcache metrics, what does lmcache:retrieve_hit_rate actually mean? We were testing a scenario with multi-turn chat, the lookup_hit_rate does seem quite high but retrieve_hit_rate is constantly 0. It only shows as one when we put the exact same prompt. Thanks
+
+**🔴 Status:** Unresolved  
+
+----
