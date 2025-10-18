@@ -241,16 +241,28 @@ class TraceReplayer:
             self.write_result_to_csv(result)
             return result
 
-    async def replay_trace(self, requests: List[TraceRequest]):
+    async def replay_trace(self, requests: List[TraceRequest], qps: Optional[float] = None):
         """
-        Replay the list of TraceRequests, preserving their relative timestamps.
+        Replay a list of TraceRequests against the target model.
 
-        Requests are sent asynchronously in order of timestamp.
+        Requests are launched asynchronously, either:
+        • In timestamp-based mode (default): requests follow their relative timestamps
+            as defined in the trace file, preserving real trace timing.
+        • In fixed-QPS mode (--qps provided): timestamps are ignored and requests are
+            sent at a constant rate defined by `qps` (queries per second), preserving
+            the original request order from the trace file.
+
+        Args:
+            requests (List[TraceRequest]): The list of requests to replay.
+            qps (Optional[float]): If provided, overrides timestamp scheduling and
+                sends requests at a fixed rate of `qps` queries per second.
+                Must be a positive number.
         """
         if not requests:
             logger.warning("No requests to replay")
             return
-
+        if qps is not None and qps <= 0:
+            raise ValueError(f"Invalid QPS value: {qps}. Must be > 0.")
         self.init_csv()
         start_time = time.time()
         logger.info(
@@ -259,11 +271,15 @@ class TraceReplayer:
         )
 
         tasks = []
+        delay = 1.0 / qps if qps else None
         for request in requests:
-            absolute_send_time = start_time + request.timestamp
-            current_time = time.time()
-            if absolute_send_time > current_time:
-                await asyncio.sleep(absolute_send_time - current_time)
+            if qps:
+                await asyncio.sleep(delay)
+            else:
+                absolute_send_time = start_time + request.timestamp
+                current_time = time.time()
+                if absolute_send_time > current_time:
+                    await asyncio.sleep(absolute_send_time - current_time)
             task = asyncio.create_task(self.send_request(request))
             tasks.append(task)
             logger.info(
@@ -334,6 +350,13 @@ async def main():
         default=60.0,
         help="Max duration to replay trace (seconds)",
     )
+    parser.add_argument(
+        "--qps", 
+        type=float, 
+        default=None, 
+        help="Fixed QPS rate (overrides timestamps)",
+        )
+
     args = parser.parse_args()
 
     replayer = TraceReplayer(
