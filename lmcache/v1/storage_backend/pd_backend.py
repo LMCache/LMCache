@@ -30,6 +30,7 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel, NixlChannel
+from lmcache.v1.transfer_channel.nixl_channel import TPRankRecvInfo
 from lmcache.v1.transfer_channel.transfer_utils import TransferRole, get_correct_device
 
 logger = init_logger(__name__)
@@ -67,14 +68,6 @@ class ProxyNotif(PDMsgBase):
 
 
 PDMsg = Union[AllocRequest, AllocResponse, ProxyNotif]
-
-
-@dataclass
-class TPRankRecvInfo:
-    group_tp_rank: int
-    receiver_id: str
-    receiver_init_url: str
-    receiver_mem_alloc_url: str
 
 
 class PDReceiverInfo:
@@ -247,7 +240,6 @@ class PDBackend(AllocatorBackendInterface):
             raise ValueError(f"Invalid PD role: {self.pd_config.role}")
 
         self.full_chunk_size = config.chunk_size
-        self.dp_ratio = 1
 
     def __str__(self):
         return self.__class__.__name__
@@ -385,7 +377,10 @@ class PDBackend(AllocatorBackendInterface):
         return alloc_response
 
     def _get_remote_alloc_request(
-        self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
+        self,
+        keys: Sequence[CacheEngineKey],
+        mem_objs: List[MemoryObj],
+        dp_ratio: int,
     ) -> AllocRequest:
         """
         Get the allocation request given the keys and memory objects.
@@ -407,17 +402,17 @@ class PDBackend(AllocatorBackendInterface):
         str_keys = [key.to_string() for key in keys]
         shape = list(shape)
         assert (
-            fmt == MemoryFormat.KV_DT2L or self.dp_ratio == 1
+            fmt == MemoryFormat.KV_DT2L or dp_ratio == 1
         ), """Asymmetric tensor parallelism is only supported
             for KV_DT2L format for now."""
-        shape[fmt.hidden_dim()] //= self.dp_ratio
+        shape[fmt.hidden_dim()] //= dp_ratio
         return AllocRequest(
             keys=str_keys,
             fmt=fmt.value,
             shape=list(shape),
             dtype=dtype,
             last_chunk_toks=last_chunk_toks,
-            transpose=self.dp_ratio > 1,
+            transpose=dp_ratio > 1,
         )
 
     # TODO(Jiayi): make this async in the future
@@ -434,19 +429,17 @@ class PDBackend(AllocatorBackendInterface):
         from vllm.distributed.utils import divide
 
         # TODO(novahow): is there better way to obtain receiver tp_size?
-        self.dp_ratio = divide(
-            len(transfer_spec.receiver_init_ports), self.tp_world_size
-        )
+        dp_ratio = divide(len(transfer_spec.receiver_init_ports), self.tp_world_size)
         # NOTE(novahow), assume dp_ratio = 2
         # rank 0 on P maps to rank [0,1] on D
         receiver_init_ports = transfer_spec.receiver_init_ports[
-            self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
+            self.tp_rank * dp_ratio : (self.tp_rank + 1) * dp_ratio
         ]
         receiver_alloc_ports = transfer_spec.receiver_alloc_ports[
-            self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
+            self.tp_rank * dp_ratio : (self.tp_rank + 1) * dp_ratio
         ]
         receiver_ids = transfer_spec.receiver_ids[
-            self.tp_rank * self.dp_ratio : (self.tp_rank + 1) * self.dp_ratio
+            self.tp_rank * dp_ratio : (self.tp_rank + 1) * dp_ratio
         ]
         receiver_info = PDReceiverInfo(
             receiver_ids=receiver_ids,
@@ -460,26 +453,26 @@ class PDBackend(AllocatorBackendInterface):
         )
 
         # Allocate remote memory objects
-        alloc_request = self._get_remote_alloc_request(keys, memory_objs)
-        all_sent_indexes: list[set[int]] = [set() for _ in range(self.dp_ratio)]
+        alloc_request = self._get_remote_alloc_request(keys, memory_objs, dp_ratio)
+        all_sent_indexes: list[set[int]] = [set() for _ in range(dp_ratio)]
         any_remote_indexes: set[int] = set()
         alloc_responses: list[AllocResponse] = []
 
         send_tasks: list[cf.Future] = []
-        for receiver_rank, receiver in enumerate(receiver_info.get_group_receivers()):
+        for receiver in receiver_info.get_group_receivers():
             # TODO(novahow): make socket async so that we can asyncio.gather responses
             alloc_response = self._remote_allocate(receiver.receiver_id, alloc_request)
             alloc_responses.append(alloc_response)
 
-        for receiver_rank, receiver in enumerate(receiver_info.get_group_receivers()):
-            alloc_response = alloc_responses[receiver_rank]
+        for receiver in receiver_info.get_group_receivers():
+            alloc_response = alloc_responses[receiver.group_tp_rank]
             mem_objs_to_send = []
             already_sent_indexes = set(alloc_response.already_sent_indexes)
             for idx, mem_obj in enumerate(memory_objs):
                 if idx not in already_sent_indexes:
                     mem_objs_to_send.append(mem_obj)
 
-            all_sent_indexes[receiver_rank] = already_sent_indexes
+            all_sent_indexes[receiver.group_tp_rank] = already_sent_indexes
             if mem_objs_to_send:
                 # TODO(Jiayi): make this decoupled with transfer channel
                 # Construct transfer spec
@@ -488,13 +481,11 @@ class PDBackend(AllocatorBackendInterface):
                     "remote_indexes": alloc_response.remote_indexes,
                 }
 
-                blocks_data = self.transfer_channel.get_block_descs(
-                    receiver_rank,
-                    self.dp_ratio,
+                self.transfer_channel.prepare_transfer_desc(
+                    receiver,
+                    dp_ratio,
                 )
-                self.transfer_channel.update_agent_from_blocks_data(
-                    blocks_data, receiver.receiver_id
-                )
+
                 send_task = asyncio.run_coroutine_threadsafe(
                     self.transfer_channel.async_batched_write(
                         memory_objs,

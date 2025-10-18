@@ -82,15 +82,11 @@ class MemoryFormat(Enum):
             return 2
         elif self == MemoryFormat.KV_2TD:
             return 2
-        elif self == MemoryFormat.BINARY:
-            return 0
-        elif self == MemoryFormat.BINARY_BUFFER:
-            return 0
         elif self == MemoryFormat.KV_MLA_FMT:
             return 3
         elif self == MemoryFormat.KV_DT2L:
             return 0
-        return 0
+        raise ValueError(f"hidden_dim not defined for format {self}")
 
 
 @dataclass

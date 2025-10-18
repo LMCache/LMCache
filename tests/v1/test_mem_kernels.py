@@ -8,7 +8,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import PinMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
 
 pytest.importorskip(
     "lmcache.c_ops",
@@ -455,13 +455,15 @@ def test_multi_layer_kernel_transpose(num_tokens):
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         mem_obj_shape = [
+            num_heads * head_size,
+            chunk_size,
             2,
             32,
-            chunk_size,
-            num_heads * head_size,
         ]  # transpose uses full chunk
 
-        memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
+        memory_obj_new = mem_allocator.allocate(
+            mem_obj_shape, dtype, MemoryFormat.KV_DT2L
+        )
         lmc_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers,

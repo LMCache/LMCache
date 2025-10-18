@@ -66,6 +66,14 @@ NixlMsg = Union[
 
 
 @dataclass
+class TPRankRecvInfo:
+    group_tp_rank: int
+    receiver_id: str
+    receiver_init_url: str
+    receiver_mem_alloc_url: str
+
+
+@dataclass
 class TPWorkerInfo:
     tp_rank: int
     tp_size: Optional[int] = None
@@ -611,6 +619,18 @@ class NixlChannel(BaseTransferChannel):
         prepare the transfer handler for the remote receiver.
         """
         self.nixl_wrapper.update_handler_from_blocks_data(blocks_data, receiver_id)
+
+    def prepare_transfer_desc(
+        self,
+        receiver: TPRankRecvInfo,
+        dp_ratio: int,
+    ) -> None:
+        """
+        Prepare the transfer descriptor for a batched write operation.
+        This handles asymmetric TP logic internally if needed.
+        """
+        blocks_data = self.get_block_descs(receiver.group_tp_rank, dp_ratio)
+        self.update_agent_from_blocks_data(blocks_data, receiver.receiver_id)
 
 
 @dataclass
