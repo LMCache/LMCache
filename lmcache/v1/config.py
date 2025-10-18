@@ -246,11 +246,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
-    "enable_asym_tp": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-    },
     "pd_role": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_buffer_size": {"type": Optional[int], "default": None, "env_converter": int},
     "pd_buffer_device": {

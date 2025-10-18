@@ -6,7 +6,7 @@ from typing import Literal, Optional, overload
 from lmcache.v1.memory_management import PagedTensorMemoryMetadata
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 from lmcache.v1.transfer_channel.nixl_channel import NixlChannel, TPWorkerInfo
-from lmcache.v1.transfer_channel.transfer_utils import PDRole
+from lmcache.v1.transfer_channel.transfer_utils import TransferRole
 
 
 # TODO(Jiayi): Refactor this function when we support more channels.
@@ -14,7 +14,7 @@ from lmcache.v1.transfer_channel.transfer_utils import PDRole
 def CreateTransferChannel(
     channel_type: Literal["nixl"],
     async_mode: bool,
-    role: PDRole,
+    role: TransferRole,
     allocator_meta: PagedTensorMemoryMetadata,
     tp_rank: int,
     peer_init_url: str,
@@ -27,7 +27,7 @@ def CreateTransferChannel(
 def CreateTransferChannel(
     channel_type: str,
     async_mode: bool,
-    role: PDRole,
+    role: TransferRole,
     allocator_meta: PagedTensorMemoryMetadata,
     tp_rank: int,
     peer_init_url: str,
@@ -39,7 +39,7 @@ def CreateTransferChannel(
 def CreateTransferChannel(
     channel_type: str,
     async_mode: bool,
-    role: PDRole,
+    role: TransferRole,
     allocator_meta: PagedTensorMemoryMetadata,
     tp_rank: int,
     peer_init_url: str,

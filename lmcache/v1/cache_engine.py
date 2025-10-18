@@ -40,6 +40,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     MemoryObj,
     MemoryObjMetadata,
     MixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
@@ -50,6 +51,7 @@ from lmcache.v1.token_database import (
     SegmentTokenDatabase,
     TokenDatabase,
 )
+from lmcache.v1.transfer_channel.transfer_utils import maybe_transpose
 
 logger = init_logger(__name__)
 
@@ -252,6 +254,16 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        transfer_spec = kwargs.get("transfer_spec", None)
+        transpose = maybe_transpose(transfer_spec) and self.config.enable_pd
+        fmt = self.fmt
+        if transpose:
+            assert isinstance(
+                self.storage_manager.allocator_backend.get_memory_allocator(),
+                PagedCpuGpuMemoryAllocator,
+            ), "Transpose is only supported when using PagedCpuGpuMemoryAllocator"
+            fmt = MemoryFormat.KV_DT2L
+
         for start, end, key in self.token_database.process_tokens(
             tokens,
             hashes,
@@ -262,7 +274,7 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
-            kv_shape = self.gpu_connector.get_shape(num_tokens)
+            kv_shape = self.gpu_connector.get_shape(num_tokens, transpose=transpose)
             kv_dtype = self.metadata.kv_dtype
 
             # TODO (Jiayi): should be batched in the future
@@ -270,7 +282,7 @@ class LMCacheEngine:
                 kv_shape,
                 kv_dtype,
                 busy_loop=self.force_store_wait,
-                fmt=self.fmt,
+                fmt=fmt,
             )
             if memory_obj is None:
                 logger.warning(
@@ -294,7 +306,6 @@ class LMCacheEngine:
 
         t = time.perf_counter()
 
-        transfer_spec = kwargs.get("transfer_spec", None)
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 

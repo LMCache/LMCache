@@ -371,12 +371,12 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  * LMCache
  */
 void multi_layer_kv_transfer(
-    torch::Tensor&
-        key_value,  // key/value must be on gpu/pinned cpu.
-                    // [2, num_layer, num_tokens, num_heads*head_size] for
-                    // flash_attn.
-                    // [1, num_layer, num_tokens, aligned_head_size]
-                    // for MLA.
+    torch::Tensor& key_value,  // key/value must be on gpu/pinned cpu.
+                               // [2, num_layer, num_tokens,
+                               // num_heads*head_size] for flash_attn.
+                               // [num_heads*head_size, num_tokens, 2,
+                               // num_layer] if transpose [1, num_layer,
+                               // num_tokens, aligned_head_size] for MLA.
 
     const torch::Tensor& key_value_ptrs,  // [num_layers]
     const torch::Tensor& slot_mapping,    // [num_tokens],
@@ -388,9 +388,9 @@ void multi_layer_kv_transfer(
   const int64_t* slot_mapping_ptr =
       get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
 
-  int num_layers = key_value.size(1);
+  int num_layers = transpose ? key_value.size(3) : key_value.size(1);
   int num_tokens = slot_mapping.size(0);
-  int num_origin_elements = key_value.size(3);
+  int num_origin_elements = transpose ? key_value.size(0) : key_value.size(3);
   int elements_per_qword = 8 / key_value.element_size();
   int num_qwords = num_origin_elements / elements_per_qword;
 
@@ -399,7 +399,7 @@ void multi_layer_kv_transfer(
     k_or_v_size = 1;
   }
 
-  int key_value_tokens = key_value.size(2);
+  int key_value_tokens = transpose ? key_value.size(1) : key_value.size(2);
   assert(transpose or (num_tokens == key_value_tokens));
 
   dim3 grid(num_tokens, num_layers, k_or_v_size);

@@ -105,7 +105,7 @@ class DisaggSpec:
     receiver_host: str
     receiver_init_ports: list[int]
     receiver_alloc_ports: list[int]
-    tp_size: int
+    sender_tp_size: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
 
@@ -1380,7 +1380,7 @@ class LMCacheConnectorV1Impl:
                 receiver_host=req_disagg_spec["receiver_host"],
                 receiver_init_ports=req_disagg_spec["receiver_init_ports"],
                 receiver_alloc_ports=req_disagg_spec["receiver_alloc_ports"],
-                tp_size=req_disagg_spec["receiver_tp_size"],
+                sender_tp_size=req_disagg_spec["sender_tp_size"],
             )
             tmp_disagg_tracker[request.request_id] = disagg_spec
         self._unfinished_requests[request.request_id] = request

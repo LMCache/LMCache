@@ -30,7 +30,7 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel, NixlChannel
-from lmcache.v1.transfer_channel.transfer_utils import PDRole, get_correct_device
+from lmcache.v1.transfer_channel.transfer_utils import TransferRole, get_correct_device
 
 logger = init_logger(__name__)
 
@@ -49,6 +49,7 @@ class AllocRequest(PDMsgBase):
     shape: list[int]  # The shape of the memory objects
     dtype: str
     last_chunk_toks: int
+    transpose: bool
 
 
 class AllocResponse(PDMsgBase):
@@ -105,7 +106,7 @@ class PDReceiverInfo:
 
 @dataclass
 class PDConfig:
-    role: PDRole
+    role: TransferRole
 
     peer_host: str
     peer_init_port: int
@@ -117,8 +118,6 @@ class PDConfig:
     buffer_size: int
     buffer_device: str
 
-    enable_asym_tp: bool = False
-
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig,
@@ -127,10 +126,10 @@ class PDConfig:
     ) -> "PDConfig":
         """Convert the LMCacheEngineConfig to PDConfig"""
 
-        role = PDRole(config.pd_role)
+        role = TransferRole(config.pd_role)
 
         # TODO(Jiayi): Could be both if we want to do dynamic role switch.
-        assert role in [PDRole.SENDER, PDRole.RECEIVER], (
+        assert role in [TransferRole.SENDER, TransferRole.RECEIVER], (
             f"Invalid role: {config.pd_role}, must be either sender or receiver"
         )
 
@@ -168,7 +167,6 @@ class PDConfig:
             proxy_port=config.pd_proxy_port,
             buffer_size=config.pd_buffer_size,
             buffer_device=corrected_device,
-            enable_asym_tp=config.enable_asym_tp,
         )
 
 
@@ -237,14 +235,13 @@ class PDBackend(AllocatorBackendInterface):
             tp_size=self.tp_world_size,
             peer_init_url=peer_init_url,
             backends=config.nixl_backends,
-            enable_asym_tp=config.enable_asym_tp,
         )
 
-        if self.pd_config.role == PDRole.SENDER:
+        if self.pd_config.role == TransferRole.SENDER:
             self._init_sender()
             self.initialized_peers: set[str] = set()
             self.mem_alloc_sockets: dict[str, zmq.Socket] = {}
-        elif self.pd_config.role == PDRole.RECEIVER:
+        elif self.pd_config.role == TransferRole.RECEIVER:
             self._init_receiver()
         else:
             raise ValueError(f"Invalid PD role: {self.pd_config.role}")
@@ -277,7 +274,6 @@ class PDBackend(AllocatorBackendInterface):
             metadata.kv_dtype,
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
             corrected_device,
-            transpose=config.enable_asym_tp and config.enable_pd,
         )
 
         return paged_mem_allocator
@@ -411,16 +407,17 @@ class PDBackend(AllocatorBackendInterface):
         str_keys = [key.to_string() for key in keys]
         shape = list(shape)
         assert (
-            fmt == MemoryFormat.KV_2LTD or self.dp_ratio == 1
+            fmt == MemoryFormat.KV_DT2L or self.dp_ratio == 1
         ), """Asymmetric tensor parallelism is only supported
-            for KV_2LTD format for now."""
-        shape[-1] //= self.dp_ratio
+            for KV_DT2L format for now."""
+        shape[fmt.hidden_dim()] //= self.dp_ratio
         return AllocRequest(
             keys=str_keys,
             fmt=fmt.value,
             shape=list(shape),
             dtype=dtype,
             last_chunk_toks=last_chunk_toks,
+            transpose=self.dp_ratio > 1,
         )
 
     # TODO(Jiayi): make this async in the future

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import Enum
-from typing import Union
+from typing import Any, Union
 
 # Third Party
 import msgspec
@@ -24,6 +24,18 @@ def get_correct_device(device: str, worker_id: int) -> str:
         return f"cuda:{worker_id}"
     else:
         raise ValueError(f"Invalid device: {device}")
+
+
+def maybe_transpose(transfer_spec: Any = None) -> bool:
+    """Check if we need to transpose the kv based on transfer spec"""
+    if transfer_spec is None:
+        return False
+    if not getattr(transfer_spec, "receiver_init_ports", None) or not getattr(
+        transfer_spec, "sender_tp_size", None
+    ):
+        return False
+
+    return len(transfer_spec.receiver_init_ports) > transfer_spec.sender_tp_size
 
 
 class SideMsgBase(msgspec.Struct, tag=True):
@@ -58,7 +70,7 @@ class P2PInitSideRetMsg(InitSideRetMsgBase):
     peer_lookup_url: str
 
 
-class PDRole(Enum):
+class TransferRole(Enum):
     SENDER = "sender"
     RECEIVER = "receiver"
     # TODO(novahow): for role switch

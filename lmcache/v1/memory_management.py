@@ -55,6 +55,9 @@ class MemoryFormat(Enum):
     """[1, num_layers, num_tokens, aligned_head_size]
     """
 
+    KV_DT2L = auto()
+    """[hidden_dim, num_tokens, 2, num_layers]"""
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2
@@ -68,6 +71,25 @@ class MemoryFormat(Enum):
             return 0
         elif self == MemoryFormat.KV_MLA_FMT:
             return 2
+        elif self == MemoryFormat.KV_DT2L:
+            return 1
+        return 0
+
+    def hidden_dim(self) -> int:
+        if self == MemoryFormat.KV_2LTD:
+            return 3
+        elif self == MemoryFormat.KV_T2D:
+            return 2
+        elif self == MemoryFormat.KV_2TD:
+            return 2
+        elif self == MemoryFormat.BINARY:
+            return 0
+        elif self == MemoryFormat.BINARY_BUFFER:
+            return 0
+        elif self == MemoryFormat.KV_MLA_FMT:
+            return 3
+        elif self == MemoryFormat.KV_DT2L:
+            return 0
         return 0
 
 
@@ -702,7 +724,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self,
         tensor: torch.Tensor,
         align_bytes: int = ALIGN_BYTES,
-        transpose: bool = False,
     ):
         self.buffer = tensor.view(torch.uint8).flatten()
         self.align_bytes = align_bytes
@@ -716,7 +737,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.total_allocated_size = 0
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-        self.transpose = transpose
 
     @staticmethod
     @_lmcache_nvtx_annotate
@@ -824,7 +844,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 shape, dtype, block.start, aligned_size, 1, 0, fmt
             ),
             parent_allocator=self,
-            transpose=self.transpose,
         )
 
     @_lmcache_nvtx_annotate
@@ -1053,7 +1072,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        transpose: Optional[bool] = False,
     ):
         self.buffer = tensor.view(torch.uint8).flatten()
         self.buffer_size = self.buffer.numel() * self.buffer.element_size()
@@ -1062,7 +1080,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.shape = shape
         self.dtype = dtype
         self.fmt = fmt
-        self.transpose = transpose
 
         num_elements = shape.numel()
         self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
@@ -1098,7 +1115,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 raw_data=buf,
                 metadata=metadata,
                 parent_allocator=self,
-                transpose=transpose,
             )
             self.free_blocks.append(mem_obj)
 
@@ -1136,7 +1152,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             )
             return None
 
-        shape = self._update_shape(fmt, shape)
+        free_block.transpose = self._is_transpose(fmt)
+        shape, fmt = self._update_shape_fmt(fmt, shape)
 
         # TODO (Jiayi): This is a bit redundant.
         free_block.meta.shape = shape
@@ -1191,7 +1208,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
             # FIXME: think about whether pareant_allocator
             # should be updated here.
-            shape = self._update_shape(fmt, shape)
+
+            free_block.transpose = self._is_transpose(fmt)
+            shape, fmt = self._update_shape_fmt(fmt, shape)
 
             free_block.meta.shape = shape
             free_block.meta.fmt = fmt
@@ -1303,21 +1322,26 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
 
-    def _update_shape(self, fmt: MemoryFormat, shape: torch.Size):
+    def _is_transpose(self, fmt: MemoryFormat):
+        if fmt == self.fmt:
+            return False
+
+        assert fmt == MemoryFormat.KV_DT2L, (
+            "Now Only KV_DT2L is supported when the paged memory format is different."
+        )
+        return True
+
+    def _update_shape_fmt(self, fmt: MemoryFormat, shape: torch.Size):
         # TODO(novahow): this is not a clean call for token_dim
         # since self.shape may be [KV_2LTHD] while fmt is [KV_2LTD].
-        # NOTE(novahow): when transpose is True, we always allocate
-        # the full chunk size for proper sharding in asymmetric TP.
-        if not self.transpose:
-            return shape
-
-        assert fmt == MemoryFormat.KV_2LTD, (
-            "Now Only KV_2LTD is supported when transpose is True."
-        )
+        # NOTE(novahow): we always allocate the full chunk size for proper
+        # sharding in asymmetric TP.
+        if not self._is_transpose(fmt):
+            return shape, fmt
 
         shape = list(shape)
         shape[fmt.token_dim()] = self.shape[self.fmt.token_dim()]
-        return torch.Size(shape)
+        return torch.Size(shape), fmt
 
     @property
     def metadata(self):
@@ -1561,9 +1585,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
               (2) byte_array buffer memory.
     """
 
-    def __init__(
-        self, size: int, use_paging: bool = False, transpose: bool = False, **kwargs
-    ):
+    def __init__(self, size: int, use_paging: bool = False, **kwargs):
         """
         :param int size: The size of the pinned memory in bytes.
         """
@@ -1590,12 +1612,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 shape=kwargs["shape"],
                 dtype=kwargs["dtype"],
                 fmt=kwargs["fmt"],
-                transpose=transpose,
             )
         else:
-            assert not transpose, (
-                "Transpose is only supported for paged memory allocator"
-            )
             self.pin_allocator = TensorMemoryAllocator(self.buffer)
 
         self.align_bytes = self.pin_allocator.align_bytes
@@ -1925,7 +1943,6 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         device: str = "cuda",
-        transpose: bool = False,
     ):
         self.gpu_buffer = torch.empty(
             size,
@@ -1937,7 +1954,6 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             shape,
             dtype,
             fmt,
-            transpose=transpose,
         )
 
     def init_cpu_memory_allocator(
@@ -1947,7 +1963,6 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         numa_mapping: Optional[NUMAMapping] = None,
-        transpose: bool = False,
     ):
         self.cpu_buffer = _allocate_cpu_memory(size, numa_mapping)
         self.cpu_allocator = PagedTensorMemoryAllocator(
@@ -1955,7 +1970,6 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             shape,
             dtype,
             fmt,
-            transpose=transpose,
         )
         self.align_bytes = self.cpu_allocator.align_bytes
 

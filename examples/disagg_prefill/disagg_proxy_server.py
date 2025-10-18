@@ -314,14 +314,18 @@ async def handle_completions(request: Request):
         # Pick decode client
         decode_client = round_robin_pick_client(app.state.decode_clients, counter)
         assert decode_client.tp_size, "Decode client init_port is empty"
-        num_decoder_tp_rank = decode_client.tp_size
 
+        prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
+        num_prefiller_tp_rank = prefill_client.tp_size
+        assert num_prefiller_tp_rank, (
+            f"Prefill client tp_size is invalid: {num_prefiller_tp_rank}"
+        )
         disagg_spec = {
             "req_id": req_id,
             "receiver_host": decode_client.host,
             "receiver_init_ports": decode_client.init_ports,
             "receiver_alloc_ports": decode_client.alloc_ports,
-            "receiver_tp_size": num_decoder_tp_rank,
+            "sender_tp_size": num_prefiller_tp_rank,
         }
 
         req_data["kv_transfer_params"] = {
@@ -333,7 +337,6 @@ async def handle_completions(request: Request):
         stream_options = req_data.pop("stream_options", None)
 
         # Send request to prefill service round robin, ignore the response
-        prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
         prefill_output = await send_request_to_service(
             prefill_client.client, "/v1/completions", req_data
         )
@@ -373,10 +376,6 @@ async def handle_completions(request: Request):
             ).encode()
 
             # Wait until decode node signals that kv is ready
-            num_prefiller_tp_rank = prefill_client.tp_size
-            assert num_prefiller_tp_rank, (
-                f"Prefill client tp_size is invalid: {num_prefiller_tp_rank}"
-            )
             await wait_decode_kv_ready(req_id, num_prefiller_tp_rank)
 
             async for chunk in stream_service_response(

@@ -81,7 +81,6 @@ class NixlChannel(BaseTransferChannel):
         assert "allocator_meta" in kwargs
         assert "tp_info" in kwargs
         assert "peer_init_url" in kwargs
-        enable_asym_tp = kwargs.get("enable_asym_tp", False)
 
         if "backends" in kwargs:
             backends = kwargs["backends"]
@@ -96,7 +95,6 @@ class NixlChannel(BaseTransferChannel):
             allocator_meta=self.allocator_meta,
             tp_rank=self.tp_info.tp_rank,
             backends=backends,
-            enable_asym_tp=enable_asym_tp,
         )
         self.nixl_agent = self.nixl_wrapper.agent
 
@@ -627,7 +625,6 @@ class NixlAgentWrapper:
         allocator_meta: PagedTensorMemoryMetadata,
         tp_rank: int,
         backends: list[str],
-        enable_asym_tp: bool = False,
     ):
         """
         Initialize the NIXL agent.
