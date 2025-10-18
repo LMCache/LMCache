@@ -241,7 +241,9 @@ class TraceReplayer:
             self.write_result_to_csv(result)
             return result
 
-    async def replay_trace(self, requests: List[TraceRequest], qps: Optional[float] = None):
+    async def replay_trace(
+        self, requests: List[TraceRequest], qps: Optional[float] = None
+    ):
         """
         Replay a list of TraceRequests against the target model.
 
@@ -271,10 +273,9 @@ class TraceReplayer:
         )
 
         tasks = []
-        delay = 1.0 / qps if qps else None
         for request in requests:
             if qps:
-                await asyncio.sleep(delay)
+                await asyncio.sleep(1.0 / qps)
             else:
                 absolute_send_time = start_time + request.timestamp
                 current_time = time.time()
@@ -351,11 +352,11 @@ async def main():
         help="Max duration to replay trace (seconds)",
     )
     parser.add_argument(
-        "--qps", 
-        type=float, 
-        default=None, 
+        "--qps",
+        type=float,
+        default=None,
         help="Fixed QPS rate (overrides timestamps)",
-        )
+    )
 
     args = parser.parse_args()
 
