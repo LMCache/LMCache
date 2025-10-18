@@ -3,7 +3,7 @@
 ## Overview
 A simple trace replayer for performance evaluation using workload traces from [Mooncake Trace Release](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/conversation_trace.jsonl) (JSONL format). Each trace line represents multiple chunked requests with timestamps, allowing you to simulate realistic request arrival patterns and measure metrics such as time-to-first-token (TTFT), token usage, and throughput.
 
-The script `trace_replayer.py` replays traces and writes detailed request stats to a CSV file. It supports different models and trace files.
+The script `trace_replayer.py` replays traces and writes detailed request stats to a CSV file. It supports different models and trace files, as well as both timestamp-based (default) and QPS-based modes. 
 
 ---
 
@@ -49,6 +49,13 @@ python trace_replayer.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --max_input_
 ```bash
 python trace_replayer.py --trace_file <file_name>.jsonl --max_duration 120.0
 ```
+### Example 3: Fixed-QPS replay
+Run at a fixed rate of 10 queries per second (timestamps in trace ignored):
+
+```bash
+python trace_replayer.py --trace_file sample_trace.jsonl --qps 10
+```
+
 ## Notes
 - **`--max_input_length`**: Optional. Use this to truncate inputs if JSONL requests exceed the model’s maximum context length. Omitting this may cause requests to fail for smaller models.
 - **Metrics Collected**: TTFT (time-to-first-token), input/output tokens, request throughput.
