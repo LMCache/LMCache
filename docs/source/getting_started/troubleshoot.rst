@@ -5,91 +5,443 @@ TroubleShoot
    :local:
    :depth: 2
    :backlinks: none
-
+   
 ---------------------------------
 🕒 2025-08
 ---------------------------------
-
 
 **🧭 Time**
-   2025-08-19
+   2025-08-14
 
 **🚨 Issue**
-   Nginx 无法启动，提示端口占用。
-
-**🧩 Environment**
-   Ubuntu 22.04  
-   Nginx 1.24  
-   Gunicorn  
+    [xPyD][lmcache0.3.3+vllm0.10.0] "failed to allocate memory for tensor" during benchmark with lmcache xPyD version
 
 **📋 Description**
-   尝试重启 Nginx 时出现错误：
-   ::
-      Job for nginx.service failed because the control process exited with error code.
-      systemd[1]: nginx.service: Failed with result 'exit-code'.
+    When running a vllm benchmark on the xPyD version of lmcache with the model Qwen3-Coder-480B-A35B-Instruct-FP8 in tensor parallel = 8 configuration, the process eventually fails with the following error:
+    Failed to allocate memory for tensor(torch.Size([2, 62, 13, 128]), torch.bfloat16)
+    because no free blocks is available (memory_management.py:992:lmcache.v1.memory_management)
+    
+    .. image:: https://private-user-images.githubusercontent.com/43373176/477835691-2937693a-f00b-4a1d-b573-0f9eb4b4bf5a.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjA3OTQ5MDEsIm5iZiI6MTc2MDc5NDYwMSwicGF0aCI6Ii80MzM3MzE3Ni80Nzc4MzU2OTEtMjkzNzY5M2EtZjAwYi00YTFkLWI1NzMtMGY5ZWI0YjRiZjVhLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTEwMTglMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMDE4VDEzMzY0MVomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWE5OTNkMGIyM2QzZTkxNDE5ODg1MjIwNWI5MmVjMjFjZTA0ZGM0NDdjOTU1ODUyMTg0NDRiYjBkMzRhNTdmZWEmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.wQU8zx5GHVJekIciS8q4ukDD3gXKWHkp0BsO6w47eeo
+        :alt: Log information
+        :width: 100%
+        :align: center
 
-**🔍 Analysis**
-   检查发现 80 端口被 `apache2` 占用：
-   ::
-      sudo lsof -i:80
+    The Decoder instance eventually fails with the error after processing a cumulative ~100+ requests. The benchmark stream is configured with max-concurrency=2, so the failure is not caused by high instantaneous concurrency. It appears that the Nixl buffer may be filled up？Does the Nixl buffer have a garbage collection (GC) mechanism?
 
-   输出结果：
-   ::
-      apache2   1234 root  ...  TCP *:http (LISTEN)
+    lmcache config:
 
-**🛠️ Solution**
-   1. 停止 Apache 服务：
+    .. code-block:: yaml
+
+        enable_nixl: True
+        enable_xpyd: True
+        nixl_buffer_size: 1080819712
+    
+    **Steps to Reproduce**
+    Launch prefill process:
+
     .. code-block:: bash
-         sudo systemctl stop apache2
 
-   2. 禁用开机自启：
-      ::
-         sudo systemctl disable apache2
+        LMCACHE_CONFIG_FILE=$prefill_config_file \
+        VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+        VLLM_WORKER_MULTIPROC_METHOD=spawn \
+        LMCACHE_LOG_LEVEL=DEBUG \
+        VLLM_LOGGING_LEVEL=DEBUG \
+        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+        PYTHONHASHSEED=0 \
+        NCCL_P2P_DISABLE=1 \
+        vllm serve $MODEL \
+        --port 8100 \
+        --enforce-eager \
+        --max-model-len 131072 \
+        --tensor-parallel-size 8 \
+        --gpu-memory-utilization 0.8 \
+        --enable-expert-parallel \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
+    
+    Launch decode process:
 
-   3. 重启 Nginx：
-      ::
-         sudo systemctl restart nginx
+    .. code-block:: bash
 
-**✅ Result**
-   Nginx 启动成功，网站恢复访问。
+        python3 lmcache_proxy.py \
+        --host 0.0.0.0 \
+        --port 9100 \
+        --prefiller-host localhost \
+        --prefiller-port 8100 \
+        --num-prefillers 1 \
+        --decoder-host ${decoder_ip} \
+        --decoder-port 8200  \
+        --decoder-init-port ${decoder_init_port}\
+        --decoder-alloc-port ${decoder_alloc_port} \
+        --proxy-host 0.0.0.0 \
+        --proxy-port 7500 \
+        --num-decoders 1
+    
+    Launch bench
 
-.. note::
-   这是一条说明。
+    .. code-block:: bash
 
-.. warning::
-   ⚠️ 请勿在生产环境执行此命令！
+        vllm bench serve --port 9100 --seed 122 \
+        --model /model \
+        --dataset-name random --random-input-len 200 --random-output-len 200 \
+        --num-prompts 200 --max-concurrency 2
 
-.. tip::
-   可以使用 ``Ctrl + C`` 中断命令。
+**🧩 Environment**
+    vllm: 0.10.0 v1
+    lmcahe: 0.3.3
+    Model: Qwen3-Coder-480B-A35B-Instruct-FP8
+    P/D: 1P1D
 
-.. code-block:: bash
-   :caption: 启动 Web 服务
-   :emphasize-lines: 2
+**🟠 Status:**  In Progress
 
-   sudo systemctl daemon-reload
-   sudo systemctl restart nginx
+----
 
-+------+--------+---------+
-| ID   | Name   | Status  |
-+------+--------+---------+
-| 1    | Nginx  | OK      |
-+------+--------+---------+
-| 2    | MySQL  | Timeout |
-+------+--------+---------+
+**🧭 Time**
+   2025-08-15
 
-====  ======  =====
-编号  名称    状态
-====  ======  =====
-1     Nginx   正常
-2     MySQL   超时
-====  ======  =====
+**🚨 Issue**
+    LMCache seems to be using the wrong CUDA devices with Ray+PP
 
-`OpenAI <https://openai.com>`_
+**📋 Description**
 
+    **Setup Context**
+    We got 2 nodes. Each node has 8 GPUs. Both nodes and all 16 GPUs are shown as resources under ``ray status``.
 
----------------------------------
-🕒 2025-08
----------------------------------
+    **Reproducer & Error Message**
+    Running the following  ``vllm`` command:
+
+    .. code-block:: bash
+
+        VLLM_WORKER_MULTIPROC_METHOD=spawn  LMCACHE_USE_EXPERIMENTAL=True  vllm serve meta-llama/Llama-3.1-70B-Instruct  --gpu-memory-utilization 0.7  --tensor_parallel_size 8  --pipeline_parallel_size 2  --no-enable-chunked-prefill  --no-enable-prefix-caching --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_connector_extra_config": {}}' --distributed-executor-backend ray
+    
+    causes the following error in 8 of the nodes:
+    
+    .. code-block:: text
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/vllm/.venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py", line 181, in init_device                                             
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     init_worker_distributed_environment(self.vllm_config, self.rank,                                                                                          
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/vllm/.venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py", line 584, in init_worker_distributed_environment                     
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     ensure_kv_transfer_initialized(vllm_config)                                                                                                               
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/vllm/.venv/lib/python3.12/site-packages/vllm/distributed/kv_transfer/kv_transfer_state.py", line 64, in ensure_kv_transfer_initialized      
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector_v1(                                                                                             
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                                                                             
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/vllm/.venv/lib/python3.12/site-packages/vllm/distributed/kv_transfer/kv_connector/factory.py", line 84, in create_connector_v1              
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     return connector_cls(config, role)                                                                                                                        
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                                                                                                        
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/vllm/.venv/lib/python3.12/site-packages/vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py", line 27, in __init__            
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)                                                                                    
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                                                                    
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/amg_stable/LMCache/lmcache/integration/vllm/vllm_v1_adapter.py", line 553, in __init__                                                      
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     self.lmcache_engine = init_lmcache_engine(
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]                           ^^^^^^^^^^^^^^^^^^^^
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/amg_stable/LMCache/lmcache/integration/vllm/vllm_v1_adapter.py", line 495, in init_lmcache_engine
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]   File "/home/amg/amg_stable/LMCache/lmcache/v1/gpu_connector.py", line 134, in __init__
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]     self.gpu_buffer = torch.empty(
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619]                       ^^^^^^^^^^^^
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619] RuntimeError: CUDA error: invalid device ordinal
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619] CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619] For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+        (RayWorkerWrapper pid=3182670, ip=10.192.207.175) ERROR 08-14 17:21:25 [worker_base.py:619] Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+    **Potential Root Cause**
+    Given that some of the workers were fine while other ones gave the above message made me think that there's something wrong how GPUs are assigned in the second node. 
+    So I added the following debug message in ``vllm_v1_adapter.py``:
+
+    .. code-block:: python
+
+            torch.cuda.device(parallel_config.rank)
+            logger.info(f"DEBUG---{parallel_config.rank}")
+            device = torch.device(f"cuda:{parallel_config.rank}")
+
+    and in the ouput right before the error I'd see things like:
+
+    .. code-block:: text
+
+        DEBUG---8
+        ...error...
+        DEBUG---9
+        ...error...
+    I believe the issue is that in the second node the global rank numbers can be 8,9,10,11,12,13,14,15 but the corresponding device IDs should be 0,1,2,3,4,5,6,7,8.
+
+    **Attempt to fix (update: it didn't work)**
+    Tried this but it didn't work:
+
+    .. code-block:: python
+
+        local_rank = envs.LOCAL_RANK
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+
+**🟠 Status:**  In Progress
+
+----
+
+**🧭 Time**
+   2025-08-15
+
+**🚨 Issue**
+    I've deployed vLLM 0.10.0 integrated with LMCache and Mooncake, DP=4 and TP=2, PD disaggregation.
+    I'm encountering frequent errors on the Decode node indicating that it fails to retrieve the kvcache from the Mooncake store.
+
+**📋 Description**
+    In the current implementation, storing the kv cache into the Mooncake is an asynchronous operation. The function returns immediately without waiting for the kvcache to be actually written into the Mooncake store. As a result, after the store operation is marked as completed (but before the kv data is truly persisted in Mooncake), the request completion signal is sent up to the vLLM Engine and API server, and eventually back to the proxy server.
+    Once the proxy receives the "prefill completed" signal, it sends the request to the Decode node. Then, the Decode node tries to fetch the corresponding kvcache from Mooncake, but it's not yet ready, leading to an error.
+
+    To reproduce:
+    - Prefill command
+
+    .. code-block:: bash
+
+        PYTHONHASHSEED=123 \
+        LMCACHE_LOG_LEVEL=DEBUG \
+        LMCACHE_CONFIG_FILE=/data/lwh/mooncake-config-prefill-TP2DP4.yaml \
+        LMCACHE_USE_EXPERIMENTAL=True \
+        VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+        VLLM_WORKER_MULTIPROC_METHOD=spawn \
+        vllm serve /data/Meta-Llama-3-8B-Instruct \
+        --port 8100 \
+        --disable-log-requests \
+        --enforce-eager \
+        --data-parallel-size 4 \
+        --tensor-parallel-size 2 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
+
+    - mooncake-config-prefill-TP2DP4.yaml
+
+    .. code-block:: yaml
+
+        chunk_size: 256
+        local_device: "cpu"
+        remote_url: "mooncakestore://200.10.0.22:50051/"
+        remote_serde: "naive"
+        local_cpu: False
+        max_local_cpu_size: 5
+
+        extra_config:
+        local_hostname: "200.10.0.22"
+        metadata_server: "http://200.10.0.22:8080/metadata"
+        protocol: "rdma"
+        device_name: "mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3"
+        master_server_address: "200.10.0.22:50051"
+        global_segment_size: 3355443200
+        local_buffer_size: 1073741824
+        transfer_timeout: 1
+
+    - Decode Command
+
+    .. code-block:: bash
+
+         PYTHONHASHSEED=123 \
+        LMCACHE_LOG_LEVEL=DEBUG \
+        LMCACHE_CONFIG_FILE=/data/lwh/mooncake-config-decode-TP2DP4.yaml \
+        LMCACHE_USE_EXPERIMENTAL=True \
+        VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+        VLLM_WORKER_MULTIPROC_METHOD=spawn \
+        vllm serve /data/Meta-Llama-3-8B-Instruct \
+        --port 8200 \
+        --disable-log-requests \
+        --enforce-eager \
+        --data-parallel-size 4 \
+        --tensor-parallel-size 2 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}'
+
+    - mooncake-config-decode-TP2DP4.yaml
+
+    .. code-block:: yaml
+
+        chunk_size: 256
+        local_device: "cpu"
+        remote_url: "mooncakestore://200.10.0.22:50051/"
+        remote_serde: "naive"
+        local_cpu: False
+        max_local_cpu_size: 5
+        # external_lookup_client: "mooncakestore://200.10.0.22:50051/"
+
+        extra_config:
+        local_hostname: "200.10.0.18"
+        metadata_server: "http://200.10.0.22:8080/metadata"
+        protocol: "rdma"
+        device_name: "mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3"
+        master_server_address: "200.10.0.22:50051"
+        global_segment_size: 33554432000
+        local_buffer_size: 10737418240
+        transfer_timeout: 1
+
+    - Proxy Command
+
+    .. code-block:: bash
+        LMCACHE_LOG_LEVEL=DEBUG python3 /data/lwh/LMCache/examples/disagg_prefill/xpyd_experimental/disagg_proxy_server.py --host localhost --port 9000 --prefiller-host 200.10.0.22 --prefiller-port 8100 --decoder-host 200.10.0.18 --decoder-port 8200
+
+    .. code-block:: python
+        :caption: LMCache/examples/disagg_prefill/xpyd_experimental/disagg_proxy_server.py
+
+            @app.post("/v1/completions")
+            async def handle_completions(request: Request):
+            global counter, stats_calculator
+            counter += 1
+            req_id = str(counter)  # we use counter as req_id
+
+            st = time.time()
+            try:
+                req_data = await request.json()
+
+                tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
+
+                tokenize_output = await send_request_to_service(
+                    tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
+                )
+                tokenize_output = tokenize_output.json()
+
+                org_max_tokens = req_data["max_tokens"]
+                req_data["prompt"] = tokenize_output["tokens"]
+                req_data["max_tokens"] = 1
+
+                # Pick decode client
+                decode_client = round_robin_pick_client(app.state.decode_clients, counter)
+
+                disagg_spec = {
+                    "req_id": req_id,
+                    "receiver_host": decode_client.host,
+                    "receiver_init_port": decode_client.init_port,
+                    "receiver_alloc_port": decode_client.alloc_port,
+                }
+
+                req_data["kv_transfer_params"] = {
+                    "ret_first_tok": True,
+                    "disagg_spec": disagg_spec,
+                }
+
+                req_data["stream"] = False
+                stream_options = req_data.pop("stream_options", None)
+
+                # Send request to prefill service round robin, ignore the response
+                prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
+                prefill_output = await send_request_to_service(
+                    prefill_client.client, "/v1/completions", req_data
+                )
+
+                prefill_output = prefill_output.json()
+
+                et = time.time()
+                stats_calculator.add(et - st)
+
+                req_data["max_tokens"] = org_max_tokens - 1
+                req_data["prompt"].append(prefill_output["kv_transfer_params"]["first_tok"])
+                req_data.pop("kv_transfer_params")
+                req_data["stream"] = True
+                if stream_options is not None:
+                    req_data["stream_options"] = stream_options
+
+                # Stream response from decode service
+                async def generate_stream():
+                    head_chunk = {
+                        "id": prefill_output["id"],
+                        "object": "text_completion",
+                        "created": prefill_output["created"],
+                        "model": prefill_output["model"],
+                        "choices": [
+                            {
+                                "index": 0,
+                                "text": prefill_output["choices"][0]["text"],
+                                "logprobs": None,
+                                "finish_reason": None,
+                                "stop_reason": None,
+                            }
+                        ],
+                        "usage": None,
+                    }
+                    yield (
+                        "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
+                    ).encode()
+
+                    # Wait until decode node signals that kv is ready
+                    # await wait_decode_kv_ready(req_id)
+
+                    async for chunk in stream_service_response(
+                        decode_client.client, "/v1/completions", req_data
+                    ):
+                        yield chunk
+
+                return StreamingResponse(generate_stream(), media_type="application/json")
+
+                except Exception as e:
+                    # Standard
+                    import sys
+                    import traceback
+
+                    exc_info = sys.exc_info()
+                    print("Error occurred in disagg prefill proxy server - completions endpoint")
+                    print(e)
+                    print("".join(traceback.format_exception(*exc_info)))
+                    raise
+
+    -  Bench command
+    
+    .. code-block:: bash
+
+        curl http://127.0.0.1:9000/v1/completions     -H "Content-Type: application/json"     
+        -d '{
+        "model": "/data/Meta-Llama-3-8B-Instruct",
+        "prompt": "Tell me a story,100 words,Tell me a story,100 words,Tell me a story,100 words",
+        "max_tokens": 10
+         }'
+**🧩 Environment**
+    vLLM: 0.10.0
+    LMCache: dev branch
+    Mooncake: main branch
+    P/D: 1P1D
+    Prefill: 8 GPU, DP=4, TP=2
+    Decode: 8 GPU, DP=4, TP=2
+
+**🔴 Status:** Unresolved
+
+----
+
+**🧭 Time**
+   2025-08-16
+
+**🚨 Issue**
+     Ref count of MemoryObj -1is negative: -2.Double free occurred somewhere.Setting ref count back to 0 as a hack 
+
+**📋 Description**
+    To reproduce 
+    - Serving
+
+    .. code-block:: bash
+
+        CUDA_VISIBLE_DEVICES=1 VLLM_ENABLE_V1_MULTIPROCESSING=1 VLLM_WORKER_MULTIPROC_METHOD=spawn \
+        LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CHUNK_SIZE=512 LMCACHE_LOCAL_CPU=True LMCACHE_MAX_LOCAL_CPU_SIZE=15.0 \
+        PYTHONHASHSEED=0 LMCACHE_REMOTE_SERDE=cachegen LMCACHE_REMOTE_URL=lm://localhost:65432 \
+        vllm serve \
+        meta-llama/Llama-3.1-8B-Instruct \
+        --download-dir /mnt/hps/llmcache/models/meta-llama/Llama-3.1-8B-Instruct \
+        --port 8000 \
+        --gpu-memory-utilization 0.95 \
+        --no-enable-chunked-prefill \
+        --enforce-eager \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
+        --async-scheduling
+    
+    - Benchmark
+
+    .. code-block:: bash
+
+        vllm bench serve --port 8000 --seed 12345 \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --dataset-name random --random-input-len 8000 --random-output-len 200 \
+        --random-prefix-len 2000 \
+        --num-prompts 500 --request-rate 3.6 --burstiness 100 --ignore-eos
+        
+**🧩 Environment**
+    lmcache==0.3.3
+
+**🔴 Status:** Unresolved
+
+----
 
 **🧭 Time**
    2025-08-19 
@@ -187,6 +539,19 @@ When completed successfully, you’ll see an output summary similar to:
    ✅ Trace replay completed.
    Summary file: summary-2025-10-17-1430.csv
    Average TTFT: 1.23s | Throughput: 412 tokens/s | Total requests: 498
+----
+
+**🧭 Time**
+   2025-08-28
+
+**🚨 Issue**
+    Support multiple backends at the same time
+
+**📋 Description**
+    does LMCache support heterogeneous multi-tier caching, where tiers span from GPU memory to CPU memory to external backends? Specifically, can we configure multiple heterogeneous backends (e.g., Redis, local disk, etc.) to be used simultaneously, along with GPU and CPU memory, and does LMCache support migration of data across these tiers and backends?
+
+**🛠️ Solution**
+    `Added in the q3 roadmap <https://github.com/LMCache/LMCache/issues/1253>`_
 
 ----
 
@@ -204,23 +569,9 @@ When completed successfully, you’ll see an output summary similar to:
         :alt: Log information
         :width: 100%
         :align: center
+
 **🛠️ Solution**
     `Links <https://github.com/LMCache/LMCache/pull/1426>`_ to the PR that fixes this issue.
-
-----
-
-**🧭 Time**
-   2025-08-28
-
-**🚨 Issue**
-    Support multiple backends at the same time
-
-**📋 Description**
-    does LMCache support heterogeneous multi-tier caching, where tiers span from GPU memory to CPU memory to external backends? Specifically, can we configure multiple heterogeneous backends (e.g., Redis, local disk, etc.) to be used simultaneously, along with GPU and CPU memory, and does LMCache support migration of data across these tiers and backends?
-
-**🛠️ Solution**
-    `Added in the q3 roadmap <https://github.com/LMCache/LMCache/issues/1253>`_
-
 ----
 
 ---------------------------------
@@ -271,6 +622,24 @@ When completed successfully, you’ll see an output summary similar to:
 
 **🔴 Status:** Unresolved  
 
+----
+
+**🧭 Time**
+    2025-09-24
+
+**🚨 Issue**
+    The codes in lmcache/integration folder do not respect the settings in precommit.
+
+**📋 Description**
+    The following code passes 80 characters at line 223, and should be identified by pre-commit (ruff)
+    
+.. code-block:: python
+   :caption: LMCache/lmcache/integration/vllm/vllm_v1_adapter.py
+
+    # https://github.com/vllm-project/vllm/commit/ 
+    # b029de9902aa3ac58806c8c17776c7074175b6db# 
+    # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94 
+**🔴 Status:** Unresolved  
 
 ----
 
