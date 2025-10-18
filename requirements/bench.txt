@@ -1,7 +1,7 @@
 requests
 tqdm
 transformers
-numpy
+numpy<=2.2
 pandas
 matplotlib
 seaborn

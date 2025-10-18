@@ -101,6 +101,9 @@ The second request will automatically retrieve and reuse the KV cache from the f
 P2P KV cache sharing
 --------------------
 
+.. note::
+   This section is outdated. Please refer to :doc:`../../kv_cache/p2p_sharing` for the latest example.
+
 This section demonstrates how to share KV cache across multiple vLLM instances using peer-to-peer transfer.
 
 Setup P2P sharing

@@ -35,7 +35,10 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     PinRetMsg,
     QueryInstMsg,
     QueryInstRetMsg,
+    QueryWorkerInfoMsg,
+    QueryWorkerInfoRetMsg,
 )
+from lmcache.v1.cache_controller.utils import WorkerInfo
 
 logger = init_logger(__name__)
 
@@ -297,6 +300,32 @@ def create_app(controller_urls: dict[str, str]) -> FastAPI:
             assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
             assert isinstance(ret_msg, CheckFinishRetMsg)
             return CheckFinishResponse(status=ret_msg.status)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    class QueryWorkerInfoRequest(BaseModel):
+        instance_id: str
+        worker_ids: Optional[list[int]]
+
+    class QueryWorkerInfoResponse(BaseModel):
+        event_id: str
+        worker_infos: list[WorkerInfo]
+
+    @app.post("/query_worker_info", response_model=QueryWorkerInfoResponse)
+    async def query_worker_info(req: QueryWorkerInfoRequest):
+        try:
+            event_id = "QueryWorkerInfo" + str(uuid.uuid4())
+            msg = QueryWorkerInfoMsg(
+                event_id=event_id,
+                instance_id=req.instance_id,
+                worker_ids=req.worker_ids,
+            )
+            ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
+            assert isinstance(ret_msg, QueryWorkerInfoRetMsg)
+            return QueryWorkerInfoResponse(
+                event_id=ret_msg.event_id, worker_infos=ret_msg.worker_infos
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
