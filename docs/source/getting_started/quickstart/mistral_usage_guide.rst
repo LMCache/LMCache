@@ -1,4 +1,4 @@
-Cookbook: Mistral 7B
+Cookbook: Mistral-7B
 ====================================
 
 Mistral-7B-Instruct-v0.2 User Guide
@@ -62,8 +62,8 @@ During runtime, LMCache automatically prints cache hit and store logs for KV dat
 **Log Explanation:**
 
 - **Total tokens**: Total token count in the current request.  
-- **LMCache hit tokens**: Number of tokens retrieved from cache.  
-- **Need to load**: Tokens that must be recomputed.  
+- **LMCache hit tokens**: Number of tokens hit in the cache.  
+- **Need to load**: Tokens that need to be loaded from LMCache, if hit.  
 - **Stored X out of total Y tokens**: KV data newly cached for reuse in later requests.  
 
 By leveraging chunked caching and fast indexing, LMCache efficiently reuses context across multi-turn tasks, drastically reducing first-token latency.
@@ -93,9 +93,9 @@ vLLM Mode
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=0 vllm serve /mnt/sda1/Mistral-7B-Instruct-v0.2 --tensor-parallel-size 1 --load-format dummy
+    PYTHONHASHSEED=0 vllm serve mistralai/Mistral-7B-Instruct-v0.2 --tensor-parallel-size 1 --load-format dummy
 
-    python benchmarks/long_doc_qa/long_doc_qa.py --model /mnt/sda1/Mistral-7B-Instruct-v0.2 --num-documents 46 --document-length 10000 --output-len 100 --repeat-count 1 --repeat-mode tile --max-inflight-requests 4
+    python benchmarks/long_doc_qa/long_doc_qa.py --model mistralai/Mistral-7B-Instruct-v0.2 --num-documents 46 --document-length 10000 --output-len 100 --repeat-count 1 --repeat-mode tile --max-inflight-requests 4
 
 
 Results:
@@ -119,9 +119,9 @@ LMCache Mode
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=0 LMCACHE_MAX_LOCAL_CPU_SIZE=66 vllm serve /mnt/sda1/Mistral-7B-Instruct-v0.2 --tensor-parallel-size 1 --load-format dummy --kv-transfer-config '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}'
+    PYTHONHASHSEED=0 LMCACHE_MAX_LOCAL_CPU_SIZE=66 vllm serve mistralai/Mistral-7B-Instruct-v0.2 --tensor-parallel-size 1 --load-format dummy --kv-transfer-config '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}'
 
-    python benchmarks/long_doc_qa/long_doc_qa.py --model /mnt/sda1/Mistral-7B-Instruct-v0.2 --num-documents 46 --document-length 10000 --output-len 100 --repeat-count 1 --repeat-mode tile --max-inflight-requests 4
+    python benchmarks/long_doc_qa/long_doc_qa.py --model mistralai/Mistral-7B-Instruct-v0.2 --num-documents 46 --document-length 10000 --output-len 100 --repeat-count 1 --repeat-mode tile --max-inflight-requests 4
 
 
 Results:

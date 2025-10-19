@@ -1,4 +1,4 @@
-Cookbook: Llama 3.1 8B
+Cookbook: Llama-3.1-8B
 ====================================
 
 Llama Usage Guide
@@ -44,7 +44,7 @@ For example, send your first test request in a new terminal:
 
    curl http://localhost:8000/v1/completions      -H "Content-Type: application/json"      -d '{
        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-       "prompt": "Qwen3 is the latest generation of large language models in the Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
+       "prompt": "Llama3.1 is the latest generation of large language models in the Llama series, offering a comprehensive suite of dense and mixture-of-experts",
        "max_tokens": 100,
        "temperature": 0.7
      }'
@@ -53,11 +53,10 @@ You should see the following logs on the server side:
 
 .. code-block:: bash
 
-   (EngineCore_DP0 pid=459096) [2025-10-12 03:22:34,480] LMCache INFO: Reqid: cmpl-7a2c81e7a86d4171a6dfa53ce134a2d1-0, Total tokens 28, LMCache hit tokens: 0, need to load: 0 (vllm_v1_adapter.py:1191:lmcache.integration.vllm.vllm_v1_adapter)
-   (EngineCore_DP0 pid=459096) [2025-10-12 03:22:34,482] LMCache INFO: Post-initializing LMCacheEngine (cache_engine.py:170:lmcache.v1.cache_engine)
-   (EngineCore_DP0 pid=459096) [2025-10-12 03:22:34,512] LMCache INFO: Storing KV cache for 28 out of 28 tokens (skip_leading_tokens=0) for request cmpl-7a2c81e7a86d4171a6dfa53ce134a2d1-0 (vllm_v1_adapter.py:1075:lmcache.integration.vllm.vllm_v1_adapter)
-   (EngineCore_DP0 pid=459096) [2025-10-12 03:22:34,513] LMCache INFO: Stored 28 out of total 28 tokens. size: 0.0034 gb, cost 1.2957 ms, throughput: 2.6380 GB/s; offload_time: 1.2593 ms, put_time: 0.0364 ms (cache_engine.py:288:lmcache.v1.cache_engine)
-   (APIServer pid=459096) INFO:     127.0.0.1:43170 - "POST /v1/completions HTTP/1.1" 200 OK
+   (EngineCore_DP0 pid=3085876) [2025-10-20 03:54:02,823] LMCache INFO: Storing KV cache for 30 out of 30 tokens (skip_leading_tokens=0) for request cmpl-7ee35d8834cb4c0aa346fa2c3ed60fa7-0 (vllm_v1_adapter.py:1077:lmcache.integration.vllm.vllm_v1_adapter)
+   (EngineCore_DP0 pid=3085876) [2025-10-20 03:54:02,825] LMCache INFO: Stored 30 out of total 30 tokens. size: 0.0037 gb, cost 1.5041 ms, throughput: 2.4348 GB/s; offload_time: 1.4613 ms, put_time: 0.0428 ms (cache_engine.py:294:lmcache.v1.cache_engine)
+   (EngineCore_DP0 pid=3085876) [2025-10-20 03:54:05,709] LMCache INFO: Calculated bytes per chunk per rank: 1048576 (local_cpu_backend.py:606:lmcache.v1.storage_backend.local_cpu_backend)
+   (APIServer pid=3085709) INFO:     127.0.0.1:33864 - "POST /v1/completions HTTP/1.1" 200 OK
 
 ------------------------------------
 Benchmark Results

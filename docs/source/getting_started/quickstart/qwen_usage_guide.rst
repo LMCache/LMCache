@@ -1,4 +1,4 @@
-Cookbook: Qwen 3 8B
+Cookbook: Qwen-3-8B
 ====================================
 
 Qwen Usage Guide
@@ -11,7 +11,7 @@ The **Qwen-3-8B** model strikes an excellent balance between computational effic
 This significantly reduces **Time to First Token (TTFT)** and overall inference latency.
 
 ------------------------------------
-1. Model Highlights
+Model Highlights
 ------------------------------------
 
 - **Efficient inference**: Achieves both high precision and low latency with 8B parameters.  
@@ -21,7 +21,7 @@ This significantly reduces **Time to First Token (TTFT)** and overall inference 
 - **LMCache optimization**: Greatly reduces redundant computation through cache reuse.
 
 ------------------------------------
-2. Deploying Qwen-3-8B with LMCache
+Deploying Qwen-3-8B with LMCache
 ------------------------------------
 
 The following example demonstrates how to quickly deploy the **Qwen-3-8B** model using **LMCache**:
@@ -48,22 +48,21 @@ Upon successful deployment, the server will output LMCache logs similar to the f
 
 .. code-block:: bash
 
-   Reqid: cmpl-6709d8795d3c4464b01999c9f3fffede-0, Total tokens 32, LMCache hit tokens: 24, need to load: 8
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,502] LMCache INFO: Retrieved 8 out of total 8 tokens. size: 0.0011 gb, cost 0.5547 ms, throughput: 1.9808 GB/s;
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,509] LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.4274 ms, throughput: 2.5702 GB/s; offload_time: 0.4013 ms, put_time: 0.0262 ms
+   (EngineCore_DP0 pid=3284044) [2025-10-20 08:56:03,487] LMCache INFO: Reqid: cmpl-128628cf86ee43788cc7f2599c855e2b-0, Total tokens 14, LMCache hit tokens: 0, need to load: 0 (vllm_v1_adapter.py:1189:lmcache.integration.vllm.vllm_v1_adapter)
+   (EngineCore_DP0 pid=3284044) [2025-10-20 08:56:03,519] LMCache INFO: Storing KV cache for 14 out of 14 tokens (skip_leading_tokens=0) for request cmpl-128628cf86ee43788cc7f2599c855e2b-0 (vllm_v1_adapter.py:1077:lmcache.integration.vllm.vllm_v1_adapter)
+   (EngineCore_DP0 pid=3284044) [2025-10-20 08:56:03,520] LMCache INFO: Stored 14 out of total 14 tokens. size: 0.0019 gb, cost 1.0830 ms, throughput: 1.7753 GB/s; offload_time: 1.0501 ms, put_time: 0.0328 ms (cache_engine.py:294:lmcache.v1.cache_engine)
 
 **Log Explanation:**
 
-- **Total tokens 32**: The request contains 32 tokenized segments.  
-- **LMCache hit tokens: 24**: 24 tokens were served from cache (a multiple of the chunk size 8).  
-- **Need to load: 8**: Since vLLM uses automatic prefix caching (block size = 16), 16 tokens already reside in GPU memory, requiring only 8 tokens to be loaded from LMCache.  
-- **Stored another 8 tokens**: The newly processed 8 tokens are hashed and stored in CPU memory for reuse in future requests.  
+- **Total tokens 14**: The request contains 14 tokenized segments.  
+- **LMCache hit tokens: 0**: No tokens were served from cache.  
+- **Need to load: 0**: No tokens need to be loaded from LMCache.  
+- **Storing KV cache for 14 out of 14 tokens**: The newly processed 14 tokens are hashed and stored in CPU memory for reuse in future requests.  
 
 🎉 **At this point, LMCache is automatically caching and reusing KV states, dramatically cutting redundant computation.**
 
 ------------------------------------
-3. Benchmarking
+Benchmarking
 ------------------------------------
 
 We conducted standardized performance evaluations on **Qwen-3-8B-Instruct**, comparing **vLLM baseline** and **LMCache-accelerated** modes under long-context workloads with one Nvidia A40 GPU.
@@ -88,7 +87,7 @@ LMCache provides an automatic recommender script to optimize settings based on h
    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model qwen/Qwen-3-8B-Instruct
 
 ------------------------------------
-4. Example Commands
+Example Commands
 ------------------------------------
 
 .. code-block:: bash
@@ -103,7 +102,7 @@ LMCache provides an automatic recommender script to optimize settings based on h
    python benchmarks/long_doc_qa/long_doc_qa.py        --model qwen/Qwen-3-8B-Instruct        --num-documents 46        --document-length 10000        --output-len 100        --repeat-count 1        --repeat-mode tile        --max-inflight-requests 4
 
 ------------------------------------
-5. Performance Metrics
+Performance Metrics
 ------------------------------------
 
 `````````````````````````````````````
@@ -137,7 +136,7 @@ LMCache Mode
    Query round prompt count: 46
 
 ------------------------------------------
-6. Performance Comparison and Conclusion
+Performance Comparison and Conclusion
 ------------------------------------------
 
 +-------------------+-------------+---------------+--------------+
