@@ -3,6 +3,7 @@
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
+import mmap
 import os
 import threading
 import time
@@ -508,16 +509,80 @@ class LocalDiskBackend(StorageBackendInterface):
         self.read_file(key, buffer, path)
         return memory_obj
 
+    def _buffered_write(self, buffer, path):
+        """Helper method for buffered write fallback."""
+        with open(path, "wb", buffering=0) as f:
+            f.write(buffer)
+
     def write_file(self, buffer, path):
         start_time = time.time()
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
-            with open(path, "wb") as f:
-                f.write(buffer)
+
+        if not self.use_odirect:
+            # Buffered write
+            self._buffered_write(buffer, path)
         else:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, buffer)
-            os.close(fd)
+            # O_DIRECT write - requires both size AND address alignment
+            bs = self.os_disk_bs
+
+            # Calculate aligned size
+            aligned_size = ((size + bs - 1) // bs) * bs
+
+            # Check if O_DIRECT is supported (Linux only)
+            if not hasattr(os, "O_DIRECT"):
+                logger.warning(
+                    "O_DIRECT not supported on this platform, "
+                    "falling back to unbuffered I/O"
+                )
+                self._buffered_write(buffer, path)
+            else:
+                # Use mmap to create a memory-aligned buffer
+                # mmap guarantees page-aligned memory addresses
+                aligned_buf = mmap.mmap(
+                    -1, aligned_size, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS
+                )
+
+                try:
+                    # Copy original data to aligned buffer
+                    aligned_buf[:size] = buffer
+                    # Pad with zeros if needed
+                    if aligned_size > size:
+                        aligned_buf[size:aligned_size] = b"\x00" * (aligned_size - size)
+
+                    # Open file with O_DIRECT
+                    fd = os.open(
+                        path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_DIRECT, 0o644
+                    )
+
+                    try:
+                        # Write in a loop to handle partial writes
+                        off = 0
+                        while off < aligned_size:
+                            written = os.write(fd, aligned_buf[off:])
+                            if written == 0:
+                                raise IOError("os.write returned 0 bytes")
+                            off += written
+
+                        # Ensure data reaches disk
+                        os.fsync(fd)
+
+                        logger.debug(
+                            f"O_DIRECT write: {size} bytes (padded to {aligned_size})"
+                        )
+                    except OSError as e:
+                        # If O_DIRECT fails, log and fall back
+                        logger.warning(
+                            f"O_DIRECT write failed: {e}, falling back to buffered I/O"
+                        )
+                        # Note: fd will be closed in finally block
+                        # Retry with buffered I/O
+                        self._buffered_write(buffer, path)
+                        return
+                    finally:
+                        os.close(fd)
+                finally:
+                    aligned_buf.close()
+
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "

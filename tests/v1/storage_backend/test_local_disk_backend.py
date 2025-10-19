@@ -120,6 +120,36 @@ def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
     )
 
 
+@pytest.fixture
+def odirect_backend_factory(temp_disk_path, async_loop, local_cpu_backend):
+    """Factory fixture for creating LocalDiskBackend with configurable O_DIRECT.
+
+    Yields a factory function that creates a backend with the specified
+    use_odirect setting. Handles cleanup automatically via context manager
+    pattern.
+    """
+    backends_created = []
+
+    def _create_backend(use_odirect: bool = False):
+        config = create_test_config(temp_disk_path)
+        if use_odirect:
+            config.extra_config = {"use_odirect": True}
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+        )
+        backends_created.append(backend)
+        return backend
+
+    yield _create_backend
+
+    # Cleanup: close memory allocator once after all backends are done
+    if backends_created:
+        local_cpu_backend.memory_allocator.close()
+
+
 class TestLocalDiskBackend:
     """Test cases for LocalDiskBackend."""
 
@@ -260,3 +290,79 @@ class TestLocalDiskBackend:
         )
         assert memory_obj is not None
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_odirect_config_disabled(self, odirect_backend_factory):
+        """Test O_DIRECT is disabled by default."""
+        backend = odirect_backend_factory(use_odirect=False)
+        assert backend.use_odirect is False
+
+    def test_odirect_config_enabled(self, odirect_backend_factory):
+        """Test O_DIRECT can be enabled via extra_config."""
+        backend = odirect_backend_factory(use_odirect=True)
+        assert backend.use_odirect is True
+
+    def test_write_with_odirect_aligned(self, temp_disk_path, odirect_backend_factory):
+        """Test write_file with O_DIRECT enabled and aligned data."""
+        backend = odirect_backend_factory(use_odirect=True)
+
+        # Create data aligned to block size
+        bs = backend.os_disk_bs
+        test_data = b"X" * (bs * 4)  # 4 blocks
+        test_path = os.path.join(temp_disk_path, "test_odirect_aligned.bin")
+
+        # Write should succeed
+        backend.write_file(test_data, test_path)
+
+        # Verify file exists and content matches
+        assert os.path.exists(test_path)
+        with open(test_path, "rb") as f:
+            content = f.read()
+        assert content == test_data
+
+    def test_write_with_odirect_misaligned(
+        self, temp_disk_path, odirect_backend_factory
+    ):
+        """Test write_file with O_DIRECT enabled and misaligned data gets padded.
+
+        Note: On filesystems that don't support O_DIRECT (e.g., tmpfs), this will
+        fall back to buffered I/O without padding, which is acceptable.
+        """
+        backend = odirect_backend_factory(use_odirect=True)
+
+        # Create data NOT aligned to block size
+        bs = backend.os_disk_bs
+        test_data = b"Y" * (bs * 2 + 100)  # 2 blocks + 100 bytes
+        test_path = os.path.join(temp_disk_path, "test_odirect_misaligned.bin")
+
+        # Write should succeed
+        backend.write_file(test_data, test_path)
+
+        # Verify file exists
+        assert os.path.exists(test_path)
+
+        # Check file size
+        file_size = os.path.getsize(test_path)
+        expected_padded_size = ((len(test_data) + bs - 1) // bs) * bs
+
+        # Read content
+        with open(test_path, "rb") as f:
+            content = f.read()
+
+        # Verify original data is preserved
+        assert content[: len(test_data)] == test_data
+
+        # Check if O_DIRECT actually worked (indicated by padding)
+        if file_size == expected_padded_size:
+            # O_DIRECT succeeded - verify padding
+            assert content[len(test_data) :] == b"\x00" * (file_size - len(test_data))
+        elif file_size == len(test_data):
+            # O_DIRECT failed, fell back to buffered I/O (e.g., on tmpfs)
+            # This is acceptable behavior
+            pass
+        else:
+            # Unexpected file size
+            pytest.fail(
+                f"Unexpected file size: {file_size}. "
+                f"Expected either {expected_padded_size} (O_DIRECT) "
+                f"or {len(test_data)} (buffered fallback)"
+            )
