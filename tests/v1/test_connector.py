@@ -239,14 +239,22 @@ def test_redis_connector(url, autorelease_v1):
 
 
 @pytest.mark.parametrize(
-    "url",
+    "url,extra_config",
     [
-        "valkey://localhost:6379",
-        "valkey://user:password@localhost:6379/0",
-        "valkey://:password@localhost:6379/1",
+        ("valkey://localhost:6379", None),
+        ("valkey://localhost", None),
+        ("valkey://localhost:6379", {
+            "valkey_username": "testuser",
+            "valkey_password": "testpass"
+        }),
+        ("valkey://localhost:6379", {
+            "valkey_username": "testuser",
+            "valkey_password": "testpass",
+            "valkey_database": 1
+        }),
     ],
 )
-def test_valkey_connector(url, autorelease_v1):
+def test_valkey_connector(url, extra_config, autorelease_v1):
     """Test Valkey connector: exists, put, get operations.
 
     This test uses the MockValkey from conftest.py to simulate
@@ -255,7 +263,9 @@ def test_valkey_connector(url, autorelease_v1):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+    
+    config = LMCacheEngineConfig.from_defaults(extra_config=extra_config)
+    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator, config))
 
     random_key = dumb_cache_engine_key()
 
@@ -266,7 +276,7 @@ def test_valkey_connector(url, autorelease_v1):
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
-    # Fill with deterministic test data for Redis Sentinel test
+    # Fill with deterministic test data
     torch.manual_seed(123)
     test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
     memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
@@ -292,28 +302,38 @@ def test_valkey_connector(url, autorelease_v1):
 
 
 @pytest.mark.parametrize(
-    "url",
+    "url,extra_config",
     [
-        "valkey://localhost:26379,localhost:26380,localhost:26381?mode=cluster",
-        "valkey://user:password@localhost:26379,localhost:26380?mode=cluster",
-        "valkey://cluster-endpoint:26379?mode=cluster",
+        ("valkey://localhost:26379,localhost:26380,localhost:26381", {
+            "valkey_mode": "cluster"
+        }),
+        ("valkey://cluster-endpoint:26379", {
+            "valkey_mode": "cluster"
+        }),
+        ("valkey://localhost:26379,localhost:26380,localhost:26381", {
+            "valkey_mode": "cluster",
+            "valkey_username": "testuser",
+            "valkey_password": "testpass"
+        }),
+        ("valkey://cluster-endpoint:26379", {
+            "valkey_mode": "cluster",
+            "valkey_username": "testuser",
+            "valkey_password": "testpass"
+        }),
     ],
 )
-def test_valkey_cluster_connector(url, autorelease_v1):
+def test_valkey_cluster_connector(url, extra_config, autorelease_v1):
     """Test Valkey Cluster connector: exists, put, get operations.
 
     This test uses the MockValkeyCluster from conftest.py to simulate
     Valkey Cluster behavior without requiring an actual Valkey Cluster setup.
     """
-    # Standard
-    import os
-
-    # Set optional environment variable for Valkey Cluster
-    os.environ["VALKEY_TIMEOUT"] = "3.5"
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+    
+    config = LMCacheEngineConfig.from_defaults(extra_config=extra_config)
+    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator, config))
 
     random_key = dumb_cache_engine_key()
 
@@ -324,7 +344,7 @@ def test_valkey_cluster_connector(url, autorelease_v1):
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
-    # Fill with deterministic test data for Redis Sentinel test
+    # Fill with deterministic test data
     torch.manual_seed(123)
     test_tensor = torch.randint(0, 100, memory_obj.raw_data.shape, dtype=torch.int64)
     memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
