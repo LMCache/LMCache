@@ -52,3 +52,6 @@ Detailed Examples
    share_kv_cache
    disaggregated_prefill 
    multimodality
+   llama_usage_guide
+   qwen_usage_guide
+   mistral_usage_guide
