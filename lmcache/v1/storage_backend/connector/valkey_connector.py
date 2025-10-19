@@ -138,25 +138,29 @@ class ValkeyConnector(RemoteConnector):
                 "Key exists but KV cache does not exist."
                 "Might happen when the cache is evicted by valkey."
             )
+            memory_obj.ref_count_down()
             return None
 
         assert not inspect.isawaitable(kv_bytes)
 
-        if isinstance(memory_obj.byte_array, memoryview):
-            view = memory_obj.byte_array
-            if view.format == "<B":
-                view = view.cast("B")
-        else:
-            view = memoryview(memory_obj.byte_array)
+        try:
+            if isinstance(memory_obj.byte_array, memoryview):
+                view = memory_obj.byte_array
+                if view.format == "<B":
+                    view = view.cast("B")
+            else:
+                view = memoryview(memory_obj.byte_array)
 
-        if isinstance(kv_bytes, (bytes, bytearray)):
-            view[: metadata.length] = kv_bytes
-        elif isinstance(kv_bytes, str):
-            converted = kv_bytes.encode("utf-8")
-            view[: metadata.length] = converted
-        else:
-            converted = bytes(kv_bytes)
-            view[: metadata.length] = converted
+            if isinstance(kv_bytes, (bytes, bytearray)):
+                view[: metadata.length] = kv_bytes
+            elif isinstance(kv_bytes, str):
+                converted = kv_bytes.encode("utf-8")
+                view[: metadata.length] = converted
+            else:
+                converted = bytes(kv_bytes)
+                view[: metadata.length] = converted
+        except Exception as exc:
+            logger.error(f"Fail to converting : {exc}")
 
         return memory_obj
 
@@ -166,24 +170,28 @@ class ValkeyConnector(RemoteConnector):
         )
 
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        kv_bytes = bytes(memory_obj.byte_array)
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
-        memory_format = memory_obj.get_memory_format()
+        try:
+            kv_bytes = bytes(memory_obj.byte_array)
+            kv_shape = memory_obj.get_shape()
+            kv_dtype = memory_obj.get_dtype()
+            memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
-        ).serialize()
+            metadata_bytes = RemoteMetadata(
+                len(kv_bytes), kv_shape, kv_dtype, memory_format
+            ).serialize()
 
-        metadata_key, kv_key = self._get_keys(key)
+            metadata_key, kv_key = self._get_keys(key)
 
-        # Use batch to set both keys in one operation
-        # kv bytes needs to be set first to avoid race condition
-        batch = Batch(False)
-        batch.set(kv_key, kv_bytes)
-        batch.set(metadata_key, metadata_bytes)
+            # Use batch to set both keys in one operation
+            # kv bytes needs to be set first to avoid race condition
+            batch = Batch(False)
+            batch.set(kv_key, kv_bytes)
+            batch.set(metadata_key, metadata_bytes)
 
-        await self.connection.exec(batch, raise_on_error=False)
+            await self.connection.exec(batch, raise_on_error=False)
+        except Exception as exc:
+            logger.error(f"Fail to put data: {exc}")
+
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         await self.executor.submit_job(
@@ -301,27 +309,31 @@ class ValkeyClusterConnector(RemoteConnector):
                 "Key exists but KV cache does not exist."
                 "Might happen when the cache is evicted by valkey."
             )
+            memory_obj.ref_count_down()
             return None
 
         assert not inspect.isawaitable(kv_bytes)
+        
+        try:
+            if isinstance(memory_obj.byte_array, memoryview):
+                view = memory_obj.byte_array
+                if view.format == "<B":
+                    view = view.cast("B")
+            else:
+                view = memoryview(memory_obj.byte_array)
 
-        if isinstance(memory_obj.byte_array, memoryview):
-            view = memory_obj.byte_array
-            if view.format == "<B":
-                view = view.cast("B")
-        else:
-            view = memoryview(memory_obj.byte_array)
+            if isinstance(kv_bytes, (bytes, bytearray)):
+                view[: metadata.length] = kv_bytes
+            elif isinstance(kv_bytes, str):
+                converted = kv_bytes.encode("utf-8")
+                view[: metadata.length] = converted
+            else:
+                converted = bytes(kv_bytes)
+                view[: metadata.length] = converted
 
-        if isinstance(kv_bytes, (bytes, bytearray)):
-            view[: metadata.length] = kv_bytes
-        elif isinstance(kv_bytes, str):
-            converted = kv_bytes.encode("utf-8")
-            view[: metadata.length] = converted
-        else:
-            converted = bytes(kv_bytes)
-            view[: metadata.length] = converted
-
-        return memory_obj
+            return memory_obj
+        except Exception as exc:
+            logger.error(f"Fail to converting : {exc}")
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         return await self.executor.submit_job(
@@ -329,24 +341,27 @@ class ValkeyClusterConnector(RemoteConnector):
         )
 
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        kv_bytes = bytes(memory_obj.byte_array)
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
-        memory_format = memory_obj.get_memory_format()
+        try:
+            kv_bytes = bytes(memory_obj.byte_array)
+            kv_shape = memory_obj.get_shape()
+            kv_dtype = memory_obj.get_dtype()
+            memory_format = memory_obj.get_memory_format()
 
-        metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
-        ).serialize()
+            metadata_bytes = RemoteMetadata(
+                len(kv_bytes), kv_shape, kv_dtype, memory_format
+            ).serialize()
 
-        metadata_key, kv_key = self._get_keys_with_hash_tag(key)
+            metadata_key, kv_key = self._get_keys_with_hash_tag(key)
 
-        # Use cluster batch to set both keys in one operation
-        # kv bytes needs to be set first to avoid race condition
-        batch = ClusterBatch(False)
-        batch.set(kv_key, kv_bytes)
-        batch.set(metadata_key, metadata_bytes)
+            # Use cluster batch to set both keys in one operation
+            # kv bytes needs to be set first to avoid race condition
+            batch = ClusterBatch(False)
+            batch.set(kv_key, kv_bytes)
+            batch.set(metadata_key, metadata_bytes)
 
-        await self.connection.exec(batch, raise_on_error=False)
+            await self.connection.exec(batch, raise_on_error=False)
+        except Exception as exc:
+            logger.error(f"Fail to put data: {exc}")
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         await self.executor.submit_job(
