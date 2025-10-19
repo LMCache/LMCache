@@ -24,18 +24,17 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
         from .valkey_connector import ValkeyConnector, ValkeyClusterConnector
 
         config = context.config
-        assert config is not None
 
-        if config.extra_config is None:
-            self.valkey_username = ""
-            self.valkey_password = ""
-            self.valkey_database = None
-            self.valkey_mode = "standalone"
-        else:
+        if config is not None and config.extra_config is not None:
             self.valkey_username = config.extra_config.get("valkey_username", "")
             self.valkey_password = config.extra_config.get("valkey_password", "")
             self.valkey_database = config.extra_config.get("valkey_database", None)
             self.valkey_mode = config.extra_config.get("valkey_mode", "standalone")
+        else:
+            self.valkey_username = ""
+            self.valkey_password = ""
+            self.valkey_database = None
+            self.valkey_mode = "standalone"
 
         logger.info(f"Creating Valkey connector for URL: {context.url}")
 
