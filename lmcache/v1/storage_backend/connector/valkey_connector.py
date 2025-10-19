@@ -192,7 +192,6 @@ class ValkeyConnector(RemoteConnector):
         except Exception as exc:
             logger.error(f"Fail to put data: {exc}")
 
-
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         await self.executor.submit_job(
             self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
@@ -313,7 +312,7 @@ class ValkeyClusterConnector(RemoteConnector):
             return None
 
         assert not inspect.isawaitable(kv_bytes)
-        
+
         try:
             if isinstance(memory_obj.byte_array, memoryview):
                 view = memory_obj.byte_array
@@ -330,10 +329,10 @@ class ValkeyClusterConnector(RemoteConnector):
             else:
                 converted = bytes(kv_bytes)
                 view[: metadata.length] = converted
-
-            return memory_obj
         except Exception as exc:
             logger.error(f"Fail to converting : {exc}")
+
+        return memory_obj
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         return await self.executor.submit_job(

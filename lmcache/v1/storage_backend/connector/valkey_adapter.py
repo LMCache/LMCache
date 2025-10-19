@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List, Tuple
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.storage_backend.connector import (
@@ -21,7 +22,7 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
 
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         # Local
-        from .valkey_connector import ValkeyConnector, ValkeyClusterConnector
+        from .valkey_connector import ValkeyClusterConnector, ValkeyConnector
 
         config = context.config
 
@@ -56,7 +57,7 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
                 password=self.valkey_password,
             )
         else:
-            url = context.url[len(self.schema):]
+            url = context.url[len(self.schema) :]
             return ValkeyConnector(
                 url=url,
                 loop=context.loop,

@@ -243,15 +243,18 @@ def test_redis_connector(url, autorelease_v1):
     [
         ("valkey://localhost:6379", None),
         ("valkey://localhost", None),
-        ("valkey://localhost:6379", {
-            "valkey_username": "testuser",
-            "valkey_password": "testpass"
-        }),
-        ("valkey://localhost:6379", {
-            "valkey_username": "testuser",
-            "valkey_password": "testpass",
-            "valkey_database": 1
-        }),
+        (
+            "valkey://localhost:6379",
+            {"valkey_username": "testuser", "valkey_password": "testpass"},
+        ),
+        (
+            "valkey://localhost:6379",
+            {
+                "valkey_username": "testuser",
+                "valkey_password": "testpass",
+                "valkey_database": 1,
+            },
+        ),
     ],
 )
 def test_valkey_connector(url, extra_config, autorelease_v1):
@@ -263,9 +266,11 @@ def test_valkey_connector(url, extra_config, autorelease_v1):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    
+
     config = LMCacheEngineConfig.from_defaults(extra_config=extra_config)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator, config))
+    connector = autorelease_v1(
+        CreateConnector(url, async_loop, memory_allocator, config)
+    )
 
     random_key = dumb_cache_engine_key()
 
@@ -304,22 +309,27 @@ def test_valkey_connector(url, extra_config, autorelease_v1):
 @pytest.mark.parametrize(
     "url,extra_config",
     [
-        ("valkey://localhost:26379,localhost:26380,localhost:26381", {
-            "valkey_mode": "cluster"
-        }),
-        ("valkey://cluster-endpoint:26379", {
-            "valkey_mode": "cluster"
-        }),
-        ("valkey://localhost:26379,localhost:26380,localhost:26381", {
-            "valkey_mode": "cluster",
-            "valkey_username": "testuser",
-            "valkey_password": "testpass"
-        }),
-        ("valkey://cluster-endpoint:26379", {
-            "valkey_mode": "cluster",
-            "valkey_username": "testuser",
-            "valkey_password": "testpass"
-        }),
+        (
+            "valkey://localhost:26379,localhost:26380,localhost:26381",
+            {"valkey_mode": "cluster"},
+        ),
+        ("valkey://cluster-endpoint:26379", {"valkey_mode": "cluster"}),
+        (
+            "valkey://localhost:26379,localhost:26380,localhost:26381",
+            {
+                "valkey_mode": "cluster",
+                "valkey_username": "testuser",
+                "valkey_password": "testpass",
+            },
+        ),
+        (
+            "valkey://cluster-endpoint:26379",
+            {
+                "valkey_mode": "cluster",
+                "valkey_username": "testuser",
+                "valkey_password": "testpass",
+            },
+        ),
     ],
 )
 def test_valkey_cluster_connector(url, extra_config, autorelease_v1):
@@ -331,9 +341,11 @@ def test_valkey_cluster_connector(url, extra_config, autorelease_v1):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    
+
     config = LMCacheEngineConfig.from_defaults(extra_config=extra_config)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator, config))
+    connector = autorelease_v1(
+        CreateConnector(url, async_loop, memory_allocator, config)
+    )
 
     random_key = dumb_cache_engine_key()
 
