@@ -671,6 +671,9 @@ class LMCacheConnectorV1Impl:
 
         self._requests_priority: dict[str, int] = {}
 
+        # Track block IDs associated with failed load attempts.
+        self._invalid_block_ids: set[int] = set()
+
         # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
         if vllm_config.parallel_config.data_parallel_rank_local == 0:
             # Start internal API server if enabled
@@ -885,6 +888,59 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
+                self.record_failed_blocks(
+                    request.req_id,
+                    token_mask[:lmcache_cached_tokens],
+                    ret_token_mask,
+                    slot_mapping[:lmcache_cached_tokens],
+                )
+
+    def record_failed_blocks(
+        self,
+        request_id: str,
+        expected_mask: torch.Tensor,
+        ret_mask: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Record block IDs associated with failed load attempts."""
+
+        if expected_mask.numel() == 0:
+            return
+
+        expected_mask_cpu = expected_mask.to(device="cpu", dtype=torch.bool)
+        ret_mask_cpu = ret_mask.to(device="cpu", dtype=torch.bool)
+
+        if ret_mask_cpu.shape[0] != expected_mask_cpu.shape[0]:
+            logger.debug("expected_mask_cpu.shape[0] != ret_mask_cpu.shape[0]")
+            return
+
+        missing_mask = expected_mask_cpu & ~ret_mask_cpu
+        if not torch.any(missing_mask):
+            return
+
+        missing_indices = torch.nonzero(missing_mask, as_tuple=False).view(-1)
+        if missing_indices.numel() == 0:
+            return
+
+        slot_mapping_cpu = slot_mapping.to(device="cpu", dtype=torch.long)
+        if slot_mapping_cpu.shape[0] > missing_mask.shape[0]:
+            slot_mapping_cpu = slot_mapping_cpu[: missing_mask.shape[0]]
+
+        missing_blocks_tensor = torch.unique(
+            slot_mapping_cpu[missing_indices] // self._block_size
+        )
+        missing_blocks = {int(block.item()) for block in missing_blocks_tensor}
+
+        if not missing_blocks:
+            return
+
+        logger.warning(
+            "Request %s failed to load %d token(s) across %d block(s); marking blocks invalid.",
+            request_id,
+            missing_indices.numel(),
+            len(missing_blocks),
+        )
+        self._invalid_block_ids.update(missing_blocks)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -1116,6 +1172,11 @@ class LMCacheConnectorV1Impl:
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         return None, None
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        invalid_blocks = self._invalid_block_ids.copy()
+        self._invalid_block_ids.clear()
+        return invalid_blocks
 
     ###################
     # Scheduler side APIs
