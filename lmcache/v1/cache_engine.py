@@ -1138,7 +1138,13 @@ class LMCacheEngine:
             else:
                 # NOTE: key should always be in the lookup cache once
                 # we support it.
-                location = self.storage_manager.contains(key)
+
+                if len(self.storage_manager.actual_storage_names) == 1:
+                    # Only lookup result is True, will reach this branch, if there is only
+                    # one storage backend, there is no need to check 'contains' again
+                    location = self.storage_manager.actual_storage_names[0]
+                else:
+                    location = self.storage_manager.contains(key)
                 if location is None:
                     break
 
