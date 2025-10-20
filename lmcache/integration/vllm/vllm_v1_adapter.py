@@ -935,7 +935,7 @@ class LMCacheConnectorV1Impl:
             return
 
         logger.warning(
-            "Request %s failed to load %d token(s) across %d block(s); marking blocks invalid.",
+            "Request %s failed to load %d tokens across %d blocks",
             request_id,
             missing_indices.numel(),
             len(missing_blocks),
