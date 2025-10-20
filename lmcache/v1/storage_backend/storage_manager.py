@@ -10,6 +10,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    cast,
 )
 import asyncio
 import functools
@@ -28,10 +29,8 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_pool import MemoryPool, PoolRequest
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
@@ -215,6 +214,14 @@ class StorageManager:
         if config.local_cpu:
             self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
+        backend_owner = cast(Any, self.allocator_backend)
+        backend_pool = getattr(backend_owner, "memory_pool", None)
+        if backend_pool is None:
+            allocator = self.allocator_backend.get_memory_allocator()
+            backend_pool = MemoryPool(allocator, backend=self.allocator_backend)
+            backend_owner.memory_pool = backend_pool
+        self.memory_pool: MemoryPool = backend_pool
+
         self.manager_lock = threading.Lock()
 
         self.lmcache_worker = lmcache_worker
@@ -289,6 +296,42 @@ class StorageManager:
         return self.allocator_backend.batched_allocate(
             shape, dtype, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
         )
+
+    def request_memory(
+        self,
+        *,
+        shape: Optional[torch.Size] = None,
+        dtype: Optional[torch.dtype] = None,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        size: Optional[int] = None,
+        tag: str = "generic",
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> MemoryObj:
+        """
+        Borrow a MemoryObj from the shared memory pool. This centralizes
+        allocation for connectors and other engine-owned components.
+        """
+        if self.memory_pool is None:
+            raise RuntimeError("MemoryPool is not available")
+        req = PoolRequest(
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt,
+            size=size,
+            tag=tag,
+            eviction=eviction,
+            busy_loop=busy_loop,
+        )
+        return self.memory_pool.borrow(req)
+
+    def release_memory(self, memory_obj: MemoryObj) -> None:
+        """
+        Release a previously borrowed MemoryObj back to the pool.
+        """
+        if self.memory_pool is None:
+            raise RuntimeError("MemoryPool is not available")
+        self.memory_pool.release(memory_obj)
 
     def put(
         self,

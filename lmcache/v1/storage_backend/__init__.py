@@ -14,7 +14,10 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.local_cpu_backend import (
+    LocalCPUBackend,
+    LocalCPUDisabledError,
+)
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -120,17 +123,33 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
+    local_cpu_backend: Optional[LocalCPUBackend] = None
     if not config.enable_pd or config.local_cpu:
-        local_cpu_backend = LocalCPUBackend(
-            config,
-            metadata,
-            dst_device,
-            lmcache_worker,
-        )
-        backend_name = str(local_cpu_backend)
-        storage_backends[backend_name] = local_cpu_backend
+        try:
+            local_cpu_backend = LocalCPUBackend(
+                config,
+                metadata,
+                dst_device,
+                lmcache_worker,
+            )
+        except LocalCPUDisabledError as exc:
+            if config.local_cpu or not config.enable_pd:
+                raise ValueError(
+                    "LocalCPUBackend requires max_local_cpu_size > 0 when "
+                    "local_cpu is enabled or PD is disabled."
+                ) from exc
+            logger.info(
+                "Skipping LocalCPUBackend initialization because max_local_cpu_size "
+                "is non-positive while PD is enabled."
+            )
+            local_cpu_backend = None
+        else:
+            backend_name = str(local_cpu_backend)
+            storage_backends[backend_name] = local_cpu_backend
 
     if config.enable_p2p:
+        if local_cpu_backend is None:
+            raise ValueError("enable_p2p requires max_local_cpu_size > 0")
         p2p_backend = P2PBackend(
             config,
             metadata,
@@ -152,6 +171,8 @@ def CreateStorageBackends(
         )
 
     if config.local_disk and config.max_local_disk_size > 0:
+        if local_cpu_backend is None:
+            raise ValueError("local_disk backend requires max_local_cpu_size > 0")
         local_disk_backend = LocalDiskBackend(
             config, loop, local_cpu_backend, dst_device, lmcache_worker
         )
@@ -169,6 +190,8 @@ def CreateStorageBackends(
         gds_backend = GdsBackend(config, metadata, loop, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
     if config.remote_url is not None:
+        if local_cpu_backend is None:
+            raise ValueError("remote_url requires max_local_cpu_size > 0")
         remote_backend = RemoteBackend(
             config,
             metadata,
@@ -179,7 +202,7 @@ def CreateStorageBackends(
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
-    if not config.enable_pd or config.local_cpu:
+    if (not config.enable_pd or config.local_cpu) and local_cpu_backend is not None:
         # Create dynamic backends from configuration
         create_dynamic_backends(
             config,
