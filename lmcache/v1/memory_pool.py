@@ -83,7 +83,7 @@ class MemoryPool:
     def borrow(self, req: PoolRequest) -> MemoryObj:
         """Borrow a MemoryObj from the underlying allocator."""
         shape = req.resolve_shape()
-        memory_obj: Optional[MemoryObj]
+        memory_obj: Optional[MemoryObj] = None
         if self._backend is not None:
             allocate_from_pool = getattr(self._backend, "allocate_from_pool", None)
             if callable(allocate_from_pool):
@@ -94,9 +94,8 @@ class MemoryPool:
                     req.fmt != MemoryFormat.BINARY_BUFFER
                 ):
                     if req.dtype is None:
-                        raise ValueError(
-                            "PoolRequest dtype must be set for backend allocations"
-                        )
+                        msg = "PoolRequest dtype must be set for backend allocations"
+                        raise ValueError(msg)
                     memory_obj = backend_allocate(
                         shape,
                         req.dtype,
@@ -104,9 +103,7 @@ class MemoryPool:
                         eviction=req.eviction,
                         busy_loop=req.busy_loop,
                     )
-                else:
-                    memory_obj = self._allocator.allocate(shape, req.dtype, req.fmt)
-        else:
+        if memory_obj is None:
             memory_obj = self._allocator.allocate(shape, req.dtype, req.fmt)
         if memory_obj is None:
             raise RuntimeError(
