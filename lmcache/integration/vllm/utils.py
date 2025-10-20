@@ -131,10 +131,10 @@ def create_lmcache_metadata(
     """
     # Third Party
     try:
+        # Third Party
         from vllm.utils.torch_utils import get_kv_cache_torch_dtype
     except ImportError:
         from vllm.utils import get_kv_cache_torch_dtype
-
     # First Party
     from lmcache.config import LMCacheEngineMetadata
 
