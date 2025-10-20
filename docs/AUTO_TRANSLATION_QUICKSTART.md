@@ -33,6 +33,8 @@
 1. 修改任意英文文档 (`.rst` 或 `.md` 文件)
 2. 推送到 `dev` 分支
 3. 查看 **Actions** 标签页，工作流会自动运行
+   - 工作流会先运行 `make gettext` 和 `sphinx-intl update` 更新 `.po` 文件
+   - 然后 AI 自动翻译新增或修改的内容
 4. 等待几分钟，会自动创建包含翻译的 PR
 
 **选项 B: 手动触发**
@@ -46,6 +48,87 @@
 - ✨ 现在每次更新英文文档，系统会自动翻译
 - 📝 翻译会通过 Pull Request 提交，方便审核
 - 🚀 审核通过后，中英文文档会一起发布
+
+## 🔍 工作原理
+
+### 自动翻译流程
+
+当英文文档更新时，GitHub Actions 会自动执行以下步骤：
+
+```
+1. 检测到英文文档变更
+   ↓
+2. 运行 make gettext
+   - 从 RST 文件提取可翻译文本
+   - 生成 .pot 模板文件
+   ↓
+3. 运行 sphinx-intl update
+   - 更新 .po 翻译文件
+   - 新内容：添加空的 msgstr ""
+   - 修改内容：标记为 fuzzy
+   - 已有翻译：保留不变
+   ↓
+4. AI 自动翻译
+   - 读取 .po 文件
+   - 翻译新增内容（空 msgstr）
+   - 重新翻译修改内容（fuzzy 标记）
+   - 跳过未修改的已翻译内容
+   - 保持术语一致性
+   ↓
+5. 创建 Pull Request
+   - 包含更新后的 .po 文件
+   - 等待审核和合并
+```
+
+### 手动翻译流程
+
+如果需要手动翻译或修正翻译：
+
+```bash
+# 1. 更新翻译文件（必须先做这一步）
+cd docs
+make i18n-update
+
+# 2. 使用 AI 自动翻译
+python tools/auto_translate.py --api anyrouter --target-lang zh_CN
+
+# 3. 或手动编辑 .po 文件
+vim source/locale/zh_CN/LC_MESSAGES/XXX.po
+
+# 4. 构建并预览
+make html-zh
+```
+
+**重要提示**：
+- 必须先运行 `make i18n-update` 来更新 .po 文件
+- AI 工具会自动翻译：
+  - ✨ **新增内容**（空 msgstr）
+  - 🔄 **修改内容**（fuzzy 标记）
+  - ⏭️ **跳过**未修改的已翻译内容
+
+### 什么是 fuzzy 标记？
+
+当英文原文被修改时，`sphinx-intl update` 会：
+1. 保留旧的翻译（msgstr）
+2. 添加 `#, fuzzy` 标记表示"翻译可能已过时"
+3. AI 工具会自动检测并重新翻译这些条目
+4. 翻译完成后自动清除 fuzzy 标记
+
+示例：
+```po
+# 原始状态
+msgid "Welcome"
+msgstr "欢迎"
+
+# 英文改为 "Welcome to LMCache" 后
+#, fuzzy          ← fuzzy 标记
+msgid "Welcome to LMCache"
+msgstr "欢迎"    ← 旧翻译保留
+
+# AI 自动翻译后
+msgid "Welcome to LMCache"
+msgstr "欢迎使用 LMCache"  ← 新翻译，fuzzy 标记已清除
+```
 
 ## 📖 下一步
 

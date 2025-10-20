@@ -334,19 +334,37 @@ def translate_po_file(
     translated_count = 0
     skipped_count = 0
     error_count = 0
+    fuzzy_count = 0
 
     for entry in po:
-        # 跳过已翻译的条目（除非强制重新翻译）
-        if entry.msgstr and not force:
-            skipped_count += 1
-            continue
-
         # 跳过空的源文本
         if not entry.msgid.strip():
             skipped_count += 1
             continue
 
-        print(f"  翻译: {entry.msgid[:50]}...")
+        # 判断是否需要翻译
+        needs_translation = False
+        is_fuzzy = 'fuzzy' in entry.flags
+        
+        if force:
+            # 强制翻译所有条目
+            needs_translation = True
+            reason = "强制重译"
+        elif not entry.msgstr:
+            # 新增的条目（msgstr 为空）
+            needs_translation = True
+            reason = "新增"
+        elif is_fuzzy:
+            # 修改的条目（fuzzy 标记）
+            needs_translation = True
+            fuzzy_count += 1
+            reason = "已修改(fuzzy)"
+        else:
+            # 已翻译且未修改的条目，跳过
+            skipped_count += 1
+            continue
+
+        print(f"  翻译 [{reason}]: {entry.msgid[:50]}...")
 
         try:
             translation = translator.translate(entry.msgid)
@@ -364,6 +382,9 @@ def translate_po_file(
 
             if not dry_run:
                 entry.msgstr = translation
+                # 清除 fuzzy 标记（如果有）
+                if 'fuzzy' in entry.flags:
+                    entry.flags.remove('fuzzy')
             translated_count += 1
         except Exception as e:
             print(f"  错误: {e}")
@@ -374,6 +395,8 @@ def translate_po_file(
         try:
             po.save(str(po_file))
             print(f"✓ 已保存翻译到: {po_file}")
+            if fuzzy_count > 0:
+                print(f"  其中 fuzzy 条目: {fuzzy_count} 条")
         except Exception as e:
             print(f"错误: 无法保存 .po 文件: {e}")
             error_count += 1

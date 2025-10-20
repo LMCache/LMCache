@@ -110,6 +110,38 @@ python tools/auto_translate.py --api anyrouter --target-lang zh_CN
 python tools/auto_translate.py --api anyrouter --target-lang zh_CN --dry-run
 ```
 
+### 翻译策略
+
+AI 翻译工具会智能处理不同状态的条目：
+
+| 状态 | msgstr | fuzzy 标记 | 处理方式 |
+|------|--------|-----------|---------|
+| 新增内容 | 空 | 无 | ✅ 自动翻译 |
+| 修改内容 | 有（旧翻译） | 有 | ✅ 重新翻译 |
+| 未修改内容 | 有 | 无 | ⏭️ 跳过 |
+| 强制模式 | 任意 | 任意 | ✅ 全部重译 |
+
+**Fuzzy 标记说明**：
+- 当英文原文修改时，`sphinx-intl update` 会自动添加 `#, fuzzy` 标记
+- 表示该条目的翻译可能已过时，需要更新
+- AI 工具检测到 fuzzy 标记后会自动重新翻译
+- 翻译完成后会自动清除 fuzzy 标记
+
+示例工作流：
+```bash
+# 1. 英文文档更新后，先更新 .po 文件
+cd docs
+make i18n-update
+# 这会标记修改的条目为 fuzzy
+
+# 2. AI 自动翻译新增和 fuzzy 条目
+python tools/auto_translate.py --api anyrouter --target-lang zh_CN
+# 输出会显示：翻译 [新增] 和 翻译 [已修改(fuzzy)]
+
+# 3. 验证结果
+make html-zh
+```
+
 ### 验证翻译
 
 ```bash

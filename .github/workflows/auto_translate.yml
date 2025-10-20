@@ -10,7 +10,6 @@ on:
       - '!docs/source/locale/**'
       - 'docs/TRANSLATION_GLOSSARY_zh.md'
   
-  # 也可以手动触发
   workflow_dispatch:
     inputs:
       force:
