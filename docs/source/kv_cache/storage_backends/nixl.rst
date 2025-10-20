@@ -47,13 +47,13 @@ Key settings:
 
 - ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
 
-- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS" and "GDS_MT" backends - for "POSIX", "HF3FS" & "OBJ", must be "cpu".
+- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS" and "GDS_MT" backends - for "POSIX", "HF3FS", "OBJ" & "AIStor", must be "cpu".
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
   .. note::
 
-    Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ"].
+    Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AIStor"].
 
     Backend specific params should be provided via ``extra_config.nixl_backend_params``. Please refer to NIXL documentation for specifics.
 

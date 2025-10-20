@@ -70,15 +70,15 @@ class NixlStorageConfig:
 
     @staticmethod
     def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
-        if dynamic_storage:  # For now only supported for OBJ & cpu
-            if backend in ("OBJ",):
+        if dynamic_storage:  # For now only supported for OBJ, AIStor & cpu
+            if backend in ("OBJ", "AIStor"):
                 return device == "cpu"
             else:
                 return False
         else:
             if backend in ("GDS", "GDS_MT"):
                 return device == "cpu" or device == "cuda"
-            elif backend in ("POSIX", "HF3FS", "OBJ"):
+            elif backend in ("POSIX", "HF3FS", "OBJ", "AIStor"):
                 return device == "cpu"
             else:
                 return False
