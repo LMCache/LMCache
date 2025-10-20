@@ -11,11 +11,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.token_database import (
-    ChunkedTokenDatabase,
-    SegmentTokenDatabase,
-    TokenDatabase,
-)
 
 if TYPE_CHECKING:
     # Third Party
@@ -52,13 +47,9 @@ class LMCacheBypassLookupClient(LookupClientInterface):
         self.lmcache_engine = lmcache_engine
         self.config = config
 
-        # Initialize token database for processing tokens
-        self.enable_blending = config.enable_blending
-        self.token_database: TokenDatabase
-        if self.enable_blending:
-            self.token_database = SegmentTokenDatabase(config, metadata)
-        else:
-            self.token_database = ChunkedTokenDatabase(config, metadata)
+        # Use the token database from the provided LMCacheEngine
+        self.token_database = self.lmcache_engine.token_database
+        self.enable_blending = self.config.enable_blending
 
         logger.info("LMCacheBypassLookupClient initialized")
 
