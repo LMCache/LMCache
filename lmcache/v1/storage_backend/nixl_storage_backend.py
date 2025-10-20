@@ -44,6 +44,7 @@ from lmcache.v1.memory_management import (
     PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
@@ -115,6 +116,10 @@ class NixlDescPool(ABC):
 
         self.indices.extend(reversed(range(size)))
 
+    def get_num_available_descs(self) -> int:
+        with self.lock:
+            return len(self.indices)
+
     def pop(self) -> int:
         with self.lock:
             assert len(self.indices) > 0
@@ -162,6 +167,34 @@ class NixlObjectPool(NixlDescPool):
 
     def close(self):
         pass
+
+
+@dataclass
+class NixlKeyMetadata:
+    index: int
+    shape: Optional[torch.Size] = None
+    dtype: Optional[torch.dtype] = None
+    fmt: Optional[MemoryFormat] = None
+    pin_count: int = 0
+
+    def pin(self) -> bool:
+        self.pin_count += 1
+        return True
+
+    def unpin(self) -> bool:
+        self.pin_count -= 1
+        return True
+
+    @property
+    def is_pinned(self) -> bool:
+        return self.pin_count > 0
+
+    @property
+    def can_evict(self) -> bool:
+        """
+        Check if the related key can be evicted.
+        """
+        return not self.is_pinned
 
 
 class NixlStorageAgent:
@@ -325,11 +358,12 @@ class NixlStorageBackend(AllocatorBackendInterface):
         super().__init__(dst_device=nixl_config.buffer_device)
 
         self.loop = loop
-        self.key_lock = threading.Lock()
-        self.key_dict: dict[int, MemoryObjMetadata] = {}
+        self.key_lock = threading.RLock()
+        self.cache_policy = get_cache_policy(config.cache_policy)
+        self.key_dict = self.cache_policy.init_mutable_mapping()
 
-        self.progress_lock = threading.Lock()
-        self.progress_set: Set[int] = set()
+        self.progress_lock = threading.RLock()
+        self.progress_set: Set[CacheEngineKey] = set()
 
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
@@ -357,8 +391,9 @@ class NixlStorageBackend(AllocatorBackendInterface):
         """
 
         with self.key_lock:
-            chunk_hash = key.chunk_hash
-            if chunk_hash in self.key_dict and not self.exists_in_put_tasks(key):
+            if key in self.key_dict:
+                if pin:
+                    self.key_dict[key].pin()
                 return True
             else:
                 return False
@@ -371,21 +406,20 @@ class NixlStorageBackend(AllocatorBackendInterface):
         :return: True if the key exists in put tasks, False otherwise
         """
         with self.progress_lock:
-            return key.chunk_hash in self.progress_set
+            return key in self.progress_set
 
     def add_key_to_dict(
         self, key: CacheEngineKey, obj: MemoryObjMetadata, index: int
     ) -> None:
         with self.key_lock:
-            assert key.chunk_hash not in self.key_dict
-            self.key_dict[key.chunk_hash] = MemoryObjMetadata(
+            assert key not in self.key_dict
+            self.key_dict[key] = NixlKeyMetadata(
                 shape=obj.shape,
                 dtype=obj.dtype,
                 fmt=obj.fmt,
-                phy_size=obj.phy_size,
-                ref_count=1,
-                address=index,
+                index=index,
             )
+            self.cache_policy.update_on_put(key)
 
     async def mem_to_storage(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
@@ -404,7 +438,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         for key in keys:
             with self.progress_lock:
-                self.progress_set.discard(key.chunk_hash)
+                self.progress_set.discard(key)
 
     async def storage_to_mem(
         self, keys: list[CacheEngineKey]
@@ -414,10 +448,12 @@ class NixlStorageBackend(AllocatorBackendInterface):
         storage_indices = []
         with self.key_lock:
             for key in keys:
-                metadata = self.key_dict.get(key.chunk_hash)
+                metadata = self.key_dict.get(key)
                 if metadata is None:
                     obj_list.append(None)
                     continue
+
+                self.cache_policy.update_on_hit(key, self.key_dict)
 
                 dtype = metadata.dtype
                 shape = metadata.shape
@@ -432,7 +468,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
                 obj_list.append(obj)
 
                 mem_indices.append(obj.metadata.address)
-                storage_indices.append(metadata.address)
+                storage_indices.append(metadata.index)
 
         if not mem_indices:
             return obj_list
@@ -449,9 +485,25 @@ class NixlStorageBackend(AllocatorBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
     ) -> None:
+        with self.key_lock:
+            available_descs = self.pool.get_num_available_descs()
+            num_evict = len(keys) - available_descs
+            if num_evict > 0:
+                evict_keys = self.cache_policy.get_evict_candidates(
+                    self.key_dict, num_candidates=num_evict
+                )
+
+                if not evict_keys:
+                    logger.warning(
+                        "No eviction candidates found. Backend under pressure."
+                    )
+                    return None
+
+                self.batched_remove(evict_keys, force=False)
+
         with self.progress_lock:
             for key in keys:
-                self.progress_set.add(key.chunk_hash)
+                self.progress_set.add(key)
 
         asyncio.run_coroutine_threadsafe(
             self.mem_to_storage(keys, memory_objs), self.loop
@@ -492,18 +544,30 @@ class NixlStorageBackend(AllocatorBackendInterface):
         """
 
         with self.key_lock:
-            metadata = self.key_dict.pop(key.chunk_hash, None)
+            metadata = self.key_dict.pop(key, None)
             if metadata is None:
                 return False
+            if force:
+                self.cache_policy.update_on_force_evict(key)
 
-        self.pool.push(metadata.address)
+        self.pool.push(metadata.index)
         return True
 
     def pin(self, key: CacheEngineKey) -> bool:
-        return False
+        with self.key_lock:
+            if key in self.key_dict:
+                self.key_dict[key].pin()
+                return True
+            else:
+                return False
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        return False
+        with self.key_lock:
+            if key in self.key_dict:
+                self.key_dict[key].unpin()
+                return True
+            else:
+                return False
 
     def close(self) -> None:
         """
@@ -562,8 +626,6 @@ class NixlStorageBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
-        if eviction:
-            logger.warning("NixlStorageBackend does not support eviction for now")
         if busy_loop:
             logger.warning("NixlStorageBackend does not support busy loop for now")
 
@@ -578,8 +640,6 @@ class NixlStorageBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[list[MemoryObj]]:
-        if eviction:
-            logger.warning("NixlStorageBackend does not support eviction for now")
         if busy_loop:
             logger.warning("NixlStorageBackend does not support busy loop for now")
 
