@@ -1131,6 +1131,7 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
 
+            location = None
             if key in self.lookup_cache:
                 # TODO(Jiayi): we can reduce the number of `contains` calls
                 # by checking the lookup cache first (should be updated in `lookup`)
@@ -1140,7 +1141,7 @@ class LMCacheEngine:
                 # we support it.
 
                 if len(self.storage_manager.actual_storage_names) == 1:
-                    # Only lookup result is True, will reach this branch, if there is only
+                    # Only lookup is True, will reach this branch, if there is only
                     # one storage backend, there is no need to check 'contains' again
                     location = self.storage_manager.actual_storage_names[0]
                 else:

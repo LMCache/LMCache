@@ -827,7 +827,7 @@ class StorageManager:
             if "LocalCPUBackend" == backend_name and not self.config.local_cpu:
                 # if local_cpu is False, means LocalCPUBackend is only a allocator
                 continue
-            if "PDBackend" == backend_name and backend.pd_config.role == "sender":
+            if "PDBackend" == backend_name and backend.pd_config.role == "sender":  # type: ignore
                 # if pd_config.role is sender, means PDBackend is only a allocator
                 continue
             storage_names.append(backend_name)
