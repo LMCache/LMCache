@@ -1,8 +1,15 @@
 # LMCache 文档中文翻译维护指南
 
+> 💡 **新功能**: 现在支持自动翻译！查看 [自动翻译快速开始指南](AUTO_TRANSLATION_QUICKSTART.md) 了解如何使用 AI 自动翻译文档。
+
 ## 📚 项目概述
 
 LMCache 文档现已完成中文翻译，本文档用于指导后续的翻译维护工作。
+
+### 翻译方式
+
+- **🤖 自动翻译** (推荐): 使用 AI API 自动翻译，参见 [AUTO_TRANSLATION_QUICKSTART.md](AUTO_TRANSLATION_QUICKSTART.md)
+- **✍️ 手动翻译**: 按照本文档的指引手动编辑 .po 文件
 
 ### 在线文档
 - **英文文档**: [https://docs.lmcache.ai](https://docs.lmcache.ai)

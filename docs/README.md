@@ -6,9 +6,14 @@ Check out the [online doc](https://docs.lmcache.ai/developer_guide/contributing.
 
 This documentation supports multiple languages:
 - **English** - Primary version
-- **中文 (Chinese)** - Complete translation available
+- **中文 (Chinese)** - Complete translation available ✅
 
-For translation maintenance, see [TRANSLATION_MAINTENANCE_zh.md](./TRANSLATION_MAINTENANCE_zh.md).
+### 🤖 Auto Translation (New!)
+
+We now support **AI-powered automatic translation**:
+- ⚡ **Quick Start**: [AUTO_TRANSLATION_QUICKSTART.md](./AUTO_TRANSLATION_QUICKSTART.md) - Set up in 3 minutes
+- 📖 **Complete Guide**: [AUTO_TRANSLATION_SETUP.md](./AUTO_TRANSLATION_SETUP.md) - Advanced configuration
+- ✍️ **Manual Translation**: [TRANSLATION_MAINTENANCE_zh.md](./TRANSLATION_MAINTENANCE_zh.md) - Traditional workflow
 
 ## Quick Build Commands
 

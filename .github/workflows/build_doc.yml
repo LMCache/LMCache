@@ -39,9 +39,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements/docs.txt
 
-      - name: Build Versioned Sphinx Documentation
+      - name: Build Versioned Sphinx Documentation (English)
         run: |
           sphinx-multiversion docs/source output
+        continue-on-error: false
+      
+      - name: Build Versioned Sphinx Documentation (Chinese)
+        run: |
+          sphinx-multiversion docs/source output/zh_CN -D language=zh_CN
         continue-on-error: false
 
       - name: Setup root docs and .nojekyll
@@ -51,6 +56,13 @@ jobs:
           cp -r output/dev/* output/
           # Remove dev directory to avoid duplication
           rm -rf output/dev
+          # Setup Chinese docs with language selector
+          touch output/zh_CN/.nojekyll
+          # Copy Chinese dev docs to root if exists
+          if [ -d "output/zh_CN/dev" ]; then
+            cp -r output/zh_CN/dev/* output/zh_CN/
+            rm -rf output/zh_CN/dev
+          fi
 
       - name: Upload doc artifacts to GHA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
