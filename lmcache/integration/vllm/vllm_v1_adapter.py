@@ -953,8 +953,6 @@ class LMCacheConnectorV1Impl:
 
             is_first = True
 
-            logger.info(f"connector_metadata: {connector_metadata}")
-
             for idx, request in enumerate(connector_metadata.requests):
                 save_spec = request.save_spec
                 if save_spec is None or not save_spec.can_save:
