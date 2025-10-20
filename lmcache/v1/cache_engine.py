@@ -33,13 +33,7 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.kv_events import (
-    MEDIUM_GPU,
-    BlockStored,
-    EventPublisherFactory,
-    KVCacheEvent,
-    KVEventBatch,
-)
+from lmcache.v1.kv_events import MEDIUM_GPU, EventPublisherFactory
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -57,6 +51,14 @@ from lmcache.v1.token_database import (
     SegmentTokenDatabase,
     TokenDatabase,
 )
+
+vllm_is_available = True
+try:
+    # Third Party
+    from vllm.distributed.kv_events import BlockStored, KVCacheEvent, KVEventBatch
+except ImportError:
+    # kv events are available through vLLM only
+    vllm_is_available = False
 
 logger = init_logger(__name__)
 
@@ -136,10 +138,11 @@ class LMCacheEngine:
         )
 
         # Publishing KV events
-        self.kv_event_publisher = EventPublisherFactory.create(
-            config,
-        )
-        self.kv_event_queue: List[KVCacheEvent] = []
+        if vllm_is_available:
+            self.kv_event_publisher = EventPublisherFactory.create(
+                config,
+            )
+            self.kv_event_queue: List[KVCacheEvent] = []
 
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
@@ -295,25 +298,30 @@ class LMCacheEngine:
             tot_token_num += num_tokens
 
             # Create KV event
-            stored_block = BlockStored(
-                block_hashes=[hash(key)] if isinstance(key, CacheEngineKey) else [key],
-                parent_block_hash=None if start == 0 else prev_key,
-                token_ids=[],
-                block_size=num_tokens,
-                lora_id=None,
-                medium=MEDIUM_GPU,
-            )
-            if tokens is not None:
-                stored_block.token_ids = (
-                    tokens.tolist()[start : end + 1]
-                    if isinstance(tokens, torch.Tensor)
-                    else tokens[start : end + 1]
+            if vllm_is_available:
+                stored_block = BlockStored(
+                    block_hashes=[hash(key)]
+                    if isinstance(key, CacheEngineKey)
+                    else [key],
+                    parent_block_hash=None if start == 0 else prev_key,
+                    token_ids=[],
+                    block_size=num_tokens,
+                    lora_id=None,
+                    medium=MEDIUM_GPU,
                 )
-            elif hashes is not None:
-                stored_block.token_ids = hashes[start : end + 1]
-            logger.info(f"Added block '{stored_block}' to kv events queue")
-            self.kv_event_queue.append(stored_block)
-            prev_key = prev_key = hash(key) if isinstance(key, CacheEngineKey) else key
+                if tokens is not None:
+                    stored_block.token_ids = (
+                        tokens.tolist()[start : end + 1]
+                        if isinstance(tokens, torch.Tensor)
+                        else tokens[start : end + 1]
+                    )
+                elif hashes is not None:
+                    stored_block.token_ids = hashes[start : end + 1]
+                logger.info(f"Added block '{stored_block}' to kv events queue")
+                self.kv_event_queue.append(stored_block)
+                prev_key = prev_key = (
+                    hash(key) if isinstance(key, CacheEngineKey) else key
+                )
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
@@ -342,10 +350,11 @@ class LMCacheEngine:
         )
 
         # Publish KV events
-        logger.info("Publish kv events")
-        batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
-        self.kv_event_queue = []
-        self.kv_event_publisher.publish(batch)
+        if vllm_is_available:
+            logger.info("Publish kv events")
+            batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
+            self.kv_event_queue = []
+            self.kv_event_publisher.publish(batch)
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
 
@@ -434,7 +443,7 @@ class LMCacheEngine:
             tot_token_num += num_tokens
 
             # Create KV event
-            if tokens is not None:
+            if vllm_is_available and tokens is not None:
                 stored_block = BlockStored(
                     block_hashes=[hash(key)]
                     if isinstance(key, CacheEngineKey)
@@ -485,10 +494,11 @@ class LMCacheEngine:
         logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
 
         # Publish the KV events
-        logger.info("Publish kv events")
-        batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
-        self.kv_event_queue = []
-        self.kv_event_publisher.publish(batch)
+        if vllm_is_available:
+            logger.info("Publish kv events")
+            batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
+            self.kv_event_queue = []
+            self.kv_event_publisher.publish(batch)
 
         yield
 
