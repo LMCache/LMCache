@@ -26,7 +26,7 @@
 
 | [**Blog**](https://blog.lmcache.ai/)
 | [**Documentation**](https://docs.lmcache.ai/)
-| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3bgx768yd-H8WkOTmPtbxVYJ5nuZ4dmA)
+| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3g8e6xzz8-KzS_HI8bPERGFK5PTB~MYg)
 | [**Interest Form**](https://forms.gle/MHwLiYDU6kcW3dLj7)
 | [**Roadmap**](https://github.com/LMCache/LMCache/issues/1253)
 
