@@ -133,7 +133,7 @@ def create_lmcache_metadata(
     try:
         # Third Party
         from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-    except ImportError:
+    except (ModuleNotFoundError, ImportError):
         from vllm.utils import get_kv_cache_torch_dtype
     # First Party
     from lmcache.config import LMCacheEngineMetadata

@@ -23,7 +23,7 @@ from vllm.utils import cdiv
 try:
     # Third Party
     from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-except ImportError:
+except (ModuleNotFoundError, ImportError):
     from vllm.utils import get_kv_cache_torch_dtype
 
 # Third Party
