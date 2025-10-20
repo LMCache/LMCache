@@ -57,7 +57,7 @@ class KVCacheEvent(
 
 
 class BlockStored(KVCacheEvent):
-    block_hashes: list[ExternalBlockHash] | None
+    block_hashes: list[ExternalBlockHash]
     parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int

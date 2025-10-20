@@ -259,6 +259,7 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        prev_key = 0
         for start, end, key in self.token_database.process_tokens(
             tokens,
             hashes,
@@ -293,6 +294,27 @@ class LMCacheEngine:
             tot_kv_size += memory_obj.get_size()
             tot_token_num += num_tokens
 
+            # Create KV event
+            stored_block = BlockStored(
+                block_hashes=[hash(key)] if isinstance(key, CacheEngineKey) else [key],
+                parent_block_hash=None if start == 0 else prev_key,
+                token_ids=[],
+                block_size=num_tokens,
+                lora_id=None,
+                medium=MEDIUM_GPU,
+            )
+            if tokens is not None:
+                stored_block.token_ids = (
+                    tokens.tolist()[start : end + 1]
+                    if isinstance(tokens, torch.Tensor)
+                    else tokens[start : end + 1]
+                )
+            elif hashes is not None:
+                stored_block.token_ids = hashes[start : end + 1]
+            logger.info(f"Added block '{stored_block}' to kv events queue")
+            self.kv_event_queue.append(stored_block)
+            prev_key = prev_key = hash(key) if isinstance(key, CacheEngineKey) else key
+
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
             return
@@ -319,17 +341,10 @@ class LMCacheEngine:
             put_time * 1000,
         )
 
-        self.kv_event_queue.append(
-            BlockStored(
-                block_hashes=None,
-                parent_block_hash=None,
-                token_ids=tokens,  # type: ignore[arg-type]
-                block_size=0,
-                lora_id=0,
-                medium=MEDIUM_GPU,
-            )
-        )
+        # Publish KV events
+        logger.info("Publish kv events")
         batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
+        self.kv_event_queue = []
         self.kv_event_publisher.publish(batch)
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
@@ -382,6 +397,7 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        prev_key = 0
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask, request_configs=request_configs
         ):
@@ -417,6 +433,24 @@ class LMCacheEngine:
             memory_objs.append(memory_objs_multi_layer)
             tot_token_num += num_tokens
 
+            # Create KV event
+            if tokens is not None:
+                stored_block = BlockStored(
+                    block_hashes=[hash(key)]
+                    if isinstance(key, CacheEngineKey)
+                    else [key],
+                    parent_block_hash=None if start == 0 else prev_key,
+                    token_ids=tokens.tolist()[start : end + 1]
+                    if isinstance(tokens, torch.Tensor)
+                    else tokens[start : end + 1],
+                    block_size=num_tokens,
+                    lora_id=None,
+                    medium=MEDIUM_GPU,
+                )
+                logger.info(f"Added block '{stored_block}' to kv events queue")
+                self.kv_event_queue.append(stored_block)
+                prev_key = hash(key) if isinstance(key, CacheEngineKey) else key
+
         if keys:
             # Transpose the keys and memory objects into layer major format
             memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
@@ -449,16 +483,13 @@ class LMCacheEngine:
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
         logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
-        self.kv_event_queue.append(
-            BlockStored(
-                block_hashes=None,
-                parent_block_hash=None,
-                token_ids=tokens,
-                block_size=0,
-                lora_id=0,
-                medium=MEDIUM_GPU,
-            )
-        )
+
+        # Publish the KV events
+        logger.info("Publish kv events")
+        batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
+        self.kv_event_queue = []
+        self.kv_event_publisher.publish(batch)
+
         yield
 
     @_lmcache_nvtx_annotate
