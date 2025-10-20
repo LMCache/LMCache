@@ -6,7 +6,16 @@ import asyncio
 import inspect
 
 # Third Party
-from glide import Batch, ClusterBatch, GlideClient, GlideClusterClient, NodeAddress
+from glide import (
+    Batch,
+    ClusterBatch,
+    GlideClient,
+    GlideClientConfiguration,
+    GlideClusterClient,
+    GlideClusterClientConfiguration,
+    NodeAddress,
+    ServerCredentials,
+)
 
 # First Party
 from lmcache.logging import init_logger
@@ -60,25 +69,25 @@ class ValkeyConnector(RemoteConnector):
         """Initialize GlideClient connection with credentials and database"""
 
         async def create_connection():
-            # Third Party
-            from glide import GlideClientConfiguration, ServerCredentials
+            try:
+                # Setup credentials if provided
+                credentials = None
+                if self.username or self.password:
+                    credentials = ServerCredentials(self.username, self.password)
 
-            # Setup credentials if provided
-            credentials = None
-            if self.username or self.password:
-                credentials = ServerCredentials(self.username, self.password)
+                # Build config with optional database_id
+                config_kwargs = {
+                    "addresses": [NodeAddress(self.host, self.port)],
+                    "credentials": credentials,
+                }
 
-            # Build config with optional database_id
-            config_kwargs = {
-                "addresses": [NodeAddress(self.host, self.port)],
-                "credentials": credentials,
-            }
+                if self.database_id is not None:
+                    config_kwargs["database_id"] = self.database_id
 
-            if self.database_id is not None:
-                config_kwargs["database_id"] = self.database_id
-
-            config = GlideClientConfiguration(**config_kwargs)
-            return await GlideClient.create(config)
+                config = GlideClientConfiguration(**config_kwargs)
+                return await GlideClient.create(config)
+            except Exception as e:
+                raise RuntimeError(f"Fail to init valkey connection {e}") from e
 
         future = asyncio.run_coroutine_threadsafe(create_connection(), self.loop)
         connection = future.result(timeout=1.0)
@@ -159,10 +168,11 @@ class ValkeyConnector(RemoteConnector):
             else:
                 converted = bytes(kv_bytes)
                 view[: metadata.length] = converted
+            return memory_obj
+
         except Exception as exc:
             logger.error(f"Fail to converting : {exc}")
-
-        return memory_obj
+            return None
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         return await self.executor.submit_job(
@@ -235,19 +245,21 @@ class ValkeyClusterConnector(RemoteConnector):
         """Initialize GlideClusterClient connection with credentials"""
 
         async def create_connection():
-            # Third Party
-            from glide import GlideClusterClientConfiguration, ServerCredentials
+            try:
+                # Setup credentials if provided
+                credentials = None
+                if self.username or self.password:
+                    credentials = ServerCredentials(self.username, self.password)
 
-            # Setup credentials if provided
-            credentials = None
-            if self.username or self.password:
-                credentials = ServerCredentials(self.username, self.password)
-
-            addresses = [NodeAddress(host, port) for host, port in self.hosts_and_ports]
-            config = GlideClusterClientConfiguration(
-                addresses=addresses, credentials=credentials
-            )
-            return await GlideClusterClient.create(config)
+                addresses = [
+                    NodeAddress(host, port) for host, port in self.hosts_and_ports
+                ]
+                config = GlideClusterClientConfiguration(
+                    addresses=addresses, credentials=credentials
+                )
+                return await GlideClusterClient.create(config)
+            except Exception as e:
+                raise RuntimeError(f"Fail to init valkey connection {e}") from e
 
         future = asyncio.run_coroutine_threadsafe(create_connection(), self.loop)
         connection = future.result(timeout=1.0)
@@ -329,10 +341,10 @@ class ValkeyClusterConnector(RemoteConnector):
             else:
                 converted = bytes(kv_bytes)
                 view[: metadata.length] = converted
+            return memory_obj
         except Exception as exc:
             logger.error(f"Fail to converting : {exc}")
-
-        return memory_obj
+            return None
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         return await self.executor.submit_job(

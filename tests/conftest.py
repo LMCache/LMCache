@@ -281,62 +281,6 @@ def mock_redis_cluster():
         yield mock
 
 
-class MockValkey:
-    def __init__(self, addresses=None, request_timeout=None, **kwargs):
-        self.store = {}
-
-    @classmethod
-    async def create(cls, config):
-        return cls()
-
-    async def set(self, key, value):
-        self.store[key] = value
-        return True
-
-    async def get(self, key):
-        return self.store.get(key, None)
-
-    async def mget(self, keys):
-        result = []
-        for key in keys:
-            data = self.store.get(key, None)
-            result.append(data)
-        return result
-
-    async def exists(self, keys):
-        if isinstance(keys, list):
-            return sum(1 for key in keys if key in self.store)
-        return 1 if keys in self.store else 0
-
-    async def exec(self, batch, raise_on_error=True):
-        """Execute batch operations by processing batch.commands"""
-        results = []
-
-        # Process each command in the batch
-        for command_code, args in batch.commands:
-            if command_code == 1517:  # SET command
-                key, value = args[0], args[1]
-                await self.set(key, value)
-                results.append(None)  # SET returns None on success
-            else:
-                # Unknown command, just append None
-                results.append(None)
-
-        return results
-
-    async def close(self):
-        pass
-
-
-@pytest.fixture(scope="function", autouse=True)
-def mock_valkey():
-    with (
-        patch("glide.GlideClient", MockValkey) as mock_client,
-        patch("glide.GlideClusterClient", MockValkey),
-    ):
-        yield mock_client
-
-
 @pytest.fixture(scope="module")
 def lmserver_v1_process(request):
     def ensure_connection(host, port):
