@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import (
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
@@ -1105,11 +1106,12 @@ class LMCacheConnectorV1Impl:
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
             )
-
-            # NOTE(Jiayi): We assume all tokens are saved
-            save_spec.skip_leading_tokens = len(token_ids)
-            if request.disagg_spec:
-                request.disagg_spec.num_transferred_tokens = len(token_ids)
+            
+            if get_pp_group().is_last_rank:
+                # NOTE(Jiayi): We assume all tokens are saved
+                save_spec.skip_leading_tokens = len(token_ids)
+                if request.disagg_spec:
+                    request.disagg_spec.num_transferred_tokens = len(token_ids)
 
     @_lmcache_nvtx_annotate
     def get_finished(
