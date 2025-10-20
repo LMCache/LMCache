@@ -22,6 +22,7 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.memory_pool import MemoryPool, PoolRequest
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.system_detection import NUMADetector, SystemMemoryDetector
@@ -66,6 +67,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if memory_allocator is None
             else memory_allocator
         )
+        self.memory_pool = MemoryPool(self.memory_allocator, backend=self)
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
@@ -361,32 +363,24 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 numa_mapping=numa_mapping,
             )
 
-    @_lmcache_nvtx_annotate
-    def allocate(
+    def _resolve_memory_format(self, fmt: Optional[MemoryFormat]) -> MemoryFormat:
+        if fmt is not None:
+            return fmt
+        if self.layerwise:
+            return MemoryFormat.KV_2TD if self.enable_blending else MemoryFormat.KV_T2D
+        return MemoryFormat.KV_2LTD
+
+    def _allocate_internal(
         self,
         shape: torch.Size,
         dtype: torch.dtype,
-        fmt: Optional[MemoryFormat] = None,
-        eviction: bool = True,
-        busy_loop: bool = True,
+        fmt: MemoryFormat,
+        eviction: bool,
+        busy_loop: bool,
     ) -> Optional[MemoryObj]:
-        """
-        Allocate a memory object of shape and dtype
-        evict if necessary. Storage manager should always call
-        local_cpu_backend.allocate() to get memory objects
-        regardless of whether local_cpu is True or False
-        """
         logger.debug(
-            f"Allocating memory in local cpu backend with busy loop: {busy_loop}"
+            "Allocating memory in local cpu backend with busy loop: %s", busy_loop
         )
-        if fmt is None:
-            if self.layerwise:
-                if self.enable_blending:
-                    fmt = MemoryFormat.KV_2TD
-                else:
-                    fmt = MemoryFormat.KV_T2D
-            else:
-                fmt = MemoryFormat.KV_2LTD
 
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
         if memory_obj is not None or not eviction:
@@ -411,7 +405,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         # and don't need to wait for other requests yet
                         wait_other_requests = False
                         logger.debug(
-                            f"Evicting {len(evict_keys)} chunks from cpu memory"
+                            "Evicting %d chunks from cpu memory", len(evict_keys)
                         )
                         # remove
                         self.batched_remove(evict_keys, force=False)
@@ -433,7 +427,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 logger.warning(
                     "No eviction candidates found in local cpu backend. "
                     "Local cpu memory is under pressure. "
-                    f"Waiting for {time_to_wait} seconds before retrying."
+                    "Waiting for %s seconds before retrying.",
+                    time_to_wait,
                 )
                 # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
@@ -445,12 +440,74 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             num_attempts += 1
             logger.debug(
-                f"Unable to allocate memory object after {num_attempts}"
-                " attempts of local cpu backend allocate()"
+                "Unable to allocate memory object after %d attempts of local cpu backend allocate()",
+                num_attempts,
             )
 
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_obj
+
+    def allocate_from_pool(self, req: PoolRequest) -> Optional[MemoryObj]:
+        fmt = self._resolve_memory_format(req.fmt)
+        if fmt != MemoryFormat.BINARY_BUFFER and req.dtype is None:
+            raise ValueError("dtype must be specified for tensor allocations")
+        shape = req.resolve_shape()
+        dtype = req.dtype if req.dtype is not None else torch.uint8
+        assert dtype is not None
+        return self._allocate_internal(
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt,
+            eviction=req.eviction,
+            busy_loop=req.busy_loop,
+        )
+
+    @_lmcache_nvtx_annotate
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: Optional[MemoryFormat] = None,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        fmt_resolved = self._resolve_memory_format(fmt)
+        req = PoolRequest(
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt_resolved,
+            tag="local_cpu.allocate",
+            eviction=eviction,
+            busy_loop=busy_loop,
+        )
+        try:
+            return self.memory_pool.borrow(req)
+        except RuntimeError:
+            return None
+
+    def request_memory(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: Optional[MemoryFormat] = None,
+        *,
+        tag: str = "local_cpu.request",
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        fmt_resolved = self._resolve_memory_format(fmt)
+        req = PoolRequest(
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt_resolved,
+            tag=tag,
+            eviction=eviction,
+            busy_loop=busy_loop,
+        )
+        try:
+            return self.memory_pool.borrow(req)
+        except RuntimeError:
+            return None
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
