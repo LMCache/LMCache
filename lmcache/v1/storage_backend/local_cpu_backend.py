@@ -472,36 +472,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
             busy_loop=req.busy_loop,
         )
 
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        fmt: Optional[MemoryFormat] = None,
-        eviction: bool = True,
-        busy_loop: bool = True,
-    ) -> Optional[MemoryObj]:
-        fmt_resolved = self._resolve_memory_format(fmt)
-        req = PoolRequest(
-            shape=shape,
-            dtype=dtype,
-            fmt=fmt_resolved,
-            tag="local_cpu.allocate",
-            eviction=eviction,
-            busy_loop=busy_loop,
-        )
-        try:
-            return self.memory_pool.borrow(req)
-        except RuntimeError:
-            return None
-
-    def request_memory(
+    def _request_from_pool(
         self,
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: Optional[MemoryFormat] = None,
         *,
-        tag: str = "local_cpu.request",
+        tag: str,
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
@@ -518,6 +495,43 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return self.memory_pool.borrow(req)
         except RuntimeError:
             return None
+
+    @_lmcache_nvtx_annotate
+    def allocate(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: Optional[MemoryFormat] = None,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        return self._request_from_pool(
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt,
+            tag="local_cpu.allocate",
+            eviction=eviction,
+            busy_loop=busy_loop,
+        )
+
+    def request_memory(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: Optional[MemoryFormat] = None,
+        *,
+        tag: str = "local_cpu.request",
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        return self._request_from_pool(
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt,
+            tag=tag,
+            eviction=eviction,
+            busy_loop=busy_loop,
+        )
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
