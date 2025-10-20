@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
 from __future__ import annotations
 
+# Standard
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterator, Optional, cast
 import threading
 
+# Third Party
 import torch
 
+# First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.v1.memory_management import (
@@ -17,6 +21,7 @@ from lmcache.v1.memory_management import (
 )
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
@@ -41,15 +46,15 @@ class PoolRequest:
     def resolve_shape(self) -> torch.Size:
         if self.fmt == MemoryFormat.BINARY_BUFFER:
             if self.size is None and self.shape is None:
-                msg = "PoolRequest for BINARY_BUFFER expects size or shape"
-                raise ValueError(msg)
+                raise ValueError("PoolRequest for BINARY_BUFFER expects size or shape")
             if self.shape is not None:
                 return self.shape
             return torch.Size([self.size])  # type: ignore[arg-type]
 
         if self.shape is None or self.dtype is None:
-            msg = "PoolRequest requires shape and dtype for tensor allocations"
-            raise ValueError(msg)
+            raise ValueError(
+                "PoolRequest requires shape and dtype for tensor allocations"
+            )
         return self.shape
 
 
@@ -89,8 +94,9 @@ class MemoryPool:
                     req.fmt != MemoryFormat.BINARY_BUFFER
                 ):
                     if req.dtype is None:
-                        msg = "PoolRequest dtype must be set for backend allocations"
-                        raise ValueError(msg)
+                        raise ValueError(
+                            "PoolRequest dtype must be set for backend allocations"
+                        )
                     memory_obj = backend_allocate(
                         shape,
                         req.dtype,
@@ -103,8 +109,9 @@ class MemoryPool:
         else:
             memory_obj = self._allocator.allocate(shape, req.dtype, req.fmt)
         if memory_obj is None:
-            msg = f"MemoryPool failed to allocate object (fmt={req.fmt}, tag={req.tag})"
-            raise RuntimeError(msg)
+            raise RuntimeError(
+                f"MemoryPool failed to allocate object (fmt={req.fmt}, tag={req.tag})"
+            )
 
         memory_obj_any = cast(Any, memory_obj)
         original_parent = getattr(memory_obj_any, "parent_allocator", None)
@@ -131,13 +138,13 @@ class MemoryPool:
         phy_size = memory_obj.meta.phy_size
         already_released = getattr(memory_obj_any, "_memory_pool_released", False)
         if already_released:
-            logger.warning("MemoryPool.release called multiple times for %s", memory_obj)
+            logger.warning(
+                "MemoryPool.release called multiple times for %s", memory_obj
+            )
             return
         memory_obj_any._memory_pool_released = True
 
-        original_parent = getattr(
-            memory_obj_any, "_memory_pool_original_parent", None
-        )
+        original_parent = getattr(memory_obj_any, "_memory_pool_original_parent", None)
         if original_parent is None or original_parent is self:
             original_parent = self._allocator
 
@@ -176,9 +183,7 @@ class MemoryPool:
 
     def _update_metrics(self) -> None:
         update_custom_metric = getattr(
-            self._stats_monitor,
-            "update_custom_metric",
-            None,
+            self._stats_monitor, "update_custom_metric", None
         )
         if callable(update_custom_metric):
             update_custom_metric(self._STAT_LIVE_LEASES, self._live_leases)
@@ -186,9 +191,7 @@ class MemoryPool:
 
         if self._prometheus_logger is not None:
             update_custom_gauge = getattr(
-                self._prometheus_logger,
-                "update_custom_gauge",
-                None,
+                self._prometheus_logger, "update_custom_gauge", None
             )
             if callable(update_custom_gauge):
                 update_custom_gauge(self._STAT_LIVE_LEASES, self._live_leases)
