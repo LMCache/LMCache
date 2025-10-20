@@ -72,6 +72,7 @@ jobs:
           python tools/auto_translate.py \
             --api anyrouter \
             --target-lang ${{ github.event.inputs.target_lang || 'zh_CN' }} \
+            --error-threshold 0.3 \
             $FORCE_FLAG
       
       - name: Check for changes

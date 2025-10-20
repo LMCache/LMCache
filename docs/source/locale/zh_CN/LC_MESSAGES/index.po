@@ -6,17 +6,17 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: LMCache \n"
+"Project-Id-Version: LMCache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-10-11 10:29+0000\n"
+"POT-Creation-Date: 2025-10-20 12:48+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.13.1\n"
 
 #: ../../source/index.rst:63
@@ -73,9 +73,9 @@ msgstr "LMCache"
 
 #: ../../source/index.rst:25
 msgid ""
-"We are currently in the process of upgrading our documentation to provide"
-" better guidance and examples. Some sections may be under construction. "
-"Thank you for your patience!"
+"We are currently in the process of upgrading our documentation to provide "
+"better guidance and examples. Some sections may be under construction. Thank"
+" you for your patience!"
 msgstr "我们正在升级文档以提供更好的指导和示例。部分章节可能正在建设中。感谢您的耐心等待！"
 
 #: ../../source/index.rst:46
@@ -89,12 +89,10 @@ msgstr "`LMCache 博客 <https://lmcache.github.io>`_"
 #: ../../source/index.rst:49
 msgid ""
 "`Join LMCache slack workspace "
-"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
-"5Amprc9k5hcIdXT7XevTaQ>`_"
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-j2hPn0AdzcfyykatTBXSTg>`_"
 msgstr ""
 "`加入 LMCache Slack 工作区 "
-"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-"
-"5Amprc9k5hcIdXT7XevTaQ>`_"
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-j2hPn0AdzcfyykatTBXSTg>`_"
 
 #: ../../source/index.rst:50
 msgid "Our papers:"
@@ -102,19 +100,19 @@ msgstr "我们的论文："
 
 #: ../../source/index.rst:52
 msgid ""
-"`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
-"Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language Model "
+"Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 msgstr ""
-"`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
-"Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language Model "
+"Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 
 #: ../../source/index.rst:53
 msgid ""
-"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge "
-"Fusion <https://arxiv.org/abs/2405.16444>`_"
+"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion "
+"<https://arxiv.org/abs/2405.16444>`_"
 msgstr ""
-"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge "
-"Fusion <https://arxiv.org/abs/2405.16444>`_"
+"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion "
+"<https://arxiv.org/abs/2405.16444>`_"
 
 #: ../../source/index.rst:54
 msgid ""
@@ -139,4 +137,3 @@ msgstr "文档"
 
 #~ msgid "raw-html:`<br />`"
 #~ msgstr "raw-html:`<br />`"
-

@@ -104,7 +104,7 @@ class OpenAITranslator(TranslationAPI):
             return response.choices[0].message.content.strip()
         except Exception as e:
             print(f"翻译失败: {e}")
-            return text
+            return ""  # 失败时返回空字符串，而不是原文
 
 
 class AnthropicTranslator(TranslationAPI):
@@ -162,7 +162,7 @@ class AnthropicTranslator(TranslationAPI):
             return response.content[0].text.strip()
         except Exception as e:
             print(f"翻译失败: {e}")
-            return text
+            return ""  # 失败时返回空字符串，而不是原文
 
 
 class AnyRouterTranslator(TranslationAPI):
@@ -247,7 +247,7 @@ class AnyRouterTranslator(TranslationAPI):
                     return result["content"][0]["text"].strip()
                 else:
                     print(f"警告: API 响应格式异常: {result}")
-                    return text
+                    return ""  # 响应格式异常，返回空字符串
                     
             else:
                 # OpenAI /v1/chat/completions 格式
@@ -273,14 +273,14 @@ class AnyRouterTranslator(TranslationAPI):
                     return result["choices"][0]["message"]["content"].strip()
                 else:
                     print(f"警告: API 响应格式异常: {result}")
-                    return text
+                    return ""  # 响应格式异常，返回空字符串
                     
         except requests.exceptions.HTTPError as e:
             print(f"翻译失败(HTTP {e.response.status_code}): {e.response.text[:200]}")
-            return text
+            return ""  # HTTP 错误，返回空字符串
         except Exception as e:
             print(f"翻译失败(anyrouter/{self.provider}): {e}")
-            return text
+            return ""  # 其他异常，返回空字符串
 
 
 def load_glossary(glossary_file: Path) -> Dict[str, str]:
@@ -369,17 +369,18 @@ def translate_po_file(
         try:
             translation = translator.translate(entry.msgid)
 
-            # 将无效翻译（为空或与原文相同）视为错误，不写入 msgstr
-            if translation is None or not str(translation).strip():
-                print("  错误: 翻译结果为空，已跳过该条")
+            # 简洁的判断逻辑：
+            # - 空字符串 = 翻译失败（API 错误）
+            # - 与原文相同 = 该内容不需要翻译（如数字、代码等）
+            # - 不同 = 正常翻译
+            
+            if not translation or not translation.strip():
+                # 翻译失败（API 返回空），计入错误
+                print("  错误: 翻译失败（API 返回空），已跳过该条")
                 error_count += 1
                 continue
 
-            if str(translation).strip() == str(entry.msgid).strip():
-                print("  错误: 翻译结果与原文相同，可能是API失败或未返回，已跳过该条")
-                error_count += 1
-                continue
-
+            # 保存翻译结果（即使与原文相同也保存，说明该内容本就不需要翻译）
             if not dry_run:
                 entry.msgstr = translation
                 # 清除 fuzzy 标记（如果有）
@@ -483,6 +484,19 @@ def main():
         type=Path,
         default=Path("docs/TRANSLATION_GLOSSARY_zh.md"),
         help="术语表文件路径 (默认: docs/TRANSLATION_GLOSSARY_zh.md)"
+    )
+
+    parser.add_argument(
+        "--error-threshold",
+        type=float,
+        default=0.3,
+        help="错误率阈值（0-1），超过此比例则失败退出 (默认: 0.3 即 30%%)"
+    )
+
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="即使有错误也继续运行并返回成功状态码（用于 CI/CD）"
     )
 
     args = parser.parse_args()
@@ -593,8 +607,38 @@ def main():
     print(f"  错误: {total_errors} 条")
     print("=" * 60)
 
+    # 决定是否退出
     if total_errors > 0:
-        sys.exit(1)
+        # 计算需要翻译的总数（不包括跳过的）
+        total_attempted = total_translated + total_errors
+        
+        if total_attempted == 0:
+            # 没有需要翻译的内容，这是正常的
+            print("\n✅ 没有需要翻译的内容（所有内容都已翻译）")
+            sys.exit(0)
+        
+        error_rate = total_errors / total_attempted
+        print(f"\n错误率: {error_rate:.1%} ({total_errors}/{total_attempted})")
+        
+        if args.continue_on_error:
+            # CI/CD 模式：只警告，不退出
+            print(f"⚠️  警告: 有 {total_errors} 条翻译失败，但因设置了 --continue-on-error，仍将继续")
+            print(f"💡 提示: 这些失败的条目将保留原状（fuzzy 标记不会被清除）")
+            sys.exit(0)
+        elif error_rate > args.error_threshold:
+            # 错误率超过阈值，退出
+            print(f"❌ 错误: 错误率 {error_rate:.1%} 超过阈值 {args.error_threshold:.1%}")
+            print(f"💡 建议:")
+            print(f"   1. 检查 API 密钥是否有效")
+            print(f"   2. 检查网络连接")
+            print(f"   3. 检查 API 配额")
+            print(f"   4. 使用 --continue-on-error 强制继续（不推荐）")
+            sys.exit(1)
+        else:
+            # 错误率在可接受范围内，只警告
+            print(f"⚠️  警告: 有少量翻译失败（{error_rate:.1%}），但在可接受范围内")
+            print(f"💡 提示: 失败的条目将在下次运行时重试")
+            sys.exit(0)
 
 
 if __name__ == "__main__":

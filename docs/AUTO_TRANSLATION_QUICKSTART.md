@@ -135,6 +135,57 @@ msgstr "欢迎使用 LMCache"  ← 新翻译，fuzzy 标记已清除
 - 查看 [完整设置指南](AUTO_TRANSLATION_SETUP.md) 了解高级功能
 - 阅读 [翻译维护指南](TRANSLATION_MAINTENANCE_zh.md) 学习如何优化翻译
 
+## ⚠️ 错误处理
+
+### 容错机制
+
+系统内置智能容错机制，处理 API 临时故障：
+
+**默认行为（30% 错误阈值）**：
+- ✅ 错误率 < 30%：创建 PR，包含成功的翻译
+- ❌ 错误率 ≥ 30%：工作流失败，需要检查问题
+
+**示例**：
+```
+翻译: 80 条
+跳过: 1692 条
+错误: 5 条
+
+错误率: 5.9% (5/85)  ← 低于 30%
+结果: ✅ 成功，创建 PR
+```
+
+### 调整容错策略
+
+如果需要更严格或更宽松的容错：
+
+```bash
+# 更严格（10% 阈值）
+python tools/auto_translate.py --api anyrouter --target-lang zh_CN \
+  --error-threshold 0.1
+
+# 更宽松（50% 阈值）
+python tools/auto_translate.py --api anyrouter --target-lang zh_CN \
+  --error-threshold 0.5
+
+# 强制继续（忽略所有错误）
+python tools/auto_translate.py --api anyrouter --target-lang zh_CN \
+  --continue-on-error
+```
+
+### 失败条目的处理
+
+**翻译失败的条目会怎样？**
+
+1. **不会覆盖原内容**：失败的条目保持原状
+2. **Fuzzy 标记保留**：如果是 fuzzy 条目，标记不会被清除
+3. **下次自动重试**：下次运行时会再次尝试翻译
+
+**建议做法**：
+- 查看失败原因（API 配额、网络等）
+- 修复问题后重新运行 workflow
+- 或等待下次文档更新时自动重试
+
 ## 🐛 遇到问题？
 
 ### 常见问题速查
