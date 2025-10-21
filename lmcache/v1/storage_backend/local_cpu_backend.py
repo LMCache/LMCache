@@ -613,7 +613,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # calculate budget with safety margin
         max_chunks = total_memory // aligned_chunk_bytes
 
-        return int(max_chunks)
+        return max_chunks
 
     def get_keys(self) -> List[CacheEngineKey]:
         """
