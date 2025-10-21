@@ -328,9 +328,7 @@ class LMCacheEngine:
                     stored_block.token_ids = hashes[start : end + 1]
                 logger.info(f"Added block '{stored_block}' to kv events queue")
                 self.kv_event_queue.append(stored_block)
-                prev_key = (
-                    hash(key) if isinstance(key, CacheEngineKey) else key
-                )
+                prev_key = hash(key) if isinstance(key, CacheEngineKey) else key
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
@@ -363,7 +361,8 @@ class LMCacheEngine:
             logger.info("Publish kv events")
             batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
             self.kv_event_queue = []
-            self.kv_event_publisher.publish(batch)
+            if self.kv_event_publisher:
+                self.kv_event_publisher.publish(batch)
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
 
@@ -507,7 +506,8 @@ class LMCacheEngine:
             logger.info("Publish kv events")
             batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
             self.kv_event_queue = []
-            self.kv_event_publisher.publish(batch)
+            if self.kv_event_publisher:
+                self.kv_event_publisher.publish(batch)
 
         yield
 
