@@ -127,7 +127,4 @@ def test_nixl_aistor_backend():
     dtype = torch.bfloat16
     shape = [2048, 2048]
 
-    config.nixl_buffer_device = "cpu"
-    config.extra_config["nixl_backend"] = "AIStor"
-
     run(config, shape, dtype)
