@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
 
@@ -505,75 +506,59 @@ def _init_lmcache_engine(
         role,
     )
 
-    # For scheduler role, gpu_connector is not needed
+    use_gpu = need_gpu_interm_buffer(lmcache_config)
     vllm_gpu_connector: Optional[GPUConnectorInterface]
+
+    if use_mla and lmcache_config.use_layerwise:
+        raise ValueError("layerwise MLA connector is not supported yet")
+
+    # When use_mla is True, num_kv_head is 1
+    hidden_dim_size = num_kv_head * head_size
     if role == "scheduler":
         vllm_gpu_connector = None
-    else:
-        use_gpu = need_gpu_interm_buffer(lmcache_config)
-
-        if use_mla and lmcache_config.use_layerwise:
-            raise ValueError("layerwise MLA connector is not supported yet")
-
-        # When use_mla is True, num_kv_head is 1
-        hidden_dim_size = num_kv_head * head_size
-        if lmcache_config.use_layerwise:
-            if lmcache_config.enable_blending:
-                # Use layerwise connector for blending
-                vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
-                    hidden_dim_size,
-                    num_layer,
-                    use_gpu=use_gpu,
-                    chunk_size=chunk_size,
-                    dtype=kv_dtype,
-                    device=device,
-                )
-            else:
-                vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-                    hidden_dim_size,
-                    num_layer,
-                    use_gpu=use_gpu,
-                    chunk_size=chunk_size,
-                    dtype=kv_dtype,
-                    device=device,
-                )
-        else:
-            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+        # Create a dummy tpg object with broadcast and broadcast_object methods
+        tpg = SimpleNamespace()
+        tpg.broadcast = lambda tensor, src: tensor
+        tpg.broadcast_object = lambda obj, src: obj
+    elif lmcache_config.use_layerwise:
+        if lmcache_config.enable_blending:
+            # Use layerwise connector for blending
+            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
                 hidden_dim_size,
                 num_layer,
                 use_gpu=use_gpu,
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
-                use_mla=use_mla,
             )
-
-    if role == "scheduler":
-        # Provide dummy implementations for scheduler role
-        def dummy_broadcast(tensor: torch.Tensor, src: int) -> None:
-            pass
-
-        def dummy_broadcast_object(obj: Any, src: int) -> Any:
-            return obj
-
-        broadcast = dummy_broadcast
-        broadcast_object = dummy_broadcast_object
-    else:
+        else:
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
         tpg = get_tp_group()
-
-        def broadcast_wrapper(tensor: torch.Tensor, src: int) -> None:
-            tpg.broadcast(tensor, src)
-
-        broadcast = broadcast_wrapper
-        broadcast_object = tpg.broadcast_object
-
+    else:
+        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+            hidden_dim_size,
+            num_layer,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=kv_dtype,
+            device=device,
+            use_mla=use_mla,
+        )
+        tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         lmcache_config,
         metadata,
         vllm_gpu_connector,
-        broadcast,
-        broadcast_object,
+        tpg.broadcast,
+        tpg.broadcast_object,
     )
 
     return engine
@@ -656,7 +641,6 @@ class LMCacheConnectorV1Impl:
             self.enable_blending = config.enable_blending
 
             if self.enable_blending:
-                # Blender requires GPU connector to be available
                 assert self.lmcache_engine.gpu_connector is not None, (
                     "GPU connector must be available for blending"
                 )

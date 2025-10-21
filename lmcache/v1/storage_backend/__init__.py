@@ -14,10 +14,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
-from lmcache.v1.storage_backend.local_cpu_backend import (
-    DummyLocalCpuBackend,
-    LocalCPUBackend,
-)
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -34,7 +31,7 @@ def create_dynamic_backends(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
-    local_cpu_backend: LocalCPUBackend,
+    local_cpu_backend: Optional[LocalCPUBackend],
     dst_device: str,
     storage_backends: OrderedDict[str, StorageBackendInterface],
 ) -> None:
@@ -107,7 +104,6 @@ def CreateStorageBackends(
     if metadata.role == "scheduler":
         dst_device = "cpu"
     elif dst_device == "cuda":
-        # Replace 'cuda' with 'cuda:<device id>'
         dst_device = f"cuda:{torch.cuda.current_device()}"
 
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
@@ -128,12 +124,8 @@ def CreateStorageBackends(
     # other backends might need it as a buffer.
     local_cpu_backend: Optional[LocalCPUBackend] = None
     if metadata.role == "scheduler":
-        # For scheduler role, use DummyLocalCpuBackend
-        local_cpu_backend = DummyLocalCpuBackend(
-            config,
-        )
-        backend_name = str(local_cpu_backend)
-        storage_backends["LocalCPUBackend"] = local_cpu_backend
+        # For scheduler role, local_cpu_backend is None
+        pass
     elif not config.enable_pd or config.local_cpu:
         local_cpu_backend = LocalCPUBackend(
             config,
@@ -145,9 +137,7 @@ def CreateStorageBackends(
         storage_backends[backend_name] = local_cpu_backend
 
     if config.enable_p2p:
-        assert local_cpu_backend is not None, (
-            "local_cpu_backend is required for P2PBackend"
-        )
+        assert local_cpu_backend is not None
         p2p_backend = P2PBackend(
             config,
             metadata,
@@ -169,9 +159,7 @@ def CreateStorageBackends(
         )
 
     if config.local_disk and config.max_local_disk_size > 0:
-        assert local_cpu_backend is not None, (
-            "local_cpu_backend is required for LocalDiskBackend"
-        )
+        assert local_cpu_backend is not None
         local_disk_backend = LocalDiskBackend(
             config, loop, local_cpu_backend, dst_device, lmcache_worker
         )
@@ -189,9 +177,6 @@ def CreateStorageBackends(
         gds_backend = GdsBackend(config, metadata, loop, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
     if config.remote_url is not None:
-        assert local_cpu_backend is not None, (
-            "local_cpu_backend is required for RemoteBackend"
-        )
         remote_backend = RemoteBackend(
             config,
             metadata,
@@ -204,9 +189,6 @@ def CreateStorageBackends(
 
     if not config.enable_pd or config.local_cpu:
         # Create dynamic backends from configuration
-        assert local_cpu_backend is not None, (
-            "local_cpu_backend is required for dynamic backends"
-        )
         create_dynamic_backends(
             config,
             metadata,

@@ -217,7 +217,11 @@ class StorageManager:
 
         self.enable_pd = config.enable_pd
 
-        self.allocator_backend = self._get_allocator_backend(config)
+        self.allocator_backend = (
+            self._get_allocator_backend(config)
+            if metadata.role != "scheduler"
+            else None
+        )
         if config.local_cpu:
             self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
@@ -249,6 +253,7 @@ class StorageManager:
         if not self.enable_pd and (
             self.config.enable_async_loading or self.config.use_layerwise
         ):
+            assert self.allocator_backend is not None
             self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
@@ -276,6 +281,7 @@ class StorageManager:
         """
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
+        assert self.allocator_backend is not None
         return self.allocator_backend.allocate(
             shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
         )

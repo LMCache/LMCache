@@ -59,17 +59,6 @@ class LMCacheBypassLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        """
-        Perform lookup using the LMCacheEngine directly.
-
-        Args:
-            token_ids: The token IDs to lookup
-            lookup_id: The lookup ID to associate with the lookup
-            request_configs: The configs of the request
-
-        Returns:
-            The number of tokens that can be loaded from cache
-        """
         try:
             if not self.enable_blending:
                 # Process tokens to get hashes and offsets
@@ -105,10 +94,8 @@ class LMCacheBypassLookupClient(LookupClientInterface):
             return 0
 
     def supports_producer_reuse(self) -> bool:
-        """Return True as LMCacheBypassLookupClient supports producer kvcache reuse"""
         return True
 
     def close(self):
-        """Close the lookup client and clean up resources."""
         # No resources to clean up for bypass client
         logger.info("LMCacheBypassLookupClient closed")
