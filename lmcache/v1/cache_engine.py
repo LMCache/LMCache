@@ -1124,6 +1124,12 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        # In some scenarios, lookup is called first, and then the original tokens
+        # is sliced based on the lookup result. In these scenarios, the tokens
+        # passed in must exist in LMCache, and we can set skip_contains_check to True.
+        # When skip_contains_check is True and there is only one backend, the `contains`
+        # call can be skipped.
+        skip_contains_check = kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -1137,12 +1143,8 @@ class LMCacheEngine:
                 # by checking the lookup cache first (should be updated in `lookup`)
                 pass
             else:
-                # NOTE: key should always be in the lookup cache once
-                # we support it.
-
-                if len(self.storage_manager.actual_storage_names) == 1:
-                    # Only lookup is True, will reach this branch, if there is only
-                    # one storage backend, there is no need to check 'contains' again
+                # NOTE: key should always be in the lookup cache once we support it.
+                if skip_contains_check and len(self.storage_manager.actual_storage_names) == 1:
                     location = self.storage_manager.actual_storage_names[0]
                 else:
                     location = self.storage_manager.contains(key)
