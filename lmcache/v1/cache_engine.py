@@ -138,6 +138,7 @@ class LMCacheEngine:
         )
 
         # Publishing KV events
+        self.kv_event_publisher = None
         self.kv_events_enabled = False
         if vllm_is_available:
             self.kv_events_enabled = config.enable_kv_events
