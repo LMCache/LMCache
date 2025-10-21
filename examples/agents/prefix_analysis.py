@@ -11,6 +11,7 @@ import json
 from tqdm import tqdm
 from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
+import torch
 
 # Constants
 DEFAULT_TOKENIZER = "meta-llama/Llama-3.1-8B"
@@ -84,7 +85,16 @@ class LRUTokenPool:
 
 def load_and_tokenize_inputs(
     jsonl_path: str, tokenizer_name: str = DEFAULT_TOKENIZER
-) -> List[List[int]]:
+) -> Tuple[List[List[int]], torch.Tensor]:
+    """
+    Load and tokenize inputs from a JSONL file.
+
+    Returns:
+        Tuple of (tokenized_sequences_list, tokenized_sequences_tensor)
+        - tokenized_sequences_list: List of token lists
+        - tokenized_sequences_tensor: Padded 2D tensor (sequences, tokens)
+          Sequences are padded with 0s to match the longest sequence.
+    """
     print(f"Loading tokenizer: {tokenizer_name}")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
@@ -104,7 +114,19 @@ def load_and_tokenize_inputs(
             print(f"Warning: Failed to process line: {e}")
             tokenized_sequences.append([])
 
-    return tokenized_sequences
+    if tokenized_sequences:
+        max_length = max(len(seq) for seq in tokenized_sequences)
+        num_sequences = len(tokenized_sequences)
+
+        # Create padded tensor (pad with 0s)
+        tokenized_tensor = torch.zeros((num_sequences, max_length), dtype=torch.long)
+        for i, seq in enumerate(tokenized_sequences):
+            if seq:
+                tokenized_tensor[i, : len(seq)] = torch.tensor(seq, dtype=torch.long)
+    else:
+        tokenized_tensor = torch.tensor([], dtype=torch.long)
+
+    return tokenized_sequences, tokenized_tensor
 
 
 def calculate_hit_rate(
@@ -296,8 +318,10 @@ def main() -> None:
     print(f"  Pool sizes: {pool_sizes_gb}\n")
 
     # Load and tokenize inputs
-    token_sequences = load_and_tokenize_inputs(args.input, args.tokenizer)
+    token_sequences, token_tensor = load_and_tokenize_inputs(args.input, args.tokenizer)
     print(f"Loaded {len(token_sequences)} requests")
+    print(f"Token tensor shape: {token_tensor.shape} (padded with 0s)")
+    print(f"First sequence: {token_tensor[0]}")
 
     # Analyze hit rates
     hit_rates, x_labels = analyze_hit_rates_across_pool_sizes(
