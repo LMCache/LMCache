@@ -88,7 +88,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
         nixl_backend.batched_submit_put_task(keys, objs)
 
-        for key, obj in zip(keys, objs, strict=False):
+        for key, obj in zip(keys, objs):
             returned_memory_obj = nixl_backend.get_blocking(key)
             assert returned_memory_obj is not None
             assert returned_memory_obj.get_size() == obj.get_size()
