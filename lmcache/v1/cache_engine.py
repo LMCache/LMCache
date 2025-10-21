@@ -1282,8 +1282,11 @@ class LMCacheEngineBuilder:
         enable_nixl_storage = extra_config is not None and extra_config.get(
             "enable_nixl_storage"
         )
+        enable_nixl_object = extra_config is not None and extra_config.get(
+            "enable_nixl_object"
+        )
 
-        if enable_nixl_storage:
+        if enable_nixl_storage or enable_nixl_object:
             # TODO(Jiayi): weird to import from transfer utils.
             # First Party
             from lmcache.v1.transfer_channel.transfer_utils import (

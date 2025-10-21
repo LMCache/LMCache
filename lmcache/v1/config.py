@@ -495,6 +495,9 @@ def _validate_config(self):
     enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
         "enable_nixl_storage"
     )
+    enable_nixl_object = self.extra_config is not None and self.extra_config.get(
+        "enable_nixl_object"
+    )
     if self.enable_pd:
         assert self.pd_role is not None
         assert self.pd_buffer_size is not None
@@ -509,6 +512,11 @@ def _validate_config(self):
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
         assert self.extra_config.get("nixl_pool_size") is not None
+        assert self.nixl_buffer_size is not None
+        assert self.nixl_buffer_device is not None
+
+    if enable_nixl_object:
+        assert self.extra_config.get("nixl_object_backend") is not None
         assert self.nixl_buffer_size is not None
         assert self.nixl_buffer_device is not None
 

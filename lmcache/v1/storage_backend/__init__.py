@@ -110,6 +110,9 @@ def CreateStorageBackends(
     enable_nixl_storage = extra_config is not None and extra_config.get(
         "enable_nixl_storage"
     )
+    enable_nixl_object = extra_config is not None and extra_config.get(
+        "enable_nixl_object"
+    )
 
     if config.enable_pd:
         # First Party
@@ -149,6 +152,16 @@ def CreateStorageBackends(
 
         storage_backends["NixlStorageBackend"] = (
             NixlStorageBackend.CreateNixlStorageBackend(config, loop, metadata)
+        )
+
+    if enable_nixl_object:
+        # First Party
+        from lmcache.v1.storage_backend.nixl_object_backend import (
+            NixlObjectBackend,
+        )
+
+        storage_backends["NixlObjectBackend"] = (
+            NixlObjectBackend.CreateNixlObjectBackend(config, loop, metadata)
         )
 
     if config.local_disk and config.max_local_disk_size > 0:
