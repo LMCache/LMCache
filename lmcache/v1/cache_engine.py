@@ -1129,7 +1129,9 @@ class LMCacheEngine:
         # passed in must exist in LMCache, and we can set skip_contains_check to True.
         # When skip_contains_check is True and there is only one backend, the `contains`
         # call can be skipped.
-        skip_contains_check = kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
+        skip_contains_check = (
+            kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
+        )
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -1144,7 +1146,10 @@ class LMCacheEngine:
                 pass
             else:
                 # NOTE: key should always be in the lookup cache once we support it.
-                if skip_contains_check and len(self.storage_manager.actual_storage_names) == 1:
+                if (
+                    skip_contains_check
+                    and len(self.storage_manager.actual_storage_names) == 1
+                ):
                     location = self.storage_manager.actual_storage_names[0]
                 else:
                     location = self.storage_manager.contains(key)
