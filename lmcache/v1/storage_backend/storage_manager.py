@@ -119,7 +119,7 @@ class WeightedSemaphore:
             )
 
         async with self._cond:
-            logger.info(f"WeightedSemaphore: Attempting to acquire {n} chunks")
+            logger.debug(f"WeightedSemaphore: Attempting to acquire {n} chunks")
             if n <= self._concurrent_budget_cap:
                 await self._cond.wait_for(lambda: self._current_chunks >= n)
                 self._current_chunks -= n
@@ -130,7 +130,7 @@ class WeightedSemaphore:
                 )
                 # Reserve everything
                 self._current_chunks = 0
-            logger.info(
+            logger.debug(
                 f"WeightedSemaphore: Acquired {n} chunks, "
                 f"remaining chunks: {self._current_chunks}"
             )
