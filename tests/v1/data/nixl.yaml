@@ -6,5 +6,5 @@ nixl_buffer_device: cpu
 extra_config:
   enable_nixl_storage: true
   nixl_backend: POSIX
-  nixl_pool_size: 64
+  nixl_pool_size: 2
   nixl_path: /tmp/nixl/cache
