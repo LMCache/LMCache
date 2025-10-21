@@ -328,7 +328,7 @@ class LMCacheEngine:
                     stored_block.token_ids = hashes[start : end + 1]
                 logger.info(f"Added block '{stored_block}' to kv events queue")
                 self.kv_event_queue.append(stored_block)
-                prev_key = prev_key = (
+                prev_key = (
                     hash(key) if isinstance(key, CacheEngineKey) else key
                 )
 
