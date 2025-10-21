@@ -42,4 +42,22 @@ div.highlight button.copybtn + button.copybtn {
     border-radius: 3px;
     font-size: 10px;
   }
+
+  /* Language Switcher Icon Styles */
+  #language-switcher {
+    transition: transform 0.2s ease, opacity 0.2s ease;
+  }
+
+  #language-switcher:hover {
+    transform: scale(1.1);
+    opacity: 0.8;
+  }
+
+  a[href="#"]:has(#language-switcher) {
+    cursor: pointer;
+  }
+
+  a[href="#"]:has(#language-switcher):hover {
+    opacity: 0.8;
+  }
   

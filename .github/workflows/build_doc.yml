@@ -63,6 +63,9 @@ jobs:
             cp -r output/zh_CN/dev/* output/zh_CN/
             rm -rf output/zh_CN/dev
           fi
+          # Create short path aliases for Chinese docs
+          ln -s zh_CN output/zh
+          ln -s zh_CN output/cn
 
       - name: Upload doc artifacts to GHA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

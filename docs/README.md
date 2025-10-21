@@ -1,5 +1,16 @@
 # LMCache Documentation
 
+## 🌐 Online Documentation
+
+### Access URLs
+
+| Language | Main URL | Alternative URLs |
+|----------|----------|------------------|
+| **English** 🇺🇸 | https://docs.lmcache.ai/ | - |
+| **中文** 🇨🇳 | https://docs.lmcache.ai/zh_CN/ | /zh/ or /cn/ |
+
+**Language Switcher**: Use the selector in the top-right corner to switch between languages.
+
 Check out the [online doc](https://docs.lmcache.ai/developer_guide/contributing.html#building-the-docs) on how to build docs locally.
 
 ## Multilingual Support
