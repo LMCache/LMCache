@@ -405,6 +405,46 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
+    # KV events configuration
+    "enable_kv_events": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
+    "kv_events_publisher_type": {
+        "type": str,
+        "default": "zmq",
+        "env_converter": str,
+    },
+    "kv_events_publisher_endpoint": {
+        "type": str,
+        "default": "tcp://*:5557",
+        "env_converter": str,
+    },
+    "kv_events_publisher_replay_endpoint": {
+        "type": str,
+        "default": "tcp://*:5558",
+        "env_converter": str,
+    },
+    "kv_events_publisher_topic": {
+        "type": str,
+        "default": "kv-events",
+        "env_converter": str,
+    },
+    "kv_events_publisher_buffer_steps": {
+        "type": int,
+        "default": 10_000,
+        "env_converter": int,
+    },
+    "kv_events_publisher_hwm": {
+        "type": int,
+        "default": 100_000,
+        "env_converter": int,
+    },
+    "kv_events_publisher_max_queue_size": {
+        "type": int,
+        "default": 100_000,
+        "env_converter": int,
     },
 }
 

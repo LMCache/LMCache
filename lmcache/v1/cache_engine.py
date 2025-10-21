@@ -138,11 +138,19 @@ class LMCacheEngine:
         )
 
         # Publishing KV events
+        self.kv_events_enabled = False
         if vllm_is_available:
-            self.kv_event_publisher = EventPublisherFactory.create(
-                config,
-            )
-            self.kv_event_queue: List[KVCacheEvent] = []
+            self.kv_events_enabled = config.enable_kv_events
+            if self.kv_events_enabled:
+                self.kv_event_publisher = EventPublisherFactory.create(
+                    config,
+                )
+                self.kv_event_queue: List[KVCacheEvent] = []
+                logger.info("KV events are enabled.")
+            else:
+                logger.info("KV events are disabled.")
+        else:
+            logger.info("KV events are unavailable as vLLM is required.")
 
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
@@ -298,7 +306,7 @@ class LMCacheEngine:
             tot_token_num += num_tokens
 
             # Create KV event
-            if vllm_is_available:
+            if vllm_is_available and self.kv_events_enabled:
                 stored_block = BlockStored(
                     block_hashes=[hash(key)]
                     if isinstance(key, CacheEngineKey)
@@ -350,7 +358,7 @@ class LMCacheEngine:
         )
 
         # Publish KV events
-        if vllm_is_available:
+        if vllm_is_available and self.kv_events_enabled:
             logger.info("Publish kv events")
             batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
             self.kv_event_queue = []
@@ -443,7 +451,7 @@ class LMCacheEngine:
             tot_token_num += num_tokens
 
             # Create KV event
-            if vllm_is_available and tokens is not None:
+            if vllm_is_available and self.kv_events_enabled and tokens is not None:
                 stored_block = BlockStored(
                     block_hashes=[hash(key)]
                     if isinstance(key, CacheEngineKey)
@@ -494,7 +502,7 @@ class LMCacheEngine:
         logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
 
         # Publish the KV events
-        if vllm_is_available:
+        if vllm_is_available and self.kv_events_enabled:
             logger.info("Publish kv events")
             batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
             self.kv_event_queue = []

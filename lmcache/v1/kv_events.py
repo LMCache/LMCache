@@ -116,7 +116,7 @@ if vllm_is_available:
             buffer_steps: int = 10_000,
             hwm: int = 100_000,
             max_queue_size: int = 100_000,
-            topic: str = "kv_events",
+            topic: str = "kv-events",
         ) -> None:
             # Storage
             super().__init__(data_parallel_rank)
@@ -157,7 +157,7 @@ if vllm_is_available:
             if events.data_parallel_rank is None:
                 events.data_parallel_rank = self._data_parallel_rank
             self._event_queue.put(events)
-            logger.info("Added kv events to queue for publishing")
+            logger.debug("Added kv events to queue for publishing")
 
         def shutdown(self) -> None:
             """Stop the publisher thread and clean up resources."""
@@ -260,15 +260,15 @@ if vllm_is_available:
 
                 try:
                     seq = next(self._seq_gen)
-                    logger.info(
+
+                    logger.debug(
                         f"Publishing event '{event}' in sequence '{seq}' "
                         f"to topic '{self._topic_bytes.decode('utf-8')}'"
                     )
-
                     payload = self._pack.encode(event)
                     seq_bytes = seq.to_bytes(8, "big")
                     self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
-                    logger.info(
+                    logger.debug(
                         f"Published payload to '{self._topic_bytes.decode('utf-8')}'"
                     )
 
@@ -358,19 +358,17 @@ if vllm_is_available:
             if not config:
                 return NullEventPublisher()
 
-            # config_dict = asdict(config)
-
-            # kind = config_dict.pop("publisher", "null")
-            kind = "zmq"
-            # config_dict.pop("enable_kv_cache_events")
+            kind = config.kv_events_publisher_type
             try:
                 constructor = cls._registry[kind]
             except KeyError as exc:
                 raise ValueError(f"Unknown event publisher '{kind}'") from exc
-            # return constructor(data_parallel_rank=data_parallel_rank, **config_dict)
             return constructor(
                 data_parallel_rank=data_parallel_rank,
-                endpoint="tcp://*:5557",
-                replay_endpoint="tcp://*:5558",
-                topic="kv-events",
+                endpoint=config.kv_events_publisher_endpoint,
+                replay_endpoint=config.kv_events_publisher_replay_endpoint,
+                buffer_steps=config.kv_events_publisher_buffer_steps,
+                hwm=config.kv_events_publisher_hwm,
+                max_queue_size=config.kv_events_publisher_max_queue_size,
+                topic=config.kv_events_publisher_topic,
             )
