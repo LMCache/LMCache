@@ -120,6 +120,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.skip(reason='This test requires a working MinIO server instance and customization of the data/minio-aistor.yaml template')
 def test_nixl_aistor_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/minio-aistor.yaml")
