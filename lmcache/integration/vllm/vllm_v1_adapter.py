@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generator, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
 
 # Third Party
@@ -64,7 +64,6 @@ from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
     LMCacheAsyncLookupServer,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 
@@ -78,45 +77,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-
-class DummyGpuConnector(GPUConnectorInterface):
-    def __init__(self):
-        pass
-
-    def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        pass
-
-    def to_gpu_batch(
-        self,
-        memory_objs: list["MemoryObj"],
-        slot_mappings: list[torch.Tensor],
-    ) -> None:
-        pass
-
-    def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        return None
-
-    def batched_from_gpu(
-        self,
-        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
-        starts: List[int],
-        ends: List[int],
-        **kwargs,
-    ):
-        return []
-
-    def batched_to_gpu(
-        self,
-        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
-        starts: List[int],
-        ends: List[int],
-        **kwargs,
-    ):
-        pass
-
-    def get_shape(self, num_tokens: int) -> torch.Size:
-        return torch.Size([0])
 
 
 @dataclass
@@ -545,10 +505,10 @@ def _init_lmcache_engine(
         role,
     )
 
-    # For scheduler role, use DummyGpuConnector
-    vllm_gpu_connector: GPUConnectorInterface
+    # For scheduler role, gpu_connector is not needed
+    vllm_gpu_connector: Optional[GPUConnectorInterface]
     if role == "scheduler":
-        vllm_gpu_connector = DummyGpuConnector()
+        vllm_gpu_connector = None
     else:
         use_gpu = need_gpu_interm_buffer(lmcache_config)
 
@@ -696,6 +656,10 @@ class LMCacheConnectorV1Impl:
             self.enable_blending = config.enable_blending
 
             if self.enable_blending:
+                # Blender requires GPU connector to be available
+                assert self.lmcache_engine.gpu_connector is not None, (
+                    "GPU connector must be available for blending"
+                )
                 self.blender = LMCBlenderBuilder.get_or_create(
                     ENGINE_NAME,
                     self.lmcache_engine,
