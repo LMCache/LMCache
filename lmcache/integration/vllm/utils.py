@@ -130,8 +130,12 @@ def create_lmcache_metadata(
         tuple: (LMCacheEngineMetadata, LMCacheEngineConfig)
     """
     # Third Party
-    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-
+    # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
+    try:
+        # Third Party
+        from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+    except ImportError:
+        from vllm.utils import get_kv_cache_torch_dtype
     # First Party
     from lmcache.config import LMCacheEngineMetadata
 

@@ -19,7 +19,15 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv
-from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+
+# Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
+try:
+    # Third Party
+    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+except ImportError:
+    from vllm.utils import get_kv_cache_torch_dtype
+
+# Third Party
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 import torch
