@@ -198,6 +198,8 @@ def _server_process(
         payload_classes = get_payload_classes(request_type)
         server.add_handler(request_type, payload_classes, handler)
 
+    server.start()
+
     # Signal that server is ready
     ready_event.set()
 

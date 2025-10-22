@@ -273,7 +273,6 @@ class MessageQueueServer:
         # Main loop thread
         self.is_finished = threading.Event()
         self.worker_thread = threading.Thread(target=self._main_loop, daemon=True)
-        self.worker_thread.start()
 
         # Registered handlers: request_type -> (payload_cls, handler)
         self.handlers: dict[RequestType, MessageQueueServer.HandlerEntry] = {}
@@ -325,6 +324,9 @@ class MessageQueueServer:
                 as arguments.
         """
         self.handlers[request_type] = self.HandlerEntry(payload_clss, handler)
+
+    def start(self):
+        self.worker_thread.start()
 
     def close(self) -> None:
         self.is_finished.set()
