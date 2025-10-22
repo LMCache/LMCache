@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Optional, TypeVar
 import queue
 import threading
+import uuid
 
 # Third Party
 import msgspec
@@ -133,12 +134,14 @@ class MessageQueueClient:
         self.socket = self.ctx.socket(zmq.DEALER)
         self.socket.connect(server_url)
 
+        # Input queue
+        self.task_notifier, self.task_waiter = self._prepare_task_sockets()
+        self.input_queue: queue.Queue = queue.Queue()
+
         # Poller
         self.poller = zmq.Poller()
-        self.poller.register(self.socket, zmq.POLLIN | zmq.POLLOUT)
-
-        # Input queue
-        self.input_queue: queue.Queue = queue.Queue()
+        self.poller.register(self.socket, zmq.POLLIN)
+        self.poller.register(self.task_waiter, zmq.POLLIN)
 
         # main thread
         self.is_finished = threading.Event()
@@ -149,46 +152,69 @@ class MessageQueueClient:
         self.request_counter = 0
         self.pending_futures: dict[int, MessagingFuture[Any]] = {}
 
+    def _prepare_task_sockets(self) -> tuple[zmq.Socket, zmq.Socket]:
+        """Create 2 inproc socket pair for the zmq-poller compatible task
+        queue
+
+        Returns:
+            tuple[zmq.Socket, zmq.Socket]: The (push_socket, pull_socket)
+        """
+        inproc_url = "inproc://mq_client_task_queue/" + str(uuid.uuid4())
+        push_socket = self.ctx.socket(zmq.PUSH)
+        pull_socket = self.ctx.socket(zmq.PULL)
+        pull_socket.bind(inproc_url)
+        push_socket.connect(inproc_url)
+        return push_socket, pull_socket
+
+    def _process_outbound_task(self):
+        try:
+            while wrapped_request := self.input_queue.get_nowait():
+                # wrapped_request = self.input_queue.get_nowait()
+
+                # Update the pending futures
+                request_uid = wrapped_request.request_uid
+                self.pending_futures[request_uid] = wrapped_request.future
+
+                # Send the request
+                b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
+                b_request_type = msgspec_encode(
+                    wrapped_request.request_type, cls=RequestType
+                )
+                payload_classes = get_payload_classes(wrapped_request.request_type)
+                if len(payload_classes) != len(wrapped_request.request_payloads):
+                    raise ValueError("Payload count does not match expected count")
+
+                b_payloads = [
+                    msgspec_encode(payload, cls=cls)
+                    for payload, cls in zip(
+                        wrapped_request.request_payloads,
+                        payload_classes,
+                        strict=False,
+                    )
+                ]
+                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
+        except queue.Empty:
+            pass
+
     def _main_loop(self):
         # NOTE: make sure we only edit the pending_futures dict in this thread
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
-            state = socks.get(self.socket, None)
-            if state is None:
-                continue
+            inbound_state = socks.get(self.socket, None)
+            outbound_state = socks.get(self.task_waiter, None)
 
-            if state & zmq.POLLOUT:
-                try:
-                    wrapped_request = self.input_queue.get_nowait()
+            if outbound_state and outbound_state & zmq.POLLIN:
+                # Drain the notifier
+                while True:
+                    try:
+                        self.task_waiter.recv(zmq.DONTWAIT)
+                    except zmq.Again:
+                        break
 
-                    # Update the pending futures
-                    request_uid = wrapped_request.request_uid
-                    self.pending_futures[request_uid] = wrapped_request.future
+                # Process the output tasks
+                self._process_outbound_task()
 
-                    # Send the request
-                    b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
-                    b_request_type = msgspec_encode(
-                        wrapped_request.request_type, cls=RequestType
-                    )
-                    payload_classes = get_payload_classes(wrapped_request.request_type)
-                    if len(payload_classes) != len(wrapped_request.request_payloads):
-                        raise ValueError("Payload count does not match expected count")
-
-                    b_payloads = [
-                        msgspec_encode(payload, cls=cls)
-                        for payload, cls in zip(
-                            wrapped_request.request_payloads,
-                            payload_classes,
-                            strict=False,
-                        )
-                    ]
-                    self.socket.send_multipart(
-                        [b_request_uid, b_request_type] + b_payloads
-                    )
-                except queue.Empty:
-                    pass
-
-            if state & zmq.POLLIN:
+            if inbound_state and inbound_state & zmq.POLLIN:
                 msg = self.socket.recv_multipart()
                 assert len(msg) >= 2, (
                     "Expected at least 2 message part "
@@ -236,6 +262,7 @@ class MessageQueueClient:
                 request_payloads=request_payloads,
             )
         )
+        self.task_notifier.send(b"1")
         return future
 
     def close(self) -> None:
