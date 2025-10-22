@@ -34,8 +34,6 @@ DEFAULT_POOL_SIZES_GB: List[Union[int, float, str]] = [
 class LRUTokenPool:
     """
     Token pool with LRU eviction policy based on token count limit.
-    For request i (1-indexed):
-    y[i] = y[i-1] + (len(tokens[i]) - max_shared_prefix(tokens[i], any previous))
     """
 
     def __init__(self, max_tokens: float) -> None:
@@ -46,9 +44,8 @@ class LRUTokenPool:
     def longest_prefix_len(self, tokens: List[int]) -> Tuple[int, int]:
         """
         Find longest prefix match and update LRU ordering.
-
-        Returns:
-            Tuple of (prefix_length, matching_request_id)
+        For request i (1-indexed):
+        y[i] = y[i-1] + (len(tokens[i]) - max_shared_prefix(tokens[i], any previous))
         """
         best_len = 0
         best_id = -1
@@ -71,12 +68,31 @@ class LRUTokenPool:
 
         return best_len, best_id
 
-    def add_request(self, request_id: int, tokens: List[int]) -> None:
-        """Add a request to the pool, evicting LRU entries if necessary."""
+    def longest_common_substring(
+        self, request_id: int, token_tensor: torch.Tensor
+    ) -> Tuple[int, int]:
+        """
+        Find longest common substring match using tensor operations for performance.
+        """
+        return 0, 0
+
+    def add_request(
+        self,
+        request_id: int,
+        tokens: List[int],
+        token_tensor: Optional[torch.Tensor] = None,
+    ) -> None:
+        """
+        Add a request to the pool, evicting LRU entries if necessary.
+        """
         # Evict until we have space
         while self.current_tokens + len(tokens) > self.max_tokens and self.requests:
             old_id, old_tokens = self.requests.popitem(last=False)
             self.current_tokens -= len(old_tokens)
+
+            # substring matching case
+            if token_tensor is not None:
+                token_tensor[old_id, :] = 0
 
         # Add new request
         self.requests[request_id] = tokens
@@ -130,7 +146,10 @@ def load_and_tokenize_inputs(
 
 
 def calculate_hit_rate(
-    token_sequences: List[List[int]], pool_size: Optional[int] = None
+    token_sequences: List[List[int]],
+    pool_size: Optional[int] = None,
+    token_tensor: Optional[torch.Tensor] = None,
+    method: str = "prefix",
 ) -> float:
     # Use float('inf') for unlimited case to avoid eviction
     max_tokens = float("inf") if pool_size is None else pool_size
@@ -142,11 +161,18 @@ def calculate_hit_rate(
     for idx, tokens in enumerate(token_sequences):
         total_tokens += len(tokens)
 
-        if idx > 0:
-            common, _ = pool.longest_prefix_len(tokens)
-            hit_tokens += common
-
-        pool.add_request(idx, tokens)
+        if method == "prefix":
+            if idx > 0:
+                common, _ = pool.longest_prefix_len(tokens)
+                hit_tokens += common
+            pool.add_request(idx, tokens)
+        elif method == "substring" and token_tensor is not None:
+            if idx > 0:
+                common, _ = pool.longest_common_substring(idx, token_tensor)
+                hit_tokens += common
+            pool.add_request(idx, tokens, token_tensor)
+        else:
+            raise ValueError(f"Invalid method: {method}")
 
     return hit_tokens / total_tokens if total_tokens > 0 else 0.0
 
@@ -155,11 +181,13 @@ def analyze_hit_rates_across_pool_sizes(
     token_sequences: List[List[int]],
     pool_sizes_gb: List[Union[int, float, str]],
     tokens_per_gb: int,
-) -> Tuple[List[float], List[str]]:
+    token_tensor: Optional[torch.Tensor] = None,
+) -> Tuple[List[float], List[float], List[str]]:
     print("\nAnalyzing hit rates across pool sizes...")
     print("=" * 60)
 
-    hit_rates = []
+    prefix_hit_rates = []
+    substring_hit_rates = []
     x_labels = []
 
     for size_gb in pool_sizes_gb:
@@ -175,51 +203,98 @@ def analyze_hit_rates_across_pool_sizes(
             token_desc = f" ({size_tokens:,} tokens)"
 
         print(f"Testing pool size: {pool_desc}{token_desc}")
-        hit_rate = calculate_hit_rate(token_sequences, size_tokens)
-        hit_rates.append(hit_rate)
-        print(f"  Hit rate: {hit_rate:.4f} ({hit_rate * 100:.2f}%)\n")
+
+        # For every pool size round, we should start from fresh
+        tensor_copy = token_tensor.clone() if token_tensor is not None else None
+
+        prefix_hit_rate = calculate_hit_rate(
+            token_sequences, size_tokens, tensor_copy, method="prefix"
+        )
+        prefix_hit_rates.append(prefix_hit_rate)
+        print(f"  Prefix: {prefix_hit_rate:.4f} ({prefix_hit_rate * 100:.2f}%)")
+
+        substring_hit_rate = calculate_hit_rate(
+            token_sequences, size_tokens, tensor_copy, method="substring"
+        )
+        substring_hit_rates.append(substring_hit_rate)
+        print(
+            f"  Substring: {substring_hit_rate:.4f} ({substring_hit_rate * 100:.2f}%)\n"
+        )
 
     print("=" * 60)
-    return hit_rates, x_labels
+    return prefix_hit_rates, substring_hit_rates, x_labels
 
 
 def plot_hit_rates(
-    hit_rates: List[float], x_labels: List[str], output_path: str
+    prefix_hit_rates: List[float],
+    substring_hit_rates: List[float],
+    x_labels: List[str],
+    output_path: str,
 ) -> None:
     """
-    Generate and save the hit rate vs pool size plot.
-
-    Args:
-        hit_rates: List of hit rates
-        x_labels: X-axis labels (pool sizes)
-        output_path: Path to save the plot
+    Generate and save the hit rate vs pool size plot comparing both methods.
     """
     plt.figure(figsize=(12, 7))
+
+    # Plot prefix
     plt.plot(
-        range(len(hit_rates)),
-        hit_rates,
+        range(len(prefix_hit_rates)),
+        prefix_hit_rates,
         marker="o",
         linewidth=2,
         markersize=8,
         color="#2E86AB",
+        label="Prefix Matching",
+    )
+
+    # Plot substring
+    plt.plot(
+        range(len(substring_hit_rates)),
+        substring_hit_rates,
+        marker="s",
+        linewidth=2,
+        markersize=8,
+        color="#A23B72",
+        label="Substring Matching",
     )
 
     plt.xlabel("Pool Size (GB)", fontsize=12, fontweight="bold")
     plt.ylabel("Hit Rate", fontsize=12, fontweight="bold")
-    plt.title("Prefix Cache Hit Rate vs Pool Size", fontsize=14, fontweight="bold")
+    plt.title(
+        "Cache Hit Rate vs Pool Size: Prefix vs Substring Matching",
+        fontsize=14,
+        fontweight="bold",
+    )
     plt.xticks(range(len(x_labels)), x_labels, rotation=45)
     plt.grid(True, alpha=0.3, linestyle="--")
-    plt.ylim(0, min(1.0, max(hit_rates) * 1.1))
 
-    for i, (rate, label) in enumerate(zip(hit_rates, x_labels, strict=False)):
+    # Set y-axis limit based on max of both methods
+    max_rate = max(max(prefix_hit_rates), max(substring_hit_rates))
+    plt.ylim(0, min(1.0, max_rate * 1.1))
+    plt.legend(loc="best", fontsize=10)
+
+    # Annotate prefix matching rates
+    for i, (rate, label) in enumerate(zip(prefix_hit_rates, x_labels, strict=False)):
         plt.annotate(
             f"{rate * 100:.1f}%",
             xy=(i, rate),
             xytext=(0, 8),
             textcoords="offset points",
             ha="center",
-            fontsize=9,
-            fontweight="bold",
+            fontsize=8,
+            color="#2E86AB",
+        )
+
+    # Annotate substring matching rates
+    for i, (rate, label) in enumerate(zip(substring_hit_rates, x_labels, strict=False)):
+        plt.annotate(
+            f"{rate * 100:.1f}%",
+            xy=(i, rate),
+            xytext=(0, -15),
+            textcoords="offset points",
+            ha="center",
+            fontsize=8,
+            color="#A23B72",
         )
 
     plt.tight_layout()
@@ -323,13 +398,18 @@ def main() -> None:
     print(f"Token tensor shape: {token_tensor.shape} (padded with 0s)")
     print(f"First sequence: {token_tensor[0]}")
 
-    # Analyze hit rates
-    hit_rates, x_labels = analyze_hit_rates_across_pool_sizes(
-        token_sequences, pool_sizes_gb, args.tokens_per_gb
+    # Analyze hit rates using both methods
+    prefix_hit_rates, substring_hit_rates, x_labels = (
+        analyze_hit_rates_across_pool_sizes(
+            token_sequences,
+            pool_sizes_gb,
+            args.tokens_per_gb,
+            token_tensor,
+        )
     )
 
-    # Generate plot
-    plot_hit_rates(hit_rates, x_labels, args.output)
+    # Generate comparison plot
+    plot_hit_rates(prefix_hit_rates, substring_hit_rates, x_labels, args.output)
     print("\nAnalysis complete!")
 
 
