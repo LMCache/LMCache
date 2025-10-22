@@ -40,7 +40,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         vllm_is_available = True
         try:
             # Third Party
-            from vllm.utils import sha256, sha256_cbor_64bit
+            from vllm.utils.hashing import sha256, sha256_cbor_64bit
         except ImportError:
             # sha256, sha256_cbor_64bit are available through vLLM only
             vllm_is_available = False
