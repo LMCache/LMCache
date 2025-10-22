@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import asyncio
 import hashlib
@@ -114,27 +114,17 @@ if hasattr(torch, "float8_e5m2fnuz"):
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
 
-@dataclass
+@dataclass(slots=True)
 class CacheEngineKey:
-    # use offsets instead of __dict__
-    __slots__ = (
-        "fmt",
-        "model_name",
-        "world_size",
-        "worker_id",
-        "chunk_hash",
-        "dtype",
-        "request_configs",
-        "tags",
-        "_dtype_str",
-    )
     fmt: str
     model_name: str
     world_size: int
     worker_id: int
     chunk_hash: int
     dtype: torch.dtype
-    request_configs: Optional[dict] = None
+    request_configs: Optional[dict] = field(default_factory=dict)
+    tags: Optional[tuple] = field(init=False, default=None)
+    _dtype_str: str = field(init=False, default="")
 
     def __post_init__(self):
         tag_list = None
@@ -280,22 +270,10 @@ class CacheEngineKey:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class LayerCacheEngineKey(CacheEngineKey):
     """A key for the layer cache engine"""
 
-    __slots__ = (
-        "fmt",
-        "model_name",
-        "world_size",
-        "worker_id",
-        "chunk_hash",
-        "dtype",
-        "request_configs",
-        "tags",
-        "_dtype_str",
-        "layer_id",
-    )
     layer_id: int = 0
 
     def __hash__(self):
