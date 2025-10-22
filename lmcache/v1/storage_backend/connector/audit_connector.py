@@ -247,3 +247,30 @@ class AuditConnector(RemoteConnector):
         result = self.real_connector.remove_sync(key)
         self.logger.info(f"[REMOTE_AUDIT]REMOVE_SYNC|{result}|Key: {key}")
         return result
+
+    def batched_contains(
+        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
+    ) -> List[bool]:
+        self.logger.debug(
+            f"[REMOTE_AUDIT][{self.real_connector}]:BATCHED_CONTAINS|START"
+        )
+        t1 = time.perf_counter()
+        result = self.real_connector.batched_contains(keys, stop_after_first_not_exits)
+        t2 = time.perf_counter()
+        cost = (t2 - t1) * 1000
+        self.logger.info(
+            f"[REMOTE_AUDIT][{self.real_connector}]:BATCHED_CONTAINS|SUCCESS|"
+            f"Count:{len(result)}|Cost:{cost:.6f}ms"
+        )
+        return result
+
+    def support_batched_contains(self) -> bool:
+        self.logger.debug(
+            f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_BATCHED_CONTAINS|START"
+        )
+        result = self.real_connector.support_batched_contains()
+        self.logger.info(
+            f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_BATCHED_CONTAINS|"
+            f"SUCCESS|result: {result}"
+        )
+        return result
