@@ -834,6 +834,7 @@ class LMCacheConnectorV1Impl:
             self._stats_monitor.update_interval_vllm_hit_tokens(
                 request.load_spec.vllm_cached_tokens
             )
+            self._stats_monitor.update_interval_prompt_tokens(len(tokens))
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
