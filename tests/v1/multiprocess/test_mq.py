@@ -3,6 +3,7 @@
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
 import multiprocessing as mp
+import sys
 import threading
 import time
 
@@ -215,7 +216,7 @@ def _run_client_test(
     expected_response: Any,
     num_requests: int = 1,
     client_id: int = 0,
-) -> bool:
+) -> None:
     """
     Client process that sends requests and validates responses.
 
@@ -234,14 +235,14 @@ def _run_client_test(
     # Wait for server to be ready
     if not ready_event.wait(timeout=5):
         print(f"Client {client_id}: Server failed to start within timeout")
-        return False
+        sys.exit(1)
 
     # Small delay to ensure server is fully initialized
     time.sleep(0.1)
 
     context = zmq.Context.instance()
     client = MessageQueueClient(server_url, context)
-    need_sleep = True
+    successful = True
 
     try:
         futures = []
@@ -258,18 +259,18 @@ def _run_client_test(
                     f"Client {client_id}, Request {i}: Expected "
                     f"{expected_response}, got {response}"
                 )
-                return False
 
-        need_sleep = False
-        return True
+                # Exit with error code
+                client.close()
+                sys.exit(1)
+
     except Exception as e:
         print(f"Client {client_id} test failed with exception: {e}")
-        return False
+        successful = False
     finally:
         client.close()
-        # HACK: we use time.sleep to trigger the timeout error
-        if need_sleep:
-            time.sleep(10)  # To trigger the timeout error
+        if not successful:
+            sys.exit(1)
 
 
 class MessageQueueTestHelper:

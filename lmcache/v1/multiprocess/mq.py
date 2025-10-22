@@ -10,6 +10,7 @@ import msgspec
 import zmq
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     get_customized_decoder,
@@ -20,6 +21,8 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
     get_response_class,
 )
+
+logger = init_logger(__name__)
 
 T = TypeVar("T")
 
@@ -168,6 +171,9 @@ class MessageQueueClient:
                         wrapped_request.request_type, cls=RequestType
                     )
                     payload_classes = get_payload_classes(wrapped_request.request_type)
+                    if len(payload_classes) != len(wrapped_request.request_payloads):
+                        raise ValueError("Payload count does not match expected count")
+
                     b_payloads = [
                         msgspec_encode(payload, cls=cls)
                         for payload, cls in zip(
@@ -299,10 +305,12 @@ class MessageQueueServer:
                                 [identity, b_request_uid, b_request_type]
                             )
                     except Exception as e:
-                        print(f"Error handling request {request_type}: {e}")
+                        logger.error("Error handling request %s: %s", request_type, e)
                 else:
-                    print(f"No handler registered for request type {request_type}")
-                    print("Available handlers:", list(self.handlers.keys()))
+                    logger.error(
+                        "No handler registered for request type %s", request_type
+                    )
+                    logger.error("Available handlers: %s", list(self.handlers.keys()))
 
     def add_handler(
         self, request_type: RequestType, payload_clss: list[Any], handler
