@@ -117,5 +117,13 @@ class InstrumentedRemoteConnector(RemoteConnector):
     def remove_sync(self, key: CacheEngineKey) -> bool:
         return self._connector.remove_sync(key)
 
+    def batched_contains(
+        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
+    ) -> List[bool]:
+        return self._connector.batched_contains(keys, stop_after_first_not_exits)
+
+    def support_batched_contains(self) -> bool:
+        return self._connector.support_batched_contains()
+
     def __repr__(self) -> str:
         return f"InstrumentedRemoteConnector({self._connector})"

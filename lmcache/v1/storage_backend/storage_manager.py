@@ -626,6 +626,67 @@ class StorageManager:
 
         return None
 
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        search_range: Optional[List[str]] = None,
+        pin: bool = False,
+        stop_after_first_not_exits: bool = True,
+    ) -> List[bool]:
+        """
+        Check whether the key exists in the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys to check.
+
+        :param Optional[List[str]] search_range: The range of storage backends
+        to search in. Should be a subset of ["LocalCPUBackend",
+        "LocalDiskBackend"] for now.
+        If None, search in all backends.
+
+        :param bool pin: Whether to pin the key.
+
+        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
+        all subsequent results will return False directly.
+
+        return: True if the key exists in the specified storage backends else False.
+        """
+
+        # TODO: Only single-layer batched_contains is supported currently.
+        # Only allocate backend is LocalCPUBackend and do not enable hot cache,
+        # check another backend is supported batched_contains
+        if (
+            len(self.storage_backends) == 2
+            and not self.config.enable_pd
+            and not self.config.local_cpu
+            and (search_range is None or len(search_range) == 1)
+        ):
+            for backend_name, backend in self.storage_backends.items():
+                if backend_name == "LocalCPUBackend":
+                    continue
+                if (
+                    search_range is None or search_range[0] == backend_name
+                ) and backend.support_batched_contains():
+                    return backend.batched_contains(
+                        keys, pin, stop_after_first_not_exits
+                    )
+
+        # default implementation
+        contains_res = []
+        for key in keys:
+            res = self.contains(key, search_range, pin)
+            if res is not None:
+                contains_res.append(True)
+            else:
+                if stop_after_first_not_exits:
+                    # fill the contains_res with None
+                    current_len = len(contains_res)
+                    contains_res.extend([False] * (len(keys) - current_len))
+                    break
+                else:
+                    contains_res.append(False)
+
+        return contains_res
+
     def touch_cache(self):
         for backend_name, backend in self.storage_backends.items():
             if backend_name == "LocalCPUBackend" or backend_name == "LocalDiskBackend":
