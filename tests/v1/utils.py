@@ -33,7 +33,7 @@ def dumb_metadata_with_model_name(
 
 
 def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
-    return CacheEngineKey("vllm", "test_model", 3, 123, id)
+    return CacheEngineKey("vllm", "test_model", 3, 123, id, torch.bfloat16)
 
 
 def random_string(N):

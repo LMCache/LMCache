@@ -26,6 +26,7 @@ def create_key(chunk_hash: str):
         world_size=8,
         worker_id=0,
         chunk_hash=int(chunk_hash, base=16),
+        dtype=torch.bfloat16,
     )
 
 
