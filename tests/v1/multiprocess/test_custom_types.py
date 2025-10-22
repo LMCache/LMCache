@@ -98,6 +98,7 @@ def _worker_process_deserialize_and_reconstruct(
     """
     try:
         # Decode the list of wrappers
+        torch.cuda.init()
         decoder = get_customized_decoder(type=list[CudaIPCWrapper])
         decoded_wrappers = decoder.decode(encoded_data)
 
@@ -110,6 +111,9 @@ def _worker_process_deserialize_and_reconstruct(
             checksum = float(tensor.sum().cpu().item())
             checksums.append(checksum)
             shapes.append(list(tensor.shape))
+
+            ## Do add 1 on the tensor to ensure it's writable
+            # tensor.add_(1)
 
         result_queue.put(("success", checksums, shapes))
     except Exception as e:
@@ -130,6 +134,7 @@ def test_cudaipc_wrapper_multiprocess_serialization():
 
     # Create test tensors and wrappers in the main process
     num_tensors = 3
+    tensors = []
     test_data = []
     wrappers = []
 
@@ -138,6 +143,7 @@ def test_cudaipc_wrapper_multiprocess_serialization():
         tensor = torch.full(
             (2, 3), fill_value=float(i + 1), dtype=torch.float32, device="cuda"
         )
+        tensors.append(tensor)
         wrapper = CudaIPCWrapper(tensor)
         wrappers.append(wrapper)
 
@@ -194,3 +200,14 @@ def test_cudaipc_wrapper_multiprocess_serialization():
             f"Tensor {i}: checksum mismatch. Expected {expected_checksum}, "
             f"got {actual_checksum}"
         )
+
+    ## Verify that the tensors are being modified in the worker process
+    # for i, (tensor, (expected_checksum, _)) in enumerate(zip(tensors, test_data)):
+    #    # After adding 1 to each element, the new checksum should be:
+    #    num_elements = tensor.numel()
+    #    new_expected_checksum = expected_checksum + float(num_elements)
+    #    actual_checksum = float(tensor.sum().cpu().item())
+    #    assert abs(actual_checksum - new_expected_checksum) < 1e-5, (
+    #        f"Tensor {i}: post-modification checksum mismatch. "
+    #        f"Expected {new_expected_checksum}, got {actual_checksum}"
+    #    )

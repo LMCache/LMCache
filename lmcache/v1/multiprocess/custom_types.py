@@ -27,11 +27,12 @@ class CudaIPCWrapper:
         self.device = tensor.device.index  # Explicit device ordinal
 
     def to_tensor(self):
-        # NOTE: seems like we don't need this
-        # torch.cuda.set_device(self.device)  # Ensure correct device/context
-
+        """
+        Note:
+            This function may break if torch cuda is not initialized.
+            We should call `torch.cuda.init()` before using this function.
+        """
         device = self.handle[0]
-        print("HERE THE DEVICE IS:", device)
         storage = torch.UntypedStorage._new_shared_cuda(*self.handle)
         t = torch.tensor(0, device=device, dtype=self.dtype)
         t.set_(storage)
