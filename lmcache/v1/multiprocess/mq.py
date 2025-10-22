@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Generic, Optional, TypeVar
 import queue
 import threading
-import time
 
 # Third Party
 import msgspec
@@ -141,14 +139,14 @@ class MessageQueueClient:
 
         # main thread
         self.is_finished = threading.Event()
-        self.worker_thread = threading.Thread(target=self.main_loop, daemon=True)
+        self.worker_thread = threading.Thread(target=self._main_loop, daemon=True)
         self.worker_thread.start()
 
         # Pending job's futures
         self.request_counter = 0
         self.pending_futures: dict[int, MessagingFuture[Any]] = {}
 
-    def main_loop(self):
+    def _main_loop(self):
         # NOTE: make sure we only edit the pending_futures dict in this thread
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
@@ -210,6 +208,17 @@ class MessageQueueClient:
         request_payloads: list[Any],
         response_cls: Optional[T] = None,
     ) -> MessagingFuture[T]:
+        """Submit a request to the server.
+
+        Args:
+            request_type (RequestType): The type of the request.
+            request_payloads (list[Any]): The payloads of the request.
+            response_cls (Optional[T]): The expected response class.
+                This should be get from `get_response_class(request_type)`.
+
+        Returns:
+            MessagingFuture[T]: A future that will hold the response.
+        """
         future: MessagingFuture[T] = MessagingFuture()
         request_uid = self.request_counter
         self.request_counter += 1
@@ -257,13 +266,13 @@ class MessageQueueServer:
 
         # Main loop thread
         self.is_finished = threading.Event()
-        self.worker_thread = threading.Thread(target=self.process_requests, daemon=True)
+        self.worker_thread = threading.Thread(target=self._main_loop, daemon=True)
         self.worker_thread.start()
 
         # Registered handlers: request_type -> (payload_cls, handler)
         self.handlers: dict[RequestType, MessageQueueServer.HandlerEntry] = {}
 
-    def process_requests(self):
+    def _main_loop(self):
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
             if socks.get(self.socket) == zmq.POLLIN:
@@ -298,81 +307,18 @@ class MessageQueueServer:
     def add_handler(
         self, request_type: RequestType, payload_clss: list[Any], handler
     ) -> None:
+        """Register a handler for a specific request type.
+
+        Args:
+            request_type (RequestType): The type of the request to handle.
+            payload_clss (list[Any]): The expected payload classes for the request.
+                This should be get from `get_payload_classes(request_type)`.
+            handler (callable): The handler function that takes the payloads
+                as arguments.
+        """
         self.handlers[request_type] = self.HandlerEntry(payload_clss, handler)
 
     def close(self) -> None:
         self.is_finished.set()
         self.worker_thread.join()
         self.socket.close()
-
-
-@contextmanager
-def create_dummy_server():
-    # Standard
-    context = zmq.Context().instance()
-    server = MessageQueueServer("tcp://localhost:5555", context)
-
-    def handler_func_with_sleep():
-        sleep_time = 0.2  # random.uniform(0.1, 0.5)
-        print("Sleeping for", sleep_time, "seconds")
-        time.sleep(sleep_time)
-        return "Ok"
-
-    server.add_handler(RequestType.DEBUG_B, [], handler_func_with_sleep)
-    yield server
-
-    server.close()
-
-
-def client_process(num_requests=10):
-    # Standard
-    import os
-
-    pid = os.getpid()
-    context = zmq.Context().instance()
-    client = MessageQueueClient("tcp://localhost:5555", context)
-    futures = [
-        client.submit_request(RequestType.DEBUG_A, [pid, i])
-        for i in range(num_requests)
-    ]
-
-    t = time.perf_counter()
-    results = [f.result() for f in futures]
-    print(f"Client received all responses in {time.perf_counter() - t:.4f} seconds")
-
-    for idx, r in enumerate(results):
-        assert r == "Ok", f"Unexpected response at {idx}: {r}"
-
-    client.close()
-
-
-def server_process():
-    context = zmq.Context().instance()
-    server = MessageQueueServer("tcp://localhost:5555", context)
-
-    def handler_func(pid: int, req_id: int):
-        print(
-            f"Handling request from client {pid}, request id {req_id} -- {time.time()}"
-        )
-        time.sleep(0.01)
-        return "Ok"
-
-    server.add_handler(
-        RequestType.DEBUG_A, get_payload_classes(RequestType.DEBUG_A), handler_func
-    )
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
-    server.close()
-
-
-if __name__ == "__main__":
-    # Standard
-    import sys
-
-    if len(sys.argv) >= 2 and sys.argv[1] == "server":
-        server_process()
-    elif len(sys.argv) >= 2 and sys.argv[1] == "client":
-        client_process(num_requests=200)
