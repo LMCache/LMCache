@@ -112,8 +112,8 @@ def _worker_process_deserialize_and_reconstruct(
             checksums.append(checksum)
             shapes.append(list(tensor.shape))
 
-            ## Do add 1 on the tensor to ensure it's writable
-            # tensor.add_(1)
+            # Do add 1 on the tensor to ensure it's writable
+            tensor.add_(1)
 
         result_queue.put(("success", checksums, shapes))
     except Exception as e:
@@ -201,13 +201,15 @@ def test_cudaipc_wrapper_multiprocess_serialization():
             f"got {actual_checksum}"
         )
 
-    ## Verify that the tensors are being modified in the worker process
-    # for i, (tensor, (expected_checksum, _)) in enumerate(zip(tensors, test_data)):
-    #    # After adding 1 to each element, the new checksum should be:
-    #    num_elements = tensor.numel()
-    #    new_expected_checksum = expected_checksum + float(num_elements)
-    #    actual_checksum = float(tensor.sum().cpu().item())
-    #    assert abs(actual_checksum - new_expected_checksum) < 1e-5, (
-    #        f"Tensor {i}: post-modification checksum mismatch. "
-    #        f"Expected {new_expected_checksum}, got {actual_checksum}"
-    #    )
+    # Verify that the tensors are being modified in the worker process
+    for i, (tensor, (expected_checksum, _)) in enumerate(
+        zip(tensors, test_data, strict=False)
+    ):
+        # After adding 1 to each element, the new checksum should be:
+        num_elements = tensor.numel()
+        new_expected_checksum = expected_checksum + float(num_elements)
+        actual_checksum = float(tensor.sum().cpu().item())
+        assert abs(actual_checksum - new_expected_checksum) < 1e-5, (
+            f"Tensor {i}: post-modification checksum mismatch. "
+            f"Expected {new_expected_checksum}, got {actual_checksum}"
+        )
