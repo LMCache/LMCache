@@ -1075,22 +1075,49 @@ class LMCacheEngine:
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
-        for idx, (start, end, key) in enumerate(
+ 
+        # First, iterate through all tokens with an all-true mask to get the
+        # correct mapping between chunk indices and memory objects
+        all_chunks_info = list(
             self.token_database.process_tokens(
                 tokens=tokens,
-                mask=mask,
+                mask=None,  # Use all-true mask to get all chunks
                 request_configs=request_configs,
             )
+        )
+
+        # Build a mapping from (start, end) to memory object index
+        chunk_to_idx = {
+            (chunk_start, chunk_end): idx
+            for idx, (chunk_start, chunk_end, _) in enumerate(all_chunks_info)
+        }
+
+        # Now iterate with the actual mask to determine which chunks to use
+        used_indices = set()
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens,
+            mask=mask,
+            request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            memory_obj = memory_objs[idx]
+
+            # Find the correct memory object index by matching the chunk
+            mem_obj_idx = chunk_to_idx.get((start, end))
+
+            assert mem_obj_idx is not None, (
+                f"Could not find matching chunk for start={start}, end={end}"
+            )
+
+            memory_obj = memory_objs[mem_obj_idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
+            used_indices.add(mem_obj_idx)
 
         # NOTE: free the memory objects that are not hit.
-        for unused_mem_obj in memory_objs[len(chunks) :]:
-            unused_mem_obj.ref_count_down()
+        for idx, unused_mem_obj in enumerate(memory_objs):
+            if idx not in used_indices:
+                unused_mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 
