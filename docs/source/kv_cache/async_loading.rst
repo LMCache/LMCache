@@ -115,6 +115,7 @@ Limitations
 - Backend support constraint: This feature currently requires backends that implement ``batched_async_contains``; limited to a few backends, e.g.:
     - ``LocalCpuBackend``
     - ``LocalDiskBackend``
+    - ``S3Connector``
     - ``FSConnector``
 - save_unfull_chunk: Automatically disabled in async mode for correctness in prefix chunking.
 
