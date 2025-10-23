@@ -517,6 +517,7 @@ def init_lmcache_engine(
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
+    async_requests: list[ReqMeta] = field(default_factory=list)
     lookup_requests_in_step: list[str] = field(default_factory=list)
 
     @_lmcache_nvtx_annotate
@@ -527,6 +528,14 @@ class LMCacheConnectorMetadata(KVConnectorMetadata):
             req_meta (ReqMeta): the request metadata.
         """
         self.requests.append(req_meta)
+
+    def add_async_request(self, req_meta: ReqMeta) -> None:
+        """Add an async request to the metadata.
+
+        Args:
+            req_meta (ReqMeta): the request metadata.
+        """
+        self.async_requests.append(req_meta)
 
 
 class LMCacheConnectorV1Impl:

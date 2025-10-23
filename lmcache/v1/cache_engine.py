@@ -423,6 +423,7 @@ class LMCacheEngine:
         self,
         tokens: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        skip_broadcast: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         """Retrieve the KV caches from the cache engine. And put the retrieved
@@ -462,6 +463,15 @@ class LMCacheEngine:
                 ret_mask,
                 **kwargs,
             )
+        if skip_broadcast:
+            retrieved_tokens = torch.sum(ret_mask)
+            self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+            logger.info(
+                f"Retrieved {retrieved_tokens} "
+                f"out of {num_required_tokens} "
+                f"out of total {len(tokens)} tokens"
+            )
+            return ret_mask, reordered_chunks, kwargs["slot_mapping"]
         if self.save_only_first_rank:
             self._broadcast_or_receive_memory_objs(
                 reordered_chunks,
@@ -492,6 +502,78 @@ class LMCacheEngine:
             f"out of total {len(tokens)} tokens"
         )
         return ret_mask
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def broadcast_and_to_gpu(
+        self,
+        reordered_chunks,
+        ret_mask,
+        **kwargs,
+    ) -> None:
+        if self.save_only_first_rank:
+            self._broadcast_or_receive_memory_objs(
+                reordered_chunks,
+                ret_mask,
+            )
+
+        # NOTE(Jiayi): memory_obj doesn't have to be a pinned
+        # cpu tensor for the sake of performance.
+        # For example, disk->gpu is faster than disk->cpu->gpu.
+        # RDMA is another example.
+        if len(reordered_chunks) > 0:
+            _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+            self.gpu_connector.batched_to_gpu(
+                list(memory_objs), list(starts), list(ends), **kwargs
+            )
+
+        # TODO(Jiayi): Remove the following for loop with batched operations
+        for key, memory_obj, _, _ in reordered_chunks:
+            if self.remove_after_retrieve and not self._is_passive():
+                self.storage_manager.remove(key)
+            memory_obj.ref_count_down()
+
+
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def broadcast_at_finish(
+        self,
+        done_recv_req_info: dict[str, tuple[torch.Tensor, list[Tuple[CacheEngineKey, MemoryObj, int, int]], torch.Tensor]],
+        kvcaches: list[torch.Tensor],
+    ) -> None:
+        assert isinstance(done_recv_req_info, dict)
+        first_rank = self.metadata.first_rank
+        if self.metadata.is_first_rank():
+            if len(done_recv_req_info) > 0:
+                self.broadcast_object_fn(len(done_recv_req_info), first_rank)
+                for _req_id, (ret_token_mask, reordered_chunks, slot_mapping) in done_recv_req_info.items():
+                    slot_mapping_len = len(slot_mapping)
+                    self.broadcast_object_fn(slot_mapping_len, first_rank)
+                    self.broadcast_fn(slot_mapping, first_rank)
+                    self.broadcast_and_to_gpu(
+                        reordered_chunks,
+                        ret_token_mask,
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping,
+                    )
+            else:
+                self.broadcast_object_fn(0, first_rank)
+        else:
+            count = self.broadcast_object_fn(None, first_rank)
+            if count > 0:
+                for _ in range(count):
+                    ret_token_mask = None
+                    reordered_chunks = []
+                    slot_mapping_len = self.broadcast_object_fn(None, first_rank)
+                    slot_mapping = torch.empty(slot_mapping_len, dtype=torch.int64, device=f"cuda:{self.metadata.worker_id}")
+                    self.broadcast_fn(slot_mapping, first_rank)
+                    self.broadcast_and_to_gpu(
+                        reordered_chunks,
+                        ret_token_mask,
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping,
+                    )
+
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -1064,7 +1146,8 @@ class LMCacheEngine:
                     )
                     break
                 start, end, metadata_dict = combined_metadata
-                ret_mask[start:end] = True
+                if ret_mask is not None:
+                    ret_mask[start:end] = True
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
