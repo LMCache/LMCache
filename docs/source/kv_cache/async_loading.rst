@@ -24,7 +24,7 @@ Principle and Theory
 At a high level, ``async_loading`` decouples scheduler-side lookup from worker-side prefetch/retrieval, allowing overlap between I/O and computation while preserving prefix-based correctness.
 
 - The scheduler sends lookup requests with token chunk hashes and offsets.
-- Worker-side servers perform tiered ``async_batch_contains`` over available backends and eagerly launch non-blocking batched get operations for hit prefixes.
+- Worker-side servers perform tiered ``batched_async_contains`` over available backends and eagerly launch non-blocking batched get operations for hit prefixes.
 - Completion is tracked via an ``EventManager`` to safely deliver loaded memory objects back to the requesting path.
 - A weighted semaphore with an ``AsyncSerializer`` prevents allocator deadlocks by shaping concurrency according to chunk budget.
 
@@ -45,7 +45,7 @@ The following Mermaid sequence diagram illustrates the end-to-end flow:
      note right of LC: Hashes + offsets via TokenDatabase
      LC->>WS: ZMQ PUSH multipart [lookup_id, hashes, offsets, configs]
      WS->>SM: async_lookup_and_prefetch(lookup_id, keys, cum_chunk_lengths)
-     SM->>BE: async_batch_contains(lookup_id, keys, pin=True)
+     SM->>BE: batched_async_contains(lookup_id, keys, pin=True)
      alt prefix hit across tiers
        BE-->>SM: num_hit_chunks (per tier)
        SM->>BE: batched_get_non_blocking(lookup_id, hit_prefix)
@@ -112,7 +112,7 @@ Limitations
 -----------
 
 - Only works with vllm merged `VLLM_PR_23620 <https://github.com/vllm-project/vllm/pull/23620>`_
-- Backend support constraint: This feature currently requires backends that implement ``async_batch_contains``; limited to a few backends, e.g.:
+- Backend support constraint: This feature currently requires backends that implement ``batched_async_contains``; limited to a few backends, e.g.:
     - ``LocalCpuBackend``
     - ``LocalDiskBackend``
     - ``FSConnector``
@@ -121,7 +121,7 @@ Limitations
 Future Work
 -----------
 
-- Introduce a default ``async_batch_contains`` implementation, so all backends can support ``async_loading``.
+- Introduce a default ``batched_async_contains`` implementation, so all backends can support ``async_loading``.
 - Refactor ``AsyncSerializer`` to support being enabled together with ``save_unfull_chunk`` and ``PDBackend``.
 - Add metrics and observability to track the number of asynchronous lookup requests and the number of occupied ``MemoryObj`` instances.
 - Improve the lookup framework by passing vLLM prefix cache hit tokens so that async lookup can skip loading parts already hit in vLLM.
