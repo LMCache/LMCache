@@ -119,7 +119,7 @@ class WeightedSemaphore:
             )
 
         async with self._cond:
-            logger.info(f"WeightedSemaphore: Attempting to acquire {n} chunks")
+            logger.debug(f"WeightedSemaphore: Attempting to acquire {n} chunks")
             if n <= self._concurrent_budget_cap:
                 await self._cond.wait_for(lambda: self._current_chunks >= n)
                 self._current_chunks -= n
@@ -130,7 +130,7 @@ class WeightedSemaphore:
                 )
                 # Reserve everything
                 self._current_chunks = 0
-            logger.info(
+            logger.debug(
                 f"WeightedSemaphore: Acquired {n} chunks, "
                 f"remaining chunks: {self._current_chunks}"
             )
@@ -240,7 +240,9 @@ class StorageManager:
             )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
         # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd:
+        if not self.enable_pd and (
+            self.config.enable_async_loading or self.config.use_layerwise
+        ):
             self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
