@@ -123,7 +123,7 @@ class MessagingFuture(Generic[T]):
 class MessageQueueClient:
     @dataclass
     class WrappedRequest:
-        request_uid: int
+        request_uid: RequestUID
         future: MessagingFuture[Any]
         request_type: RequestType
         request_payloads: list[Any]
