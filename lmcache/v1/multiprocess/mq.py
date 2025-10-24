@@ -2,7 +2,7 @@
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Optional, TypeVar, override
+from typing import Any, Callable, Generic, Optional, TypeVar
 import queue
 import threading
 import uuid
@@ -343,7 +343,6 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         self.handler = handler
         self.response_cls = response_cls
 
-    @override
     def __call__(self, payloads: list[bytes]) -> Future[ResponseType]:
         decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
         future = self.executor.submit(self.handler, *decoded_payloads)
