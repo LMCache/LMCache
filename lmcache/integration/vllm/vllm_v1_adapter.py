@@ -1106,7 +1106,7 @@ class LMCacheConnectorV1Impl:
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
             )
-            
+
             if get_pp_group().is_last_rank:
                 # NOTE(Jiayi): We assume all tokens are saved
                 save_spec.skip_leading_tokens = len(token_ids)
