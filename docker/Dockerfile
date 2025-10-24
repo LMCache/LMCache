@@ -90,7 +90,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
             'vllm[runai,tensorizer,flashinfer]' \
             'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' \
             --extra-index-url https://wheels.vllm.ai/nightly \
-            --index-strategy unsafe-best-match
+            --index-strategy unsafe-best-match ; \
     else \
         uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" \
