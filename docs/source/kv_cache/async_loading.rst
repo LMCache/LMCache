@@ -117,6 +117,7 @@ Limitations
     - ``LocalDiskBackend``
     - ``S3Connector``
     - ``FSConnector``
+    - ``RedisConnector/RedisClusterConnector``
 - save_unfull_chunk: Automatically disabled in async mode for correctness in prefix chunking.
 
 Future Work
