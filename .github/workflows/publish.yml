@@ -95,6 +95,43 @@ jobs:
                 name: release-artifacts
                 path: dist/
 
+    # Run tests and code quality checks before publishing
+    test:
+        name: Run tests
+        uses: ./.github/workflows/test.yml
+
+    code-quality:
+        name: Run code quality checks
+        uses: ./.github/workflows/code_quality_checks.yml
+
+    # Wait for external CI checks (Buildkite) to pass
+    wait-for-ci:
+        name: Wait for Buildkite tests
+        runs-on: ubuntu-latest
+        if: |
+            github.repository_owner == 'LMCache' && (
+                github.event.action == 'published' ||
+                (github.event_name == 'push' && github.ref == 'refs/heads/dev')
+            )
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+              with:
+                disable-sudo-and-containers: true
+                egress-policy: block
+                allowed-endpoints: >
+                  api.github.com:443
+
+            - name: Wait for Buildkite unit tests
+              uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028fb74dc5a068cccc # v1.3.4
+              with:
+                ref: ${{ github.sha }}
+                check-regexp: 'buildkite/lmcache.*'
+                repo-token: ${{ secrets.GITHUB_TOKEN }}
+                wait-interval: 30
+                allowed-conclusions: success
+                running-workflow-name: 'Wait for Buildkite tests'
+
     # Push to Test PyPI when:
     # - a new GitHub release is published
     # - a PR is merged into dev branch (push only trigger)
@@ -110,7 +147,7 @@ jobs:
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
         runs-on: ubuntu-latest
-        needs: build-artifacts
+        needs: [build-artifacts, test, code-quality, wait-for-ci]
 
         steps:
             - name: Harden Runner
@@ -151,7 +188,7 @@ jobs:
             contents: write
 
         runs-on: ubuntu-latest
-        needs: build-artifacts
+        needs: [build-artifacts, test, code-quality, wait-for-ci]
 
         steps:
             - name: Harden Runner
