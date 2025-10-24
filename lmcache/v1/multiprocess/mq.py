@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Callable, Generic, Optional, TypeVar, override
 import queue
 import threading
 import uuid
@@ -18,6 +19,7 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_encoder,
 )
 from lmcache.v1.multiprocess.protocol import (
+    HandlerType,
     RequestType,
     get_payload_classes,
     get_response_class,
@@ -38,6 +40,19 @@ def encode_request_uid(uid: RequestUID) -> bytes:
 
 def decode_request_uid(b_uid: bytes) -> RequestUID:
     return msgspec.msgpack.decode(b_uid, type=RequestUID)
+
+
+def unwrap_request_payloads(
+    b_payloads: list[bytes], payload_clss: list[Any]
+) -> list[Any]:
+    if len(b_payloads) != len(payload_clss):
+        raise ValueError("Payload count does not match expected count")
+
+    decoded_payloads = [
+        msgspec_decode(payload, cls=cls)
+        for payload, cls in zip(b_payloads, payload_clss, strict=False)
+    ]
+    return decoded_payloads
 
 
 _SPECIAL_ENCODER_DECODERS = {
@@ -271,23 +286,94 @@ class MessageQueueClient:
         self.socket.close()
 
 
+ResponseType = TypeVar("ResponseType", covariant=True)
+StateType = TypeVar("StateType", covariant=True)
+
+
+class RequestHandlerBase(Generic[ResponseType]):
+    def __call__(self, payloads: list[bytes]):
+        raise NotImplementedError
+
+    def get_response_class(self) -> ResponseType:
+        raise NotImplementedError
+
+    def get_handler_type(self) -> HandlerType:
+        raise NotImplementedError
+
+
+class SyncRequestHandler(RequestHandlerBase[ResponseType]):
+    """
+    The handler for those "fast" functions that can be executed in the main loop
+    """
+
+    def __init__(
+        self,
+        payload_clss: list[Any],
+        response_cls: ResponseType,
+        handler: Callable[..., ResponseType],
+    ):
+        self.payload_clss = payload_clss
+        self.response_cls = response_cls
+        self.handler = handler
+
+    def __call__(self, payloads: list[bytes]) -> ResponseType:
+        return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
+
+    def get_response_class(self) -> ResponseType:
+        return self.response_cls
+
+    def get_handler_type(self) -> HandlerType:
+        return HandlerType.SYNC
+
+
+class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
+    """
+    Returns the future of the response.
+    """
+
+    def __init__(
+        self,
+        executor: ThreadPoolExecutor,
+        payload_clss: list[Any],
+        response_cls: ResponseType,
+        handler: Callable[..., ResponseType],
+    ):
+        self.executor = executor
+        self.payload_clss = payload_clss
+        self.handler = handler
+        self.response_cls = response_cls
+
+    @override
+    def __call__(self, payloads: list[bytes]) -> Future[ResponseType]:
+        decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
+        future = self.executor.submit(self.handler, *decoded_payloads)
+        return future
+
+    def get_response_class(self) -> ResponseType:
+        return self.response_cls
+
+    def get_handler_type(self) -> HandlerType:
+        return HandlerType.BLOCKING
+
+
+class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
+    """
+    The handler for the "fire and probe" functions that launch async tasks
+    and have special mechanism to probe the task status.
+
+    It requires 2 callables as the input:
+    - the first one is to launch the async task. This function should return
+        a 'state handle' that can be used to probe the task status later.
+    - the second one is to probe the task status and get the return value
+        with the 'state handle' returned by the first function.
+    """
+
+    # TODO: implement this in the future versions if needed
+    pass
+
+
 class MessageQueueServer:
-    class HandlerEntry:
-        def __init__(self, payload_clss: list[Any], handler: Any):
-            self.payload_clss = payload_clss
-            self.handler = handler
-
-        def __call__(self, payloads: list[bytes]) -> Any:
-            if len(payloads) != len(self.payload_clss):
-                raise ValueError("Payload count does not match expected count")
-
-            decoded_payloads = [
-                msgspec_decode(payload, cls=cls)
-                for payload, cls in zip(payloads, self.payload_clss, strict=False)
-            ]
-            return self.handler(*decoded_payloads)
-
-    def __init__(self, bind_url: str, context: zmq.Context):
+    def __init__(self, bind_url: str, context: zmq.Context, max_workers: int = 4):
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
@@ -301,8 +387,82 @@ class MessageQueueServer:
         self.is_finished = threading.Event()
         self.worker_thread = threading.Thread(target=self._main_loop, daemon=True)
 
+        # Thread pool for blocking handlers
+        self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
+
         # Registered handlers: request_type -> (payload_cls, handler)
-        self.handlers: dict[RequestType, MessageQueueServer.HandlerEntry] = {}
+        self.handlers: dict[RequestType, RequestHandlerBase[Any]] = {}
+
+    def _call_sync_handler(
+        self,
+        handler_entry: SyncRequestHandler[Any],
+        payloads: list[bytes],
+        prefix_frames: list[bytes],
+    ) -> Any:
+        """
+        Call the sync handler and send the response back to the client.
+
+        Args:
+            handler_entry (SyncRequestHandler[Any]): The handler entry.
+            payloads (list[bytes]): The payloads of the request.
+            prefix_frames (list[bytes]): The prefix frames to send back.
+        """
+        response = handler_entry(payloads)
+        response_cls = handler_entry.get_response_class()
+        b_response = msgspec_encode(response, cls=response_cls)
+        if response is not None:
+            self.socket.send_multipart(prefix_frames + [b_response])
+        else:
+            self.socket.send_multipart(prefix_frames)
+
+    def _call_blocking_handler(
+        self,
+        handler_entry: BlockingRequestHandler[Any],
+        payloads: list[bytes],
+        prefix_frames: list[bytes],
+    ) -> Any:
+        """
+        Call the blocking handler in a separate thread and send the response
+        back to the client.
+
+        Args:
+            handler_entry (BlockingRequestHandler[Any]): The handler entry.
+            payloads (list[bytes]): The payloads of the request.
+            prefix_frames (list[bytes]): The prefix frames to send back.
+        """
+        future = handler_entry(payloads)
+
+        def _send_response(fut: Future):
+            try:
+                response = fut.result()
+                response_cls = handler_entry.get_response_class()
+                b_response = msgspec_encode(response, cls=response_cls)
+                if response is not None:
+                    self.socket.send_multipart(prefix_frames + [b_response])
+                else:
+                    self.socket.send_multipart(prefix_frames)
+            except Exception as e:
+                logger.error("Error in blocking handler: %s", e)
+
+        future.add_done_callback(_send_response)
+
+    def _call_handler(
+        self,
+        handler_entry: RequestHandlerBase[Any],
+        payloads: list[bytes],
+        prefix_frames: list[bytes],
+    ) -> Any:
+        match handler_entry.get_handler_type():
+            case HandlerType.SYNC:
+                assert isinstance(handler_entry, SyncRequestHandler)
+                self._call_sync_handler(handler_entry, payloads, prefix_frames)
+            case HandlerType.BLOCKING:
+                assert isinstance(handler_entry, BlockingRequestHandler)
+                self._call_blocking_handler(handler_entry, payloads, prefix_frames)
+            case HandlerType.NON_BLOCKING:
+                raise NotImplementedError("Non-blocking handler is not supported yet")
+            case _:
+                raise ValueError("Unknown handler type")
 
     def _main_loop(self):
         while not self.is_finished.is_set():
@@ -319,17 +479,11 @@ class MessageQueueServer:
 
                 if handler_entry := self.handlers.get(request_type):
                     try:
-                        response = handler_entry(payloads)
-                        response_cls = get_response_class(request_type)
-                        if response is not None:
-                            b_response = msgspec_encode(response, cls=response_cls)
-                            self.socket.send_multipart(
-                                [identity, b_request_uid, b_request_type, b_response]
-                            )
-                        else:
-                            self.socket.send_multipart(
-                                [identity, b_request_uid, b_request_type]
-                            )
+                        self._call_handler(
+                            handler_entry=handler_entry,
+                            payloads=payloads,
+                            prefix_frames=[identity, b_request_uid, b_request_type],
+                        )
                     except Exception as e:
                         logger.error("Error handling request %s: %s", request_type, e)
                 else:
@@ -339,7 +493,11 @@ class MessageQueueServer:
                     logger.error("Available handlers: %s", list(self.handlers.keys()))
 
     def add_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self,
+        request_type: RequestType,
+        payload_clss: list[Any],
+        handler_type: HandlerType,
+        handler,
     ) -> None:
         """Register a handler for a specific request type.
 
@@ -350,7 +508,37 @@ class MessageQueueServer:
             handler (callable): The handler function that takes the payloads
                 as arguments.
         """
-        self.handlers[request_type] = self.HandlerEntry(payload_clss, handler)
+        match handler_type:
+            case HandlerType.SYNC:
+                self.add_sync_handler(request_type, payload_clss, handler)
+            case HandlerType.BLOCKING:
+                self.add_blocking_handler(request_type, payload_clss, handler)
+            case HandlerType.NON_BLOCKING:
+                raise NotImplementedError("Non-blocking handler is not supported yet")
+            case _:
+                raise ValueError(f"Unknown handler type: {handler_type}")
+        # self.handlers[request_type] = self.HandlerEntry(payload_clss, handler)
+
+    def add_sync_handler(
+        self, request_type: RequestType, payload_clss: list[Any], handler
+    ) -> None:
+        response_cls = get_response_class(request_type)
+        self.handlers[request_type] = SyncRequestHandler(
+            payload_clss, response_cls, handler
+        )
+
+    def add_blocking_handler(
+        self, request_type: RequestType, payload_clss: list[Any], handler
+    ) -> None:
+        response_cls = get_response_class(request_type)
+        self.handlers[request_type] = BlockingRequestHandler(
+            self.thread_pool, payload_clss, response_cls, handler
+        )
+
+    def add_nonblocking_handler(
+        self, request_type: RequestType, payload_clss: list[Any], handler
+    ) -> None:
+        raise NotImplementedError
 
     def start(self):
         self.worker_thread.start()

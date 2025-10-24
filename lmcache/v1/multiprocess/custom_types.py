@@ -57,7 +57,7 @@ class CudaIPCWrapper:
         return pickle.loads(data)
 
 
-@dataclass
+@dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
     model_name: str
     world_size: int

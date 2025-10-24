@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.mq import (
 )
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
+    get_handler_type,
     get_payload_classes,
 )
 
@@ -196,7 +197,8 @@ def _server_process(
     # Register all handlers
     for request_type, handler in request_handlers.items():
         payload_classes = get_payload_classes(request_type)
-        server.add_handler(request_type, payload_classes, handler)
+        handler_type = get_handler_type(request_type)
+        server.add_handler(request_type, payload_classes, handler_type, handler)
 
     server.start()
 
