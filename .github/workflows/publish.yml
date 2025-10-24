@@ -120,7 +120,17 @@ jobs:
                 disable-sudo-and-containers: true
                 egress-policy: block
                 allowed-endpoints: >
+                  github.com:443
                   api.github.com:443
+                  objects.githubusercontent.com:443
+                  raw.githubusercontent.com:443
+                  github-releases.githubusercontent.com:443
+                  codeload.github.com:443
+                  releases.githubusercontent.com:443
+                  *.github.com:443
+                  *.githubusercontent.com:443
+                  rubygems.org:443
+                  index.rubygems.org:443
 
             - name: Wait for Buildkite unit tests
               uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028fb74dc5a068cccc # v1.3.4
