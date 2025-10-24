@@ -177,6 +177,20 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in batched_contains, returning all False"
             )
             return [False] * len(keys)
+
+        if self._mla_worker_id_as0_mode:
+            keys = [
+                CacheEngineKey(
+                    key.fmt,
+                    key.model_name,
+                    key.world_size,
+                    0,
+                    key.chunk_hash,
+                    key.request_configs,
+                )
+                for key in keys
+            ]
+
         return self.connection.batched_contains(keys, stop_after_first_not_exits)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
