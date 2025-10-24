@@ -1075,7 +1075,7 @@ class LMCacheEngine:
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
- 
+
         # First, iterate through all tokens with an all-true mask to get the
         # correct mapping between chunk indices and memory objects
         all_chunks_info = list(
