@@ -347,14 +347,13 @@ class StorageManager:
             str,
             tuple[Sequence[CacheEngineKey], list[MemoryObj]],
         ] = {}
-        if self.allocator_backend is not None:
-            obj_dict[get_backend_cname(self.allocator_backend)] = (
-                keys,
-                memory_objs,
-            )
-        else:
+        if self.allocator_backend is None:
             # For scheduler role, no allocator backend available
             raise RuntimeError("Batched put not available for scheduler role")
+        obj_dict[get_backend_cname(self.allocator_backend)] = (
+            keys,
+            memory_objs,
+        )
 
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
