@@ -877,6 +877,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                     req_id=request.req_id,
+                    skip_contains_check=True,
                 )
 
                 # Check the result
