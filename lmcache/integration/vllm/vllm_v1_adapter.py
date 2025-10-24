@@ -507,8 +507,8 @@ def _init_lmcache_engine(
     # Validate MLA with layerwise configurations
     if use_mla and lmcache_config.use_layerwise and lmcache_config.enable_blending:
         raise ValueError(
-            "MLA with layerwise and cache blending is not supported yet. "
-            "Please disable either layerwise or cache blending."
+            "We haven't supported MLA with Cacheblend yet. "
+            "Please disable blending."
         )
 
     # When use_mla is True, num_kv_head is 1

@@ -100,7 +100,7 @@ __global__ void reshape_and_cache_back_flash_kernel(
   }
 }
 
-template <typename scalar_t>
+template <typename scalar_t, bool USE_MLA>
 __global__ void single_layer_kv_transfer_kernel(
     // scalar_t* __restrict__ lmc_key_cache,    // [num_tokens,
     // num_heads*head_size] scalar_t* __restrict__ lmc_value_cache,  //
@@ -136,33 +136,32 @@ __global__ void single_layer_kv_transfer_kernel(
   const int64_t block_offset = slot_idx % block_size;
   const int n = num_heads * head_size_in_64bit;
 
-  // Check if this is MLA format (no separate K/V)
-  const bool is_mla = (lmc_value_offset == 0 && vllm_value_offset == 0);
-
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
     const int64_t lmc_key_idx = token_idx * lmc_stride + i;
-    const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
 
     const int head_idx = i / head_size_in_64bit;
     const int head_offset = i % head_size_in_64bit;
     const int64_t vllm_key_idx = block_idx * vllm_block_key_stride_in_64bit +
                                  block_offset * num_heads * head_size_in_64bit +
                                  head_idx * head_size_in_64bit + head_offset;
-    const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
 
     if (direction) {
       // GPU to LMCache
       lmc_key_value_cache[lmc_key_idx] = vllm_key_value_cache[vllm_key_idx];
-      // For MLA, skip redundant copy since key and value are the same
-      if (!is_mla) {
+      // For non-MLA, also copy the value component
+      if constexpr (!USE_MLA) {
+        const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
+        const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
         lmc_key_value_cache[lmc_value_idx] =
             vllm_key_value_cache[vllm_value_idx];
       }
     } else {
       // LMCache to GPU
       vllm_key_value_cache[vllm_key_idx] = lmc_key_value_cache[lmc_key_idx];
-      // For MLA, skip redundant copy since key and value are the same
-      if (!is_mla) {
+      // For non-MLA, also copy the value component
+      if constexpr (!USE_MLA) {
+        const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
+        const int64_t vllm_value_idx = vllm_key_idx + vllm_value_offset;
         vllm_key_value_cache[vllm_value_idx] =
             lmc_key_value_cache[lmc_value_idx];
       }
@@ -617,10 +616,22 @@ void single_layer_kv_transfer(
       device_of(vllm_key_value_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  lmc::single_layer_kv_transfer_kernel<int64_t><<<grid, block, 0, stream>>>(
-      lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
-      vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
-      lmc_value_offset, num_heads, head_size_in_64bit, block_size, direction);
+  // Dispatch to the appropriate template specialization based on use_mla
+  if (use_mla) {
+    lmc::single_layer_kv_transfer_kernel<int64_t, true>
+        <<<grid, block, 0, stream>>>(
+            lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
+            vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
+            lmc_value_offset, num_heads, head_size_in_64bit, block_size,
+            direction);
+  } else {
+    lmc::single_layer_kv_transfer_kernel<int64_t, false>
+        <<<grid, block, 0, stream>>>(
+            lmc_key_value_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
+            vllm_block_key_stride_in_64bit, vllm_value_offset, lmc_stride,
+            lmc_value_offset, num_heads, head_size_in_64bit, block_size,
+            direction);
+  }
 }
 
 void load_and_reshape_flash(
