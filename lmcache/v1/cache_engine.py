@@ -1146,11 +1146,12 @@ class LMCacheEngine:
                 pass
             else:
                 # NOTE: key should always be in the lookup cache once we support it.
+                # TODO: use lookup_cache to skip the contains
                 if (
                     skip_contains_check
-                    and len(self.storage_manager.actual_storage_names) == 1
+                    and len(self.storage_manager.non_allocator_backends) == 1
                 ):
-                    location = self.storage_manager.actual_storage_names[0]
+                    location = self.storage_manager.non_allocator_backends[0]
                 else:
                     location = self.storage_manager.contains(key)
                 if location is None:

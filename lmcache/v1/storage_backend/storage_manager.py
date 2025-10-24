@@ -210,7 +210,7 @@ class StorageManager:
         )
 
         # the backend used for actual storage
-        self.actual_storage_names = self.get_actual_storage_names()
+        self.non_allocator_backends = self.get_non_allocator_backends()
 
         self.enable_pd = config.enable_pd
 
@@ -816,11 +816,11 @@ class StorageManager:
                 return False
         return True
 
-    def get_actual_storage_names(self) -> List[str]:
+    def get_non_allocator_backends(self) -> List[str]:
         """
-        Get the name of the actual storage backends. Some backends,
+        Get the names of the actual storage backends. Some backends,
         such as LocalCPUBackend and PDBackend, in some cases, only
-        serve as a backend for allocation
+        serve as a backend for allocation.
         """
         storage_names = []
         for backend_name, backend in self.storage_backends.items():
