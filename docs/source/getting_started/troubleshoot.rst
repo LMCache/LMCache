@@ -608,6 +608,90 @@ When completed successfully, you’ll see an output summary similar to:
 
 **🛠️ Solution**
     `Links <https://github.com/LMCache/LMCache/pull/1391>`_ to the PR that fixes this issue.
+----
+**🧭 Time**
+    2025-09-10
+
+**🚨 Issue**
+   [Bug] [1P1D Disagg] Facing assertion error while starting Vllm server for assert isinstance(allocator_backend, AllocatorBackendInterface)
+
+**📋 Description**
+    I am experimenting with 1P1D configuration and trying to start vllm server with 1P1D configuration but facing the following error:
+    
+    .. code-block:: bash
+        
+        Traceback (most recent call last):
+        File "/usr/local/lib/python3.12/dist-packages/vllm/v1/executor/multiproc_executor.py", line 533, in worker_main
+            worker = WorkerProc(*args, **kwargs)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/vllm/v1/executor/multiproc_executor.py", line 401, in __init__
+            self.worker.init_device()
+        File "/usr/local/lib/python3.12/dist-packages/vllm/worker/worker_base.py", line 603, in init_device
+            self.worker.init_device()  # type: ignore
+            ^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_worker.py", line 192, in init_device
+            init_worker_distributed_environment(self.vllm_config, self.rank,
+        File "/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_worker.py", line 612, in init_worker_distributed_environment
+            ensure_kv_transfer_initialized(vllm_config)
+        File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_transfer_state.py", line 63, in ensure_kv_transfer_initialized
+            _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/factory.py", line 60, in create_connector
+            return connector_cls(config, role)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py", line 27, in __init__
+            self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/vllm_v1_adapter.py", line 563, in __init__
+            self.lmcache_engine = _init_lmcache_engine(
+                                ^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/vllm_v1_adapter.py", line 507, in _init_lmcache_engine
+            engine = LMCacheEngineBuilder.get_or_create(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/lmcache/v1/cache_engine.py", line 1457, in get_or_create
+            engine = LMCacheEngine(
+                    ^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/lmcache/v1/cache_engine.py", line 130, in __init__
+            self.storage_manager = StorageManager(
+                                    ^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/lmcache/v1/storage_backend/storage_manager.py", line 114, in __init__
+            self.allocator_backend = self._get_allocator_backend(config)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/local/lib/python3.12/dist-packages/lmcache/v1/storage_backend/storage_manager.py", line 153, in _get_allocator_backend
+            assert isinstance(allocator_backend, AllocatorBackendInterface)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        AssertionError
+
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1551>`_
+----
+
+**🧭 Time**
+    2025-09-10
+
+**🚨 Issue**
+   [DistServe] The decoder KV cache missed yet the prefiller has transfered it successfully
+
+**📋 Description**
+    I have a 1P1D setup with VLLM+ LMCache 0.3.3 (with some fixes) and it works for inference request of 16K input prompt length or lower.
+With 32K input length, I see the prefill does successfully transfer KV-cache data over, yet decode performs prefill work again.
+
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1547>`_
+----
+
+**🧭 Time**
+    2025-09-17
+
+**🚨 Issue**
+    blend_kv_v1 with use-disk doesn't work on v0.3.6
+
+**📋 Description**
+    blend_kv_v1 with use-disk doesn't work on v0.3.6.
+When using the use-disk option, the second request during inference terminates with a key error in local_cpu_backend's hot_cache.
+
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1616>`_
 
 ----
 
@@ -643,9 +727,48 @@ When completed successfully, you’ll see an output summary similar to:
 
 ----
 
+**🧭 Time**
+    2025-09-25
+
+**🚨 Issue**
+   ERROR:The number of retrieved tokens is less than the expected number of tokens! This should not happen!
+
+**📋 Description**
+    ERROR:The number of retrieved tokens is less than the expected number of tokens!
+
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1686>`_
+----
+
+**🧭 Time**
+    2025-09-30
+
+**🚨 Issue**
+   multi-TP deployment, "exist" key and "put" key in the connector are no same
+
+**📋 Description**
+    using multi-tp deployment, the keys of exists and put are different, which leads to the failure to hit the kv cache.
+
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1728>`_
+----
+
+
 ---------------------------------
 🕒 2025-10
 ---------------------------------
+**🧭 Time**
+    2025-10-01
+
+**🚨 Issue**
+   ``len(slot_mapping) == len(token_ids)`` Assertion failure with Decode Context Parallelism
+
+**📋 Description**
+    When running DeepSeek V3/R1 with ``-tp 4 -dcp 4`` on 4xH200, LMCache fails the assertion ``assert len(slot_mapping) == len(token_ids)``.
+    That said, I think this may actually be a bug with vLLM's DCP, regarding its interaction with the KV cache storage/retrieval? I'm not sure.
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1732>`_
+----
 
 **🧭 Time**
     2025-10-01
@@ -656,6 +779,252 @@ When completed successfully, you’ll see an output summary similar to:
 **📋 Description**
     For lmcache metrics, what does lmcache:retrieve_hit_rate actually mean? We were testing a scenario with multi-turn chat, the lookup_hit_rate does seem quite high but retrieve_hit_rate is constantly 0. It only shows as one when we put the exact same prompt. Thanks
 
+----
+**🧭 Time**
+    2025-10-08
+
+**🚨 Issue**
+   The native serdes ref_count_up() is preventing MemoryObj from being unpinned and evicted
+
+**📋 Description**
+    The extra memory_obj.ref_count_up() is currently blocking the MemoryObj being released if the cache memory is filled up. We got the following WARNINGs which is not recoverable
+
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1756>`_
+----
+
+**🧭 Time**
+    2025-10-13
+
+**🚨 Issue**
+   LMCache + vLLM Version Compatibility Issues Across Multiple Releases
+
+**📋 Description**
+    For lmcache metrics, what does lmcache:retrieve_hit_rate actually mean? We were testing a scenario with multi-turn chat, the lookup_hit_rate does seem quite high but retrieve_hit_rate is constantly 0. It only shows as one when we put the exact same prompt. Thanks
+
+**🔍 Details**
+    `Links <https://github.com/LMCache/LMCache/issues/1768>`_
+----
+
+**🧭 Time**
+    2025-10-13
+
+**🚨 Issue**
+   Performance Degradation When enable_async_loading: True Under High CPU Memory Usage
+
+**📋 Description**
+    When ``enable_async_loading``: True is set, in scenarios with multiple users interacting in multi-turn conversations under high concurrency, if CPU memory usage becomes saturated, the GPU utilization drops sharply from 90% to 60%-70% and overall performance degrades significantly.
+
+    **To Reproduce**
+    1. Configure LMCache as follows:
+
+    .. code-block:: yaml
+
+        chunk_size: 256
+        local_cpu: True
+        max_local_cpu_size: 200
+        use_layerwise: true
+
+    2. Start vllm service (H100):
+
+    .. code-block:: bash
+
+        LMCACHE_CONFIG_FILE=example.yaml vllm serve xxx-10B-dense-model --max-model-len 10000 --port 8000 --quantization fp8 --max-num-batched-tokens 1024 --kv-cache-dtype fp8 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+    3. Run a benchmark script (such as `Links <https://github.com/vllm-project/production-stack/blob/main/benchmarks/multi-round-qa/multi-round-qa.py>`_ )
+    
+    This issue only occurs when enable_async_loading is enabled. In other configurations, GPU utilization remains stable even under high CPU memory usage. See attached performance dashboards and GPU metrics for reference.
+
+**🧩 Environment**
+    - Device: Server/Workstation running LMCache
+    - OS: Linux (please specify version)
+    - GPU: NVIDIA H100 80GB HBM3
+    - CUDA Driver: 12.2
+    - LMCache version: (please specify)
+    - Other info: Driver Version 535.129.03, concurrency level: high
+
 **🔴 Status:** Unresolved  
 
 ----
+**🧭 Time**
+    2025-10-15
+
+**🚨 Issue**
+   async mode connector use batched_put OOM
+
+**📋 Description**
+    Connector using async batched_put will cause OOM,memoryobj.meta.ref_count not decrease to 0.
+
+    .. image:: https://private-user-images.githubusercontent.com/26517379/501337901-d8b0f4ff-9808-4165-8ffd-141aeff3a63d.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjEzNzc0OTMsIm5iZiI6MTc2MTM3NzE5MywicGF0aCI6Ii8yNjUxNzM3OS81MDEzMzc5MDEtZDhiMGY0ZmYtOTgwOC00MTY1LThmZmQtMTQxYWVmZjNhNjNkLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTEwMjUlMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMDI1VDA3MjYzM1omWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTA1MTg4MDA4NjBmZjUyOGM3ZWFmZmJjOGRjM2VjOTVmY2YxMDlkODUzN2EyNDU3NjQ4MDY3ODA4ZmE2ZmI4N2UmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.h-bOqYqPoRBXscmSmHLvJ7cOccUrwowRF--j_yEKIZw
+        :alt: Log information
+        :width: 100%
+        :align: center
+    
+    .. image:: https://private-user-images.githubusercontent.com/26517379/501341592-81e9ae13-0609-4ee5-823b-d78d326928eb.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjEzNzc0OTMsIm5iZiI6MTc2MTM3NzE5MywicGF0aCI6Ii8yNjUxNzM3OS81MDEzNDE1OTItODFlOWFlMTMtMDYwOS00ZWU1LTgyM2ItZDc4ZDMyNjkyOGViLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTEwMjUlMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMDI1VDA3MjYzM1omWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWE1YjE1NDI0Y2U1MDJkNTYxYjQxNDMzZTFmMDk3ZTdiM2ViMGIyMjI2NWU3YmJhOTcxMTY1ZjQ0NzQ5OTBiODYmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.YPxQDFdZumDXKwpc2VNDsARacJr9jkmsuxVfgiUcC9E
+        :alt: Log information
+        :width: 100%
+        :align: center
+
+    **To Reproduce**
+        - use async
+        - ``support_batched_put`` True
+
+    .. code-block:: yaml
+
+        chunk_size: 256
+        local_cpu: False
+        max_local_cpu_size: 5
+        enable_async_loading: True
+        remote_url: "my connector"
+    
+    server
+    .. code-bolck:: bash
+
+        export LMCACHE_CONFIG_FILE=debug_config.yaml \
+        export LMCACHE_USE_EXPERIMENTAL=True \
+        export VLLM_USE_V1=1
+
+        python3 -m vllm.entrypoints.openai.api_server \
+        --port "8000" \
+        --uvicorn-log-level warning \
+        --model /models/DeepSeek-R1-Distill-Qwen-1.5B \
+        --served-model-name DeepSeek-R1-Distill-Qwen-1.5B \
+        --trust-remote-code \
+        --max-model-len "16384" \
+        --disable-log-requests \
+        --disable-fastapi-docs \
+        --swap-space "0" \
+        --no-enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --gpu-memory-utilization="0.95" \
+        --tensor-parallel-size=2 \
+        --kv-transfer-config '{"kv_connector": "LMCacheConnectorV1","kv_role": "kv_both"}' \
+        >test.log 2>&1 &
+    test
+
+    .. code-bolck:: bash
+
+        curl http://0.0.0.0:8000/v1/chat/completions     -H "Content-Type: application/json" -d '{
+            "model": "DeepSeek-R1-Distill-Qwen-1.5B",
+            "messages": [
+                {"role": "user", "content": "hello world"}
+            ]
+        }'
+**🧩 Environment**
+    
+    lmcache==0.3.6
+
+----
+**🧭 Time**
+    2025-10-17
+
+**🚨 Issue**
+   Inference crashes when unable to load token
+
+**📋 Description**
+    Two inference nodes are connected to the same mooncake. When one node is shut down unexpectedly, the other node will die after receiving the request.
+
+    **To Reproduce**
+
+    Three containers, A, B, and C.
+    A: Inference Node 1
+    B: ​​Inference Node 2
+    C: Mooncake service, including mooncake_master and mooncake_http_metadata_server
+    
+    1. Both inference nodes use Mooncake as the lmcache storage backend.
+
+    - After startup, they first send a request to node A to store the KV there.
+    - They send a request to node B, where they can observe token reuse.
+
+    .. image:: https://private-user-images.githubusercontent.com/43202036/502373331-3b49cbc3-dadc-483f-8622-abeec6ee2061.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjEzNzY5NzAsIm5iZiI6MTc2MTM3NjY3MCwicGF0aCI6Ii80MzIwMjAzNi81MDIzNzMzMzEtM2I0OWNiYzMtZGFkYy00ODNmLTg2MjItYWJlZWM2ZWUyMDYxLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTEwMjUlMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMDI1VDA3MTc1MFomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTViODY1YzI3MDkwOGQ2YWI4NDJhODYwMzU1MmNmZWY2MjlhNzMzMTc0NmE0ZmQ2ODliZTE0OTE2NWNmOTY5MWQmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.wjW4EHTUVvny5oq-62-gud0OgQUEh5SpuemZMbhKOC0
+        :alt: Log information
+        :width: 100%
+        :align: center
+
+    2. Shut down node A directly and send a request to node B again. The inference is stuck and returns 500 after a while.
+
+    .. image:: https://private-user-images.githubusercontent.com/43202036/502373463-b492c6b9-a336-4aaf-822a-a3896eb137d5.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjEzNzY5NzAsIm5iZiI6MTc2MTM3NjY3MCwicGF0aCI6Ii80MzIwMjAzNi81MDIzNzM0NjMtYjQ5MmM2YjktYTMzNi00YWFmLTgyMmEtYTM4OTZlYjEzN2Q1LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTEwMjUlMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMDI1VDA3MTc1MFomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWI0NzcwY2ZmNDBmZjQ4MzEzNWIzM2QxOGY0OWMyMDVhMmNjNzNkNzYzYzNmNTYyOTBkMWFjYmVkZGRmMzE1NjkmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.koJH8h0hH7L4TaVwdCNCkq7pPSt_ugFHUYBqFy6lO5k
+        :alt: Log information
+        :width: 100%
+        :align: center
+    Node B engine crashes and exits
+
+    .. image:: https://private-user-images.githubusercontent.com/43202036/502373482-4e2016c9-9352-46ae-8394-4ac3975c1482.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NjEzNzY5NzAsIm5iZiI6MTc2MTM3NjY3MCwicGF0aCI6Ii80MzIwMjAzNi81MDIzNzM0ODItNGUyMDE2YzktOTM1Mi00NmFlLTgzOTQtNGFjMzk3NWMxNDgyLnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNTEwMjUlMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjUxMDI1VDA3MTc1MFomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTIzMjY3MDZmM2U3ZGMxY2Y1NDMxZGU5NjRiOGQ0Mjc2OGQ0NzExYzRlYWRjYTI4NGUwYTI4ODU1Nzk5MTdmNTcmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0.AZnJtMSpUPoUFpmKp-s_NUR18AZWkpkCTv9zVkolIH4
+        :alt: Log information
+        :width: 100%
+        :align: center
+    **Expected behavior**
+    Fall back to no lmcache when token cannot be loaded
+
+**🧩 Environment**
+    
+    vllm==0.10.2
+    lmcache==0.3.7
+    
+**🔴 Status:** Unresolved  
+
+----
+**🧭 Time**
+    2025-10-22
+
+**🚨 Issue**
+   Chunk name/CacheEngineKey should contains dtype to avoid multiple vllm cluster cache matched by accident 
+
+**📋 Description**
+    There are two vllm cluster with same module, same tp count, but with different kvcache dtype. Under this assumption, there is a risk to have two different chunks belong to different vLLM cluster, but with save CacheEngineKey, if we use shared remote backend, vLLM0 cluster may get the vLLM0 cluster's chunk regard as cache hit, but the content is not correct.
+
+**🛠️ Solution**
+    `Links <https://github.com/LMCache/LMCache/pull/1859>`_ to the PR that fixes this issue.
+
+----
+**🧭 Time**
+    2025-10-23
+
+**🚨 Issue**
+   Response is wrong due to async KV loading using wrong memory object
+
+**📋 Description**
+    When both vllm's prefix cache and LMCache are hit. ``_async_process_tokens_internal()`` in cache_engine.py appends wrong memory object to chunks and return to caller, causing vLLM generating wrong response
+
+    To Reproduce
+    1. Configure a simple cpu backend, enable async loading
+
+    .. code-block:: yaml
+        chunk_size: 64
+        local_cpu: True
+        max_local_cpu_size: 5
+        enable_async_loading: True
+
+    2. start vllm with such cpu.yaml
+
+    .. code-block:: bash
+
+        VLLM_LOGGING_LEVEL=DEBUG PYTHONHASHSEED=0 \
+        LMCACHE_CONFIG_FILE=cpu.yaml LMCACHE_LOG_LEVEL=DEBUG \
+        vllm serve Qwen/Qwen3-4B --served-model-name 'Qwen/Qwen3-4B' --enforce-eager  \
+        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+        --disable-log-stats --disable-log-requests -tp 1
+    
+    3. prepare a 256 token prompt (for Qwen3-4B) and send
+
+    4. for the first time, response is correct because kv cache is fully computed and written to vllm's GPU cache and LMCache's CPU cache
+
+    5. resend the request, got wrong answer, because token is computed with vllm's GPU cache plus wrong data from LMCache's object
+
+    .. code-block:: bash
+
+        "text": "?\n\nStanford University, formally known as Leland Stanford Junior University, is a prestigious private research university"
+    vllm uses cache of 240 tokens from its GPU cache and try to load 15 tokens from LMCache, which triggers LMCache to load the 4th chunk (192-255) in its CPU memory
+
+    .. code-block:: bash
+
+        LMCache INFO: Reqid: cmpl-3f9cb13d8712474ea76302f67af0bb4f-0, Total tokens 256, LMCache hit tokens: 256, need to load: 15
+        LMCache DEBUG: Scheduled to load 256 tokens for request cmpl-3f9cb13d8712474ea76302f67af0bb4f-0
+        LMCache INFO: Retrieved 64 out of 64 required tokens (from 256 total tokens).
+    Somehow the data returned from LMCache is wrong, making vllm generate wrong response
+
+    6. following request will continue to get wrong response
+
+**🔴 Status:** Unresolved  
+
+----
+
