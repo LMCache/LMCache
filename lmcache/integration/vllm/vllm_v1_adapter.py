@@ -901,6 +901,7 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
+<<<<<<< HEAD
                     """
                     Report failed block IDs in case of partial failure.
                     """
@@ -916,6 +917,14 @@ class LMCacheConnectorV1Impl:
                 request.load_spec.vllm_cached_tokens
             )
             self._stats_monitor.update_interval_prompt_tokens(len(tokens))
+=======
+                self.record_failed_blocks(
+                    request.req_id,
+                    token_mask[:lmcache_cached_tokens],
+                    ret_token_mask,
+                    slot_mapping[:lmcache_cached_tokens],
+                )
+>>>>>>> 855d3b4 (merge invalid blocks report)
 
     def record_failed_blocks(
         self,
@@ -923,6 +932,7 @@ class LMCacheConnectorV1Impl:
         expected_mask: torch.Tensor,
         ret_mask: torch.Tensor,
         slot_mapping: torch.Tensor,
+<<<<<<< HEAD
     ) -> set[int]:
         """Record block IDs associated with failed load attempts.
 
@@ -955,12 +965,20 @@ class LMCacheConnectorV1Impl:
 
         if expected_mask.numel() == 0:
             return set()
+=======
+    ) -> None:
+        """Record block IDs associated with failed load attempts."""
+
+        if expected_mask.numel() == 0:
+            return
+>>>>>>> 855d3b4 (merge invalid blocks report)
 
         expected_mask_cpu = expected_mask.to(device="cpu", dtype=torch.bool)
         ret_mask_cpu = ret_mask.to(device="cpu", dtype=torch.bool)
 
         if ret_mask_cpu.shape[0] != expected_mask_cpu.shape[0]:
             logger.debug("expected_mask_cpu.shape[0] != ret_mask_cpu.shape[0]")
+<<<<<<< HEAD
             return set()
 
         missing_mask = expected_mask_cpu & ~ret_mask_cpu
@@ -970,6 +988,17 @@ class LMCacheConnectorV1Impl:
         missing_indices = torch.nonzero(missing_mask, as_tuple=False).view(-1)
         if missing_indices.numel() == 0:
             return set()
+=======
+            return
+
+        missing_mask = expected_mask_cpu & ~ret_mask_cpu
+        if not torch.any(missing_mask):
+            return
+
+        missing_indices = torch.nonzero(missing_mask, as_tuple=False).view(-1)
+        if missing_indices.numel() == 0:
+            return
+>>>>>>> 855d3b4 (merge invalid blocks report)
 
         slot_mapping_cpu = slot_mapping.to(device="cpu", dtype=torch.long)
         if slot_mapping_cpu.shape[0] > missing_mask.shape[0]:
@@ -981,7 +1010,11 @@ class LMCacheConnectorV1Impl:
         missing_blocks = {int(block.item()) for block in missing_blocks_tensor}
 
         if not missing_blocks:
+<<<<<<< HEAD
             return set()
+=======
+            return
+>>>>>>> 855d3b4 (merge invalid blocks report)
 
         logger.warning(
             "Request %s failed to load %d tokens across %d blocks",
@@ -989,7 +1022,11 @@ class LMCacheConnectorV1Impl:
             missing_indices.numel(),
             len(missing_blocks),
         )
+<<<<<<< HEAD
         return missing_blocks
+=======
+        self._invalid_block_ids.update(missing_blocks)
+>>>>>>> 855d3b4 (merge invalid blocks report)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
