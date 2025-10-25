@@ -92,7 +92,7 @@ class NixlObjectConfig:
             config.nixl_buffer_device, metadata.worker_id
         )
 
-        lookup_and_fetch = extra_config.get("nixl_object_lookup_and_fetch", True)
+        lookup_and_fetch = extra_config.get("nixl_object_lookup_and_fetch", False)
 
         return NixlObjectConfig(
             buffer_size=config.nixl_buffer_size,
@@ -185,7 +185,7 @@ class NixlObjectAgent:
         self.mem_xfer_descs = xfer_descs
         self.mem_xfer_handler = xfer_handler
 
-    def create_storage_handler(self, object_key: str, page_size: int):
+    def create_single_storage_handler(self, object_key: str, page_size: int):
         """Create a storage handler for a single specific object key"""
         reg_list = [(0, page_size, 0, object_key)]
         xfer_desc = [(0, page_size, 0)]
@@ -196,6 +196,23 @@ class NixlObjectAgent:
             self.agent_name, xfer_desc, mem_type="OBJ"
         )
         
+        return reg_descs, xfer_descs, xfer_handler
+
+    def create_batched_storage_handler(self, object_keys: str, page_size: int):
+        """Create a storage handler for a single specific object key"""
+        reg_list = []
+        xfer_desc = []
+        for i in range(len(object_keys)):
+            reg_list.append((0, page_size, i, object_keys[i]))
+            xfer_desc.append((0, page_size, i))
+            logger.debug(f"Initializing storage handler for {object_keys[i]} with index {i}")
+        
+        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
+        # descs not used
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
+        xfer_handler = self.nixl_agent.prep_xfer_dlist(
+            self.agent_name, xfer_desc, mem_type="OBJ"
+        )       
         return reg_descs, xfer_descs, xfer_handler
 
     def get_mem_to_storage_handle(
@@ -361,13 +378,13 @@ class NixlObjectBackend(AllocatorBackendInterface):
         with self.progress_lock:
             return key.chunk_hash in self.progress_set
 
-    def get_one_object_to_mem(self, key: CacheEngineKey, pin: bool = True) -> Optional[MemoryObj]:
+    def get_one_object_to_mem(self, key: CacheEngineKey, pin: bool = False) -> Optional[MemoryObj]:
         object_key = self._format_object_key(key)
         page_size = self.memory_allocator.align_bytes
 
         # Create storage handler for this object
         storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
-            self.agent.create_storage_handler(object_key, page_size)
+            self.agent.create_single_storage_handler(object_key, page_size)
         )
 
         # Allocate memory for the object
@@ -406,7 +423,8 @@ class NixlObjectBackend(AllocatorBackendInterface):
             if pin:
                 self.object_map.add(key.chunk_hash, obj, object_key)
                 logger.debug(f"PREFETCH Key {key.chunk_hash:x} and keep in map")
-            #logger.debug(f"OOOO object tensor shape is {obj.tensor.size()}")
+
+            logger.debug(f"GET Key {key.chunk_hash:x} shape is {obj.tensor.size()}")
             #logger.debug(f"OOOO object tensor is {obj.tensor}")
             return obj
         else:
@@ -415,7 +433,81 @@ class NixlObjectBackend(AllocatorBackendInterface):
             logger.debug(f"PREFETCH Key {key.chunk_hash:x} failed")
             return None
 
-    def contains(self, key: CacheEngineKey, pin: bool = True) -> bool:
+    def get_objects_to_mem(
+        self, keys: list[CacheEngineKey], pin: bool = False
+    ) -> list[Optional[MemoryObj]]:
+        obj_list: list[Optional[MemoryObj]] = []
+        object_keys = []
+        mem_indices = []
+        storage_indices = []
+        page_size = self.memory_allocator.align_bytes
+        idx = 0
+        start_time = time.time()
+
+        # Prepare mem and storage indice
+        for key in keys:
+            object_key = self._format_object_key(key)
+            object_keys.append(object_key)
+
+            # Allocate memory for the object
+            assert self.meta_shape is not None
+            assert self.meta_dtype is not None
+            assert self.meta_fmt is not None
+            obj = self.memory_allocator.allocate(
+                self.meta_shape, self.meta_dtype, self.meta_fmt
+            )
+            if obj is None:
+                logger.warning("Failed to allocate memory for contains check")
+                self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
+                return None
+
+            obj_list.append(obj)
+            mem_indices.append(obj.metadata.address)
+            storage_indices.append(idx)
+            idx += 1
+        
+        # Create batched storage handler
+        storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
+            self.agent.create_batched_storage_handler(object_keys, page_size)
+        )
+        # Create transfer handle
+        handle = self.agent.get_storage_to_mem_handle(
+            mem_indices, storage_xfer_handler, storage_indices
+        )
+
+        # Try to read the object
+        try:
+            xfer_state = self.agent.post_blocking(handle)
+        except nixlBind.nixlBackendError as exc:
+            logger.debug(f"Batch Transfer failed: {exc}")
+            return [None] * len(keys)
+
+        self.agent.release_handle(handle)
+        self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
+
+        if xfer_state:
+            for i in range(len(keys)):
+                key = keys[i]
+                obj = obj_list[i]
+                object_key = object_keys[i]
+                # Cache them in the object map
+                if pin:
+                    self.object_map.add(key.chunk_hash, obj, object_key)
+                    logger.debug(f"PREFETCH Key {key.chunk_hash:x} in batch and keep in map")
+                else:
+                    logger.debug(f"GET Key {key.chunk_hash:x} in batch")
+            end_time = time.time()
+            duration = end_time - start_time
+            logger.info(f"get_objects_to_mem for {len(keys)} objects size {page_size*len(keys)} took {duration:.6f} seconds")                
+            return obj_list
+        else:
+            # Object doesn't exist, free the allocated memory
+            for obj in obj_list:
+                self.memory_allocator.free(obj)
+            logger.debug(f"Get keys failed")
+            return [None] * len(keys)
+
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether key is in the storage backend.
 
@@ -438,12 +530,12 @@ class NixlObjectBackend(AllocatorBackendInterface):
             return True
 
         xfer_state = False # not found by default
-        if (pin):
+        if (pin and self.lookup_and_fetch):
+            """Only enable prefetch if lookup_and_fetch is enabled"""
             logger.debug(f"PREFETCH key {key.chunk_hash:x}")
             '''retrieve and pin in memory for later use'''
-            xfer_state = (self.get_one_object_to_mem(key, pin=True) is not None)
+            xfer_state = (self.get_one_object_to_mem(key, pin) is not None)
         else:
-            logger.debug(f"LOOKUP key {key.chunk_hash:x}")
             xfer_state = self.key_exists(key)
             if xfer_state:
                 logger.debug(f"LOOKUP Key {key.chunk_hash:x} exists in storage")
@@ -452,13 +544,13 @@ class NixlObjectBackend(AllocatorBackendInterface):
 
         return xfer_state
 
+    """
     async def batched_async_contains(
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
         pin: bool = False,
     ) -> int:
-        '''Check multiple keys concurrently with limited concurrency; stop at first miss.'''
         if not keys:
             return 0
 
@@ -467,7 +559,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         async def async_contains(key: CacheEngineKey) -> bool:
             # Limit concurrent threads
             #async with sem:
-            return await asyncio.to_thread(self.contains, key, self.lookup_and_fetch)
+            return await asyncio.to_thread(self.contains, key, pin)
 
         # Start all tasks concurrently (semaphore will throttle)
         tasks = [asyncio.create_task(async_contains(k)) for k in keys]
@@ -489,6 +581,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
                     rt.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             return 0
+    """
 
     async def mem_to_storage_parallel(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
@@ -627,11 +720,9 @@ class NixlObjectBackend(AllocatorBackendInterface):
             obj_list = asyncio.run(self.get_from_mem([key]))
             return obj_list[0]
         else:
-            found = self.get_one_object_to_mem(key)
-            if found:
-                objentry = self.object_map.pop(key.chunk_hash)
-                if objentry is not None:
-                    return objentry.obj
+            #obj = self.get_one_object_to_mem(key, False)
+            obj_list = self.get_objects_to_mem([key], False)
+            return obj_list[0]
         return None
 
     """
@@ -641,6 +732,21 @@ class NixlObjectBackend(AllocatorBackendInterface):
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
     """
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        """
+        A blocking function to get the kv cache from the storage backend.
+        :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+        :return: a list of memory objects.
+        """
+        if not keys:
+            return []
+
+        obj_list = self.get_objects_to_mem(keys, False)
+        return obj_list
 
     async def batched_get_non_blocking(
         self,
@@ -733,11 +839,12 @@ class NixlObjectBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
+        """
         if eviction:
             logger.warning("NixlObjectBackend does not support eviction for now")
         if busy_loop:
             logger.warning("NixlObjectBackend does not support busy loop for now")
-
+        """
         return self.memory_allocator.allocate(shape, dtype, fmt)
 
     def batched_allocate(
