@@ -22,7 +22,7 @@ TroubleShoot
     because no free blocks is available (memory_management.py:992:lmcache.v1.memory_management)
     
 
-    The Decoder instance eventually fails with the error after processing a cumulative ~100+ requests. The benchmark stream is configured with max-concurrency=2, so the failure is not caused by high instantaneous concurrency. It appears that the Nixl buffer may be filled up？Does the Nixl buffer have a garbage collection (GC) mechanism?
+    The Decoder instance eventually fails with the error after processing a cumulative ~100+ requests. The benchmark stream is configured with max-concurrency=2, so the failure is not caused by high instantaneous concurrency. It appears that the Nixl buffer may be filled up. Does the Nixl buffer have a garbage collection (GC) mechanism?
 
     lmcache config:
 
@@ -84,7 +84,7 @@ TroubleShoot
 
 **🧩 Environment**
     vllm: 0.10.0 v1
-    lmcahe: 0.3.3
+    lmcache: 0.3.3
     Model: Qwen3-Coder-480B-A35B-Instruct-FP8
     P/D: 1P1D
 
@@ -150,7 +150,7 @@ TroubleShoot
             logger.info(f"DEBUG---{parallel_config.rank}")
             device = torch.device(f"cuda:{parallel_config.rank}")
 
-    and in the ouput right before the error I'd see things like:
+    and in the output right before the error I'd see things like:
 
     .. code-block:: text
 
@@ -400,7 +400,7 @@ TroubleShoot
    2025-08-16
 
 **🚨 Issue**
-     Ref count of MemoryObj -1is negative: -2.Double free occurred somewhere.Setting ref count back to 0 as a hack 
+     Ref count of MemoryObj -1 is negative: -2. Double free occurred somewhere.Setting ref count back to 0 as a hack 
 
 **📋 Description**
     To reproduce 
@@ -662,7 +662,7 @@ When completed successfully, you’ll see an output summary similar to:
     2025-09-10
 
 **🚨 Issue**
-   [DistServe] The decoder KV cache missed yet the prefiller has transfered it successfully
+   [DistServe] The decoder KV cache missed yet the prefiller has transferred it successfully
 
 **📋 Description**
     I have a 1P1D setup with VLLM+ LMCache 0.3.3 (with some fixes) and it works for inference request of 16K input prompt length or lower.
@@ -704,7 +704,7 @@ When using the use-disk option, the second request during inference terminates w
     2025-09-24
 
 **🚨 Issue**
-    The codes in lmcache/integration folder do not respect the settings in precommit.
+    The code in lmcache/integration folder do not respect the settings in precommit.
 
 **📋 Description**
     The following code passes 80 characters at line 223, and should be identified by pre-commit (ruff)
@@ -712,9 +712,7 @@ When using the use-disk option, the second request during inference terminates w
 .. code-block:: python
    :caption: LMCache/lmcache/integration/vllm/vllm_v1_adapter.py
 
-    # https://github.com/vllm-project/vllm/commit/ 
-    # b029de9902aa3ac58806c8c17776c7074175b6db# 
-    # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94 
+    # https://github.com/vllm-project/vllm/commit/b029de9902aa3ac58806c8c17776c7074175b6db#diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
 **🔴 Status:** Unresolved  
 
 ----
@@ -736,7 +734,7 @@ When using the use-disk option, the second request during inference terminates w
     2025-09-30
 
 **🚨 Issue**
-   multi-TP deployment, "exist" key and "put" key in the connector are no same
+   multi-TP deployment, "exist" key and "put" key in the connector are not the same
 
 **📋 Description**
     using multi-tp deployment, the keys of exists and put are different, which leads to the failure to hit the kv cache.
@@ -859,7 +857,7 @@ When using the use-disk option, the second request during inference terminates w
         remote_url: "my connector"
     
     server
-    .. code-bolck:: bash
+    .. code-block:: bash
 
         export LMCACHE_CONFIG_FILE=debug_config.yaml \
         export LMCACHE_USE_EXPERIMENTAL=True \
@@ -883,7 +881,7 @@ When using the use-disk option, the second request during inference terminates w
         >test.log 2>&1 &
     test
 
-    .. code-bolck:: bash
+    .. code-block:: bash
 
         curl http://0.0.0.0:8000/v1/chat/completions     -H "Content-Type: application/json" -d '{
             "model": "DeepSeek-R1-Distill-Qwen-1.5B",
@@ -934,10 +932,10 @@ When using the use-disk option, the second request during inference terminates w
     2025-10-22
 
 **🚨 Issue**
-   Chunk name/CacheEngineKey should contains dtype to avoid multiple vllm cluster cache matched by accident 
+   Chunk name/CacheEngineKey should contain dtype to avoid multiple vllm cluster cache matched by accident 
 
 **📋 Description**
-    There are two vllm cluster with same module, same tp count, but with different kvcache dtype. Under this assumption, there is a risk to have two different chunks belong to different vLLM cluster, but with save CacheEngineKey, if we use shared remote backend, vLLM0 cluster may get the vLLM0 cluster's chunk regard as cache hit, but the content is not correct.
+    There are two vllm cluster with same module, same tp count, but with different kvcache dtype. Under this assumption, there is a risk to have two different chunks belong to different vLLM cluster, but with same CacheEngineKey, if we use shared remote backend, vLLM0 cluster may get the vLLM0 cluster's chunk regard as cache hit, but the content is not correct.
 
 **🛠️ Solution**
     `Links <https://github.com/LMCache/LMCache/pull/1859>`_ to the PR that fixes this issue.
