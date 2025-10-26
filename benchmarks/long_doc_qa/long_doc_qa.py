@@ -97,7 +97,7 @@ def has_content(chunk):
         and chunk.choices[0].delta
         and (
             chunk.choices[0].delta.content is not None
-            or chunk.choices[0].delta.reasoning_content is not None
+            or getattr(chunk.choices[0].delta, "reasoning_content", None) is not None
         )
     )
 
@@ -119,8 +119,8 @@ def extract_content(chunk):
     """
     if chunk.choices[0].delta.content is not None:
         return chunk.choices[0].delta.content
-    elif chunk.choices[0].delta.reasoning_content is not None:
-        return chunk.choices[0].delta.reasoning_content
+    elif getattr(chunk.choices[0].delta, "reasoning_content", None) is not None:
+        return getattr(chunk.choices[0].delta, "reasoning_content", "")
     else:
         return ""
 
