@@ -835,6 +835,7 @@ When using the use-disk option, the second request during inference terminates w
 **🔴 Status:** Unresolved  
 
 ----
+
 **🧭 Time**
     2025-10-15
 
@@ -894,6 +895,7 @@ When using the use-disk option, the second request during inference terminates w
     lmcache==0.3.6
 
 ----
+
 **🧭 Time**
     2025-10-17
 
@@ -926,8 +928,9 @@ When using the use-disk option, the second request during inference terminates w
     lmcache==0.3.7
     
 **🔴 Status:** Unresolved  
-
+ 
 ----
+
 **🧭 Time**
     2025-10-22
 
