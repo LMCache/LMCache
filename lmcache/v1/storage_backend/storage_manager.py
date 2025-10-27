@@ -319,6 +319,8 @@ class StorageManager:
                     eviction=eviction,
                     busy_loop=busy_loop,
                 )
+                if memory_obj is None:
+                    raise RuntimeError("Failed to allocate memory for batch")
                 memory_objs.append(memory_obj)
         except RuntimeError:
             for obj in memory_objs:
