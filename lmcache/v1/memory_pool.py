@@ -80,8 +80,6 @@ class MemoryPool:
         if self._borrow_hook is not None:
             memory_obj = self._borrow_hook(req)
         if memory_obj is None:
-            if req.dtype is None and req.fmt != MemoryFormat.BINARY_BUFFER:
-                raise ValueError("dtype must be specified for tensor allocations")
             memory_obj = self._allocator.allocate(shape, req.dtype, req.fmt)
         if memory_obj is None:
             raise RuntimeError(
@@ -183,4 +181,3 @@ class MemoryPool:
         with self._lock:
             self._live_leases = max(0, self._live_leases - 1)
             self._borrowed_bytes = max(0, self._borrowed_bytes - bytes_released)
-
