@@ -125,5 +125,16 @@ class InstrumentedRemoteConnector(RemoteConnector):
     def support_batched_contains(self) -> bool:
         return self._connector.support_batched_contains()
 
+    def init_chunk_meta(self, config, metadata) -> None:
+        return self._connector.init_chunk_meta(config, metadata)
+
+    def reshape_partial_chunk(
+        self, memory_obj: MemoryObj, bytes_read: int
+    ) -> MemoryObj:
+        return self._connector.reshape_partial_chunk(memory_obj, bytes_read)
+
+    def post_init(self):
+        return self._connector.post_init()
+
     def __repr__(self) -> str:
         return f"InstrumentedRemoteConnector({self._connector})"
