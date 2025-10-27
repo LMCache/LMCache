@@ -54,7 +54,12 @@ class PoolRequest:
 
 class MemoryPool:
     """
-    Thin facade that centralises engine-owned allocations and basic accounting.
+    Thin facade that centralises engine-owned allocations and ref-count hygiene.
+
+    Responsibilities:
+      * Delegate allocations to either the backend hook or the raw allocator.
+      * Swap in the pool as the parent allocator so ref_count_down() leads back here.
+      * Keep lightweight counters for observability/debug logging.
     """
 
     def __init__(
@@ -83,9 +88,9 @@ class MemoryPool:
                 f"MemoryPool failed to allocate object (fmt={req.fmt}, tag={req.tag})"
             )
 
-        self._mark_parent(memory_obj)
+        self._attach_parent_allocator(memory_obj)
         phy_size = memory_obj.meta.phy_size
-        self._increment_counters(phy_size)
+        self._record_borrow(phy_size)
         logger.debug(
             "MemoryPool borrowed %s bytes (tag=%s, fmt=%s, total_leases=%d)",
             phy_size,
@@ -114,7 +119,7 @@ class MemoryPool:
         try:
             original_parent.free(memory_obj)  # type: ignore[call-arg]
         finally:
-            self._decrement_counters(phy_size)
+            self._record_release(phy_size)
             if hasattr(memory_obj_any, "_memory_pool_original_parent"):
                 delattr(memory_obj_any, "_memory_pool_original_parent")
         logger.debug(
@@ -154,7 +159,10 @@ class MemoryPool:
         """
         self.release(memory_obj)
 
-    def _mark_parent(self, memory_obj: MemoryObj) -> None:
+    def _attach_parent_allocator(self, memory_obj: MemoryObj) -> None:
+        """
+        Remember the original parent allocator and redirect ref_count_down to the pool.
+        """
         memory_obj_any = cast(Any, memory_obj)
         if getattr(memory_obj_any, "_memory_pool_released", False):
             # If borrowed after a previous release, clear book-keeping first.
@@ -164,12 +172,14 @@ class MemoryPool:
         memory_obj_any._memory_pool_released = False
         memory_obj_any.parent_allocator = self  # type: ignore[attr-defined]
 
-    def _increment_counters(self, bytes_borrowed: int) -> None:
+    def _record_borrow(self, bytes_borrowed: int) -> None:
+        """Track a successful borrow in a threadsafe way."""
         with self._lock:
             self._live_leases += 1
             self._borrowed_bytes += bytes_borrowed
 
-    def _decrement_counters(self, bytes_released: int) -> None:
+    def _record_release(self, bytes_released: int) -> None:
+        """Track a release while clamping counters at zero."""
         with self._lock:
             self._live_leases = max(0, self._live_leases - 1)
             self._borrowed_bytes = max(0, self._borrowed_bytes - bytes_released)
