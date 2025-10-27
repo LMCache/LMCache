@@ -119,7 +119,6 @@ class NixlObjectMap:
     def add(self, chunk_hash: int, obj: Optional[MemoryObj], object_key: str):
         with self.lock:
             self.map[chunk_hash] = NixlObjectMapEntry(obj, object_key)
-        #logger.info(f"OOOO Added key {chunk_hash:x} now map size is {len(self.map)}")
 
     def get(self, chunk_hash: int) -> Optional[NixlObjectMapEntry]:
         with self.lock:
@@ -184,19 +183,6 @@ class NixlObjectAgent:
         self.mem_reg_descs = reg_descs
         self.mem_xfer_descs = xfer_descs
         self.mem_xfer_handler = xfer_handler
-
-    def create_single_storage_handler(self, object_key: str, page_size: int):
-        """Create a storage handler for a single specific object key"""
-        reg_list = [(0, page_size, 0, object_key)]
-        xfer_desc = [(0, page_size, 0)]
-        
-        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
-        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
-        xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_desc, mem_type="OBJ"
-        )
-        
-        return reg_descs, xfer_descs, xfer_handler
 
     def create_batched_storage_handler(self, object_keys: str, page_size: int):
         """Create a storage handler for a single specific object key"""
@@ -378,61 +364,6 @@ class NixlObjectBackend(AllocatorBackendInterface):
         with self.progress_lock:
             return key.chunk_hash in self.progress_set
 
-    def get_one_object_to_mem(self, key: CacheEngineKey, pin: bool = False) -> Optional[MemoryObj]:
-        object_key = self._format_object_key(key)
-        page_size = self.memory_allocator.align_bytes
-
-        # Create storage handler for this object
-        storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
-            self.agent.create_single_storage_handler(object_key, page_size)
-        )
-
-        # Allocate memory for the object
-        assert self.meta_shape is not None
-        assert self.meta_dtype is not None
-        assert self.meta_fmt is not None
-
-        obj = self.memory_allocator.allocate(
-            self.meta_shape, self.meta_dtype, self.meta_fmt
-        )
-        if obj is None:
-            logger.warning("Failed to allocate memory for contains check")
-            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
-            return None
-
-        mem_indices = [obj.metadata.address]
-        storage_indices = [0]
-
-        # Create transfer handle
-        handle = self.agent.get_storage_to_mem_handle(
-            mem_indices, storage_xfer_handler, storage_indices
-        )
-
-        # Try to read the object
-        try:
-            xfer_state = self.agent.post_blocking(handle)
-        except nixlBind.nixlBackendError as exc:
-            logger.debug(f"NIXL Object {object_key} does not exist: {exc}")
-            xfer_state = False
-
-        self.agent.release_handle(handle)
-        self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
-
-        if xfer_state:
-            # Object exists, cache it in the object map
-            if pin:
-                self.object_map.add(key.chunk_hash, obj, object_key)
-                logger.debug(f"PREFETCH Key {key.chunk_hash:x} and keep in map")
-
-            logger.debug(f"GET Key {key.chunk_hash:x} shape is {obj.tensor.size()}")
-            #logger.debug(f"OOOO object tensor is {obj.tensor}")
-            return obj
-        else:
-            # Object doesn't exist, free the allocated memory
-            self.memory_allocator.free(obj)
-            logger.debug(f"PREFETCH Key {key.chunk_hash:x} failed")
-            return None
-
     def get_objects_to_mem(
         self, keys: list[CacheEngineKey], pin: bool = False
     ) -> list[Optional[MemoryObj]]:
@@ -534,7 +465,8 @@ class NixlObjectBackend(AllocatorBackendInterface):
             """Only enable prefetch if lookup_and_fetch is enabled"""
             logger.debug(f"PREFETCH key {key.chunk_hash:x}")
             '''retrieve and pin in memory for later use'''
-            xfer_state = (self.get_one_object_to_mem(key, pin) is not None)
+            obj_list = self.get_objects_to_mem([key], pin)
+            xfer_state = (obj_list[0] is not None)
         else:
             xfer_state = self.key_exists(key)
             if xfer_state:
@@ -583,35 +515,26 @@ class NixlObjectBackend(AllocatorBackendInterface):
             return 0
     """
 
-    async def mem_to_storage_parallel(
+    def mem_to_storage_parallel(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> None:
         start_time = time.time()
         if len(keys) == 0:
             return
         
+        object_keys = []
         mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
         page_size = self.memory_allocator.align_bytes
-
         storage_indices = []
-        reg_list = []
-        xfer_desc = []
 
         for i in range(len(keys)):
             # Generate object key based on CacheEngineKey
             object_key = self._format_object_key(keys[i])
+            object_keys.append(object_key)
             storage_indices.append(i)
 
-            logger.info(f"Initializing storage handler for {object_key} with index {i}")
-            reg_list.append((0, page_size, i, object_key))
-            xfer_desc.append((0, page_size, i))
-
-        #logger.info(f"Registering handlers for {len(keys)} objects, total {len(reg_list)} and {len(xfer_desc)}")
-
-        storage_reg_descs = self.agent.nixl_agent.register_memory(reg_list, mem_type="OBJ")
-        storage_xfer_descs = self.agent.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
-        storage_xfer_handler = self.agent.nixl_agent.prep_xfer_dlist(
-            self.agent.agent_name, storage_xfer_descs, mem_type="OBJ"
+        storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
+            self.agent.create_batched_storage_handler(object_keys, page_size)
         )   
 
         handle = self.agent.get_mem_to_storage_handle(mem_indices, storage_xfer_handler, storage_indices)
@@ -623,49 +546,6 @@ class NixlObjectBackend(AllocatorBackendInterface):
         duration = end_time - start_time
         logger.info(f"mem_to_storage_parallel for {len(keys)} objects size {page_size*len(keys)} took {duration:.6f} seconds")
 
-        for key in keys:
-            with self.progress_lock:
-                self.progress_set.discard(key.chunk_hash)
-
-    async def mem_to_storage_seq(
-        self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
-    ) -> None:
-        """
-        Write memory objects to storage with dynamically generated object keys.
-
-        Unlike mem_to_storage in nixl_storage_backend, this doesn't use a pre-allocated
-        pool but generates object keys on-the-fly based on CacheEngineKey.
-        """
-        mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
-        page_size = self.memory_allocator.align_bytes
-
-        for i in range(len(keys)):
-            key = keys[i]
-            mem_obj = mem_objs[i]
-
-            # Generate object key based on CacheEngineKey
-            object_key = self._format_object_key(key)
-
-            # Create storage handler for this specific object
-            storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
-                self.agent.create_storage_handler(object_key, page_size)
-            )
-
-            # Create transfer handle
-            handle = self.agent.get_mem_to_storage_handle(
-                [mem_indices[i]], storage_xfer_handler, [0]
-            )
-
-            # Perform the transfer
-            self.agent.post_blocking(handle)
-
-            # Release resources
-            self.agent.release_handle(handle)
-            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
-
-            logger.debug(f"Write key {key.chunk_hash:x} to object {object_key} with shape {mem_obj.tensor.size()}")
-
-        # Remove from progress set
         for key in keys:
             with self.progress_lock:
                 self.progress_set.discard(key.chunk_hash)
@@ -702,11 +582,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
             for key in keys:
                 self.progress_set.add(key.chunk_hash)
 
-        #asyncio.run_coroutine_threadsafe(
-        #    self.mem_to_storage(keys, memory_objs), self.loop
-        #)
-        # test sync
-        asyncio.run(self.mem_to_storage_parallel(keys, memory_objs))
+        self.mem_to_storage_parallel(keys, memory_objs)
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -720,18 +596,9 @@ class NixlObjectBackend(AllocatorBackendInterface):
             obj_list = asyncio.run(self.get_from_mem([key]))
             return obj_list[0]
         else:
-            #obj = self.get_one_object_to_mem(key, False)
             obj_list = self.get_objects_to_mem([key], False)
             return obj_list[0]
         return None
-
-    """
-    TODO implement this
-    def batched_get_blocking(
-        self,
-        keys: List[CacheEngineKey],
-    ) -> List[Optional[MemoryObj]]:
-    """
 
     def batched_get_blocking(
         self,
