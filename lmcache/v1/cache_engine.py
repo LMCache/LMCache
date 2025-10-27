@@ -169,11 +169,9 @@ class LMCacheEngine:
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-            self.storage_manager.post_init(async_lookup_server=self.async_lookup_server)
-        else:
-            self.storage_manager.post_init()
+            self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:
+            self.storage_manager.post_init(**kwargs)
             logger.info("Post-initializing LMCacheEngine")
             self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
@@ -693,22 +691,20 @@ class LMCacheEngine:
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
+        res = 0
         try:
-            end = 0
-            prev_end = 0
-
-            if pin:
-                assert lookup_id is not None, "lookup_id is required when pin is True"
-
-            for start, end, key in self.token_database.process_tokens(
+            chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
                 hashes=hashes,
                 offsets=offsets,
                 request_configs=request_configs,
-            ):
-                assert isinstance(key, CacheEngineKey)
+            )
 
-                if self.use_layerwise:
+            # TODO: support batched_contains when layerwise is enabled
+            if self.use_layerwise:
+                for start, end, key in chunk_info_iterator:
+                    assert isinstance(key, CacheEngineKey)
+
                     # TODO(Jiayi): Optimize by checking only the existence of the key
                     # of one layer
                     key_all_layers = key.split_layers(self.num_layers)
@@ -721,29 +717,44 @@ class LMCacheEngine:
                             found = True
                     if found:
                         if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
                             self.lookup_pins[lookup_id].extend(  # type: ignore
                                 key_all_layers
                             )
-                        prev_end = end
+                        res = end
                         continue
-                    end = prev_end
-                    return prev_end
-                else:
-                    if self.storage_manager.contains(key, search_range, pin):
-                        if pin:
-                            self.lookup_pins[lookup_id].append(  # type: ignore
-                                key
-                            )
-                        prev_end = end
-                        continue
+                    return res
+            else:
+                chunk_info_list = []
+                keys = []
+                for chunk_info in chunk_info_iterator:
+                    assert isinstance(chunk_info[2], CacheEngineKey)
+                    chunk_info_list.append(chunk_info)
+                    keys.append(chunk_info[2])
 
-                    end = prev_end
-                    return prev_end
+                batched_contains_res = self.storage_manager.batched_contains(
+                    keys, search_range, pin, True
+                )
+                assert len(batched_contains_res) == len(chunk_info_list)
+                for (start, end, key), exists in zip(
+                    chunk_info_list, batched_contains_res, strict=False
+                ):
+                    if exists:
+                        if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
+                            self.lookup_pins[lookup_id].append(key)
+                        res = end
+                        continue
+                    return res
 
             # all tokens where found, return the maximal end
-            return end
+            return res
         finally:
-            self.stats_monitor.on_lookup_finished(lookup_request_id, end)
+            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()
@@ -1113,6 +1124,14 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        # In some scenarios, lookup is called first, and then the original tokens
+        # is sliced based on the lookup result. In these scenarios, the tokens
+        # passed in must exist in LMCache, and we can set skip_contains_check to True.
+        # When skip_contains_check is True and there is only one backend, the `contains`
+        # call can be skipped.
+        skip_contains_check = (
+            kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
+        )
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -1120,14 +1139,21 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
 
+            location = None
             if key in self.lookup_cache:
                 # TODO(Jiayi): we can reduce the number of `contains` calls
                 # by checking the lookup cache first (should be updated in `lookup`)
                 pass
             else:
-                # NOTE: key should always be in the lookup cache once
-                # we support it.
-                location = self.storage_manager.contains(key)
+                # NOTE: key should always be in the lookup cache once we support it.
+                # TODO: use lookup_cache to skip the contains
+                if (
+                    skip_contains_check
+                    and len(self.storage_manager.non_allocator_backends) == 1
+                ):
+                    location = self.storage_manager.non_allocator_backends[0]
+                else:
+                    location = self.storage_manager.contains(key)
                 if location is None:
                     break
 
