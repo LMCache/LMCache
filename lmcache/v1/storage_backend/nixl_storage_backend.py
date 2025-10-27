@@ -562,9 +562,6 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         future = asyncio.run_coroutine_threadsafe(self.storage_to_mem(keys), self.loop)
 
-        if future is None:
-            return []
-
         obj_list = future.result()
         return obj_list
 
