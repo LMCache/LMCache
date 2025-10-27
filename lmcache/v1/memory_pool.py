@@ -184,11 +184,3 @@ class MemoryPool:
             self._live_leases = max(0, self._live_leases - 1)
             self._borrowed_bytes = max(0, self._borrowed_bytes - bytes_released)
 
-
-@contextmanager
-def lease(pool: MemoryPool, req: PoolRequest) -> Iterator[MemoryObj]:
-    """
-    Convenience helper that guarantees release even if the caller throws.
-    """
-    with pool.lease(req) as memory_obj:
-        yield memory_obj

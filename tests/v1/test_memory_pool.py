@@ -7,7 +7,7 @@ import torch
 from lmcache.v1 import memory_pool as memory_pool_module
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
-from lmcache.v1.memory_pool import MemoryPool, PoolRequest, lease
+from lmcache.v1.memory_pool import MemoryPool, PoolRequest
 from lmcache.v1.storage_backend.local_cpu_backend import (
     LocalCPUBackend,
     LocalCPUDisabledError,
@@ -53,7 +53,7 @@ def test_lease_scope_releases_on_exception():
     req = _sample_request(tag="lease_exception")
 
     with pytest.raises(RuntimeError):
-        with lease(pool, req):
+        with pool.lease(req):
             raise RuntimeError("boom")
 
     stats = pool.stats()
