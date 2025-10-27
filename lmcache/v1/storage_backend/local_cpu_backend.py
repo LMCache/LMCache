@@ -71,7 +71,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if memory_allocator is None
             else memory_allocator
         )
-        self.memory_pool = MemoryPool(self.memory_allocator, backend=self)
+        self.memory_pool = MemoryPool(
+            self.memory_allocator,
+            borrow_hook=self.borrow_from_pool,
+        )
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
@@ -471,6 +474,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
             eviction=req.eviction,
             busy_loop=req.busy_loop,
         )
+
+    def borrow_from_pool(self, req: PoolRequest) -> Optional[MemoryObj]:
+        return self.allocate_from_pool(req)
 
     def _request_from_pool(
         self,

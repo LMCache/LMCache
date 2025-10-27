@@ -20,6 +20,7 @@ from lmcache.v1.memory_management import (
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.memory_pool import PoolRequest
     from lmcache.v1.storage_backend import LocalCPUBackend
 
 
@@ -375,6 +376,13 @@ class AllocatorBackendInterface(StorageBackendInterface):
         Calculate the chunk budget for the allocator backend.
         """
         raise NotImplementedError
+
+    def borrow_from_pool(self, req: "PoolRequest") -> Optional[MemoryObj]:
+        """
+        Optional hook invoked by MemoryPool before falling back to the allocator.
+        Backends can override to inject custom allocation behavior.
+        """
+        return None
 
 
 class ConfigurableStorageBackendInterface(StorageBackendInterface):

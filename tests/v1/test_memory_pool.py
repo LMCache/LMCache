@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1 import memory_pool as memory_pool_module
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
 from lmcache.v1.memory_pool import MemoryPool, PoolRequest, lease
@@ -60,6 +61,24 @@ def test_lease_scope_releases_on_exception():
     assert stats["borrowed_bytes"] == 0
 
 
+def test_lease_logs_exception(monkeypatch):
+    pool, _ = _make_pool()
+    req = _sample_request(tag="lease_log")
+
+    captured: dict[str, str] = {}
+
+    def fake_exception(msg: str, *args: object, **kwargs: object) -> None:
+        captured["message"] = msg % args if args else msg
+
+    monkeypatch.setattr(memory_pool_module.logger, "exception", fake_exception)
+
+    with pytest.raises(RuntimeError):
+        with pool.lease(req):
+            raise RuntimeError("boom")
+
+    assert "MemoryPool lease raised exception" in captured.get("message", "")
+
+
 def test_ref_count_down_triggers_pool_release():
     pool, _ = _make_pool()
     req = _sample_request(tag="refcount")
@@ -74,32 +93,27 @@ def test_ref_count_down_triggers_pool_release():
     assert stats["borrowed_bytes"] == 0
 
 
-class _BackendStub:
+class _BorrowHook:
     def __init__(self, allocator):
         self.allocator = allocator
         self.calls = []
 
-    def allocate(
-        self,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        eviction: bool = True,
-        busy_loop: bool = True,
-    ):
-        self.calls.append((shape, dtype, fmt, eviction, busy_loop))
-        return self.allocator.allocate(shape, dtype, fmt)
+    def __call__(self, req: PoolRequest):
+        shape = req.resolve_shape()
+        assert req.dtype is not None
+        self.calls.append((shape, req.dtype, req.fmt, req.eviction, req.busy_loop))
+        return self.allocator.allocate(shape, req.dtype, req.fmt)
 
 
 def test_backend_fallback_preserves_allocator_type():
     allocator = AdHocMemoryAllocator(device="cpu")
-    backend = _BackendStub(allocator)
-    pool = MemoryPool(allocator, backend=backend)
+    hook = _BorrowHook(allocator)
+    pool = MemoryPool(allocator, borrow_hook=hook)
     req = _sample_request(tag="backend_fallback")
 
     memory_obj = pool.borrow(req)
     assert memory_obj is not None
-    assert backend.calls, "expected backend.allocate to be used in fallback path"
+    assert hook.calls, "expected borrow hook to be invoked"
 
 
 def test_local_cpu_backend_zero_size_disables():

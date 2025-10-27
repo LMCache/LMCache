@@ -5,6 +5,7 @@ from concurrent.futures import Future
 from typing import (
     TYPE_CHECKING,
     Any,
+    ContextManager,
     Coroutine,
     Generator,
     List,
@@ -221,7 +222,10 @@ class StorageManager:
         backend_pool = getattr(backend_owner, "memory_pool", None)
         if backend_pool is None:
             allocator = self.allocator_backend.get_memory_allocator()
-            backend_pool = MemoryPool(allocator, backend=self.allocator_backend)
+            backend_pool = MemoryPool(
+                allocator,
+                borrow_hook=self.allocator_backend.borrow_from_pool,
+            )
             backend_owner.memory_pool = backend_pool
         self.memory_pool: MemoryPool = backend_pool
 
@@ -278,11 +282,17 @@ class StorageManager:
         Allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
         """
-        # TODO (Jiayi): We might need to pre-allocate and management
-        # disk in a similar way as CPU.
-        return self.allocator_backend.allocate(
-            shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
-        )
+        try:
+            return self.request_memory(
+                shape=shape,
+                dtype=dtype,
+                fmt=fmt,
+                tag="storage_manager.allocate",
+                eviction=eviction,
+                busy_loop=busy_loop,
+            )
+        except RuntimeError:
+            return None
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
@@ -298,11 +308,23 @@ class StorageManager:
         Batched allocate memory object with memory allocator.
         Use LRU evictor if eviction is enabled.
         """
-        # TODO (Jiayi): We might need to pre-allocate and management
-        # disk in a similar way as CPU.
-        return self.allocator_backend.batched_allocate(
-            shape, dtype, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
-        )
+        memory_objs: list[MemoryObj] = []
+        try:
+            for _ in range(batch_size):
+                memory_obj = self.request_memory(
+                    shape=shape,
+                    dtype=dtype,
+                    fmt=fmt,
+                    tag="storage_manager.batched_allocate",
+                    eviction=eviction,
+                    busy_loop=busy_loop,
+                )
+                memory_objs.append(memory_obj)
+        except RuntimeError:
+            for obj in memory_objs:
+                self.release_memory(obj)
+            return None
+        return memory_objs
 
     def request_memory(
         self,
@@ -313,7 +335,7 @@ class StorageManager:
         size: Optional[int] = None,
         tag: str = "generic",
         eviction: bool = True,
-        busy_loop: bool = True,
+        busy_loop: bool = False,
     ) -> MemoryObj:
         """
         Borrow a MemoryObj from the shared memory pool. This centralizes
@@ -339,6 +361,33 @@ class StorageManager:
         if self.memory_pool is None:
             raise RuntimeError("MemoryPool is not available")
         self.memory_pool.release(memory_obj)
+
+    def lease_memory(
+        self,
+        *,
+        shape: Optional[torch.Size] = None,
+        dtype: Optional[torch.dtype] = None,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        size: Optional[int] = None,
+        tag: str = "generic",
+        eviction: bool = True,
+        busy_loop: bool = False,
+    ) -> ContextManager[MemoryObj]:
+        """
+        Context manager helper that borrows and releases through the pool.
+        """
+        if self.memory_pool is None:
+            raise RuntimeError("MemoryPool is not available")
+        req = PoolRequest(
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt,
+            size=size,
+            tag=tag,
+            eviction=eviction,
+            busy_loop=busy_loop,
+        )
+        return self.memory_pool.lease(req)
 
     def put(
         self,

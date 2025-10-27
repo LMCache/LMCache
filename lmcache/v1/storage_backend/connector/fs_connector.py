@@ -147,14 +147,12 @@ class FSConnector(RemoteConnector):
                         metadata.shape,
                         metadata.dtype,
                         metadata.fmt,
-                        tag="fs/get",
                     )
                 else:
                     memory_obj = self.local_cpu_backend.request_memory(
                         self.meta_shape,
                         self.meta_dtype,
                         self.meta_fmt,
-                        tag="fs/get",
                     )
                 if memory_obj is None:
                     logger.debug("Memory allocation failed during async disk load.")
