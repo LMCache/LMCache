@@ -40,9 +40,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         vllm_is_available = True
         try:
             # Third Party
-            from vllm.utils import sha256, sha256_cbor_64bit
+            from vllm.utils.hashing import sha256, sha256_cbor
         except ImportError:
-            # sha256, sha256_cbor_64bit are available through vLLM only
+            # sha256, sha256_cbor are available through vLLM only
             vllm_is_available = False
 
         hash_algorithm: str
@@ -53,8 +53,8 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         # Need to support vLLM hashing functions at a minimum
         self.hash_func = (
-            sha256_cbor_64bit
-            if hash_algorithm == "sha256_cbor_64bit" and vllm_is_available
+            sha256_cbor
+            if hash_algorithm == "sha256_cbor" and vllm_is_available
             else sha256
             if hash_algorithm == "sha256" and vllm_is_available
             else hash
