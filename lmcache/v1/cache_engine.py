@@ -7,8 +7,8 @@ from typing import (
     Dict,
     Generator,
     List,
+    NamedTuple,
     Optional,
-    Tuple,
     Union,
 )
 import asyncio
@@ -52,6 +52,26 @@ from lmcache.v1.token_database import (
 )
 
 logger = init_logger(__name__)
+
+
+class ProcessedChunk(NamedTuple):
+    """Represents a processed chunk with its key, memory object, and token range.
+
+    Note: key can be None for passive ranks in distributed scenarios where
+    the key is not needed for local operations.
+    """
+
+    key: Optional[CacheEngineKey]
+    memory_obj: MemoryObj
+    start: int
+    end: int
+
+
+class ProcessTokensResult(NamedTuple):
+    """Result of processing tokens, containing chunks and total KV size."""
+
+    chunks: List[ProcessedChunk]
+    total_kv_size: int
 
 
 class CacheEngineEndSignal:
@@ -457,22 +477,27 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
-        reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        reordered_chunks: List[ProcessedChunk] = []
+        tot_kv_size = 0
         if not self._is_passive():
             if self.async_loading:
-                reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
+                result = self._async_process_tokens_internal(  # noqa: E501
                     tokens,
                     mask,
                     ret_mask,
                     **kwargs,
                 )
+                reordered_chunks = result.chunks
+                tot_kv_size = result.total_kv_size
             else:
-                reordered_chunks, tot_kv_size = self._process_tokens_internal(
+                result = self._process_tokens_internal(
                     tokens,
                     mask,
                     ret_mask,
                     **kwargs,
                 )
+                reordered_chunks = result.chunks
+                tot_kv_size = result.total_kv_size
         if self.save_only_first_rank:
             with torch.cuda.stream(self.broadcast_stream):
                 self._broadcast_or_receive_memory_objs(
@@ -494,17 +519,21 @@ class LMCacheEngine:
         # For example, disk->gpu is faster than disk->cpu->gpu.
         # RDMA is another example.
         if len(reordered_chunks) > 0:
-            _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-            self.gpu_connector.batched_to_gpu(
-                list(memory_objs), list(starts), list(ends), **kwargs
-            )
+            memory_objs, starts, ends = [], [], []
+            for chunk in reordered_chunks:
+                memory_objs.append(chunk.memory_obj)
+                starts.append(chunk.start)
+                ends.append(chunk.end)
+            self.gpu_connector.batched_to_gpu(memory_objs, starts, ends, **kwargs)
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
-        for key, memory_obj, _, _ in reordered_chunks:
+        for chunk in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
-                self.storage_manager.remove(key)
-            memory_obj.ref_count_down()
+                # chunk.key can be None for passive ranks
+                if chunk.key is not None:
+                    self.storage_manager.remove(chunk.key)
+            chunk.memory_obj.ref_count_down()
 
         onload_time = time.perf_counter() - t
 
@@ -1048,7 +1077,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+    ) -> ProcessTokensResult:
         """
         This function is used to get the memory objects from the event manager.
 
@@ -1064,7 +1093,7 @@ class LMCacheEngine:
             assert isinstance(request_configs, dict)
 
         tot_kv_size = 0
-        chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
         memory_objs = future.result()
@@ -1082,7 +1111,7 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
             memory_obj = memory_objs[idx]
-            chunks.append((key, memory_obj, start, end))
+            chunks.append(ProcessedChunk(key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
 
@@ -1090,7 +1119,7 @@ class LMCacheEngine:
         for unused_mem_obj in memory_objs[len(chunks) :]:
             unused_mem_obj.ref_count_down()
 
-        return chunks, tot_kv_size
+        return ProcessTokensResult(chunks, tot_kv_size)
 
     def _process_tokens_internal(
         self,
@@ -1098,7 +1127,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+    ) -> ProcessTokensResult:
         """Process tokens and populate the reordered lists.
 
         This function is used to process tokens and populate the reordered lists.
@@ -1116,7 +1145,7 @@ class LMCacheEngine:
             list
         )
 
-        reordered_chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        reordered_chunks: List[ProcessedChunk] = []
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
@@ -1186,18 +1215,18 @@ class LMCacheEngine:
                     ):
                         last_failed_block_start = start
                     break
-                reordered_chunks.append((key, memory_obj, start, end))
+                reordered_chunks.append(ProcessedChunk(key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
 
             reordered_chunks = [
-                (key, memory_obj, start, end)
-                for key, memory_obj, start, end in reordered_chunks
-                if end < last_failed_block_start
+                chunk
+                for chunk in reordered_chunks
+                if chunk.end < last_failed_block_start
             ]
-        return reordered_chunks, tot_kv_size
+        return ProcessTokensResult(reordered_chunks, tot_kv_size)
 
     def _broadcast_or_receive_memory_objs(
         self,
@@ -1229,14 +1258,14 @@ class LMCacheEngine:
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
 
             # Broadcast each chunk's data
-            for key, memory_obj, start, end in reordered_chunks:
+            for chunk in reordered_chunks:
                 # Combine (start, end) and metadata into single broadcast
-                metadata_dict = memory_obj.metadata.to_dict()
-                combined_metadata = (start, end, metadata_dict)
+                metadata_dict = chunk.memory_obj.metadata.to_dict()
+                combined_metadata = (chunk.start, chunk.end, metadata_dict)
                 self.broadcast_object_fn(combined_metadata, self.metadata.first_rank)
 
                 # Broadcast tensor data
-                tensor_to_broadcast = memory_obj.tensor.to(
+                tensor_to_broadcast = chunk.memory_obj.tensor.to(
                     f"cuda:{self.metadata.worker_id}"
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
@@ -1278,7 +1307,7 @@ class LMCacheEngine:
                 memory_obj = TensorMemoryObj(
                     raw_data=tensor, metadata=metadata, parent_allocator=None
                 )
-                reordered_chunks.append((None, memory_obj, start, end))
+                reordered_chunks.append(ProcessedChunk(None, memory_obj, start, end))
 
     def _is_passive(self):
         """
