@@ -237,7 +237,14 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # Ignore extra keys for now
         # Extra keys are for multi-modal inputs and
         # request specific metadata (e.g., LoRA ID).
-        return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
+        # Use default values for None to maintain a fixed tuple structure for hashing.
+        # This ensures consistency across processes and avoids
+        # breaking changes in tuple length.
+
+        _prefix_hash = prefix_hash if prefix_hash is not None else ""
+        _extra_keys = tuple(extra_keys) if extra_keys is not None else ()
+
+        return self.hash_func((_prefix_hash, tokens_tuple, _extra_keys))
 
 
 class ChunkedTokenDatabase(TokenDatabase):
@@ -372,9 +379,9 @@ class ChunkedTokenDatabase(TokenDatabase):
                     else:
                         yield start_idx, end_idx, hash_val
         elif hashes is not None:
-            assert offsets is not None, (
-                "If hashes are provided, offsets must also be provided."
-            )
+            assert (
+                offsets is not None
+            ), "If hashes are provided, offsets must also be provided."
             start_idx = 0
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
@@ -503,9 +510,9 @@ class SegmentTokenDatabase(TokenDatabase):
                         yield start_idx, end_idx, self._hash_tokens(token_chunk)
                 start_idx = end_idx
         elif hashes is not None:
-            assert offsets is not None, (
-                "If hashes are provided, offsets must also be provided."
-            )
+            assert (
+                offsets is not None
+            ), "If hashes are provided, offsets must also be provided."
             start_idx = 0
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
