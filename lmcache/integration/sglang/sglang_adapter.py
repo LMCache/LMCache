@@ -246,7 +246,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         for i in sorted(indices_to_remove, reverse=True):
             del self.layerwise_retrievers[i]
             del self.layer_load_layer[i]
-            self.lmcache_engine.lookup_unpin([self.lookup_id_list[i]])
+            self.lmcache_engine.lookup_unpin(self.lookup_id_list[i])
             del self.lookup_id_list[i]
 
         return
