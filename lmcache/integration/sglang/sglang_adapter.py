@@ -223,6 +223,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
     def global_min_tokens(
         self, local_tokens: int, tp_group: dist.ProcessGroup, device: torch.device
     ):
+        # If tensor parallel size is 1, no need for all_reduce
+        if self.tp_size == 1:
+            return local_tokens
+
         t = torch.tensor([local_tokens], dtype=torch.int32, device=device)
         dist.all_reduce(t, op=dist.ReduceOp.MIN, group=tp_group)
         return int(t.item())
@@ -265,7 +269,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         )
 
         retrieve_token_num = self.global_min_tokens(
-            retrieve_token_num, self.tp_group, self.rank
+            retrieve_token_num, self.tp_group, torch.device(f"cuda:{self.rank}")
         )
 
         layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -310,4 +314,4 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         for _ in range(self.sgl_config.num_hidden_layers):
             next(layerwise_storer)
 
-        self.lmcache_engine.lookup_unpin([lookup_id])
+        self.lmcache_engine.lookup_unpin(lookup_id)
