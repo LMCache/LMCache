@@ -82,7 +82,7 @@ When the inference is complete, clean up the LMCache backend:
 .. code-block:: python
 
     from lmcache.v1.cache_engine import LMCacheEngineBuilder
-    from lmcache.integration.vllm.utils import ENGINE_NAME
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import ENGINE_NAME
 
     LMCacheEngineBuilder.destroy(ENGINE_NAME)
 
@@ -140,14 +140,14 @@ You should see the following logs:
 .. code-block:: text
     :emphasize-lines: 1
 
-    LMCache INFO: Storing KV cache for 31 out of 31 tokens for request cmpl-274bcaa80837444dbf9fbba4155d2620-0 (vllm_v1_adapter.py:497:lmcache.integration.vllm.vllm_v1_adapter)
+    LMCache INFO: Storing KV cache for 31 out of 31 tokens for request cmpl-274bcaa80837444dbf9fbba4155d2620-0 (vllm_v1_adapter.py:497:vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter)
 
 Once you send the same curl request again, you should see the following logs:
 
 .. code-block:: text
     :emphasize-lines: 1
 
-    LMCache INFO: Reqid: cmpl-4ddf8863a6ac4dc3b6a952f2a107e9b2-0, Total tokens 31, LMCache hit tokens: 30, need to load: 14 (vllm_v1_adapter.py:543:lmcache.integration.vllm.vllm_v1_adapter)
+    LMCache INFO: Reqid: cmpl-4ddf8863a6ac4dc3b6a952f2a107e9b2-0, Total tokens 31, LMCache hit tokens: 30, need to load: 14 (vllm_v1_adapter.py:543:vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter)
 
 
 Example: CPU offloading benefits
@@ -181,7 +181,7 @@ Save the following script as ``cpu-offloading.py``:
     import argparse
     import time
     from lmcache.v1.cache_engine import LMCacheEngineBuilder
-    from lmcache.integration.vllm.utils import ENGINE_NAME
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import ENGINE_NAME
     from vllm import LLM, SamplingParams
     from vllm.config import KVTransferConfig
 
@@ -398,7 +398,7 @@ You can resolve this issue using one of the following methods:
         from vllm import LLM, SamplingParams
         from vllm.config import KVTransferConfig
         from lmcache.v1.cache_engine import LMCacheEngineBuilder
-        from lmcache.integration.vllm.utils import ENGINE_NAME
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import ENGINE_NAME
         main()
 
 For details, please refer to the `vLLM Troubleshooting Guide: Python multiprocessing <https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing>`_.

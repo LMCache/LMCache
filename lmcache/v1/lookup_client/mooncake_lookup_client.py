@@ -39,8 +39,10 @@ class MooncakeLookupClient(LookupClientInterface):
         )
 
         # Initialize token database for processing tokens
-        # First Party
-        from lmcache.integration.vllm.utils import create_lmcache_metadata
+        # Third Party
+        from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+            create_lmcache_metadata,
+        )
 
         metadata, config = create_lmcache_metadata(vllm_config)
 

@@ -9,12 +9,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (
+    LMCacheConnectorV1Impl,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 import torch
-
-# First Party
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
 if TYPE_CHECKING:
     # Third Party

@@ -4,8 +4,12 @@
 # Standard
 import asyncio
 
+# Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+    lmcache_get_or_create_config,
+)
+
 # First Party
-from lmcache.integration.vllm.utils import lmcache_get_or_create_config
 from lmcache.v1.check import check_mode
 
 # Import shared utilities

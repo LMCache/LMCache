@@ -110,7 +110,7 @@ This first output demonstrates the tokens being cached and loaded.
 
 .. code-block:: text
 
-   [2025-08-04 22:43:35,484] LMCache INFO: Reqid: chatcmpl-05e2d296601046b29210f53a1fa30b13, Total tokens 1536, LMCache hit tokens: 1536, need to load: 1535 (vllm_v1_adapter.py:803:lmcache.integration.vllm.vllm_v1_adapter)
+   [2025-08-04 22:43:35,484] LMCache INFO: Reqid: chatcmpl-05e2d296601046b29210f53a1fa30b13, Total tokens 1536, LMCache hit tokens: 1536, need to load: 1535 (vllm_v1_adapter.py:803:vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter)
 
 This then shows the speedup between the first and second runs.
 

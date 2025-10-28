@@ -6,7 +6,7 @@ LMCache should be able to reduce the generation time of the second and following
 - In the same file, add 
 ```
 from lmcache.v1.compute.models.utils import VLLMModelTracker
-from lmcache.integration.vllm.utils import ENGINE_NAME
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import ENGINE_NAME
         
 VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)
 ensure_kv_transfer_initialized(self.vllm_config)

@@ -5,12 +5,14 @@ import threading
 import time
 
 # Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+    create_lmcache_metadata,
+)
 import msgspec
 import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface

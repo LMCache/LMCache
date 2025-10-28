@@ -16,8 +16,10 @@ from lmcache.logging import init_logger
 from .api_registry import APIRegistry
 
 if TYPE_CHECKING:
-    # First Party
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import (
+        LMCacheConnectorV1Impl,
+    )
 
 logger = init_logger(__name__)
 

@@ -182,7 +182,7 @@ The prefiller instance will log the throughput of KV cache transfer:
 
 The decoder instance will log how many tokens are fetched from the LMCache:
 
-    LMCache INFO: Reqid: cmpl-b8bf01cbe47e4d108732ceeb4158d310-0, Total tokens 5170, LMCache hit tokens: 5169, need to load: 5169 (vllm_v1_adapter.py:543:lmcache.integration.vllm.vllm_v1_adapter)
+    LMCache INFO: Reqid: cmpl-b8bf01cbe47e4d108732ceeb4158d310-0, Total tokens 5170, LMCache hit tokens: 5169, need to load: 5169 (vllm_v1_adapter.py:543:vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter)
 
 The proxy server will log the TTFT of the prefiller node:
 

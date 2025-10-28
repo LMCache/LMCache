@@ -10,7 +10,7 @@ vLLM imports the connector from the lmcache package and wraps it in `vllm/distri
 
 .. code-block:: python
 
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.vllm_v1_adapter import LMCacheConnectorV1Impl
 
 This means that any updates to LMCache connector need to be synced/updated in the upstream vLLM. 
 

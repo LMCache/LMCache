@@ -4,10 +4,12 @@ from typing import List, Optional, Tuple, Union
 import abc
 
 # Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+    ENGINE_NAME,
+)
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder

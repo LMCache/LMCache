@@ -33,6 +33,13 @@ except ImportError:
     from vllm.utils import get_kv_cache_torch_dtype
 
 # Third Party
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+    ENGINE_NAME,
+    apply_mm_hashes_to_token_ids,
+    extract_mm_features,
+    lmcache_get_or_create_config,
+    mla_enabled,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 import torch
@@ -40,13 +47,6 @@ import torch
 # First Party
 from lmcache import utils
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import (
-    ENGINE_NAME,
-    apply_mm_hashes_to_token_ids,
-    extract_mm_features,
-    lmcache_get_or_create_config,
-    mla_enabled,
-)
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate

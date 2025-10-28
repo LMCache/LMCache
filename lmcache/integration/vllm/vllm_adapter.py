@@ -35,10 +35,12 @@ from vllm.config import (
     ParallelConfig,
     SchedulerConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+    ENGINE_NAME,
+)
 from vllm.sequence import IntermediateTensors
 
 # First Party
-from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 
 # Use LMCache's own math utilities instead of vllm's

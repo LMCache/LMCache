@@ -72,8 +72,12 @@ def create_test_memory_obj_for_storage_manager(
 
 def create_storage_manager_with_config(model: str):
     """Create storage manager with default configuration"""
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+        lmcache_get_or_create_config,
+    )
+
     # First Party
-    from lmcache.integration.vllm.utils import lmcache_get_or_create_config
     from lmcache.v1.event_manager import EventManager
 
     config = lmcache_get_or_create_config()
