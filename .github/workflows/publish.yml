@@ -133,7 +133,7 @@ jobs:
                   index.rubygems.org:443
 
             - name: Wait for Buildkite unit tests
-              uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028fb74dc5a068cccc # v1.3.4
+              uses: lewagon/wait-on-check-action@3603e826ee561ea102b58accb5ea55a1a7482343 # v1.4.1
               with:
                 ref: ${{ github.sha }}
                 check-regexp: 'buildkite/lmcache.*'
