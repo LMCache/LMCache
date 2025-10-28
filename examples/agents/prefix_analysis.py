@@ -6,6 +6,7 @@ from collections import OrderedDict
 from typing import List, Optional, Tuple, Union
 import argparse
 import json
+import time
 
 # Third Party
 from tqdm import tqdm
@@ -69,13 +70,56 @@ class LRUTokenPool:
         return best_len, best_id
 
     def longest_common_substring(
-        self, request_id: int, token_tensor: torch.Tensor
-    ) -> Tuple[int, int]:
+        self,
+        request_id: int,
+        token_tensor: torch.Tensor,
+        tokens: List[int],
+        *,
+        chunk_len: int = 8,
+        stride_r: int = 8,
+        chunk_batch: int = 512,
+    ) -> Tuple[int, float]:
         """
-        Find longest common substring match using tensor operations for performance.
+        For token_tensor[request_id], chunk it and check whether each chunk
+        appears contiguously in any previous request (token_tensor[:request_id]).
+        Returns (total_tokens_matched, elapsed_seconds).
         """
-        return 0, 0
+        assert token_tensor.ndim == 2, "Expected [N, T] tensor"
+        N, T = token_tensor.shape
+        assert 0 <= request_id < N, "request_id out of range"
 
+        if request_id == 0 or T < chunk_len:
+            return 0, 0
+
+        r = token_tensor[request_id]          # [T]
+        r = r[:len(tokens)]
+        Xprev = token_tensor[:request_id]     # [request_id, T]
+
+        # Sliding windows for previous rows
+        Xw = Xprev.unfold(dimension=1, size=chunk_len, step=1)  # [R, W, L]
+        # Chunks of r
+        r_chunks = r.unfold(dimension=0, size=chunk_len, step=stride_r)  # [C, L]
+        if r_chunks.numel() == 0:
+            return 0, 0
+
+        total_matched_chunks = 0
+
+        # Process in mini-batches to control memory
+        for b in range(0, r_chunks.size(0), chunk_batch):
+            rc = r_chunks[b:b + chunk_batch]  # [B, L]
+            eq = (Xw[:, :, None, :] == rc[None, None, :, :])
+            full = eq.all(dim=-1)             # [R, W, B]
+            # Count how many unique chunks matched (across all previous rows)
+            matched_chunk_indices = torch.unique(full.nonzero(as_tuple=True)[2])
+            total_matched_chunks += matched_chunk_indices.numel()
+
+        total_tokens_matched = total_matched_chunks * chunk_len
+
+
+        return total_tokens_matched, 0
+
+    
+    
     def add_request(
         self,
         request_id: int,
@@ -158,7 +202,10 @@ def calculate_hit_rate(
     total_tokens = 0
     hit_tokens = 0
 
-    for idx, tokens in enumerate(token_sequences):
+    total_lcs_time_s = 0.0
+    lcs_calls = 0
+
+    for idx, tokens in tqdm(list(enumerate(token_sequences))):
         total_tokens += len(tokens)
 
         if method == "prefix":
@@ -168,11 +215,20 @@ def calculate_hit_rate(
             pool.add_request(idx, tokens)
         elif method == "substring" and token_tensor is not None:
             if idx > 0:
-                common, _ = pool.longest_common_substring(idx, token_tensor)
+                common, elapsed = pool.longest_common_substring(idx, token_tensor, tokens)
                 hit_tokens += common
+                total_lcs_time_s += elapsed
+                lcs_calls += 1
             pool.add_request(idx, tokens, token_tensor)
         else:
             raise ValueError(f"Invalid method: {method}")
+
+    if method == "substring":
+        avg_ms = (total_lcs_time_s / lcs_calls * 1000.0) if lcs_calls > 0 else 0.0
+        print(
+            f"  [Timing] longest_common_substring: total {total_lcs_time_s:.3f}s, "
+            f"calls {lcs_calls}, avg {avg_ms:.2f} ms"
+        )
 
     return hit_tokens / total_tokens if total_tokens > 0 else 0.0
 
@@ -380,6 +436,7 @@ def parse_pool_sizes(
 
 
 def main() -> None:
+
     args = parse_arguments()
 
     # Parse pool sizes
