@@ -457,10 +457,10 @@ class QueryInstRetMsg(OrchRetMsg):
     """Query instance return message"""
 
     event_id: str
-    instance_id: Optional[str]
+    instance_ids: Optional[list[str]]
 
     def describe(self) -> str:
-        return f"The instance id is {self.instance_id}"
+        return f"The instance ids are {self.instance_ids}"
 
 
 class LookupRetMsg(OrchRetMsg):

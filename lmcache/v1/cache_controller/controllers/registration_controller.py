@@ -43,8 +43,8 @@ class RegistrationController:
         # Mapping from `(instance_id, worker_id)` -> `socket`
         self.socket_mapping: dict[tuple[str, int], zmq.asyncio.Socket] = {}
 
-        # Mapping from `ip` -> `instance_id`
-        self.instance_mapping: dict[str, str] = {}
+        # Mapping from `ip` -> `instance_ids`
+        self.instance_mapping: dict[str, list[str]] = {}
 
         # Mapping from `(instance_id, worker_id)` -> `WorkerInfo`
         self.worker_info_mapping: dict[tuple[str, int], WorkerInfo] = {}
@@ -82,17 +82,17 @@ class RegistrationController:
         """
         return self.worker_mapping.get(instance_id, [])
 
-    async def get_instance_id(self, msg: QueryInstMsg) -> QueryInstRetMsg:
+    async def get_instance_ids(self, msg: QueryInstMsg) -> QueryInstRetMsg:
         """
-        Get the instance id given an ip address.
+        Get the instance ids given an ip address.
         """
         ip = msg.ip
         event_id = msg.event_id
-        instance_id = self.instance_mapping.get(ip)
-        if instance_id is None:
+        instance_ids = self.instance_mapping.get(ip)
+        if instance_ids is None:
             logger.warning(f"Instance not registered for IP {ip}")
-            return QueryInstRetMsg(instance_id=None, event_id=event_id)
-        return QueryInstRetMsg(instance_id=instance_id, event_id=event_id)
+            return QueryInstRetMsg(instance_ids=None, event_id=event_id)
+        return QueryInstRetMsg(instance_ids=instance_ids, event_id=event_id)
 
     async def register(self, msg: RegisterMsg) -> None:
         """
@@ -106,7 +106,10 @@ class RegistrationController:
         distributed_url = msg.distributed_url
         self.distributed_url_mapping[(instance_id, worker_id)] = distributed_url
 
-        self.instance_mapping[ip] = instance_id
+        if ip not in self.instance_mapping:
+            self.instance_mapping[ip] = []
+        if instance_id not in self.instance_mapping[ip]:
+            self.instance_mapping[ip].append(instance_id)
 
         context = get_zmq_context()
         socket = get_zmq_socket(

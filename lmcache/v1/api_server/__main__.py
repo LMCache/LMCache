@@ -71,7 +71,7 @@ def create_app(controller_urls: dict[str, str]) -> FastAPI:
 
     class QueryInstResponse(BaseModel):
         event_id: str
-        res: str  # the instance id
+        res: list[str]  # the instance ids
 
     @app.post("/query_instance")
     async def query_instance(req: QueryInstRequest):
@@ -86,7 +86,7 @@ def create_app(controller_urls: dict[str, str]) -> FastAPI:
             assert isinstance(ret_msg, QueryInstRetMsg)
             return QueryInstResponse(
                 event_id=ret_msg.event_id,
-                res=ret_msg.instance_id,
+                res=ret_msg.instance_ids,
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e

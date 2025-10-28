@@ -133,7 +133,7 @@ class LMCacheControllerManager:
         elif isinstance(msg, HealthMsg):
             return await self.reg_controller.health(msg)
         elif isinstance(msg, QueryInstMsg):
-            return await self.reg_controller.get_instance_id(msg)
+            return await self.reg_controller.get_instance_ids(msg)
         elif isinstance(msg, ClearMsg):
             return await self.kv_controller.clear(msg)
         elif isinstance(msg, PinMsg):
