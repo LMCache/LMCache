@@ -6,7 +6,6 @@ from collections import OrderedDict
 from typing import List, Optional, Tuple, Union
 import argparse
 import json
-import time
 
 # Third Party
 from tqdm import tqdm
@@ -75,8 +74,8 @@ class LRUTokenPool:
         token_tensor: torch.Tensor,
         tokens: List[int],
         *,
-        chunk_len: int = 8,
-        stride_r: int = 8,
+        chunk_len: int = 4,
+        stride_r: int = 4,
         chunk_batch: int = 512,
     ) -> Tuple[int, float]:
         """
@@ -91,9 +90,9 @@ class LRUTokenPool:
         if request_id == 0 or T < chunk_len:
             return 0, 0
 
-        r = token_tensor[request_id]          # [T]
-        r = r[:len(tokens)]
-        Xprev = token_tensor[:request_id]     # [request_id, T]
+        r = token_tensor[request_id]  # [T]
+        r = r[: len(tokens)]
+        Xprev = token_tensor[:request_id]  # [request_id, T]
 
         # Sliding windows for previous rows
         Xw = Xprev.unfold(dimension=1, size=chunk_len, step=1)  # [R, W, L]
@@ -106,20 +105,17 @@ class LRUTokenPool:
 
         # Process in mini-batches to control memory
         for b in range(0, r_chunks.size(0), chunk_batch):
-            rc = r_chunks[b:b + chunk_batch]  # [B, L]
-            eq = (Xw[:, :, None, :] == rc[None, None, :, :])
-            full = eq.all(dim=-1)             # [R, W, B]
+            rc = r_chunks[b : b + chunk_batch]  # [B, L]
+            eq = Xw[:, :, None, :] == rc[None, None, :, :]
+            full = eq.all(dim=-1)  # [R, W, B]
             # Count how many unique chunks matched (across all previous rows)
             matched_chunk_indices = torch.unique(full.nonzero(as_tuple=True)[2])
             total_matched_chunks += matched_chunk_indices.numel()
 
         total_tokens_matched = total_matched_chunks * chunk_len
 
-
         return total_tokens_matched, 0
 
-    
-    
     def add_request(
         self,
         request_id: int,
@@ -215,7 +211,9 @@ def calculate_hit_rate(
             pool.add_request(idx, tokens)
         elif method == "substring" and token_tensor is not None:
             if idx > 0:
-                common, elapsed = pool.longest_common_substring(idx, token_tensor, tokens)
+                common, elapsed = pool.longest_common_substring(
+                    idx, token_tensor, tokens
+                )
                 hit_tokens += common
                 total_lcs_time_s += elapsed
                 lcs_calls += 1
@@ -436,7 +434,6 @@ def parse_pool_sizes(
 
 
 def main() -> None:
-
     args = parse_arguments()
 
     # Parse pool sizes
