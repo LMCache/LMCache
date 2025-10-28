@@ -26,10 +26,6 @@ from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.distributed_server import (
-    DistributedServerInterface,
-    NaiveDistributedServer,
-)
 from lmcache.v1.event_manager import EventManager, EventType
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
@@ -37,16 +33,13 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.lookup_server import LookupServerInterface, RedisLookupServer
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
-    AdHocMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
     MixedMemoryAllocator,
-    NixlCPUMemoryAllocator,
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
@@ -103,16 +96,18 @@ class LMCacheEngine:
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
-        self.enable_p2p = config.enable_p2p
+
+        if self.save_only_first_rank:
+            self.broadcast_stream = (
+                self.gpu_connector.load_stream
+                if hasattr(self.gpu_connector, "load_stream")
+                else torch.cuda.Stream()
+            )
 
         self.enable_controller = config.enable_controller
 
         # NOTE: Unix systems use fork by default
         multiprocessing.set_start_method("spawn", force=True)
-
-        self.lookup_server: Optional[LookupServerInterface] = None
-        if self.enable_p2p:
-            self.lookup_server = RedisLookupServer(config)
 
         # avoid circular import
         # First Party
@@ -131,35 +126,24 @@ class LMCacheEngine:
             # self.memory_allocator,
             event_manager=self.event_manager,
             lmcache_worker=self.lmcache_worker,
-            lookup_server=self.lookup_server,
         )
 
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
-        # dropping the kv cache in nixl backend at decoder.
-        self.remove_after_retrieve = (
-            config.enable_nixl and config.nixl_role == "receiver"
-        )
-
-        self.distributed_server: Optional[DistributedServerInterface] = None
-
-        if self.enable_p2p or self.enable_controller:
-            self.distributed_loop = asyncio.get_event_loop()
-            assert isinstance(self.storage_manager, StorageManager)
-            self.distributed_server = NaiveDistributedServer(
-                self.storage_manager,
-                self.lookup_server,
-                self.distributed_loop,
-                config,
-            )
+        # dropping the kv cache from the buffer in PD backend
+        # at decoder.
+        self.remove_after_retrieve = config.enable_pd and config.pd_role == "receiver"
 
         self.use_layerwise = config.use_layerwise
         self.num_layers = metadata.kv_shape[0]
+        self.fmt = None
         if self.use_layerwise:
             if config.enable_blending:
                 self.fmt = MemoryFormat.KV_2TD
             else:
                 self.fmt = MemoryFormat.KV_T2D
+        if metadata.use_mla:
+            self.fmt = MemoryFormat.KV_MLA_FMT
 
         # NOTE(ApostaC): we haven't support lookup-cache yet
         self.lookup_cache: dict[CacheEngineKey, Any] = {}
@@ -183,9 +167,9 @@ class LMCacheEngine:
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-            self.storage_manager.post_init(async_lookup_server=self.async_lookup_server)
+            self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:
+            self.storage_manager.post_init(**kwargs)
             logger.info("Post-initializing LMCacheEngine")
             self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
@@ -275,6 +259,7 @@ class LMCacheEngine:
                 kv_shape,
                 kv_dtype,
                 busy_loop=self.force_store_wait,
+                fmt=self.fmt,
             )
             if memory_obj is None:
                 logger.warning(
@@ -489,10 +474,20 @@ class LMCacheEngine:
                     **kwargs,
                 )
         if self.save_only_first_rank:
-            self._broadcast_or_receive_memory_objs(
-                reordered_chunks,
-                ret_mask,
-            )
+            with torch.cuda.stream(self.broadcast_stream):
+                self._broadcast_or_receive_memory_objs(
+                    reordered_chunks,
+                    ret_mask,
+                )
+
+            # if self.gpu_connector has load_stream, self.broadcast_stream is equals
+            # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
+            # will execute sequentially within the stream.
+            # if self.gpu_connector does not have load_stream, self.broadcast_stream
+            # is created by torch.cuda.Stream(), we need to synchronize broadcast
+            # operation, and then process to_cpu operation.
+            if not hasattr(self.gpu_connector, "load_stream"):
+                self.broadcast_stream.synchronize()
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
@@ -505,6 +500,7 @@ class LMCacheEngine:
             )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
+        # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 self.storage_manager.remove(key)
@@ -515,14 +511,15 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(
-            "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"
+            "Retrieved %d out of %d required tokens (from %d total tokens)."
+            " size: %.4f gb,"
             " cost %.4f ms, throughput: %.4f GB/s;",
             retrieved_tokens,
             num_required_tokens,
             len(tokens),
             tot_kv_size / 1024**3,
             onload_time * 1000,
-            tot_kv_size / onload_time / 1024**3,
+            tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
         )
         return ret_mask
 
@@ -686,33 +683,26 @@ class LMCacheEngine:
         """
 
         if tokens is not None:
-            self.stats_monitor.on_lookup_request(len(tokens))
+            lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
         else:
             assert offsets is not None
             assert hashes is not None
-            self.stats_monitor.on_lookup_request(sum(offsets))
+            lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
+        res = 0
         try:
-            end = 0
-            prev_end = 0
-
-            if pin:
-                assert lookup_id is not None, "lookup_id is required when pin is True"
-
-            # secondary lookup on p2p (via lookup_server) if enabled
-            search_p2p = self.enable_p2p and (
-                search_range is None or "p2p" in search_range
-            )
-
-            for start, end, key in self.token_database.process_tokens(
+            chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
                 hashes=hashes,
                 offsets=offsets,
                 request_configs=request_configs,
-            ):
-                assert isinstance(key, CacheEngineKey)
+            )
 
-                if self.use_layerwise:
+            # TODO: support batched_contains when layerwise is enabled
+            if self.use_layerwise:
+                for start, end, key in chunk_info_iterator:
+                    assert isinstance(key, CacheEngineKey)
+
                     # TODO(Jiayi): Optimize by checking only the existence of the key
                     # of one layer
                     key_all_layers = key.split_layers(self.num_layers)
@@ -723,41 +713,46 @@ class LMCacheEngine:
                             key_single_layer, search_range, pin
                         ):
                             found = True
-                        if search_p2p:
-                            assert self.lookup_server is not None
-                            if self.lookup_server.lookup(key_single_layer):
-                                found = True
                     if found:
                         if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
                             self.lookup_pins[lookup_id].extend(  # type: ignore
                                 key_all_layers
                             )
-                        prev_end = end
+                        res = end
                         continue
-                    end = prev_end
-                    return prev_end
-                else:
-                    if self.storage_manager.contains(key, search_range, pin):
-                        if pin:
-                            self.lookup_pins[lookup_id].append(  # type: ignore
-                                key
-                            )
-                        prev_end = end
-                        continue
+                    return res
+            else:
+                chunk_info_list = []
+                keys = []
+                for chunk_info in chunk_info_iterator:
+                    assert isinstance(chunk_info[2], CacheEngineKey)
+                    chunk_info_list.append(chunk_info)
+                    keys.append(chunk_info[2])
 
-                    if search_p2p:
-                        assert self.lookup_server is not None
-                        # TODO(Jiayi): We need to support pin for remote lookup
-                        if self.lookup_server.lookup(key):
-                            prev_end = end
-                            continue
-                    end = prev_end
-                    return prev_end
+                batched_contains_res = self.storage_manager.batched_contains(
+                    keys, search_range, pin, True
+                )
+                assert len(batched_contains_res) == len(chunk_info_list)
+                for (start, end, key), exists in zip(
+                    chunk_info_list, batched_contains_res, strict=False
+                ):
+                    if exists:
+                        if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
+                            self.lookup_pins[lookup_id].append(key)
+                        res = end
+                        continue
+                    return res
 
             # all tokens where found, return the maximal end
-            return end
+            return res
         finally:
-            self.stats_monitor.on_lookup_finished(end)
+            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()
@@ -774,9 +769,6 @@ class LMCacheEngine:
         """
         Perform cross-node move of the KV cache.
         """
-        assert self.distributed_server is not None, (
-            "Distributed server should be initialized for move operation"
-        )
 
         num_tokens = self.lookup(
             tokens,
@@ -800,32 +792,35 @@ class LMCacheEngine:
             f"Trying to send {len(memory_objs)} memory objects to {new_position}"
         )
 
+        # TODO: reduce loops
+        token_dim = memory_objs[0].meta.fmt.token_dim()  # type: ignore
+        offsets = [m.meta.shape[token_dim] for m in memory_objs]  # type: ignore
+
+        transfer_spec = {
+            "peer_init_url": new_position[0],
+            "offsets": offsets,
+        }
+
+        logger.info(self.storage_manager.storage_backends)
+        p2p_backend = self.storage_manager.storage_backends["P2PBackend"]
+
         future = asyncio.run_coroutine_threadsafe(
-            self.distributed_server.batched_issue_put(
+            p2p_backend.async_batched_submit_put_task(
                 keys,
                 memory_objs,  # type: ignore
-                new_position[0],
-                new_position[1],
+                transfer_spec=transfer_spec,
             ),
-            self.distributed_loop,
+            self.storage_manager.loop,
         )
-
-        future.add_done_callback(
-            lambda f: [m.unpin() for m in memory_objs]  # type: ignore
-        )
-
-        if not do_copy:
-            remove_callback = lambda f: self.storage_manager.batched_remove(
-                keys, locations=[old_position]
-            )
-            future.add_done_callback(remove_callback)
 
         future.result()
+
+        if not do_copy:
+            self.storage_manager.batched_remove(keys, locations=[old_position])
 
         logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
         return num_tokens
 
-    # TODO(Jiayi): Add p2p + async lookup support.
     # TODO(Jiayi): Add layerwise support.
     @_lmcache_nvtx_annotate
     def async_lookup_and_prefetch(
@@ -984,11 +979,10 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
-    def lookup_unpin(self, lookup_ids: list[str]) -> None:
-        for lookup_id in lookup_ids:
-            if lookup_id in self.lookup_pins:
-                self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
-                del self.lookup_pins[lookup_id]
+    def lookup_unpin(self, lookup_id: str) -> None:
+        if lookup_id in self.lookup_pins:
+            self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
+            del self.lookup_pins[lookup_id]
 
     @_lmcache_nvtx_annotate
     def clear(
@@ -1001,11 +995,9 @@ class LMCacheEngine:
         if self.save_only_first_rank:
             if self.metadata.is_first_rank():
                 num_removed = self._clear(tokens, locations, request_configs)
-                self.broadcast_object_fn(num_removed, self.metadata.first_rank)
                 return num_removed
             else:
-                num_removed = self.broadcast_object_fn(None, self.metadata.first_rank)
-                return int(num_removed)
+                return 0
         return self._clear(tokens, locations, request_configs)
 
     def _clear(
@@ -1042,9 +1034,6 @@ class LMCacheEngine:
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
-
-        if self.enable_p2p and self.distributed_server:
-            self.distributed_server.close()
 
         if self.lmcache_worker is not None:
             self.lmcache_worker.close()
@@ -1133,6 +1122,14 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        # In some scenarios, lookup is called first, and then the original tokens
+        # is sliced based on the lookup result. In these scenarios, the tokens
+        # passed in must exist in LMCache, and we can set skip_contains_check to True.
+        # When skip_contains_check is True and there is only one backend, the `contains`
+        # call can be skipped.
+        skip_contains_check = (
+            kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
+        )
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -1140,31 +1137,22 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
 
+            location = None
             if key in self.lookup_cache:
                 # TODO(Jiayi): we can reduce the number of `contains` calls
                 # by checking the lookup cache first (should be updated in `lookup`)
                 pass
             else:
-                # NOTE: key should always be in the lookup cache once
-                # we support it.
-                location = self.storage_manager.contains(key)
+                # NOTE: key should always be in the lookup cache once we support it.
+                # TODO: use lookup_cache to skip the contains
+                if (
+                    skip_contains_check
+                    and len(self.storage_manager.non_allocator_backends) == 1
+                ):
+                    location = self.storage_manager.non_allocator_backends[0]
+                else:
+                    location = self.storage_manager.contains(key)
                 if location is None:
-                    # TODO(Jiayi): Need to refactor P2P as a storage backend to
-                    # clean up the following code.
-                    if self.enable_p2p and self.distributed_server:
-                        future_memory_obj = asyncio.run_coroutine_threadsafe(
-                            self.distributed_server.issue_get(key),
-                            self.distributed_loop,
-                        )
-                        memory_obj = future_memory_obj.result()
-                        if memory_obj:
-                            reordered_chunks.append((key, memory_obj, start, end))
-                            ret_mask[start:end] = True
-                        else:
-                            # NOTE: break for P2P retrieve KV because of no required
-                            # memory obj
-                            break
-                        continue
                     break
 
                 # NOTE: Here we make the assumption that the underlying
@@ -1306,6 +1294,8 @@ class LMCacheEngineBuilder:
     _metadatas: Dict[str, LMCacheEngineMetadata] = {}
     _stat_loggers: Dict[str, LMCacheStatsLogger] = {}
 
+    # TODO(Jiayi): Please remove this helper function in the future.
+    # Currently, it's only used for testing.
     @staticmethod
     def _Create_memory_allocator(
         config: LMCacheEngineConfig,
@@ -1318,50 +1308,15 @@ class LMCacheEngineBuilder:
         enable_nixl_storage = extra_config is not None and extra_config.get(
             "enable_nixl_storage"
         )
-        if config.enable_nixl and not enable_nixl_storage:
-            assert config.nixl_buffer_device is not None
-            # TODO (Jiayi): make this less hacky
-            if config.enable_xpyd:
-                # First Party
-                from lmcache.v1.storage_backend.connector.nixl_utils import (
-                    get_correct_nixl_device,
-                )
-
-                corrected_device = get_correct_nixl_device(
-                    config.nixl_buffer_device,
-                    metadata.worker_id,
-                )
-                logger.info(f"Setting cuda device to {corrected_device} ")
-                torch.cuda.set_device(corrected_device)
-
-                # TODO(Jiayi): add numa affinity to nixl_cpu backend too.
-                buffer = torch.empty(
-                    config.nixl_buffer_size,
-                    dtype=torch.uint8,
-                    device=corrected_device,
-                )
-                nixl_cpu_mem_allocator = NixlCPUMemoryAllocator()
-                nixl_cpu_mem_allocator.init_nixl_memory_allocator(
-                    buffer,
-                    torch.Size(metadata.kv_shape),
-                    metadata.kv_dtype,
-                    MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
-                )
-                if config.local_cpu:
-                    max_local_cpu_size = config.max_local_cpu_size
-                    nixl_cpu_mem_allocator.init_cpu_memory_allocator(
-                        int(max_local_cpu_size * 1024**3)
-                    )
-                return nixl_cpu_mem_allocator
-            return AdHocMemoryAllocator(config.nixl_buffer_device)
 
         if enable_nixl_storage:
+            # TODO(Jiayi): weird to import from transfer utils.
             # First Party
-            from lmcache.v1.storage_backend.connector.nixl_utils import (
-                get_correct_nixl_device,
+            from lmcache.v1.transfer_channel.transfer_utils import (
+                get_correct_device,
             )
 
-            corrected_device = get_correct_nixl_device(
+            corrected_device = get_correct_device(
                 config.nixl_buffer_device,
                 metadata.worker_id,
             )

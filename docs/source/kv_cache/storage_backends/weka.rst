@@ -79,7 +79,7 @@ Setup Example
 
 - vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
 
-- Hugging Face access to ``meta-llama/Llama-3.1-70B-Instruct``
+- Hugging Face access to ``meta-llama/Llama-3.1-8B-Instruct``
 
 .. code-block:: bash
 
@@ -131,7 +131,7 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     LMCACHE_CONFIG_FILE="weka-offload.yaml" \
     LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
-        meta-llama/Llama-3.1-70B-Instruct \
+        meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 65536 \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'

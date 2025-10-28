@@ -171,6 +171,56 @@ key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
          token_idx * scalars_per_token + scalar_offset;
 }
 
+template <typename scalar_t>
+__global__ void single_layer_kv_transfer_sgl_kernel(
+    // scalar_t* __restrict__ lmc_key_cache,    // [num_tokens,
+    // num_heads*head_size] scalar_t* __restrict__ lmc_value_cache,  //
+    // [num_tokens, num_heads*head_size]
+    scalar_t* __restrict__ lmc_key_value_cache,  // [num_tokens, 2,
+                                                 // num_heads*head_size]
+                                                 // or
+                                                 // [2, num_tokens,
+                                                 // num_heads*head_size]
+    scalar_t* __restrict__ sgl_key_cache,        // [num_blocks, block_size,
+                                                 // num_heads, head_size]
+    scalar_t* __restrict__ sgl_value_cache,      // [num_blocks, block_size,
+                                                 // num_heads, head_size]
+    const int64_t* __restrict__ slot_mapping,    // [num_tokens]
+    const int block_stride_in_64bit, const int lmc_stride,
+    const int lmc_value_offset, const int num_heads,
+    const int head_size_in_64bit, const int block_size, const bool direction) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+
+  if (slot_idx < 0) {
+    return;
+  }
+
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+  const int n = num_heads * head_size_in_64bit;
+
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const int64_t lmc_key_idx = token_idx * lmc_stride + i;
+    const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
+
+    const int head_idx = i / head_size_in_64bit;
+    const int head_offset = i % head_size_in_64bit;
+    const int64_t sgl_key_value_idx =
+        block_idx * block_stride_in_64bit +
+        block_offset * num_heads * head_size_in_64bit +
+        head_idx * head_size_in_64bit + head_offset;
+
+    if (direction) {
+      lmc_key_value_cache[lmc_key_idx] = sgl_key_cache[sgl_key_value_idx];
+      lmc_key_value_cache[lmc_value_idx] = sgl_value_cache[sgl_key_value_idx];
+    } else {
+      sgl_key_cache[sgl_key_value_idx] = lmc_key_value_cache[lmc_key_idx];
+      sgl_value_cache[sgl_key_value_idx] = lmc_key_value_cache[lmc_value_idx];
+    }
+  }
+}
+
 /**
  * Quickly load KV cache between vLLM paged memory and offloading buffer
  * slot_id = slot_mapping[block.x]
@@ -626,4 +676,72 @@ void reshape_and_cache_back_flash(
       key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
       block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit,
       block_size, key_layer_offset, value_layer_offset);
+}
+
+void single_layer_kv_transfer_sgl(
+    // torch::Tensor& lmc_key_cache,  // [num_tokens, num_heads*head_size]
+    //  key/value must be on gpu/pinned cpu
+    // torch::Tensor& lmc_value_cache,  // [num_tokens, num_heads*head_size]
+
+    torch::Tensor& lmc_key_value_cache,  // [num_tokens, 2, num_heads*head_size]
+                                         // or
+                                         // [2, num_tokens, num_heads*head_size]
+
+    torch::Tensor&
+        sgl_key_cache,  // [num_blocks, block_size, num_heads, head_size]
+    torch::Tensor&
+        sgl_value_cache,  // [num_blocks, block_size, num_heads, head_size]
+                          // key_cache/value_cache must be on gpu
+    torch::Tensor& slot_mapping,  // [num_tokens]
+    const bool direction,   // false: LMCache to PagedBuffer, true: PagedBuffer
+                            // to LMCache
+    const bool token_major  // true: lmc_key_value_cache is
+                            // [num_tokens, 2, num_heads*head_size]
+                            // false: lmc_key_value_cache is
+                            // [2, num_tokens, num_heads*head_size]
+) {
+  // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
+  // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
+  // get_kernel_ptr<int64_t, torch::Tensor>(lmc_value_cache);
+  int64_t* lmc_key_value_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(lmc_key_value_cache);
+
+  int64_t* sgl_key_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(sgl_key_cache);
+  int64_t* sgl_value_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(sgl_value_cache);
+
+  const int64_t* slot_mapping_ptr =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
+
+  int elements_per_entry = 8 / sgl_key_cache.element_size();
+
+  int num_tokens = slot_mapping.size(0);
+  int num_heads = sgl_key_cache.size(2);
+  int head_size_in_64bit = sgl_key_cache.size(3) / elements_per_entry;
+
+  int block_size = sgl_key_cache.size(1);
+
+  int lmc_stride;
+  int lmc_value_offset;
+  if (token_major) {
+    lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(1) / elements_per_entry;
+  } else {
+    lmc_stride = lmc_key_value_cache.stride(1) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(0) / elements_per_entry;
+  }
+
+  int block_stride_in_64bit = sgl_key_cache.stride(0) / elements_per_entry;
+  TORCH_CHECK(sgl_key_cache.stride(0) == sgl_value_cache.stride(0));
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(num_heads * head_size_in_64bit, 128));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(sgl_key_cache));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  lmc::single_layer_kv_transfer_sgl_kernel<int64_t><<<grid, block, 0, stream>>>(
+      lmc_key_value_cache_ptr, sgl_key_cache_ptr, sgl_value_cache_ptr,
+      slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
+      num_heads, head_size_in_64bit, block_size, direction);
 }

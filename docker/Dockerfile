@@ -36,39 +36,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
-# Install and setup nixl
-RUN apt-get update -y && \
-    apt-get -y install \
-    ninja-build \
-    pybind11-dev \
-    python${PYTHON_VERSION}-dev \
-    cmake
-RUN export LD_LIBRARY_PATH=/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
-RUN export NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
-RUN cd /workspace
-RUN git clone https://github.com/ai-dynamo/nixl && \
-    cd nixl && \
-    git checkout b1c22edd8fe10e2e5221c107ee51200fce6f09a8
-RUN cd /workspace/nixl
-RUN source /opt/venv/bin/activate
-RUN . /opt/venv/bin/activate && \
-    uv pip install meson
-RUN cd /workspace/nixl && \
-    . /opt/venv/bin/activate && \
-    rm -rf build && \
-    mkdir build && \
-    uv run meson setup build/ --prefix=/usr/local/nixl && \
-    cd build && \
-    ninja && \
-    ninja install
-RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nixl.conf
-RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf
-RUN ldconfig
-RUN cd /workspace/nixl/ && \
-    . /opt/venv/bin/activate && \
-    uv build --wheel --out-dir /tmp/dist && \
-    uv pip install /tmp/dist/nixl-0.3.0-cp312-cp312-linux_x86_64.whl
-
 # Install runtime dependencies
 COPY ./requirements/common.txt common.txt
 COPY ./requirements/cuda.txt cuda.txt
@@ -119,11 +86,15 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
-        uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
+        uv pip install --prerelease=allow \
+            'vllm[runai,tensorizer,flashinfer]' \
+            'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' \
             --extra-index-url https://wheels.vllm.ai/nightly \
             --index-strategy unsafe-best-match ; \
     else \
-        uv pip install --prerelease=allow "vllm[runai,tensorizer]==${VLLM_VERSION}" ; \
+        uv pip install --prerelease=allow \
+            "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" \
+            'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
@@ -141,7 +112,7 @@ FROM base AS image-release
 # It is imperative that LMCache uses the same torch version as the 
 # vLLM stable release.
 RUN . /opt/venv/bin/activate && \
-    uv pip install --prerelease=allow vllm[runai,tensorizer] && \
+    uv pip install --prerelease=allow vllm[runai,tensorizer,flashinfer] && \
     uv pip install lmcache --verbose
 
 WORKDIR /workspace

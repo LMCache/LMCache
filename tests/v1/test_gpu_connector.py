@@ -87,6 +87,10 @@ def patch_pin_allocator():
 
 @pytest.mark.parametrize("use_gpu", [True, False])
 @pytest.mark.parametrize("use_mla", [True, False])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
     num_blocks = 100
     block_size = 16
@@ -182,6 +186,10 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
 
 
 @pytest.mark.parametrize("use_gpu", [True])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemLayerwiseGPUConnector",
+)
 def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     num_blocks = 100
     block_size = 16
@@ -282,6 +290,10 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
 
 @pytest.mark.parametrize("use_gpu", [True])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemLayerwiseGPUConnector",
+)
 def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     num_blocks = 100
     block_size = 16
@@ -445,6 +457,10 @@ def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
 
 @pytest.mark.skip(reason="This test is skipped due to vllm dependency")
 @pytest.mark.parametrize("use_gpu", [True])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMBufferLayerwiseGPUConnector",
+)
 def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
     num_blocks = 100
     block_size = 16
@@ -541,6 +557,10 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
     allocator.close()
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
 def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     """
     VLLMPagedMemGPUConnectorV2.to_gpu() micro-benchmark.
@@ -601,6 +621,10 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
 
 @pytest.mark.parametrize("use_gpu", [True, False])
 @pytest.mark.parametrize("use_mla", [True, False])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to SGLangGPUConnector",
+)
 def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
     num_blocks = 100
     block_size = 16

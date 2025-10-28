@@ -9,6 +9,13 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import PinMemoryAllocator
+
+pytest.importorskip(
+    "lmc_ops",
+    reason="TODO: require non CUDA implementations for CUDA enhanced functions",
+)
+
+# First Party
 import lmcache.c_ops as lmc_ops
 
 # Local

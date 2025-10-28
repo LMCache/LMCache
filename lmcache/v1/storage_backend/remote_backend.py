@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
-from typing import List, Optional, Sequence, Set
+from typing import Any, List, Optional, Sequence, Set
 import asyncio
 import threading
 import time
@@ -9,10 +9,9 @@ import time
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector import CreateConnector
@@ -31,9 +30,8 @@ class RemoteBackend(StorageBackendInterface):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
-        super().__init__(dst_device)
+        super().__init__(dst_device=dst_device)
         self.put_tasks: Set[CacheEngineKey] = set()
         self.lock = threading.Lock()
 
@@ -89,6 +87,15 @@ class RemoteBackend(StorageBackendInterface):
 
         # Start the remote monitor thread (if ping is supported)
         self.remote_monitor.start()
+
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.remote_put_task_num.set_function(
+                lambda: len(self.put_tasks)
+            )
 
     def __str__(self):
         return self.__class__.__name__
@@ -154,6 +161,38 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Returning False")
             return False
 
+    def support_batched_contains(self) -> bool:
+        return (
+            self.connection is not None and self.connection.support_batched_contains()
+        )
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+        stop_after_first_not_exits: bool = True,
+    ) -> List[bool]:
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in batched_contains, returning all False"
+            )
+            return [False] * len(keys)
+
+        if self._mla_worker_id_as0_mode:
+            keys = [
+                CacheEngineKey(
+                    key.fmt,
+                    key.model_name,
+                    key.world_size,
+                    0,
+                    key.chunk_hash,
+                    key.request_configs,
+                )
+                for key in keys
+            ]
+
+        return self.connection.batched_contains(keys, stop_after_first_not_exits)
+
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:
             return key in self.put_tasks
@@ -214,7 +253,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         if self.connection is None:
             logger.warning(
@@ -222,11 +261,6 @@ class RemoteBackend(StorageBackendInterface):
             )
             return
         if self.connection.support_batched_put():
-            if self.connection is None:
-                logger.warning(
-                    "Connection is None in batched_submit_put_task, returning None"
-                )
-                return
             if self._mla_worker_id_as0_mode:
                 return
 
@@ -433,6 +467,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> List[MemoryObj]:
         if self.connection is None:
             logger.warning(
@@ -456,7 +491,17 @@ class RemoteBackend(StorageBackendInterface):
         return True
 
     def remove(self, key, force=True):
-        raise NotImplementedError("Remote backend does not support remove now.")
+        if self.connection is None:
+            logger.warning("Connection is None in remove, returning False")
+            return False
+
+        try:
+            return self.connection.remove_sync(key)
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove key {key} from remote backend, error: {e}"
+            )
+            return False
 
     def get_allocator_backend(self):
         return self.local_cpu_backend

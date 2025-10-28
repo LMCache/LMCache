@@ -2,7 +2,15 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Generator, List, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Coroutine,
+    Generator,
+    List,
+    Optional,
+    Sequence,
+)
 import asyncio
 import functools
 import threading
@@ -20,7 +28,6 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
@@ -31,7 +38,6 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
 
 if TYPE_CHECKING:
     # First Party
@@ -94,39 +100,82 @@ def allocate_and_copy_objects(
     return keys[: len(allocated_objects)], allocated_objects
 
 
+class WeightedSemaphore:
+    def __init__(self, chunk_budget: int):
+        # it is physically impossible to have more fragmentation than 50%
+        # when all of the chunks are of the same size (save_unfull_chunk=False)
+        # so we can safely allocate half of the chunk budget for concurrent requests
+        self._concurrent_budget_cap = chunk_budget // 2
+        self._chunk_budget_cap = chunk_budget
+        self._current_chunks = self._concurrent_budget_cap
+        self._cond = asyncio.Condition()
+
+    async def acquire(self, n: int = 1) -> None:
+        if n > self._chunk_budget_cap:
+            raise ValueError(
+                f"Trying to acquire {n} chunks, "
+                f"Cannot acquire more than {self._chunk_budget_cap} chunks"
+                "Please set the max local cpu size to a larger value"
+            )
+
+        async with self._cond:
+            logger.debug(f"WeightedSemaphore: Attempting to acquire {n} chunks")
+            if n <= self._concurrent_budget_cap:
+                await self._cond.wait_for(lambda: self._current_chunks >= n)
+                self._current_chunks -= n
+            else:
+                # Oversized case: require exclusive access
+                await self._cond.wait_for(
+                    lambda: self._current_chunks == self._concurrent_budget_cap
+                )
+                # Reserve everything
+                self._current_chunks = 0
+            logger.debug(
+                f"WeightedSemaphore: Acquired {n} chunks, "
+                f"remaining chunks: {self._current_chunks}"
+            )
+
+    async def release(self, n: int = 1) -> None:
+        async with self._cond:
+            if n <= self._concurrent_budget_cap:
+                self._current_chunks += n
+            else:
+                self._current_chunks = self._concurrent_budget_cap
+            self._cond.notify_all()
+
+
+class AsyncSerializer:
+    """
+    Prevent race conditions where multiple batched_get's cause the local CPU
+    backend to allocate memory objects in parallel and get deadlocked.
+    """
+
+    def __init__(
+        self,
+        allocator_backend: AllocatorBackendInterface,
+        loop: asyncio.AbstractEventLoop,
+    ):
+        self.chunk_budget = allocator_backend.calculate_chunk_budget()
+        self._sem = WeightedSemaphore(self.chunk_budget)
+        self.loop = loop
+
+    async def run(
+        self,
+        coro_fn: Coroutine[Any, Any, Any],
+        num_chunks: int,
+    ) -> Any:
+        await self._sem.acquire(num_chunks)
+        try:
+            return await coro_fn
+        finally:
+            await self._sem.release(num_chunks)
+
+
 # TODO: extend this class to implement caching policies and eviction policies
 class StorageManager:
     """
     The StorageManager is responsible for managing the storage backends.
     """
-
-    class _CPUDiskListener(StorageBackendListener):
-        def __init__(self, storage_manager: "StorageManager"):
-            self.storage_manager = storage_manager
-
-        def on_evict(
-            self, backend: StorageBackendInterface, keys: List[CacheEngineKey]
-        ):
-            """
-            remove keys from lookup server only if they don't exist in local backends.
-
-            :param StorageBackendInterface backend: The backend that evicted the keys.
-            :param List[CacheEngineKey] keys: The keys that were evicted.
-            """
-            if self.storage_manager.lookup_server is None:
-                return
-
-            search_range = ["LocalCPUBackend", "LocalDiskBackend"]
-            if str(backend) in search_range:
-                search_range.remove(str(backend))
-
-            keys_to_remove = []
-            for key in keys:
-                if not self.storage_manager.contains(key, search_range=search_range):
-                    keys_to_remove.append(key)
-
-            if keys_to_remove:
-                self.storage_manager.lookup_server.batched_remove(keys_to_remove)
 
     def __init__(
         self,
@@ -134,8 +183,9 @@ class StorageManager:
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
+        self.config = config
+        self.metadata = metadata
         self.loop = asyncio.new_event_loop()
 
         self.thread = threading.Thread(
@@ -145,7 +195,10 @@ class StorageManager:
         )
         self.thread.start()
 
-        dst_device = "cuda"
+        if torch.cuda.is_available():
+            dst_device = "cuda"
+        else:
+            dst_device = "cpu"
         self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
             CreateStorageBackends(
                 config,
@@ -153,19 +206,19 @@ class StorageManager:
                 self.loop,
                 dst_device,
                 lmcache_worker,
-                lookup_server,
             )
         )
 
-        self.enable_nixl = config.enable_nixl
+        # the backend used for actual storage
+        self.non_allocator_backends = self.get_non_allocator_backends()
+
+        self.enable_pd = config.enable_pd
 
         self.allocator_backend = self._get_allocator_backend(config)
         if config.local_cpu:
             self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
         self.manager_lock = threading.Lock()
-
-        self.lookup_server = lookup_server
 
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
@@ -174,29 +227,32 @@ class StorageManager:
         self.event_manager = event_manager
 
         self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+        self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
-        self.internal_copy_stream = torch.cuda.Stream()
-
-        self._cpu_disk_listener = self._CPUDiskListener(self)
-        if "LocalCPUBackend" in self.storage_backends:
-            self.storage_backends["LocalCPUBackend"].set_listener(
-                self._cpu_disk_listener
-            )
-        if "LocalDiskBackend" in self.storage_backends:
-            self.storage_backends["LocalDiskBackend"].set_listener(
-                self._cpu_disk_listener
-            )
+        if torch.cuda.is_available():
+            self.internal_copy_stream = torch.cuda.Stream()
+        else:
+            self.internal_copy_stream = None
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
+            assert not self.config.save_unfull_chunk, (
+                "save_unfull_chunk should be automatically set to False when using "
+                "async loading."
+            )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
+        # PDBackend has't supported calculate_chunk_budget
+        if not self.enable_pd and (
+            self.config.enable_async_loading or self.config.use_layerwise
+        ):
+            self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
     ) -> AllocatorBackendInterface:
-        if self.enable_nixl:
-            allocator_backend = self.storage_backends["NixlBackend"]
+        if self.enable_pd:
+            allocator_backend = self.storage_backends["PDBackend"]
         else:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
         assert isinstance(allocator_backend, AllocatorBackendInterface)
@@ -262,12 +318,11 @@ class StorageManager:
 
         memory_obj.ref_count_down()
 
-    # TODO(Jiayi): location and transfer_spec might be redundant
     def batched_put(
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,  # TODO(Jiayi): add type check
+        transfer_spec=None,
         location: Optional[str] = None,
     ) -> None:
         """
@@ -303,9 +358,6 @@ class StorageManager:
             ks, objs = obj_dict[cname]
             backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
 
-        if self.lookup_server is not None:
-            self.lookup_server.batched_insert(keys)
-
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:
                 memory_obj.ref_count_down()
@@ -327,12 +379,33 @@ class StorageManager:
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj:
-                if backend_name not in ["LocalCPUBackend", "NixlBackend"]:
+                if backend_name not in ["LocalCPUBackend", "PDBackend"]:
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
                     local_cpu_backend.submit_put_task(key, memory_obj)
                 return memory_obj
 
+        return None
+
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+        location: Optional[str] = None,
+    ) -> Optional[Future]:
+        """
+        Non-blocking function to get the memory object from the storages.
+        """
+        # TODO (Jiayi): incorporate prefetching here
+
+        # Search all backends for non-blocking get
+        for backend_name, backend in self.storage_backends.items():
+            if location and backend_name != location:
+                continue
+            # NOTE(Jiayi): bypass the allocator for now
+            task = backend.get_non_blocking(key)
+            if task:
+                # TODO (Jiayi): add write-back logic here
+                return task
         return None
 
     def batched_get(
@@ -371,15 +444,19 @@ class StorageManager:
         """
         if location is None:
             location = "LocalCPUBackend"
-
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
             # TODO(Jiayi): need to make async loading and layerwise compatible
-            task = asyncio.run_coroutine_threadsafe(
-                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
-                self.loop,
+            assert self.async_serializer is not None, (
+                "Async serializer must be initialized via post_init before using "
+                "layerwise_batched_get."
             )
+            coro = self.async_serializer.run(
+                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
+                len(keys_multi_chunk),
+            )
+            task = asyncio.run_coroutine_threadsafe(coro, self.loop)
             yield task
 
     def prefetch_single_done_callback(
@@ -399,7 +476,7 @@ class StorageManager:
         self,
         task: asyncio.Future,
         lookup_id: str,
-        retrieved_length: int,
+        cum_last_tier_chunk_lengths: list[int],
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -408,6 +485,13 @@ class StorageManager:
         assert self.async_lookup_server is not None
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
+        )
+        res = task.result()
+        last_tier_retrieved_chunks = len(res[-1])
+        retrieved_length = cum_last_tier_chunk_lengths[last_tier_retrieved_chunks]
+        logger.info(
+            f"Responding to scheduler for lookup id {lookup_id}"
+            f" with retrieved length {retrieved_length}"
         )
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
@@ -439,8 +523,14 @@ class StorageManager:
         # TODO(Jiayi): We need to change/optimize this for non-prefix
         # based retrieval patterns or cases where middle chunks are missing.
 
+        # NOTE(Jiayi): We can tolerate the last tier to have fewer loaded
+        # chunks than its lookup result indicated. This is especially helpful
+        # for P2PBackend.
+
         num_total_chunks = len(keys)
         num_total_hit_chunks = 0
+        num_last_tier_hit_chunks = 0
+        cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
@@ -450,11 +540,23 @@ class StorageManager:
             if num_hit_chunks == 0:
                 continue
 
+            num_last_tier_hit_chunks = num_hit_chunks
+
             num_total_hit_chunks += num_hit_chunks
 
-            loading_task = asyncio.create_task(
-                backend.batched_get_non_blocking(lookup_id, keys[:num_hit_chunks])
+            assert self.async_serializer is not None, (
+                "Async serializer must be initialized via post_init before using "
+                "async_lookup_and_prefetch."
             )
+            get_coro = self.async_serializer.run(
+                backend.batched_get_non_blocking(
+                    lookup_id,
+                    keys[:num_hit_chunks],
+                    {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
+                ),
+                num_hit_chunks,
+            )
+            loading_task = asyncio.create_task(get_coro)
             loading_task.add_done_callback(
                 functools.partial(
                     self.prefetch_single_done_callback,
@@ -464,6 +566,8 @@ class StorageManager:
             )
 
             loading_tasks.append(loading_task)
+
+            cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
 
             if num_total_hit_chunks == num_total_chunks:
                 break
@@ -482,9 +586,14 @@ class StorageManager:
             lookup_id,
             all_done,
         )
+
         all_done.add_done_callback(
             lambda future: self.prefetch_all_done_callback(
-                future, lookup_id, cum_chunk_lengths[num_total_hit_chunks]
+                future,
+                lookup_id,
+                cum_chunk_lengths_total[
+                    num_total_hit_chunks - num_last_tier_hit_chunks :
+                ],
             )
         )
 
@@ -513,14 +622,75 @@ class StorageManager:
             if search_range and backend_name not in search_range:
                 continue
 
-            # NOTE(Jiayi): We do not pin for NixlBackend
-            if backend_name == "NixlBackend":
+            # NOTE(Jiayi): We do not pin for PDBackend
+            if backend_name == "PDBackend":
                 pin = False
 
             if backend.contains(key, pin):
                 return backend_name
 
         return None
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        search_range: Optional[List[str]] = None,
+        pin: bool = False,
+        stop_after_first_not_exits: bool = True,
+    ) -> List[bool]:
+        """
+        Check whether the key exists in the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys to check.
+
+        :param Optional[List[str]] search_range: The range of storage backends
+        to search in. Should be a subset of ["LocalCPUBackend",
+        "LocalDiskBackend"] for now.
+        If None, search in all backends.
+
+        :param bool pin: Whether to pin the key.
+
+        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
+        all subsequent results will return False directly.
+
+        return: True if the key exists in the specified storage backends else False.
+        """
+
+        # TODO: Only single-layer batched_contains is supported currently.
+        # Only allocate backend is LocalCPUBackend and do not enable hot cache,
+        # check another backend is supported batched_contains
+        if (
+            len(self.storage_backends) == 2
+            and not self.config.enable_pd
+            and not self.config.local_cpu
+            and (search_range is None or len(search_range) == 1)
+        ):
+            for backend_name, backend in self.storage_backends.items():
+                if backend_name == "LocalCPUBackend":
+                    continue
+                if (
+                    search_range is None or search_range[0] == backend_name
+                ) and backend.support_batched_contains():
+                    return backend.batched_contains(
+                        keys, pin, stop_after_first_not_exits
+                    )
+
+        # default implementation
+        contains_res = []
+        for key in keys:
+            res = self.contains(key, search_range, pin)
+            if res is not None:
+                contains_res.append(True)
+            else:
+                if stop_after_first_not_exits:
+                    # fill the contains_res with None
+                    current_len = len(contains_res)
+                    contains_res.extend([False] * (len(keys) - current_len))
+                    break
+                else:
+                    contains_res.append(False)
+
+        return contains_res
 
     def touch_cache(self):
         for backend_name, backend in self.storage_backends.items():
@@ -645,6 +815,23 @@ class StorageManager:
             if not backend.get_memory_allocator().memcheck():
                 return False
         return True
+
+    def get_non_allocator_backends(self) -> List[str]:
+        """
+        Get the names of the actual storage backends. Some backends,
+        such as LocalCPUBackend and PDBackend, in some cases, only
+        serve as a backend for allocation.
+        """
+        storage_names = []
+        for backend_name, backend in self.storage_backends.items():
+            if "LocalCPUBackend" == backend_name and not self.config.local_cpu:
+                # if local_cpu is False, means LocalCPUBackend is only a allocator
+                continue
+            if "PDBackend" == backend_name and backend.pd_config.role == "sender":  # type: ignore
+                # if pd_config.role is sender, means PDBackend is only a allocator
+                continue
+            storage_names.append(backend_name)
+        return storage_names
 
     def close(self):
         for backend in self.storage_backends.values():

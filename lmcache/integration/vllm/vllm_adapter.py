@@ -36,12 +36,14 @@ from vllm.config import (
     SchedulerConfig,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv, round_down
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+
+# Use LMCache's own math utilities instead of vllm's
+# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
+from lmcache.utils import _lmcache_nvtx_annotate, cdiv, round_down
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 # FIXME(Jiayi): temporarily comment this out

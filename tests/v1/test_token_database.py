@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+import os
+
 # Third Party
 import pytest
 import torch
@@ -9,6 +12,16 @@ from lmcache.v1.token_database import ChunkedTokenDatabase, SegmentTokenDatabase
 
 # Local
 from .utils import dumb_metadata, dumb_metadata_with_model_name, generate_tokens
+
+
+def hf_credentials_available() -> bool:
+    token_env = os.getenv("HF_TOKEN")
+    hf_home = os.getenv("HF_HOME")
+    default_token_file = os.path.expanduser("~/.cache/huggingface/token")
+    token_file = os.path.join(hf_home, "token") if hf_home else ""
+    return bool(
+        token_env or os.path.exists(default_token_file) or os.path.exists(token_file)
+    )
 
 
 @pytest.mark.parametrize("chunk_length", [16, 64, 256])
@@ -53,6 +66,9 @@ def test_chunked_token_database(chunk_length, save_unfull_chunk):
 
 @pytest.mark.parametrize("prefix_length", [0, 16, 64, 256])
 @pytest.mark.parametrize("chunk_lengths", [[256, 512, 256], [1024, 512, 256]])
+@pytest.mark.skipif(
+    not hf_credentials_available(), reason="No Hugging Face credentials found"
+)
 def test_segment_token_database(prefix_length, chunk_lengths):
     cfg = LMCacheEngineConfig.from_legacy(blend_special_str=" # # ")
     metadata = dumb_metadata_with_model_name("facebook/opt-125m")

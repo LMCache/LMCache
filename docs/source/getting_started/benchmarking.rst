@@ -13,19 +13,16 @@ You can also choose the number of times to repeat prompts and the mode of repeti
 LMCache provides a simple Long Doc QA Recommender that helps you deploy LMCache and generate the appropriate traffic through Long Doc QA.
 It will also help you determine the tensor parallelism and the amount of CPU RAM to deploy LMCache with based on the specifications of your hardware.
 
-First set your ``HF_TOKEN`` environment variable with access to the model you want to benchmark. Then run the recommendation script: 
-
 .. code-block:: bash
 
     python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model <YOUR_MODEL_NAME>
 
-Example #1:
------------
+Example:
+---------
 
 .. code-block:: bash
 
-    # default is meta-llama/Meta-Llama-3.1-8B-Instruct
-    python benchmarks/long_doc_qa/long_doc_qa_recommender.py
+    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model Qwen/Qwen3-8B
 
 .. code-block:: text
 
@@ -35,7 +32,7 @@ Example #1:
     -----------------
 
     PYTHONHASHSEED=0 \
-    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+    vllm serve Qwen/Qwen3-8B \
     --tensor-parallel-size 1 \
     --load-format dummy
 
@@ -45,7 +42,7 @@ Example #1:
 
     PYTHONHASHSEED=0 \
     LMCACHE_MAX_LOCAL_CPU_SIZE=66 \
-    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+    vllm serve Qwen/Qwen3-8B \
     --tensor-parallel-size 1 \
     --load-format dummy \
     --kv-transfer-config \
@@ -56,106 +53,35 @@ Example #1:
     ----------------------------------------
 
     python benchmarks/long_doc_qa/long_doc_qa.py \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --num-documents 51 \
+    --model Qwen/Qwen3-8B \
+    --num-documents 46 \
     --document-length 10000 \
     --output-len 100 \
     --repeat-count 1 \
     --repeat-mode tile \
     --max-inflight-requests 4
 
-Llama 8B vLLM Metrics:
-^^^^^^^^^^^^^^^^^^^^^^^
+Qwen 8B vLLM Metrics:
+^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: text
 
     === BENCHMARK RESULTS ===
-    Warmup round mean TTFT: 0.751s
-    Warmup round time: 24.915s
-    Warmup round prompt count: 51
-    Query round mean TTFT: 0.753s
-    Query round time: 24.628s
-    Query round prompt count: 51
+    Query round mean TTFT: 0.757s
+    Query round time: 23.467s
+    Query round prompt count: 46
 
-Llama 8B LMCache Metrics: 
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+Qwen 8B LMCache Metrics: 
+^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: text
 
     === BENCHMARK RESULTS ===
-    Warmup round mean TTFT: 0.832s
-    Warmup round time: 26.027s
-    Warmup round prompt count: 51
-    Query round mean TTFT: 0.214s
-    Query round time: 14.564s
-    Query round prompt count: 51
+    Query round mean TTFT: 0.185s
+    Query round time: 13.789s
+    Query round prompt count: 46
 
-The warmup round is the first time the model sees the documents. The query round is the second time the model sees the documents. Without offloading, even with KV Cache reuse, there is no improvement in TTFT nor throughput. With offloading, we can see significant performance improvements to the query round. 
+From this example, we can see a **75%** reduction in TTFT (0.757s → 0.185s), **41%** reduction in total inference time (23.467s → 13.789s) via offloading with **LMCache**.
 
-Example #2:
------------
-
-.. code-block:: bash
-
-    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model meta-llama/Llama-3.1-70B-Instruct
-
-.. code-block:: text
-
-    1. vLLM Deployment: 
-    -----------------
-
-    PYTHONHASHSEED=0 \
-    vllm serve meta-llama/Llama-3.1-70B-Instruct \
-    --tensor-parallel-size 4 \
-    --load-format dummy
-
-
-    2. LMCache Deployment: 
-    --------------------
-
-    PYTHONHASHSEED=0 \
-    LMCACHE_MAX_LOCAL_CPU_SIZE=40 \
-    vllm serve meta-llama/Llama-3.1-70B-Instruct \
-    --tensor-parallel-size 4 \
-    --load-format dummy \
-    --kv-transfer-config \
-    '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}'
-
-
-    3. Multi-Round QA Workload Generation: 
-    ----------------------------------------
-
-    python benchmarks/long_doc_qa/long_doc_qa.py \
-    --model meta-llama/Llama-3.1-70B-Instruct \
-    --num-documents 50 \
-    --document-length 10000 \
-    --output-len 100 \
-    --repeat-count 1 \
-    --repeat-mode tile \
-    --max-inflight-requests 4
-
-Llama 70B vLLM Metrics:
-^^^^^^^^^^^^^^^^^^^^^^^
-
-.. code-block:: text
-
-    === BENCHMARK RESULTS ===
-    Warmup round mean TTFT: 1.797s
-    Warmup round time: 54.903s
-    Warmup round prompt count: 50
-    Query round mean TTFT: 1.798s
-    Query round time: 54.974s
-    Query round prompt count: 50
-
-Llama 70B LMCache Metrics: 
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. code-block:: text
-
-    === BENCHMARK RESULTS ===
-    Warmup round mean TTFT: 1.881s
-    Warmup round time: 56.673s
-    Warmup round prompt count: 50
-    Query round mean TTFT: 0.174s
-    Query round time: 26.223s
-    Query round prompt count: 50
+.. note::
+   The warmup round is the first time the model sees the documents. The query round is the second time the model sees the documents. Without offloading, even with KV Cache reuse, there is no improvement in TTFT nor throughput. With offloading, we can see significant performance improvements to the query round.

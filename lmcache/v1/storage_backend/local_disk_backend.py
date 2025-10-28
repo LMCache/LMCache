@@ -101,7 +101,11 @@ class LocalDiskBackend(StorageBackendInterface):
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
-        super().__init__(dst_device)
+        if torch.cuda.is_available():
+            super().__init__(dst_device)
+        else:
+            super().__init__("cpu")
+
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 
@@ -249,12 +253,12 @@ class LocalDiskBackend(StorageBackendInterface):
 
         has_stored = False
         with self.disk_lock:
-            # Need to do reinsert to update cache recency
             if key in self.dict:
-                self.dict.pop(key)
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
                 has_stored = True
-
-            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, False)
+            else:
+                self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, 0)
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
@@ -301,9 +305,6 @@ class LocalDiskBackend(StorageBackendInterface):
             if evict_success:
                 self.current_cache_size += required_size
 
-        if all_evict_keys:
-            self._on_evict(all_evict_keys)
-
         if not evict_success:
             return None
 
@@ -325,7 +326,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
@@ -342,11 +343,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
-        self.cache_policy.update_on_hit(key, self.dict)
-
-        self.disk_lock.release()
-
-        self.disk_lock.acquire()
         # Update cache recency
         self.cache_policy.update_on_hit(key, self.dict)
 
@@ -369,6 +365,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
@@ -377,9 +374,6 @@ class LocalDiskBackend(StorageBackendInterface):
         for key in keys:
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
-
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            self.cache_policy.update_on_hit(key, self.dict)
 
             path = self.dict[key].path
             dtype = self.dict[key].dtype
@@ -401,6 +395,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
             self.dict[key].pin()
 
+            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
             self.cache_policy.update_on_hit(key, self.dict)
 
@@ -562,10 +557,4 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
-        self.disk_worker.close()
-        with self.disk_lock:
-            keys = list(self.dict.keys())
-        if keys:
-            super()._on_evict(keys)
-        # Close worker executor
         self.disk_worker.close()

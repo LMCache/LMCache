@@ -5,17 +5,20 @@ import threading
 import time
 
 # Third Party
-from vllm.utils import make_zmq_socket
 import msgspec
 import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata, mla_enabled
+from lmcache.integration.vllm.utils import create_lmcache_metadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
+from lmcache.v1.rpc_utils import (
+    get_zmq_context,
+    get_zmq_rpc_path_lmcache,
+    get_zmq_socket,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -31,8 +34,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - create_lookup_server_only_on_worker_0_for_mla:
-        is a flag to control whether to create lookup server only on worker 0.
+    - mla_lookup_server_worker_id:
+        is a flag to control whether to create lookup server only on one worker.
+        if mla is not enabled, default is -1;
+        if mla is enabled, default is 0;
+        - if mla_lookup_server_worker_id < 0, start lookup server on all workers
+        - if mla_lookup server_worker_id >= 0, start lookup server on the given worker
     """
 
     def __init__(
@@ -42,22 +49,23 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         metadata, config = create_lmcache_metadata(vllm_config)
 
         self.encoder = msgspec.msgpack.Encoder()
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.ctx = get_zmq_context(use_asyncio=False)
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        use_mla = mla_enabled(vllm_config.model_config)
-        self.create_lookup_server_only_on_worker_0_for_mla = (
-            config.get_extra_config_value(
-                "create_lookup_server_only_on_worker_0_for_mla", use_mla
-            )
+        self.mla_lookup_server_worker_id = config.get_mla_lookup_server_worker_id(
+            metadata.use_mla
         )
-        ranks = self.tensor_parallel_size
+        assert self.mla_lookup_server_worker_id < metadata.world_size
+
         self.push_sockets = []
-        if self.create_lookup_server_only_on_worker_0_for_mla:
-            ranks = 1
-        for tp_rank in range(ranks):
+        if self.mla_lookup_server_worker_id >= 0:
+            ranks = [self.mla_lookup_server_worker_id]
+        else:
+            ranks = [i for i in range(self.tensor_parallel_size)]
+
+        for tp_rank in ranks:
             worker_socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup_worker", rpc_port, tp_rank
             )
@@ -66,11 +74,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 f"with worker socket path {worker_socket_path}"
             )
 
-            push_socket = make_zmq_socket(
+            push_socket = get_zmq_socket(
                 self.ctx,
                 worker_socket_path,
+                "ipc",
                 zmq.PUSH,  # type: ignore[attr-defined]
-                bind=False,
+                "connect",
             )
 
             self.push_sockets.append(push_socket)
@@ -78,11 +87,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
             vllm_config, "lookup_scheduler", rpc_port, 0
         )
-        self.pull_socket = make_zmq_socket(
+        self.pull_socket = get_zmq_socket(
             self.ctx,
             scheduler_socket_path,
+            "ipc",
             zmq.PULL,  # type: ignore[attr-defined]
-            bind=True,
+            "bind",
         )
         logger.info(
             f"lmcache lookup client connect to scheduler "
@@ -107,15 +117,15 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # (e.g., worker process).
         self.lock = threading.Lock()
 
-        # map from lookup_id to req's status.
+        # map from lookup_id (i.e., req_id) to req's status.
         # None indicates ongoing.
         # int indicates number of hit tokens.
         self.reqs_status: dict[str, Optional[int]] = {}
 
-        # map from lookup_id to number of hit tokens for each worker
+        # map from lookup_id (i.e., req_id) to number of hit tokens for each worker
         self.res_for_each_worker: dict[str, list[int]] = {}
 
-        # The two parts are [lookup_id, num_hit_tokens]
+        # The two parts are [lookup_id (i.e., req_id), num_hit_tokens]
         self.num_parts = 2
 
         self.running = True
@@ -143,9 +153,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             # -1 indicates not found; None indicates ongoing.
             req_status = self.reqs_status.get(lookup_id, -1)
             if req_status is None:
+                time.sleep(self.lookup_backoff_time)
                 return None
             elif req_status != -1:
-                self.reqs_status.pop(lookup_id)
                 return req_status
             self.reqs_status[lookup_id] = None
         hashes = []
@@ -174,7 +184,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         ]
 
         ranks = self.tensor_parallel_size
-        if self.create_lookup_server_only_on_worker_0_for_mla:
+        if self.mla_lookup_server_worker_id >= 0:
             ranks = 1
         for i in range(ranks):
             self.push_sockets[i].send_multipart(msg_buf, copy=False)
@@ -195,7 +205,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.res_for_each_worker[lookup_id].append(res)
                 all_res = self.res_for_each_worker[lookup_id]
 
-                if len(all_res) == self.tensor_parallel_size:
+                if len(all_res) == self.tensor_parallel_size or (
+                    self.mla_lookup_server_worker_id >= 0 and len(all_res) == 1
+                ):
                     self.res_for_each_worker.pop(lookup_id)
 
                     # NOTE: it is possible that the number of hit
@@ -203,6 +215,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     # can use the minimum value as the number of
                     # hit tokens.
                     self.reqs_status[lookup_id] = min(all_res)
+
+    def clear_lookup_status(self, lookup_id: str) -> None:
+        with self.lock:
+            self.reqs_status.pop(lookup_id, None)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
@@ -237,17 +253,19 @@ class LMCacheAsyncLookupServer:
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
             vllm_config, "lookup_scheduler", rpc_port, 0
         )
-        self.push_socket = make_zmq_socket(
+        self.push_socket = get_zmq_socket(
             self.ctx,
             scheduler_socket_path,
+            "ipc",
             zmq.PUSH,  # type: ignore[attr-defined]
-            bind=False,
+            "connect",
         )
-        self.pull_socket = make_zmq_socket(
+        self.pull_socket = get_zmq_socket(
             self.ctx,
             worker_socket_path,
+            "ipc",
             zmq.PULL,  # type: ignore[attr-defined]
-            bind=True,
+            "bind",
         )
 
         self.lmcache_engine = lmcache_engine

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Sequence
+from concurrent.futures import Future
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import abc
+import asyncio
 
 # Third Party
 import torch
@@ -15,7 +17,10 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.storage_backend import LocalCPUBackend
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
@@ -37,20 +42,6 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             raise
 
         self.dst_device = dst_device
-        self._listener: Optional[StorageBackendListener] = None
-
-    def set_listener(self, listener: StorageBackendListener):
-        """
-        Set the listener to receive events.
-        """
-        self._listener = listener
-
-    def _on_evict(self, keys: List[CacheEngineKey]) -> None:
-        """
-        Evict keys from the storage backend.
-        """
-        if self._listener is not None:
-            self._listener.on_evict(self, keys)
 
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -81,19 +72,33 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
-        transfer_spec=None,
-    ) -> None:
+        transfer_spec: Any = None,
+    ) -> Union[List[Future], None]:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
 
-        :return: Nothing
+        :return:  Union[List[Future], None]: A list of `Future` objects if the
+        storage persistence operation is asynchronous and is successful.
+        `None` if the operation is synchronous, or the asynchronous fails
+        or is skipped.
 
         :note: This function will have the side effect that modifies the
             underlying key-value mappings in the storage backend. The side
             effect may change the result of lookup and get.
+        """
+        raise NotImplementedError
+
+    async def async_batched_submit_put_task(
+        self,
+        keys: Sequence[CacheEngineKey],
+        objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> None:
+        """
+        An async version of batched_submit_put_task.
         """
         raise NotImplementedError
 
@@ -108,6 +113,16 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :param CacheEngineKey key: The key of the MemoryObj.
 
         :return: MemoryObj. None if the key does not exist.
+        """
+        raise NotImplementedError
+
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,
+        location: Optional[str] = None,
+    ) -> Optional[Future]:
+        """
+        A non-blocking function to get the kv cache from the storage backend.
         """
         raise NotImplementedError
 
@@ -134,6 +149,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
         A non-blcocking function to get the kv cache from the storage backend.
@@ -240,6 +256,31 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def support_batched_contains(self) -> bool:
+        return False
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+        stop_after_first_not_exits: bool = True,
+    ) -> List[bool]:
+        """
+        Check whether the keys are in the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObj.
+
+        :param bool pin: Whether to pin the key.
+            If True, the corresponding KV cache will be
+            pinned in the storage backend.
+
+        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
+        all subsequent results will return False directly.
+
+        :return: Return a bool list, True if the key exists, False otherwise.
+        """
+        raise NotImplementedError
+
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """
@@ -328,3 +369,44 @@ class AllocatorBackendInterface(StorageBackendInterface):
         :rtype: Optional[MemoryObj]
         """
         raise NotImplementedError
+
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the chunk budget for the allocator backend.
+        """
+        raise NotImplementedError
+
+
+class ConfigurableStorageBackendInterface(StorageBackendInterface):
+    """The Configurable Storage Backend Interface needs to be implemented
+    when you want to add a storage backend in a configurable or plug and play
+    fashion."""
+
+    def __init__(
+        self,
+        dst_device: str = "cuda",
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ):
+        """
+        Initialize a configurable storage backend. This constructor will be called
+        when loading the configurable storage backends from the configuration file.
+
+        :param str dst_device: The target device for tensor operations
+            (e.g., "cuda" or "cpu").
+        :param LMCacheEngineConfig config: Optional configuration object for the
+            cache engine.
+        :param LMCacheEngineMetadata metadata: Optional metadata describing the cache
+            engine state or version.
+        :param LocalCPUBackend local_cpu_backend: Optional backend for local CPU-based
+            inference or caching.
+        :param asyncio.AbstractEventLoop loop: Optional asyncio event loop for
+            asynchronous operations.
+        """
+        super().__init__(dst_device=dst_device)
+        self.config = config
+        self.metadata = metadata
+        self.local_cpu_backend = local_cpu_backend
+        self.loop = loop

@@ -12,11 +12,11 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.weka_gds_backend import WekaGdsBackend
 
@@ -33,7 +33,6 @@ def create_dynamic_backends(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: LocalCPUBackend,
     dst_device: str,
-    lookup_server: Optional[LookupServerInterface],
     storage_backends: OrderedDict[str, StorageBackendInterface],
 ) -> None:
     """
@@ -79,12 +78,11 @@ def create_dynamic_backends(
 
             # Create the backend instance
             backend_instance = backend_class(
-                config,
-                metadata,
-                loop,
-                local_cpu_backend,
-                dst_device,
-                lookup_server,
+                config=config,
+                dst_device=dst_device,
+                metadata=metadata,
+                local_cpu_backend=local_cpu_backend,
+                loop=loop,
             )
 
             # Add to storage backends
@@ -101,7 +99,6 @@ def CreateStorageBackends(
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
-    lookup_server: Optional[LookupServerInterface] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     # Replace 'cuda' with 'cuda:<device id>'
     if dst_device == "cuda":
@@ -114,35 +111,16 @@ def CreateStorageBackends(
         "enable_nixl_storage"
     )
 
-    if config.enable_nixl:
-        if config.enable_xpyd:
-            # First Party
-            from lmcache.v1.storage_backend.nixl_backend_v3 import (
-                NixlBackend as NixlBackendV3,
-            )
+    if config.enable_pd:
+        # First Party
+        from lmcache.v1.storage_backend.pd_backend import PDBackend
 
-            storage_backends["NixlBackend"] = NixlBackendV3.CreateNixlBackend(
-                config, metadata
-            )
-        else:
-            # First Party
-            logger.warning(
-                "Latest LMCache uses XpYd code path for 1p1d,"
-                "Please set enable_xpyd to True in config"
-            )
-            # First Party
-            from lmcache.v1.storage_backend.nixl_backend import NixlBackend
-
-            storage_backends["NixlBackend"] = NixlBackend.CreateNixlBackend(
-                config, metadata
-            )
-
-        assert config.nixl_buffer_device is not None
+        storage_backends["PDBackend"] = PDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    if not config.enable_nixl or config.local_cpu:
+    if not config.enable_pd or config.local_cpu:
         local_cpu_backend = LocalCPUBackend(
             config,
             metadata,
@@ -151,6 +129,17 @@ def CreateStorageBackends(
         )
         backend_name = str(local_cpu_backend)
         storage_backends[backend_name] = local_cpu_backend
+
+    if config.enable_p2p:
+        p2p_backend = P2PBackend(
+            config,
+            metadata,
+            loop,
+            local_cpu_backend,
+            lmcache_worker,
+        )
+        backend_name = str(p2p_backend)
+        storage_backends[backend_name] = p2p_backend
 
     if enable_nixl_storage:
         # First Party
@@ -181,12 +170,16 @@ def CreateStorageBackends(
         storage_backends[str(gds_backend)] = gds_backend
     if config.remote_url is not None:
         remote_backend = RemoteBackend(
-            config, metadata, loop, local_cpu_backend, dst_device, lookup_server
+            config,
+            metadata,
+            loop,
+            local_cpu_backend,
+            dst_device,
         )
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 
-    if not config.enable_nixl or config.local_cpu:
+    if not config.enable_pd or config.local_cpu:
         # Create dynamic backends from configuration
         create_dynamic_backends(
             config,
@@ -194,7 +187,6 @@ def CreateStorageBackends(
             loop,
             local_cpu_backend,
             dst_device,
-            lookup_server,
             storage_backends,
         )
 

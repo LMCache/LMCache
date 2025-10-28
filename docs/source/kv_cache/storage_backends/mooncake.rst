@@ -22,7 +22,7 @@ Key Features
 - **RDMA optimization**: Built on Transfer Engine with support for TCP, RDMA (InfiniBand/RoCEv2/eRDMA/NVIDIA GPUDirect)
 - **Dynamic resource scaling**: Supports dynamically adding and removing nodes for elastic resource management
 
-For detailed architecture information, see the `Mooncake Architecture Guide <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_.
+For detailed architecture information, see the `Mooncake Architecture Guide <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store.md>`_.
 
 Quick Start
 -----------
@@ -102,7 +102,7 @@ Create your ``mooncake-config.yaml``:
 
     LMCACHE_CONFIG_FILE="mooncake-config.yaml" \
     vllm serve \
-        meta-llama/Llama-3.1-70B-Instruct \
+        meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 65536 \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
@@ -116,7 +116,7 @@ Test the integration with a sample request:
     curl -X POST "http://localhost:8000/v1/completions" \
          -H "Content-Type: application/json" \
          -d '{
-           "model": "meta-llama/Llama-3.1-70B-Instruct",
+           "model": "meta-llama/Llama-3.1-8B-Instruct",
            "prompt": "The future of AI is",
            "max_tokens": 100,
            "temperature": 0.7
@@ -216,7 +216,7 @@ Configuration
 Additional Resources
 --------------------
 
-- `Mooncake Store Architecture <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store-preview.md>`_
+- `Mooncake Store Architecture <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-store.md>`_
 - `Transfer Engine Documentation <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/transfer-engine.md>`_
 - `Build Instructions <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md>`_
 - `GitHub Repository <https://github.com/kvcache-ai/Mooncake>`_
