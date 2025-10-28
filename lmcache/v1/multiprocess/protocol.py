@@ -121,11 +121,11 @@ _PROTOCOL_DEFINTIONS = {
     # - keys: list[KeyType]
     # - instance_id: int
     # - gpu_block_ids: list[int]
-    # Returns: bool
+    # Returns: list[bool]
     # NOTE: no layerwise support for now
     RequestType.RETRIEVE: ProtocolDefinition(
         payload_classes=[list[KeyType], int, list[int]],
-        response_class=bool,
+        response_class=list[bool],
         handler_type=HandlerType.BLOCKING,
     ),
     # Lookup
