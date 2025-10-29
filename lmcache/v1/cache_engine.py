@@ -1074,43 +1074,41 @@ class LMCacheEngine:
         # the same order as the lookup order.
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
 
-        # First, iterate through all tokens with an all-true mask to get the
-        # correct mapping between chunk indices and memory objects
-        all_chunks_info = list(
+        # First, generate a list indicating which chunks are needed
+        num_chunks = len(tokens) // self.config.chunk_size
+        if mask is not None:
+            chunk_mask_list = []
+            for i in range(num_chunks):
+                start_idx = i * self.config.chunk_size
+                end_idx = start_idx + self.config.chunk_size
+                # Check if all values in this chunk are True
+                chunk_is_valid = all(mask[start_idx:end_idx])
+                chunk_mask_list.append(chunk_is_valid)
+        else:
+            # If no mask, all chunks are needed
+            chunk_mask_list = [True] * num_chunks
+
+        # Now chunk_mask_list is like [F, F, T, ..., T]
+        # where False means the chunk is in upper layer's cache and 
+        # doesn't need to be retrieved.
+        # So we can use this list to filter out the chunks that are not needed.
+        used_indices = set()
+        for idx, (start, end, key) in enumerate(
             self.token_database.process_tokens(
                 tokens=tokens,
-                mask=None,  # Use all-true mask to get all chunks
+                mask=None,
                 request_configs=request_configs,
             )
-        )
-
-        # Build a mapping from (start, end) to memory object index
-        chunk_to_idx = {
-            (chunk_start, chunk_end): idx
-            for idx, (chunk_start, chunk_end, _) in enumerate(all_chunks_info)
-        }
-
-        # Now iterate with the actual mask to determine which chunks to use
-        used_indices = set()
-        for start, end, key in self.token_database.process_tokens(
-            tokens=tokens,
-            mask=mask,
-            request_configs=request_configs,
         ):
+            if not chunk_mask_list[idx]:
+                continue
+
             assert isinstance(key, CacheEngineKey)
-
-            # Find the correct memory object index by matching the chunk
-            mem_obj_idx = chunk_to_idx.get((start, end))
-
-            assert mem_obj_idx is not None, (
-                f"Could not find matching chunk for start={start}, end={end}"
-            )
-
-            memory_obj = memory_objs[mem_obj_idx]
+            memory_obj = memory_objs[idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
-            used_indices.add(mem_obj_idx)
+            used_indices.add(idx)
 
         # NOTE: free the memory objects that are not hit.
         for idx, unused_mem_obj in enumerate(memory_objs):
