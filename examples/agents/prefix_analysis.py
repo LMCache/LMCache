@@ -50,7 +50,8 @@ class LRUTokenPool:
         best_len = 0
         best_id = -1
 
-        for req_id, req_tokens in reversed(self.requests):
+        # Iterate from most recently used to least (LRU ordering)
+        for req_id in reversed(self.requests):
             req_tokens = self.requests[req_id]
             common_len = 0
             for i in range(min(len(tokens), len(req_tokens))):
