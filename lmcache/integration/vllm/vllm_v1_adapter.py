@@ -934,9 +934,9 @@ class LMCacheConnectorV1Impl:
             ret_mask: Boolean tensor indicating which tokens were actually
                 successfully retrieved from LMCache. True means the token was
                 successfully loaded. For example, if 256 tokens are expected to be
-                loaded, but only 192 tokens are successfully loaded, then the 
+                loaded, but only 192 tokens are successfully loaded, then the
                 ret_mask will be a tensor of 256 items like [T, T, ..., F, F, ...]
-                where the first 192 elements are True and the last 64 elements 
+                where the first 192 elements are True and the last 64 elements
                 are False.
             slot_mapping: Tensor indicating slot IDs for each token. The block
                 ID is computed by dividing the slot ID by the block size.
@@ -947,7 +947,7 @@ class LMCacheConnectorV1Impl:
             missing_mask = expected_mask & ~ret_mask = [F, F, T, T]
             missing_indices = [2, 3]
             then missing_blocks is calculated from slot_mapping and missing_indices
-                
+
         Returns:
             set[int]: Set of block IDs that failed to load.
         """
