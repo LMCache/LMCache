@@ -131,6 +131,10 @@ jobs:
                   *.githubusercontent.com:443
                   rubygems.org:443
                   index.rubygems.org:443
+                  api.rubygems.org:443
+                  rubygems.global.ssl.fastly.net:443
+                  *.fastly.net:443
+                  *.blob.core.windows.net:443
 
             - name: Wait for Buildkite unit tests
               uses: lewagon/wait-on-check-action@3603e826ee561ea102b58accb5ea55a1a7482343 # v1.4.1
