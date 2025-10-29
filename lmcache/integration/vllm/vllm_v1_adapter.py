@@ -1316,7 +1316,7 @@ class LMCacheConnectorV1Impl:
         for request in scheduler_output.scheduled_new_reqs:
             # Right now, we only load KV for new requests
             load_spec = self.load_specs.pop(request.req_id, None)
-            
+
             # Calculate the total number of tokens that will be computed after
             # this scheduling step:
             #   - request.num_computed_tokens: tokens computed before this step
@@ -1325,7 +1325,7 @@ class LMCacheConnectorV1Impl:
                 request.num_computed_tokens
                 + scheduler_output.num_scheduled_tokens[request.req_id]
             )
-            
+
             # For async scheduling support: subtract placeholders
             # In async scheduling, num_computed_tokens includes tokens that have been
             # scheduled but not yet generated (placeholders). We need to subtract them
@@ -1333,11 +1333,14 @@ class LMCacheConnectorV1Impl:
             # For sync scheduling, num_output_placeholders will be None or empty dict,
             # so num_output_placeholders defaults to 0.
             num_output_placeholders = 0
-            if scheduler_output.num_output_placeholders:
+            if (
+                hasattr(scheduler_output, "num_output_placeholders")
+                and scheduler_output.num_output_placeholders
+            ):
                 num_output_placeholders = scheduler_output.num_output_placeholders.get(
                     request.req_id, 0
                 )
-            
+
             # Real computed tokens = scheduled tokens - placeholders
             num_tokens_to_compute -= num_output_placeholders
 
