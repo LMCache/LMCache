@@ -1089,7 +1089,7 @@ class LMCacheEngine:
             chunk_mask_list = [True] * num_chunks
 
         # Now chunk_mask_list is like [F, F, T, ..., T]
-        # where False means the chunk is in upper layer's cache and 
+        # where False means the chunk is in upper layer's cache and
         # doesn't need to be retrieved.
         # So we can use this list to filter out the chunks that are not needed.
         used_indices = set()
