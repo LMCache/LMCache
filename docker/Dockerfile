@@ -86,11 +86,15 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
-        uv pip install --prerelease=allow 'vllm[runai,tensorizer,flashinfer]' \
+        uv pip install --prerelease=allow \
+            'vllm[runai,tensorizer,flashinfer]' \
+            'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' \
             --extra-index-url https://wheels.vllm.ai/nightly \
             --index-strategy unsafe-best-match ; \
     else \
-        uv pip install --prerelease=allow "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
+        uv pip install --prerelease=allow \
+            "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" \
+            'triton-kernels @ git+https://github.com/triton-lang/triton.git@v3.5.0#subdirectory=python/triton_kernels' ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
