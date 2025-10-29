@@ -260,7 +260,7 @@ def analyze_hit_rates_across_pool_sizes(
             token_desc = ""
         else:
             size_tokens = int(size_gb * tokens_per_gb)
-            x_labels.append(str(int(size_gb)))
+            x_labels.append(str(size_gb))
             pool_desc = f"{size_gb}GB"
             token_desc = f" ({size_tokens:,} tokens)"
 
