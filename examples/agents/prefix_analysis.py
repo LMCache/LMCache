@@ -126,7 +126,11 @@ class LRUTokenPool:
         Add a request to the pool, evicting LRU entries if necessary.
         """
         # Evict until we have space
-        while self.current_tokens + len(tokens) > self.max_tokens and self.requests:
+        while (
+            self.current_tokens > 0
+            and self.current_tokens + len(tokens) > self.max_tokens
+            and self.requests is not None
+        ):
             old_id, old_tokens = self.requests.popitem(last=False)
             self.current_tokens -= len(old_tokens)
 
@@ -135,8 +139,12 @@ class LRUTokenPool:
                 token_tensor[old_id, :] = 0
 
         # Add new request
-        self.requests[request_id] = tokens
-        self.current_tokens += len(tokens)
+        if (
+            self.current_tokens + len(tokens) <= self.max_tokens
+            and self.requests is not None
+        ):
+            self.requests[request_id] = tokens
+            self.current_tokens += len(tokens)
 
 
 def load_and_tokenize_inputs(
