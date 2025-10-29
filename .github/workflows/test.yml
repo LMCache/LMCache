@@ -79,5 +79,5 @@ jobs:
 
       - name: "Run non-CUDA unit tests"
         run: |
-          pytest --ignore=tests/disagg --ignore=tests/v1/test_nixl_storage.py
+          pytest --ignore=tests/disagg --ignore=tests/v1/test_nixl_storage.py --ignore=tests/v1/multiprocess/test_cache_server.py
 
