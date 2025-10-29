@@ -107,7 +107,7 @@ def store_handler(keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]) ->
 
 def retrieve_handler(
     keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]
-) -> bool:
+) -> list[bool]:
     """
     Dummy handler for RETRIEVE requests.
 
@@ -127,7 +127,7 @@ def retrieve_handler(
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
     )
     # Return success
-    return True
+    return [True for _ in keys]
 
 
 # ==============================================================================

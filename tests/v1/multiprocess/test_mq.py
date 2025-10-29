@@ -604,7 +604,7 @@ def test_mq_retrieve():
     helper.run_test(
         request_type=RequestType.RETRIEVE,
         payloads=[keys, gpu_id, gpu_block_ids],
-        expected_response=True,
+        expected_response=[True, True, True],
         num_requests=1,
     )
 
