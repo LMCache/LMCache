@@ -18,13 +18,18 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils import cdiv
+
+# First Party
+# Use LMCache's own math utilities instead of vllm's
+# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
+from lmcache.utils import cdiv
 
 # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
 try:
     # Third Party
     from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 except ImportError:
+    # Third Party
     from vllm.utils import get_kv_cache_torch_dtype
 
 # Third Party
@@ -831,9 +836,6 @@ class LMCacheConnectorV1Impl:
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
 
-            self._stats_monitor.update_interval_vllm_hit_tokens(
-                request.load_spec.vllm_cached_tokens
-            )
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
@@ -895,6 +897,11 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
+
+            self._stats_monitor.update_interval_vllm_hit_tokens(
+                request.load_spec.vllm_cached_tokens
+            )
+            self._stats_monitor.update_interval_prompt_tokens(len(tokens))
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
