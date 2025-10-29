@@ -1,3 +1,4 @@
 transformers
 matplotlib
 tqdm
+torch
