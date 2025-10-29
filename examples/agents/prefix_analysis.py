@@ -68,7 +68,6 @@ class LRUTokenPool:
                 if common_len == len(tokens):
                     break
 
-
         # Update LRU ordering
         if best_id != -1:
             self.requests.move_to_end(best_id)
