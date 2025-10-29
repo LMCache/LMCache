@@ -480,24 +480,19 @@ class LMCacheEngine:
         reordered_chunks: List[ProcessedChunk] = []
         tot_kv_size = 0
         if not self._is_passive():
-            if self.async_loading:
-                result = self._async_process_tokens_internal(  # noqa: E501
-                    tokens,
-                    mask,
-                    ret_mask,
-                    **kwargs,
-                )
-                reordered_chunks = result.chunks
-                tot_kv_size = result.total_kv_size
-            else:
-                result = self._process_tokens_internal(
-                    tokens,
-                    mask,
-                    ret_mask,
-                    **kwargs,
-                )
-                reordered_chunks = result.chunks
-                tot_kv_size = result.total_kv_size
+            process_func = (
+                self._async_process_tokens_internal
+                if self.async_loading
+                else self._process_tokens_internal
+            )
+            result = process_func(
+                tokens,
+                mask,
+                ret_mask,
+                **kwargs,
+            )
+            reordered_chunks = result.chunks
+            tot_kv_size = result.total_kv_size
         if self.save_only_first_rank:
             with torch.cuda.stream(self.broadcast_stream):
                 self._broadcast_or_receive_memory_objs(
@@ -519,21 +514,18 @@ class LMCacheEngine:
         # For example, disk->gpu is faster than disk->cpu->gpu.
         # RDMA is another example.
         if len(reordered_chunks) > 0:
-            memory_objs, starts, ends = [], [], []
-            for chunk in reordered_chunks:
-                memory_objs.append(chunk.memory_obj)
-                starts.append(chunk.start)
-                ends.append(chunk.end)
-            self.gpu_connector.batched_to_gpu(memory_objs, starts, ends, **kwargs)
+            _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+            self.gpu_connector.batched_to_gpu(
+                list(memory_objs), list(starts), list(ends), **kwargs
+            )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
-        for chunk in reordered_chunks:
+        for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
-                # chunk.key can be None for passive ranks
-                if chunk.key is not None:
-                    self.storage_manager.remove(chunk.key)
-            chunk.memory_obj.ref_count_down()
+                assert key is not None, "Key should not be None for active ranks"
+                self.storage_manager.remove(key)
+            memory_obj.ref_count_down()
 
         onload_time = time.perf_counter() - t
 
@@ -1258,14 +1250,14 @@ class LMCacheEngine:
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
 
             # Broadcast each chunk's data
-            for chunk in reordered_chunks:
+            for key, memory_obj, start, end in reordered_chunks:
                 # Combine (start, end) and metadata into single broadcast
-                metadata_dict = chunk.memory_obj.metadata.to_dict()
-                combined_metadata = (chunk.start, chunk.end, metadata_dict)
+                metadata_dict = memory_obj.metadata.to_dict()
+                combined_metadata = (start, end, metadata_dict)
                 self.broadcast_object_fn(combined_metadata, self.metadata.first_rank)
 
                 # Broadcast tensor data
-                tensor_to_broadcast = chunk.memory_obj.tensor.to(
+                tensor_to_broadcast = memory_obj.tensor.to(
                     f"cuda:{self.metadata.worker_id}"
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
