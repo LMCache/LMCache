@@ -911,6 +911,11 @@ class LMCacheConnectorV1Impl:
                     )
                     self._invalid_block_ids.update(missing_blocks)
 
+            self._stats_monitor.update_interval_vllm_hit_tokens(
+                request.load_spec.vllm_cached_tokens
+            )
+            self._stats_monitor.update_interval_prompt_tokens(len(tokens))
+
     def record_failed_blocks(
         self,
         request_id: str,
@@ -984,11 +989,6 @@ class LMCacheConnectorV1Impl:
             len(missing_blocks),
         )
         return missing_blocks
-
-            self._stats_monitor.update_interval_vllm_hit_tokens(
-                request.load_spec.vllm_cached_tokens
-            )
-            self._stats_monitor.update_interval_prompt_tokens(len(tokens))
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
