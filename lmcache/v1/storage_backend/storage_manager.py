@@ -32,7 +32,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend import CreateStorageBackends
+from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
@@ -196,9 +196,7 @@ class StorageManager:
         self.thread.start()
 
         # For scheduler role, always use CPU device
-        if metadata.role == "scheduler":
-            dst_device = "cpu"
-        elif torch.cuda.is_available():
+        if is_cuda_worker(metadata):
             dst_device = "cuda"
         else:
             dst_device = "cpu"
@@ -237,7 +235,7 @@ class StorageManager:
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
-        if torch.cuda.is_available() and metadata.role != "scheduler":
+        if is_cuda_worker(metadata):
             self.internal_copy_stream = torch.cuda.Stream()
         else:
             self.internal_copy_stream = None

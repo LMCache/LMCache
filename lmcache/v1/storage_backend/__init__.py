@@ -27,6 +27,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
+    """
+    Check if the current role is worker and CUDA is available.
+
+    Args:
+        metadata: The LMCache engine metadata.
+
+    Returns:
+        True if the worker is not a scheduler and CUDA is available.
+    """
+    return metadata.role != "scheduler" and torch.cuda.is_available()
+
+
 def create_dynamic_backends(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
@@ -100,11 +113,10 @@ def CreateStorageBackends(
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
-    # For scheduler role, always use CPU device
-    if metadata.role == "scheduler":
-        dst_device = "cpu"
-    elif dst_device == "cuda":
+    if is_cuda_worker(metadata):
         dst_device = f"cuda:{torch.cuda.current_device()}"
+    else:
+        dst_device = "cpu"
 
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 
