@@ -50,7 +50,8 @@ class LRUTokenPool:
         best_len = 0
         best_id = -1
 
-        for req_id, req_tokens in self.requests.items():
+        for req_id, req_tokens in reversed(self.requests):
+            req_tokens = self.requests[req_id]
             common_len = 0
             for i in range(min(len(tokens), len(req_tokens))):
                 if tokens[i] == req_tokens[i]:
@@ -61,6 +62,11 @@ class LRUTokenPool:
             if common_len > best_len:
                 best_len = common_len
                 best_id = req_id
+
+                # Early exit on perfect match
+                if common_len == len(tokens):
+                    break
+
 
         # Update LRU ordering
         if best_id != -1:
