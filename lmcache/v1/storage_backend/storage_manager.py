@@ -119,7 +119,7 @@ class WeightedSemaphore:
             )
 
         async with self._cond:
-            logger.info(f"WeightedSemaphore: Attempting to acquire {n} chunks")
+            logger.debug(f"WeightedSemaphore: Attempting to acquire {n} chunks")
             if n <= self._concurrent_budget_cap:
                 await self._cond.wait_for(lambda: self._current_chunks >= n)
                 self._current_chunks -= n
@@ -130,7 +130,7 @@ class WeightedSemaphore:
                 )
                 # Reserve everything
                 self._current_chunks = 0
-            logger.info(
+            logger.debug(
                 f"WeightedSemaphore: Acquired {n} chunks, "
                 f"remaining chunks: {self._current_chunks}"
             )
@@ -209,6 +209,9 @@ class StorageManager:
             )
         )
 
+        # the backend used for actual storage
+        self.non_allocator_backends = self.get_non_allocator_backends()
+
         self.enable_pd = config.enable_pd
 
         self.allocator_backend = self._get_allocator_backend(config)
@@ -240,7 +243,9 @@ class StorageManager:
             )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
         # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd:
+        if not self.enable_pd and (
+            self.config.enable_async_loading or self.config.use_layerwise
+        ):
             self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
@@ -810,6 +815,23 @@ class StorageManager:
             if not backend.get_memory_allocator().memcheck():
                 return False
         return True
+
+    def get_non_allocator_backends(self) -> List[str]:
+        """
+        Get the names of the actual storage backends. Some backends,
+        such as LocalCPUBackend and PDBackend, in some cases, only
+        serve as a backend for allocation.
+        """
+        storage_names = []
+        for backend_name, backend in self.storage_backends.items():
+            if "LocalCPUBackend" == backend_name and not self.config.local_cpu:
+                # if local_cpu is False, means LocalCPUBackend is only a allocator
+                continue
+            if "PDBackend" == backend_name and backend.pd_config.role == "sender":  # type: ignore
+                # if pd_config.role is sender, means PDBackend is only a allocator
+                continue
+            storage_names.append(backend_name)
+        return storage_names
 
     def close(self):
         for backend in self.storage_backends.values():
