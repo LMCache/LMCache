@@ -394,7 +394,7 @@ def run_cache_server(
 
     # Initialize the message queue server
     context = zmq.Context.instance()
-    server = MessageQueueServer(bind_url="tcp://localhost:5555", context=context)
+    server = MessageQueueServer(bind_url=f"tcp://{host}:{port}", context=context)
 
     # Add handlers
     add_handler_helper(server, RequestType.REGISTER_KV_CACHE, engine.register_kv_cache)
