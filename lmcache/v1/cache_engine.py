@@ -1076,7 +1076,7 @@ class LMCacheEngine:
         used_indices = set()
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
-            mask=None,
+            mask=mask,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
