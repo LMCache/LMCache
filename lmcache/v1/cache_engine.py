@@ -1302,6 +1302,8 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
+        from lmcache.v1.memory_management import PagedTensorMemoryAllocator
+
         # NOTE: should remove this function after fixing the unit tests:
         # raise RuntimeError("_Create_memory_allocator is deprecated!")
         extra_config = config.extra_config
@@ -1352,6 +1354,9 @@ class LMCacheEngineBuilder:
             config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
+        align_bytes = PagedTensorMemoryAllocator.required_alignment(
+            metadata, config.chunk_size
+        )
         if save_only_first_rank and metadata.is_first_rank():
             # Only the first rank will save the cache,
             # so we need to set it lager than other ranks
@@ -1362,12 +1367,16 @@ class LMCacheEngineBuilder:
                 if config.extra_config
                 else max_local_cpu_size
             )
+            size_bytes = int(first_rank_max_local_cpu_size * 1024**3)
+            size_bytes = ((size_bytes + align_bytes - 1) // align_bytes) * align_bytes
             return MixedMemoryAllocator(
-                int(first_rank_max_local_cpu_size * 1024**3),
+                size_bytes,
                 numa_mapping=numa_mapping,
             )
+        size_bytes = int(max_local_cpu_size * 1024**3)
+        size_bytes = ((size_bytes + align_bytes - 1) // align_bytes) * align_bytes
         return MixedMemoryAllocator(
-            int(max_local_cpu_size * 1024**3),
+            size_bytes,
             numa_mapping=numa_mapping,
         )
 

@@ -21,6 +21,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     MixedMemoryAllocator,
     PagedCpuGpuMemoryAllocator,
+    PagedTensorMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -331,8 +332,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
         numa_mapping = NUMADetector.get_numa_mapping(config)
         logger.info(f"NUMA mapping {numa_mapping}")
 
-        # Calculate effective CPU memory size
+        # Calculate effective CPU memory size (GiB)
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
+        assert metadata is not None
+        align_bytes = PagedTensorMemoryAllocator.required_alignment(
+            metadata, config.chunk_size
+        )
+        size_bytes = int(cpu_size * 1024**3)
+        size_bytes = ((size_bytes + align_bytes - 1) // align_bytes) * align_bytes
 
         if config.enable_p2p:
             assert metadata is not None
@@ -348,7 +355,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
             paged_mem_allocator.init_cpu_memory_allocator(
-                int(cpu_size * 1024**3),
+                size_bytes,
                 shape=new_shape,
                 dtype=metadata.kv_dtype,
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
@@ -357,7 +364,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return paged_mem_allocator
         else:
             return MixedMemoryAllocator(
-                int(cpu_size * 1024**3),
+                size_bytes,
                 numa_mapping=numa_mapping,
             )
 

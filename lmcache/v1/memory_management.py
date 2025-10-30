@@ -1018,6 +1018,28 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     Implements a paged memory allocator.
     """
 
+    @staticmethod
+    def required_alignment(model_meta, chunk_size: int) -> int:
+        """
+        Calculate the alignment requirement for a KV chunk given model metadata
+        and the desired chunk size.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+        if not hasattr(model_meta, "kv_shape") or not hasattr(model_meta, "kv_dtype"):
+            raise AttributeError(
+                "model_meta must provide 'kv_shape' and 'kv_dtype' attributes"
+            )
+        kv_shape = list(model_meta.kv_shape)
+        if len(kv_shape) < 3:
+            raise ValueError("model_meta.kv_shape must have at least 3 dimensions")
+        kv_shape[2] = int(chunk_size)
+        element_size = torch.tensor([], dtype=model_meta.kv_dtype).element_size()
+        alignment = math.prod(kv_shape) * element_size
+        if alignment <= 0:
+            raise ValueError("Calculated alignment must be greater than zero")
+        return int(alignment)
+
     def __init__(
         self,
         tensor: torch.Tensor,
