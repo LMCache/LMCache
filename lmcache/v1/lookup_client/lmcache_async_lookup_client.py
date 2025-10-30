@@ -34,13 +34,13 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - mla_lookup_server_worker_ids:
-        is a flag to control create lookup server on some workers.
+    - lookup_server_worker_ids:
+        is a config to control create lookup server on some workers.
         if mla is not enabled, default is [];
         if mla is enabled, default is [0];
-        - if mla_lookup_server_worker_ids is [], start lookup server on all workers
-        - if mla_lookup_server_worker_ids is [0], start lookup server on worker 0
-        - if mla_lookup_server_worker_ids is [0, 3, 6], start lookup server on
+        - if lookup_server_worker_ids is [], start lookup server on all workers
+        - if lookup_server_worker_ids is [0], start lookup server on worker0
+        - if lookup_server_worker_ids is [0, 3, 6], start lookup server on
           worker0, worker3 and worker6
     """
 
@@ -58,14 +58,14 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
         self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
-        self.mla_lookup_server_worker_ids = config.get_mla_lookup_server_worker_ids(
+        self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
 
         self.push_sockets = []
-        if len(self.mla_lookup_server_worker_ids) > 0:
-            ranks = self.mla_lookup_server_worker_ids
-            self.num_ranks = len(self.mla_lookup_server_worker_ids)
+        if len(self.lookup_server_worker_ids) > 0:
+            ranks = self.lookup_server_worker_ids
+            self.num_ranks = len(self.lookup_server_worker_ids)
         else:
             ranks = [i for i in range(self.num_ranks)]
 

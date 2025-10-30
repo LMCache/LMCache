@@ -89,13 +89,13 @@ class LookupClientFactory:
             "LMCache v1 config is expected for lookup server and client"
         )
 
-        mla_lookup_server_worker_ids = config.get_mla_lookup_server_worker_ids(
+        lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             lmcache_engine.metadata.use_mla, lmcache_engine.metadata.world_size
         )
 
         if config.external_lookup_client is None and (
-            len(mla_lookup_server_worker_ids) == 0
-            or lmcache_engine.metadata.worker_id in mla_lookup_server_worker_ids
+            len(lookup_server_worker_ids) == 0
+            or lmcache_engine.metadata.worker_id in lookup_server_worker_ids
         ):
             # First Party
             from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
