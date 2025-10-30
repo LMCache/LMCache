@@ -1026,16 +1026,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
         if chunk_size <= 0:
             raise ValueError("chunk_size must be a positive integer")
-        if not hasattr(model_meta, "kv_shape") or not hasattr(model_meta, "kv_dtype"):
-            raise AttributeError(
-                "model_meta must provide 'kv_shape' and 'kv_dtype' attributes"
-            )
-        kv_shape = list(model_meta.kv_shape)
-        if len(kv_shape) < 3:
-            raise ValueError("model_meta.kv_shape must have at least 3 dimensions")
-        kv_shape[2] = int(chunk_size)
-        element_size = torch.tensor([], dtype=model_meta.kv_dtype).element_size()
-        alignment = math.prod(kv_shape) * element_size
+        default_alignment = chunk_size * 4096
+        if hasattr(model_meta, "kv_shape") and hasattr(model_meta, "kv_dtype"):
+            kv_shape = list(model_meta.kv_shape)
+            if len(kv_shape) >= 3:
+                kv_shape[2] = int(chunk_size)
+                element_size = torch.tensor([], dtype=model_meta.kv_dtype).element_size()
+                alignment = math.prod(kv_shape) * element_size
+            else:
+                alignment = default_alignment
+        else:
+            alignment = default_alignment
         if alignment <= 0:
             raise ValueError("Calculated alignment must be greater than zero")
         return int(alignment)
