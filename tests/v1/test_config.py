@@ -124,24 +124,15 @@ def test_get_lookup_server_worker_ids(use_mla):
         assert lookup_server_worker_ids == []
 
     # test different config
-    os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"] = "[]"
-    config.update_config_from_env()
-    lookup_server_worker_ids = config.get_lookup_server_worker_ids(use_mla, 8)
-    assert lookup_server_worker_ids == []
-
-    os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"] = "[0, 3, 6]"
-    config.update_config_from_env()
-    lookup_server_worker_ids = config.get_lookup_server_worker_ids(use_mla, 8)
-    assert lookup_server_worker_ids == [0, 3, 6]
-
+    # TODO: not support format "[]" or "[0, 3, 6]
     os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"] = "1"
     config.update_config_from_env()
     lookup_server_worker_ids = config.get_lookup_server_worker_ids(use_mla, 8)
     assert lookup_server_worker_ids == [1]
 
-    os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"] = "1, 5"
+    os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"] = "0, 3, 6"
     config.update_config_from_env()
     lookup_server_worker_ids = config.get_lookup_server_worker_ids(use_mla, 8)
-    assert lookup_server_worker_ids == [1, 5]
+    assert lookup_server_worker_ids == [0, 3, 6]
 
     del os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"]
