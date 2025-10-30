@@ -32,12 +32,14 @@ class LMCacheLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - mla_lookup_server_worker_id:
-        is a flag to control whether to create lookup server only on one worker.
-        if mla is not enabled, default is -1;
-        if mla is enabled, default is 0;
-        - if mla_lookup_server_worker_id < 0, start lookup server on all workers
-        - if mla_lookup server_worker_id >= 0, start lookup server on the given worker
+    - lookup_server_worker_ids:
+        is a config to control create lookup server on some workers.
+        if mla is not enabled, default is [];
+        if mla is enabled, default is [0];
+        - if lookup_server_worker_ids is [], start lookup server on all workers
+        - if lookup_server_worker_ids is [0], start lookup server on worker0
+        - if lookup_server_worker_ids is [0, 3, 6], start lookup server on
+          worker0, worker3 and worker6
     """
 
     def __init__(
@@ -55,15 +57,14 @@ class LMCacheLookupClient(LookupClientInterface):
         self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
         self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
-        self.mla_lookup_server_worker_id = config.get_mla_lookup_server_worker_id(
-            metadata.use_mla
+        self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
+            metadata.use_mla, metadata.world_size
         )
-        assert self.mla_lookup_server_worker_id < metadata.world_size
 
         self.sockets = []
-        if self.mla_lookup_server_worker_id >= 0:
-            ranks = [self.mla_lookup_server_worker_id]
-            self.num_ranks = 1
+        if len(self.lookup_server_worker_ids) > 0:
+            ranks = self.lookup_server_worker_ids
+            self.num_ranks = len(self.lookup_server_worker_ids)
         else:
             ranks = [i for i in range(self.num_ranks)]
 

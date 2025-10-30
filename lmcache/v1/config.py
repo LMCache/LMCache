@@ -391,10 +391,10 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": float,
     },
-    "mla_lookup_server_worker_id": {
-        "type": Optional[int],
+    "lookup_server_worker_ids": {
+        "type": Optional[list[int]],
         "default": None,
-        "env_converter": int,
+        "env_converter": _to_int_list,
     },
 }
 
@@ -453,7 +453,7 @@ def _create_config_class():
             "log_config": _log_config,
             "to_original_config": _to_original_config,
             "get_extra_config_value": _get_extra_config_value,
-            "get_mla_lookup_server_worker_id": _get_mla_lookup_server_worker_id,
+            "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
             "from_defaults": classmethod(_from_defaults),
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
@@ -554,14 +554,18 @@ def _get_extra_config_value(self, key, default_value=None):
         return default_value
 
 
-def _get_mla_lookup_server_worker_id(self, use_mla):
-    if self.mla_lookup_server_worker_id is None:
-        # if mla is not enabled, return -1, which means start
-        # lookup server on all worker as default
-        # if mla is enabled, return 0, which means start lookup
-        # server on worker 0 as default
-        return 0 if use_mla else -1
-    return self.mla_lookup_server_worker_id
+def _get_lookup_server_worker_ids(self, use_mla, world_size):
+    if self.lookup_server_worker_ids is None:
+        # if mla is not enabled, return [], which means start
+        # lookup server on all worker as default;
+        # if mla is enabled, return [0], which means start lookup
+        # server on worker 0 as default.
+        return [0] if use_mla else []
+
+    # check the input
+    for worker_id in self.lookup_server_worker_ids:
+        assert -1 < worker_id < world_size
+    return self.lookup_server_worker_ids
 
 
 def _from_defaults(cls, **kwargs):
