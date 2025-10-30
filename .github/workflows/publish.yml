@@ -267,7 +267,7 @@ jobs:
               run: | 
                 docker build \
                 --tag lmcache/vllm-openai:lightweight --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight \
-                --file docker/Dockerfile.lightweight
+                --file docker/Dockerfile.lightweight .
             
             - name: Push lmcache/vllm-openai:lightweight image to DockerHub
               run: |
