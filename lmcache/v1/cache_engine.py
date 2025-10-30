@@ -1073,37 +1073,14 @@ class LMCacheEngine:
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
-
-        # First, generate a list indicating which chunks are needed
-        num_chunks = len(tokens) // self.config.chunk_size
-        if mask is not None:
-            chunk_mask_list = []
-            for i in range(num_chunks):
-                start_idx = i * self.config.chunk_size
-                end_idx = start_idx + self.config.chunk_size
-                # Check if all values in this chunk are True
-                chunk_is_valid = all(mask[start_idx:end_idx])
-                chunk_mask_list.append(chunk_is_valid)
-        else:
-            # If no mask, all chunks are needed
-            chunk_mask_list = [True] * num_chunks
-
-        # Now chunk_mask_list is like [F, F, T, ..., T]
-        # where False means the chunk is in upper layer's cache and
-        # doesn't need to be retrieved.
-        # So we can use this list to filter out the chunks that are not needed.
         used_indices = set()
-        for idx, (start, end, key) in enumerate(
-            self.token_database.process_tokens(
-                tokens=tokens,
-                mask=None,
-                request_configs=request_configs,
-            )
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens,
+            mask=None,
+            request_configs=request_configs,
         ):
-            if not chunk_mask_list[idx]:
-                continue
-
             assert isinstance(key, CacheEngineKey)
+            idx = start // self.config.chunk_size
             memory_obj = memory_objs[idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
