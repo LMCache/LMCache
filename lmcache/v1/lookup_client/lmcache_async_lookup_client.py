@@ -53,7 +53,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
+        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
+        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
         self.mla_lookup_server_worker_id = config.get_mla_lookup_server_worker_id(
             metadata.use_mla
         )
@@ -62,15 +64,16 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self.push_sockets = []
         if self.mla_lookup_server_worker_id >= 0:
             ranks = [self.mla_lookup_server_worker_id]
+            self.num_ranks = 1
         else:
-            ranks = [i for i in range(self.tensor_parallel_size)]
+            ranks = [i for i in range(self.num_ranks)]
 
-        for tp_rank in ranks:
+        for rank in ranks:
             worker_socket_path = get_zmq_rpc_path_lmcache(
-                vllm_config, "lookup_worker", rpc_port, tp_rank
+                vllm_config, "lookup_worker", rpc_port, rank
             )
             logger.info(
-                f"lmcache lookup client connect to tp_rank {tp_rank} "
+                f"lmcache lookup client connect to rank {rank} "
                 f"with worker socket path {worker_socket_path}"
             )
 
@@ -183,10 +186,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             request_configs_buf,
         ]
 
-        ranks = self.tensor_parallel_size
-        if self.mla_lookup_server_worker_id >= 0:
-            ranks = 1
-        for i in range(ranks):
+        for i in range(self.num_ranks):
             self.push_sockets[i].send_multipart(msg_buf, copy=False)
         time.sleep(self.lookup_backoff_time)
         return None
@@ -205,13 +205,13 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.res_for_each_worker[lookup_id].append(res)
                 all_res = self.res_for_each_worker[lookup_id]
 
-                if len(all_res) == self.tensor_parallel_size or (
+                if len(all_res) == self.num_ranks or (
                     self.mla_lookup_server_worker_id >= 0 and len(all_res) == 1
                 ):
                     self.res_for_each_worker.pop(lookup_id)
 
                     # NOTE: it is possible that the number of hit
-                    # tokens is different across TP ranks, so we
+                    # tokens is different across (TP and PP) ranks, so we
                     # can use the minimum value as the number of
                     # hit tokens.
                     self.reqs_status[lookup_id] = min(all_res)
