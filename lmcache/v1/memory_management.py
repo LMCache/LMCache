@@ -1031,7 +1031,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             kv_shape = list(model_meta.kv_shape)
             if len(kv_shape) >= 3:
                 kv_shape[2] = int(chunk_size)
-                element_size = torch.tensor([], dtype=model_meta.kv_dtype).element_size()
+                element_size = torch.tensor(
+                    [], dtype=model_meta.kv_dtype
+                ).element_size()
                 alignment = math.prod(kv_shape) * element_size
             else:
                 alignment = default_alignment
