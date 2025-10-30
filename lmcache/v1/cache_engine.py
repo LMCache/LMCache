@@ -731,7 +731,7 @@ class LMCacheEngine:
         lookup_id: Optional[str] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
-        skip_n_tokens: int = 0,
+        num_computed_tokens: int = 0,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -756,26 +756,30 @@ class LMCacheEngine:
 
         :param Optional[dict] request_configs: the configs of the request.
 
-        :param int skip_n_tokens: Number of leading tokens that can be skipped
-            during lookup because they are already available to the caller.
+        :param int num_computed_tokens: Number of leading tokens those are already
+            available in the caller.
 
         :return: An int indicating how many prefix tokens are cached.
         """
         assert self.storage_manager is not None
 
         if tokens is not None:
+            lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
             total_length = len(tokens)
         else:
             assert offsets is not None
             assert hashes is not None
+            lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
             total_length = sum(offsets)
 
-        skip_n_tokens = max(0, min(skip_n_tokens, total_length))
-
-        if tokens is not None:
-            lookup_request_id = self.stats_monitor.on_lookup_request(total_length)
-        else:
-            lookup_request_id = self.stats_monitor.on_lookup_request(total_length)
+        # Skip the number of tokens that are already computed, align to chunk size
+        skip_n_tokens = (
+            min(num_computed_tokens, total_length)
+            // self.config.chunk_size
+            * self.config.chunk_size
+            if num_computed_tokens > 0
+            else 0
+        )
 
         res = skip_n_tokens
         try:
@@ -793,7 +797,8 @@ class LMCacheEngine:
                         continue
                     if start < skip_n_tokens < end:
                         logger.warning(
-                            "skip_n_tokens %d is not aligned with chunk boundary: %s-%s",
+                            "skip_n_tokens %d is not aligned "
+                            "with chunk boundary: %s-%s",
                             skip_n_tokens,
                             start,
                             end,
@@ -832,7 +837,8 @@ class LMCacheEngine:
                         continue
                     if start < skip_n_tokens < end:
                         logger.warning(
-                            "skip_n_tokens %d is not aligned with chunk boundary: %s-%s",
+                            "skip_n_tokens %d is not aligned "
+                            "with chunk boundary: %s-%s",
                             skip_n_tokens,
                             start,
                             end,
@@ -948,7 +954,7 @@ class LMCacheEngine:
         search_range: Optional[List[str]] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
-        skip_n_tokens: int = 0,
+        num_computed_tokens: int = 0,
     ) -> None:
         """
         An async version of lookup + prefetch.
@@ -966,7 +972,15 @@ class LMCacheEngine:
             assert offsets is not None
             total_length = sum(offsets)
 
-        skip_n_tokens = max(0, min(skip_n_tokens, total_length))
+        # Skip the number of tokens that are already computed, align to chunk size
+        skip_n_tokens = (
+            min(num_computed_tokens, total_length)
+            // self.config.chunk_size
+            * self.config.chunk_size
+            if num_computed_tokens > 0
+            else 0
+        )
+
         keys: list[CacheEngineKey] = []
         cum_chunk_lengths = [skip_n_tokens]
 
@@ -990,13 +1004,6 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             keys.append(key)
             cum_chunk_lengths.append(end)
-
-        if not keys:
-            if self.storage_manager.async_lookup_server is not None:
-                self.storage_manager.async_lookup_server.send_response_to_scheduler(
-                    lookup_id, skip_n_tokens
-                )
-            return
 
         asyncio.run_coroutine_threadsafe(
             self.storage_manager.async_lookup_and_prefetch(

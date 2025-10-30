@@ -690,12 +690,7 @@ class StorageManager:
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
             if self.async_lookup_server is not None:
-                initial_length = 0
-                if cum_chunk_lengths_total:
-                    initial_length = cum_chunk_lengths_total[0]
-                self.async_lookup_server.send_response_to_scheduler(
-                    lookup_id, initial_length
-                )
+                self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
             return
 
         all_done = asyncio.gather(*loading_tasks)

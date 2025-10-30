@@ -139,7 +139,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self.res_for_each_worker: dict[str, list[int]] = {}
 
         # The two parts are [lookup_id (i.e., req_id), num_hit_tokens]
-        self.response_num_parts = 2
+        self.num_parts = 2
 
         # Track lookup_ids that have been aborted for cleanup
         self.aborted_lookups: set[str] = set()
@@ -168,7 +168,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-        skip_n_tokens: int = 0,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         # Check if any aborted lookups are finished, send cleanup messages
         self._cleanup_finished_aborted_lookups()
