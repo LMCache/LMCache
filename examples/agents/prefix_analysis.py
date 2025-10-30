@@ -36,10 +36,17 @@ class LRUTokenPool:
     Token pool with LRU eviction policy based on token count limit.
     """
 
-    def __init__(self, max_tokens: float) -> None:
+    def __init__(
+        self, max_tokens: float, token_tensor_shape: Optional[Tuple[int, int]] = None
+    ) -> None:
         self.max_tokens = max_tokens
         self.current_tokens = 0
         self.requests: OrderedDict[int, List[int]] = OrderedDict()
+        self.token_tensor: Optional[torch.Tensor] = (
+            torch.zeros(token_tensor_shape, dtype=torch.long)
+            if token_tensor_shape is not None
+            else None
+        )
 
     def longest_prefix_len(self, tokens: List[int]) -> Tuple[int, int]:
         """
@@ -86,13 +93,14 @@ class LRUTokenPool:
         assert token_tensor.ndim == 2, "Expected [N, T] tensor"
         N, T = token_tensor.shape
         assert 0 <= request_id < N, "request_id out of range"
+        assert self.token_tensor is not None, "token_tensor not initialized"
 
         if request_id == 0 or T < chunk_len:
             return 0, 0
 
         r = token_tensor[request_id]  # [T]
         r = r[: len(tokens)]
-        Xprev = token_tensor[:request_id]  # [request_id, T]
+        Xprev = self.token_tensor[:request_id]  # [request_id, T]
 
         # Sliding windows for previous rows
         Xw = Xprev.unfold(dimension=1, size=chunk_len, step=1)  # [R, W, L]
@@ -135,8 +143,8 @@ class LRUTokenPool:
             self.current_tokens -= len(old_tokens)
 
             # substring matching case
-            if token_tensor is not None:
-                token_tensor[old_id, :] = 0
+            if self.token_tensor is not None:
+                self.token_tensor[old_id, :] = 0
 
         # Add new request
         if (
@@ -145,6 +153,10 @@ class LRUTokenPool:
         ):
             self.requests[request_id] = tokens
             self.current_tokens += len(tokens)
+            if self.token_tensor is not None:
+                self.token_tensor[request_id, : len(tokens)] = torch.tensor(
+                    tokens, dtype=torch.long
+                )
 
 
 def load_and_tokenize_inputs(
@@ -201,7 +213,8 @@ def calculate_hit_rate(
 ) -> float:
     # Use float('inf') for unlimited case to avoid eviction
     max_tokens = float("inf") if pool_size is None else pool_size
-    pool = LRUTokenPool(max_tokens)
+    tensor_shape = tuple(token_tensor.shape) if token_tensor is not None else None
+    pool = LRUTokenPool(max_tokens, tensor_shape)
 
     total_tokens = 0
     hit_tokens = 0
