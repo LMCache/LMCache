@@ -1400,10 +1400,15 @@ class LMCacheConnectorV1Impl:
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
 
+        skip_n_tokens = (
+            num_computed_tokens // self._lmcache_chunk_size
+        ) * self._lmcache_chunk_size
+
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,
             lookup_id=req_id,
             request_configs=request_configs,
+            skip_n_tokens=skip_n_tokens,
         )
 
         if num_external_hit_tokens is None:
