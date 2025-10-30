@@ -1304,8 +1304,6 @@ class LMCacheEngineBuilder:
         metadata: LMCacheEngineMetadata,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
-        from lmcache.v1.memory_management import PagedTensorMemoryAllocator
-
         # NOTE: should remove this function after fixing the unit tests:
         # raise RuntimeError("_Create_memory_allocator is deprecated!")
         extra_config = config.extra_config
