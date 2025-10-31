@@ -185,7 +185,7 @@ class CacheEngineKey:
             f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}"
         )
         if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in sorted(self.tags)]
+            tags = [f"{k}%{v}" for k, v in self.tags]
             s += "@" + "@".join(tags)
         return s
 
@@ -314,7 +314,7 @@ class LayerCacheEngineKey(CacheEngineKey):
             f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in sorted(self.tags)]
+            tags = [f"{k}%{v}" for k, v in self.tags]
             s += "@" + "@".join(tags)
         return s
 
