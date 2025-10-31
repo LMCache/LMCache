@@ -69,8 +69,8 @@ jobs:
             FORCE_FLAG="--force"
           fi
           
-          python tools/auto_translate.py \
-            --api anyrouter \
+          python docs/tools/auto_translate.py \
+            --api openai \
             --target-lang ${{ github.event.inputs.target_lang || 'zh_CN' }} \
             --error-threshold 0.3 \
             $FORCE_FLAG
