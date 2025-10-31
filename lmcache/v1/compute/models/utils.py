@@ -21,9 +21,9 @@ def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
 
     elif model_name == "Qwen2ForCausalLM":
         # First Party
-        from lmcache.v1.compute.models.qwen import LMCQwenModel
+        from lmcache.v1.compute.models.qwen2 import LMCQwen2Model
 
-        return LMCQwenModel(vllm_model, blender, enable_sparse)
+        return LMCQwen2Model(vllm_model, blender, enable_sparse)
 
     elif model_name == "Qwen3ForCausalLM":
         # First Party
