@@ -517,9 +517,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         :return: MemoryObj. None if the key does not exist.
         """
-        future = asyncio.run_coroutine_threadsafe(
-            self.storage_to_mem([key]), self.loop
-        )
+        future = asyncio.run_coroutine_threadsafe(self.storage_to_mem([key]), self.loop)
         if future is None:
             return None
         obj_list = future.result()
@@ -532,9 +530,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         if not keys:
             return []
 
-        future = asyncio.run_coroutine_threadsafe(
-            self.storage_to_mem(keys), self.loop
-        )
+        future = asyncio.run_coroutine_threadsafe(self.storage_to_mem(keys), self.loop)
         if future is None:
             return []
         obj_list = future.result()

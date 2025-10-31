@@ -2,14 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utility for validating NIXL-backed S3 connectivity."""
 
-# Standard
+# Future
 from __future__ import annotations
 
+# Standard
+from pathlib import Path
 import argparse
 import json
 import sys
 import uuid
-from pathlib import Path
 
 # Third Party
 from nixl._api import nixl_agent as NixlAgent
@@ -73,21 +74,23 @@ def _create_nixl_agent(backend: str, backend_params: dict[str, str]) -> NixlAgen
     agent.create_backend(backend, backend_params)
     return agent
 
+
 def parse_s3_object_name(s3_uri: str) -> str:
     if not s3_uri.startswith("s3://"):
         raise ValueError("S3 URI must start with 's3://'")
-    
+
     # Remove s3:// prefix
     uri_without_prefix = s3_uri.removeprefix("s3://")
-    
+
     # Split by first slash to separate bucket from object path
     parts = uri_without_prefix.split("/", 1)
-    
+
     if len(parts) < 2:
         raise ValueError("S3 URI must contain both bucket and object path")
-    
+
     # Return only the object name part (everything after bucket/)
     return parts[1]
+
 
 def _check_object_exists(agent: NixlAgent, object_uri: str) -> bool:
     """Query the NIXL backend to determine if the object exists."""
