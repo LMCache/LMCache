@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 # -*- coding: utf-8 -*-
 """
 Auto Translation Tool - Used for automatically translating Sphinx documentation .po files
@@ -28,12 +29,15 @@ Usage:
     python docs/tools/auto_translate.py --api anyrouter --anyrouter-provider openai --target-lang zh_CN
 """
 
+# Standard
+from pathlib import Path
+from typing import Dict, Tuple
 import argparse
 import os
 import re
 import sys
-from pathlib import Path
-from typing import Dict, List, Tuple
+
+# Third Party
 import polib
 
 
@@ -44,7 +48,9 @@ class TranslationAPI:
         self.api_key = api_key
         self.glossary = glossary or {}
 
-    def translate(self, text: str, source_lang: str = "en", target_lang: str = "zh_CN") -> str:
+    def translate(
+        self, text: str, source_lang: str = "en", target_lang: str = "zh_CN"
+    ) -> str:
         """Translate text"""
         raise NotImplementedError
 
@@ -52,11 +58,15 @@ class TranslationAPI:
 class OpenAITranslator(TranslationAPI):
     """OpenAI API translator"""
 
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini", glossary: Dict[str, str] = None):
+    def __init__(
+        self, api_key: str, model: str = "gpt-4o-mini", glossary: Dict[str, str] = None
+    ):
         super().__init__(api_key, glossary)
         self.model = model
         try:
+            # Third Party
             from openai import OpenAI
+
             # Allow overriding through OPENAI_BASE_URL (e.g. through proxy/third-party router)
             base_url = os.environ.get("OPENAI_BASE_URL")
             if base_url:
@@ -67,7 +77,9 @@ class OpenAITranslator(TranslationAPI):
             print("Error: Please install openai library: pip install openai")
             sys.exit(1)
 
-    def translate(self, text: str, source_lang: str = "en", target_lang: str = "zh_CN") -> str:
+    def translate(
+        self, text: str, source_lang: str = "en", target_lang: str = "zh_CN"
+    ) -> str:
         """Use OpenAI API to translate"""
         if not text.strip():
             return text
@@ -75,8 +87,12 @@ class OpenAITranslator(TranslationAPI):
         # Build glossary prompt
         glossary_prompt = ""
         if self.glossary:
-            glossary_items = "\n".join([f"- {en}: {zh}" for en, zh in self.glossary.items()])
-            glossary_prompt = f"\n\n术语表（请严格按照下述约定进行术语翻译）:\n{glossary_items}"
+            glossary_items = "\n".join(
+                [f"- {en}: {zh}" for en, zh in self.glossary.items()]
+            )
+            glossary_prompt = (
+                f"\n\n术语表（请严格按照下述约定进行术语翻译）:\n{glossary_items}"
+            )
 
         # Build translation prompt
         system_prompt = f"""你是一个专业的技术文档翻译专家，专门翻译 LMCache 项目的文档。
@@ -97,7 +113,7 @@ class OpenAITranslator(TranslationAPI):
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text}
+                    {"role": "user", "content": text},
                 ],
                 temperature=0.3,  # Lower temperature to get more consistent translations
             )
@@ -110,11 +126,18 @@ class OpenAITranslator(TranslationAPI):
 class AnthropicTranslator(TranslationAPI):
     """Anthropic Claude API translator"""
 
-    def __init__(self, api_key: str, model: str = "claude-haiku-4-5-20251001", glossary: Dict[str, str] = None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-haiku-4-5-20251001",
+        glossary: Dict[str, str] = None,
+    ):
         super().__init__(api_key, glossary)
         self.model = model
         try:
+            # Third Party
             from anthropic import Anthropic
+
             # Allow overriding through ANTHROPIC_BASE_URL (or through any compatible gateway)
             base_url = os.environ.get("ANTHROPIC_BASE_URL")
             if base_url:
@@ -125,7 +148,9 @@ class AnthropicTranslator(TranslationAPI):
             print("Error: Please install anthropic library: pip install anthropic")
             sys.exit(1)
 
-    def translate(self, text: str, source_lang: str = "en", target_lang: str = "zh_CN") -> str:
+    def translate(
+        self, text: str, source_lang: str = "en", target_lang: str = "zh_CN"
+    ) -> str:
         """Use Anthropic Claude API to translate"""
         if not text.strip():
             return text
@@ -133,8 +158,12 @@ class AnthropicTranslator(TranslationAPI):
         # Build glossary prompt
         glossary_prompt = ""
         if self.glossary:
-            glossary_items = "\n".join([f"- {en}: {zh}" for en, zh in self.glossary.items()])
-            glossary_prompt = f"\n\n术语表（请严格按照下述约定进行术语翻译）:\n{glossary_items}"
+            glossary_items = "\n".join(
+                [f"- {en}: {zh}" for en, zh in self.glossary.items()]
+            )
+            glossary_prompt = (
+                f"\n\n术语表（请严格按照下述约定进行术语翻译）:\n{glossary_items}"
+            )
 
         system_prompt = f"""你是一个专业的技术文档翻译专家，专门翻译 LMCache 项目的文档。
 
@@ -155,9 +184,7 @@ class AnthropicTranslator(TranslationAPI):
                 max_tokens=4096,
                 temperature=0.3,
                 system=system_prompt,
-                messages=[
-                    {"role": "user", "content": text}
-                ]
+                messages=[{"role": "user", "content": text}],
             )
             return response.content[0].text.strip()
         except Exception as e:
@@ -185,18 +212,25 @@ class AnyRouterTranslator(TranslationAPI):
     ):
         super().__init__(api_key, glossary)
         self.provider = provider
-        self.base_url = base_url or os.environ.get("ANYROUTER_BASE_URL", "https://anyrouter.top")
+        self.base_url = base_url or os.environ.get(
+            "ANYROUTER_BASE_URL", "https://anyrouter.top"
+        )
         self.model = model or (
-            "claude-haiku-4-5-20251001" if provider == "anthropic" else "openrouter/auto"
+            "claude-haiku-4-5-20251001"
+            if provider == "anthropic"
+            else "openrouter/auto"
         )
         self.api_key = api_key
 
-    def translate(self, text: str, source_lang: str = "en", target_lang: str = "zh_CN") -> str:
+    def translate(
+        self, text: str, source_lang: str = "en", target_lang: str = "zh_CN"
+    ) -> str:
         if not text.strip():
             return text
 
-        import json
+        # Standard
         try:
+            # Third Party
             import requests
         except ImportError:
             print("Error: Please install requests library: pip install requests")
@@ -204,7 +238,9 @@ class AnyRouterTranslator(TranslationAPI):
 
         glossary_prompt = ""
         if self.glossary:
-            glossary_items = "\n".join([f"- {en}: {zh}" for en, zh in self.glossary.items()])
+            glossary_items = "\n".join(
+                [f"- {en}: {zh}" for en, zh in self.glossary.items()]
+            )
             glossary_prompt = f"\n\n术语表（请严格遵守以下术语翻译）:\n{glossary_items}"
 
         system_prompt = f"""你是一个专业的技术文档翻译专家，专门翻译 LMCache 项目的文档。
@@ -227,56 +263,56 @@ class AnyRouterTranslator(TranslationAPI):
                 headers = {
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {self.api_key}",
-                    "anthropic-version": "2023-06-01"
+                    "anthropic-version": "2023-06-01",
                 }
                 payload = {
                     "model": self.model,
                     "max_tokens": 4096,
                     "temperature": 0.3,
                     "system": system_prompt,
-                    "messages": [
-                        {"role": "user", "content": text}
-                    ]
+                    "messages": [{"role": "user", "content": text}],
                 }
-                
+
                 response = requests.post(url, headers=headers, json=payload, timeout=60)
                 response.raise_for_status()
                 result = response.json()
-                
+
                 if "content" in result and len(result["content"]) > 0:
                     return result["content"][0]["text"].strip()
                 else:
                     print(f"Warning: API response format exception: {result}")
                     return ""  # Response format exception, return empty string
-                    
+
             else:
                 # OpenAI /v1/chat/completions format
                 url = f"{self.base_url}/v1/chat/completions"
                 headers = {
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}"
+                    "Authorization": f"Bearer {self.api_key}",
                 }
                 payload = {
                     "model": self.model,
                     "temperature": 0.3,
                     "messages": [
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": text}
-                    ]
+                        {"role": "user", "content": text},
+                    ],
                 }
-                
+
                 response = requests.post(url, headers=headers, json=payload, timeout=60)
                 response.raise_for_status()
                 result = response.json()
-                
+
                 if "choices" in result and len(result["choices"]) > 0:
                     return result["choices"][0]["message"]["content"].strip()
                 else:
                     print(f"Warning: API response format exception: {result}")
                     return ""  # Response format exception, return empty string
-                    
+
         except requests.exceptions.HTTPError as e:
-            print(f"Translation failed(HTTP {e.response.status_code}): {e.response.text[:200]}")
+            print(
+                f"Translation failed(HTTP {e.response.status_code}): {e.response.text[:200]}"
+            )
             return ""  # HTTP error, return empty string
         except Exception as e:
             print(f"Translation failed(anyrouter/{self.provider}): {e}")
@@ -291,18 +327,23 @@ def load_glossary(glossary_file: Path) -> Dict[str, str]:
         print(f"Warning: Glossary file does not exist: {glossary_file}")
         return glossary
 
-    with open(glossary_file, 'r', encoding='utf-8') as f:
+    with open(glossary_file, "r", encoding="utf-8") as f:
         content = f.read()
 
     # Parse terms from Markdown table
     # Format: | English | Chinese | Description |
-    pattern = r'\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|'
+    pattern = r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|"
     matches = re.findall(pattern, content)
 
     for match in matches:
         en, zh = match[0].strip(), match[1].strip()
         # Skip table headers and separators
-        if en in ['英文', 'English', '---', '------'] or zh in ['中文', 'Chinese', '---', '------']:
+        if en in ["英文", "English", "---", "------"] or zh in [
+            "中文",
+            "Chinese",
+            "---",
+            "------",
+        ]:
             continue
         # Skip same terms (e.g. LMCache, vLLM)
         if en != zh and zh:
@@ -316,7 +357,7 @@ def translate_po_file(
     po_file: Path,
     translator: TranslationAPI,
     force: bool = False,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Translate .po file
@@ -344,8 +385,8 @@ def translate_po_file(
 
         # Check if translation is needed
         needs_translation = False
-        is_fuzzy = 'fuzzy' in entry.flags
-        
+        is_fuzzy = "fuzzy" in entry.flags
+
         if force:
             # Force translate all entries
             needs_translation = True
@@ -373,10 +414,12 @@ def translate_po_file(
             # - Empty string = translation failed (API error)
             # - Same as original = this content does not need to be translated (e.g. numbers, code, etc.)
             # - Different = normal translation
-            
+
             if not translation or not translation.strip():
                 # Translation failed (API returned empty), count as error
-                print("  Translation failed (API returned empty), count as error, skipped this entry")
+                print(
+                    "  Translation failed (API returned empty), count as error, skipped this entry"
+                )
                 error_count += 1
                 continue
 
@@ -384,8 +427,8 @@ def translate_po_file(
             if not dry_run:
                 entry.msgstr = translation
                 # Clear fuzzy flag (if any)
-                if 'fuzzy' in entry.flags:
-                    entry.flags.remove('fuzzy')
+                if "fuzzy" in entry.flags:
+                    entry.flags.remove("fuzzy")
             translated_count += 1
         except Exception as e:
             print(f"  Error: {e}")
@@ -438,65 +481,59 @@ def main():
         ANYROUTER_API_KEY     - AnyRouter API Key (anthropic provider can also use ANTHROPIC_AUTH_TOKEN)
         OPENAI_BASE_URL       - Optional, override OpenAI SDK base_url
         ANTHROPIC_BASE_URL    - Optional, override Anthropic SDK base_url
-        """
+        """,
     )
 
     parser.add_argument(
         "--api",
         choices=["openai", "claude", "anyrouter"],
         default="openai",
-        help="Translation API provider (default: openai)"
+        help="Translation API provider (default: openai)",
     )
 
     parser.add_argument(
         "--anyrouter-provider",
         choices=["anthropic", "openai"],
         default="anthropic",
-        help="When --api anyrouter, select backend protocol (anthropic or openai), default anthropic"
+        help="When --api anyrouter, select backend protocol (anthropic or openai), default anthropic",
     )
 
     parser.add_argument(
-        "--target-lang",
-        default="zh_CN",
-        help="Target language code (default: zh_CN)"
+        "--target-lang", default="zh_CN", help="Target language code (default: zh_CN)"
     )
 
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-translate all content (including translated content)"
+        help="Force re-translate all content (including translated content)",
     )
 
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Dry run mode, do not save translation results"
+        help="Dry run mode, do not save translation results",
     )
 
-    parser.add_argument(
-        "--file",
-        type=Path,
-        help="Only translate specified .po files"
-    )
+    parser.add_argument("--file", type=Path, help="Only translate specified .po files")
 
     parser.add_argument(
         "--glossary",
         type=Path,
         default=Path("docs/TRANSLATION_GLOSSARY_zh.md"),
-        help="Glossary file path (default: docs/TRANSLATION_GLOSSARY_zh.md)"
+        help="Glossary file path (default: docs/TRANSLATION_GLOSSARY_zh.md)",
     )
 
     parser.add_argument(
         "--error-threshold",
         type=float,
         default=0.3,
-        help="Error rate threshold (0-1), exit if exceeds this ratio (default: 0.3即 30%%)"
+        help="Error rate threshold (0-1), exit if exceeds this ratio (default: 0.3即 30%%)",
     )
 
     parser.add_argument(
         "--continue-on-error",
         action="store_true",
-        help="Continue running even if there are errors and return success status code (for CI/CD)"
+        help="Continue running even if there are errors and return success status code (for CI/CD)",
     )
 
     args = parser.parse_args()
@@ -515,10 +552,14 @@ def main():
     elif args.api == "anyrouter":
         # Prioritize ANYROUTER_API_KEY; If provider=anthropic, also compatible with ANTHROPIC_AUTH_TOKEN
         api_key = os.environ.get("ANYROUTER_API_KEY") or (
-            os.environ.get("ANTHROPIC_AUTH_TOKEN") if args.anyrouter_provider == "anthropic" else None
+            os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            if args.anyrouter_provider == "anthropic"
+            else None
         )
         if not api_key:
-            print("Error: Please set environment variable ANYROUTER_API_KEY (or ANTHROPIC_AUTH_TOKEN, depending on provider)")
+            print(
+                "Error: Please set environment variable ANYROUTER_API_KEY (or ANTHROPIC_AUTH_TOKEN, depending on provider)"
+            )
             sys.exit(1)
     else:
         api_key = None  # Will not get here
@@ -531,23 +572,23 @@ def main():
     model = os.environ.get("TRANSLATION_MODEL")
     if args.api == "openai":
         translator = OpenAITranslator(
-            api_key=api_key,
-            model=model or "gpt-4o-mini",
-            glossary=glossary
+            api_key=api_key, model=model or "gpt-4o-mini", glossary=glossary
         )
         print(f"Using OpenAI API (model: {translator.model})")
     elif args.api == "claude":
         translator = AnthropicTranslator(
             api_key=api_key,
             model=model or "claude-haiku-4-5-20251001",
-            glossary=glossary
+            glossary=glossary,
         )
         print(f"Using Anthropic Claude API (model: {translator.model})")
     elif args.api == "anyrouter":
         anyrouter_base = os.environ.get("ANYROUTER_BASE_URL", "https://anyrouter.top")
         # If TRANSLATION_MODEL is not explicitly specified, set default by provider
         fallback_model = (
-            "claude-haiku-4-5-20251001" if args.anyrouter_provider == "anthropic" else "openrouter/auto"
+            "claude-haiku-4-5-20251001"
+            if args.anyrouter_provider == "anthropic"
+            else "openrouter/auto"
         )
         translator = AnyRouterTranslator(
             api_key=api_key,
@@ -556,7 +597,9 @@ def main():
             glossary=glossary,
             base_url=anyrouter_base,
         )
-        print(f"Using AnyRouter API (provider: {args.anyrouter_provider}, model: {translator.model}, base_url: {anyrouter_base})")
+        print(
+            f"Using AnyRouter API (provider: {args.anyrouter_provider}, model: {translator.model}, base_url: {anyrouter_base})"
+        )
     else:
         print("Error: Unknown API type")
         sys.exit(1)
@@ -590,10 +633,7 @@ def main():
 
     for po_file in sorted(po_files):
         translated, skipped, errors = translate_po_file(
-            po_file,
-            translator,
-            force=args.force,
-            dry_run=args.dry_run
+            po_file, translator, force=args.force, dry_run=args.dry_run
         )
         total_translated += translated
         total_skipped += skipped
@@ -611,36 +651,43 @@ def main():
     if total_errors > 0:
         # Calculate total number of entries to translate (excluding skipped)
         total_attempted = total_translated + total_errors
-        
+
         if total_attempted == 0:
             # No entries to translate, this is normal
             print("\n✅ No entries to translate (all content is already translated)")
             sys.exit(0)
-        
+
         error_rate = total_errors / total_attempted
         print(f"\nError rate: {error_rate:.1%} ({total_errors}/{total_attempted})")
-        
+
         if args.continue_on_error:
             # CI/CD mode: only warn, do not exit
-            print(f"⚠️ Warning: {total_errors} entries failed to translate, but due to --continue-on-error, it will continue")
-            print(f"💡 Tip: These failed entries will remain as is (fuzzy flag will not be cleared)")
+            print(
+                f"⚠️ Warning: {total_errors} entries failed to translate, but due to --continue-on-error, it will continue"
+            )
+            print(
+                "💡 Tip: These failed entries will remain as is (fuzzy flag will not be cleared)"
+            )
             sys.exit(0)
         elif error_rate > args.error_threshold:
             # Error rate exceeds threshold, exit
-            print(f"❌ Error: Error rate {error_rate:.1%} exceeds threshold {args.error_threshold:.1%}")
-            print(f"💡 Suggestions:")
-            print(f"   1. Check API key is valid")
-            print(f"   2. Check network connection")
-            print(f"   3. Check API quota")
-            print(f"   4. Use --continue-on-error to force continue (not recommended)")
+            print(
+                f"❌ Error: Error rate {error_rate:.1%} exceeds threshold {args.error_threshold:.1%}"
+            )
+            print("💡 Suggestions:")
+            print("   1. Check API key is valid")
+            print("   2. Check network connection")
+            print("   3. Check API quota")
+            print("   4. Use --continue-on-error to force continue (not recommended)")
             sys.exit(1)
         else:
             # Error rate is within acceptable range, only warn
-            print(f"⚠️ Warning: There are a few entries failed to translate ({error_rate:.1%}), but it is within acceptable range")
-            print(f"💡 Tip: These failed entries will be retried on next run")
+            print(
+                f"⚠️ Warning: There are a few entries failed to translate ({error_rate:.1%}), but it is within acceptable range"
+            )
+            print("💡 Tip: These failed entries will be retried on next run")
             sys.exit(0)
 
 
 if __name__ == "__main__":
     main()
-
