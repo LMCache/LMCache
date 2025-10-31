@@ -21,6 +21,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
     CacheEngineKey,
     _lmcache_nvtx_annotate,
@@ -234,6 +235,32 @@ class StorageManager:
             self.internal_copy_stream = torch.cuda.Stream()
         else:
             self.internal_copy_stream = None
+
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.storage_events_ongoing_count.set_function(
+                lambda: self.event_manager.get_events_count_by_status(
+                    EventType.LOADING, EventStatus.ONGOING
+                )
+            )
+            prometheus_logger.storage_events_done_count.set_function(
+                lambda: self.event_manager.get_events_count_by_status(
+                    EventType.LOADING, EventStatus.DONE
+                )
+            )
+            prometheus_logger.storage_events_not_found_count.set_function(
+                lambda: self.event_manager.get_events_count_by_status(
+                    EventType.LOADING, EventStatus.NOT_FOUND
+                )
+            )
+        else:
+            logger.warning(
+                "PrometheusLogger is not initialized, "
+                "event metrics will not be collected"
+            )
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
