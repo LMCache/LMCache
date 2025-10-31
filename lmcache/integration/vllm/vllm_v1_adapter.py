@@ -19,7 +19,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils import cdiv, get_kv_cache_torch_dtype
+from vllm.utils import get_kv_cache_torch_dtype
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 import torch
@@ -63,6 +63,10 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def cdiv(a, b):
+    return (a + b - 1) // b
 
 
 @dataclass
