@@ -19,12 +19,10 @@ This documentation supports multiple languages:
 - **English** - Primary version
 - **中文 (Chinese)** - Complete translation available ✅
 
-### 🤖 Auto Translation (New!)
+### 🤖 Auto Translation
 
 We now support **AI-powered automatic translation**:
-- ⚡ **Quick Start**: [AUTO_TRANSLATION_QUICKSTART.md](./AUTO_TRANSLATION_QUICKSTART.md) - Set up in 3 minutes
-- 📖 **Complete Guide**: [AUTO_TRANSLATION_SETUP.md](./AUTO_TRANSLATION_SETUP.md) - Advanced configuration
-- ✍️ **Manual Translation**: [TRANSLATION_MAINTENANCE_zh.md](./TRANSLATION_MAINTENANCE_zh.md) - Traditional workflow
+- 📚 **All-in-one Guide**: [TRANSLATION_GUIDE.md](./TRANSLATION_GUIDE.md)
 
 ## Quick Build Commands
 

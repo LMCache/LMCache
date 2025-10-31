@@ -8,6 +8,7 @@
 |------|------|------|
 | LMCache | LMCache | 项目名称，不翻译 |
 | vLLM | vLLM | 项目名称，不翻译 |
+| production stack | production stack | 项目名称，不翻译 |
 | KV Cache | KV 缓存 | 键值缓存 |
 | Cache | 缓存 | |
 | Prefill | 预填充 | |
