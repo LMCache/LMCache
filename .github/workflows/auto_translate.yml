@@ -60,8 +60,8 @@ jobs:
       - name: Auto translate with AI
         env:
           # Choose one API according to your needs
-          ANYROUTER_API_KEY: ${{ secrets.ANYROUTER_API_KEY }}
-          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # ANYROUTER_API_KEY: ${{ secrets.ANYROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           FORCE_FLAG=""
