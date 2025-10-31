@@ -346,7 +346,7 @@ class S3RdmaConnector(RemoteConnector):
                     phy_size=size,
                     ref_count=1,
                     pin_count=0,
-                    fmt=MemoryFormat.KV_2LTD # Use BINARY format for raw bytes
+                    fmt=MemoryFormat.KV_2LTD
                 )
 
                 # Create TensorMemoryObj wrapping the GPU tensor
