@@ -2,14 +2,14 @@
 # Standard
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Optional
+from typing import Optional, Union
 import struct
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
 
 MAX_KEY_LENGTH = 150
@@ -131,7 +131,7 @@ class ClientMetaMessage:
     """
 
     command: ClientCommand
-    key: CacheEngineKey
+    key: Union[CacheEngineKey, LayerCacheEngineKey]
     length: int
     fmt: MemoryFormat
     dtype: Optional[torch.dtype]
@@ -170,7 +170,7 @@ class ClientMetaMessage:
         )
         return ClientMetaMessage(
             ClientCommand(command),
-            CacheEngineKey.from_string(key.decode().strip()),
+            parse_cache_key(key.decode().strip()),
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],
