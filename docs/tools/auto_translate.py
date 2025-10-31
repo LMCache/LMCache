@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # -*- coding: utf-8 -*-
+# ruff: noqa: E501
 """
 Auto Translation Tool - Used for automatically translating Sphinx documentation .po files
 
@@ -31,20 +32,20 @@ Usage:
 
 # Standard
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 import argparse
 import os
 import re
 import sys
 
 # Third Party
-import polib
+import polib  # type: ignore[import-untyped]
 
 
 class TranslationAPI:
     """Translation API base class"""
 
-    def __init__(self, api_key: str, glossary: Dict[str, str] = None):
+    def __init__(self, api_key: str, glossary: Optional[Dict[str, str]] = None):
         self.api_key = api_key
         self.glossary = glossary or {}
 
@@ -59,7 +60,10 @@ class OpenAITranslator(TranslationAPI):
     """OpenAI API translator"""
 
     def __init__(
-        self, api_key: str, model: str = "gpt-4o-mini", glossary: Dict[str, str] = None
+        self,
+        api_key: str,
+        model: str = "gpt-4o-mini",
+        glossary: Optional[Dict[str, str]] = None,
     ):
         super().__init__(api_key, glossary)
         self.model = model
@@ -130,7 +134,7 @@ class AnthropicTranslator(TranslationAPI):
         self,
         api_key: str,
         model: str = "claude-haiku-4-5-20251001",
-        glossary: Dict[str, str] = None,
+        glossary: Optional[Dict[str, str]] = None,
     ):
         super().__init__(api_key, glossary)
         self.model = model
@@ -206,9 +210,9 @@ class AnyRouterTranslator(TranslationAPI):
         self,
         api_key: str,
         provider: str = "anthropic",
-        model: str = None,
-        glossary: Dict[str, str] = None,
-        base_url: str = None,
+        model: Optional[str] = None,
+        glossary: Optional[Dict[str, str]] = None,
+        base_url: Optional[str] = None,
     ):
         super().__init__(api_key, glossary)
         self.provider = provider
@@ -321,7 +325,7 @@ class AnyRouterTranslator(TranslationAPI):
 
 def load_glossary(glossary_file: Path) -> Dict[str, str]:
     """Load terms from glossary file"""
-    glossary = {}
+    glossary: Dict[str, str] = {}
 
     if not glossary_file.exists():
         print(f"Warning: Glossary file does not exist: {glossary_file}")
@@ -384,20 +388,16 @@ def translate_po_file(
             continue
 
         # Check if translation is needed
-        needs_translation = False
         is_fuzzy = "fuzzy" in entry.flags
 
         if force:
             # Force translate all entries
-            needs_translation = True
             reason = "Force re-translate"
         elif not entry.msgstr:
             # New entries (msgstr is empty)
-            needs_translation = True
             reason = "New"
         elif is_fuzzy:
             # Modified entries (fuzzy flag)
-            needs_translation = True
             fuzzy_count += 1
             reason = "Modified (fuzzy)"
         else:
