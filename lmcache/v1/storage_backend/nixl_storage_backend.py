@@ -517,24 +517,14 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         :return: MemoryObj. None if the key does not exist.
         """
+
         future = asyncio.run_coroutine_threadsafe(self.storage_to_mem([key]), self.loop)
+
         if future is None:
             return None
+
         obj_list = future.result()
         return obj_list[0]
-
-    def batched_get_blocking(
-        self,
-        keys: List[CacheEngineKey],
-    ) -> List[Optional[MemoryObj]]:
-        if not keys:
-            return []
-
-        future = asyncio.run_coroutine_threadsafe(self.storage_to_mem(keys), self.loop)
-        if future is None:
-            return []
-        obj_list = future.result()
-        return obj_list
 
     async def batched_get_non_blocking(
         self,

@@ -47,7 +47,6 @@ from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterfac
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
-ENABLE_NIXL_PRESENCE_CACHE = True
 
 
 class SetPresenceCache:
@@ -106,7 +105,8 @@ class NixlObjectConfig:
     buffer_device: str
     backend: str
     backend_params: dict[str, str]
-    lookup_and_fetch: bool
+    enable_presence_cache: bool
+    enable_async_put: bool
 
     @staticmethod
     def validate_nixl_backend(backend: str, device: str):
@@ -142,14 +142,16 @@ class NixlObjectConfig:
             config.nixl_buffer_device, metadata.worker_id
         )
 
-        lookup_and_fetch = extra_config.get("nixl_object_lookup_and_fetch", False)
+        enable_presence_cache = extra_config.get("nixl_object_presence_cache", False)
+        enable_async_put = extra_config.get("nixl_object_async_put", False)
 
         return NixlObjectConfig(
             buffer_size=config.nixl_buffer_size,
             buffer_device=corrected_device,
             backend=backend,
             backend_params=backend_params,
-            lookup_and_fetch=lookup_and_fetch,
+            enable_presence_cache=enable_presence_cache,
+            enable_async_put=enable_async_put,
         )
 
 
@@ -243,17 +245,13 @@ class NixlObjectAgent:
         for i in range(len(object_keys)):
             reg_list.append((0, page_size, i, object_keys[i]))
             xfer_desc.append((0, page_size, i))
-            logger.debug(
-                f"Initializing storage handler for {object_keys[i]} with index {i}"
-            )
 
         reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
-        # descs not used
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
         xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_desc, mem_type="OBJ"
+            self.agent_name, xfer_descs, mem_type="OBJ"
         )
-        return reg_descs, xfer_descs, xfer_handler
+        return reg_descs, xfer_handler
 
     def get_mem_to_storage_handle(
         self, mem_indices, storage_xfer_handler, storage_indices
@@ -277,22 +275,17 @@ class NixlObjectAgent:
             storage_indices,
         )
 
-    def post_blocking(self, handle: NixlXferHandle) -> bool:
+    def post_blocking(self, handle: NixlXferHandle):
         state = self.nixl_agent.transfer(handle)
 
-        while state != "DONE" and state != "ERR" and state != "MISS":
+        while state != "DONE" and state != "ERR":
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
-            except nixlBind.nixlBackendError as exc:
-                logger.info(f"NIXL transfer failed: {exc}")
-                state = "MISS"
-            except Exception as exc:
-                logger.info(f"Other exception: {exc}")
+            except nixlBind.nixlBackendError:
+                raise
 
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
-
-        return state == "DONE"
 
     def post_blocking_async(self, handle: NixlXferHandle):
         """Non-blocking async post for WRITE operations."""
@@ -351,7 +344,8 @@ class NixlObjectBackend(AllocatorBackendInterface):
         self.progress_lock = threading.Lock()
         self.progress_set: set[int] = set()
 
-        self.async_mode = False
+        self.async_mode = nixl_config.enable_async_put
+        self.enable_presence_cache = nixl_config.enable_presence_cache
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.agent = NixlObjectAgent(
@@ -361,17 +355,11 @@ class NixlObjectBackend(AllocatorBackendInterface):
             nixl_config.backend_params,
         )
 
-        self.lookup_and_fetch = nixl_config.lookup_and_fetch
-
-        # Initialize object map to track keys and their objects
-        # for prefetch and pinned obj only
-        self.object_map = NixlObjectMap()
-
         # Presence cache to reduce remote contains checks
         self.hit_counter = 0
         self.total_counter = 0
         self.key_presence_cache: Optional[PresenceCache] = None
-        if ENABLE_NIXL_PRESENCE_CACHE:
+        if self.enable_presence_cache:
             self.key_presence_cache = (
                 cache_policy if cache_policy is not None else SetPresenceCache()
             )
@@ -384,26 +372,26 @@ class NixlObjectBackend(AllocatorBackendInterface):
 
     def set_presence_cache(self, cache: PresenceCache) -> None:
         """Configure a custom cache policy for key presence tracking."""
-        if ENABLE_NIXL_PRESENCE_CACHE:
+        if self.enable_presence_cache:
             self.key_presence_cache = cache
 
     def _cache_contains(self, chunk_hash: int) -> bool:
-        if not ENABLE_NIXL_PRESENCE_CACHE or self.key_presence_cache is None:
+        if not self.enable_presence_cache or self.key_presence_cache is None:
             return False
         found = self.key_presence_cache.contains(chunk_hash)
         self.hit_counter += 1 if found else 0
         self.total_counter += 1
-        if self.total_counter % 10 == 0:
-            logger.info(f"Cache hit: {self.hit_counter} vs {self.total_counter}")
+        if self.total_counter % 100 == 0:
+            logger.debug(f"Cache hit: {self.hit_counter} vs {self.total_counter}")
         return found
 
     def _cache_add(self, chunk_hash: int) -> None:
-        if not ENABLE_NIXL_PRESENCE_CACHE or self.key_presence_cache is None:
+        if not self.enable_presence_cache or self.key_presence_cache is None:
             return
         self.key_presence_cache.add(chunk_hash)
 
     def _cache_discard(self, chunk_hash: int) -> None:
-        if not ENABLE_NIXL_PRESENCE_CACHE or self.key_presence_cache is None:
+        if not self.enable_presence_cache or self.key_presence_cache is None:
             return
         self.key_presence_cache.discard(chunk_hash)
 
@@ -493,7 +481,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
             storage_indices.append(idx)
 
         # Create batched storage handler
-        storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
+        storage_reg_descs, storage_xfer_handler = (
             self.agent.create_batched_storage_handler(object_keys, page_size)
         )
         # Create transfer handle
@@ -503,10 +491,13 @@ class NixlObjectBackend(AllocatorBackendInterface):
 
         # Try to read the object
         try:
-            xfer_state = self.agent.post_blocking(handle)
+            self.agent.post_blocking(handle)
+            xfer_state = True
         except nixlBind.nixlBackendError as exc:
-            logger.debug(f"Batch Transfer failed: {exc}")
-            return [None] * len(keys)
+            logger.error(f"Batch Transfer failed: {exc}")
+            # If any of the objects doesn't exist, the transfer will fail
+            # treat such failure recoverable and free the allocated memory
+            xfer_state = False
 
         self.agent.release_handle(handle)
         self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
@@ -514,16 +505,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         if xfer_state:
             for i in range(len(keys)):
                 key = keys[i]
-                obj = obj_list[i]
-                object_key = object_keys[i]
-                # Cache them in the object map
-                if pin:
-                    self.object_map.add(key.chunk_hash, obj, object_key)
-                    logger.debug(
-                        f"PREFETCH Key {key.chunk_hash:x} in batch and keep in map"
-                    )
-                else:
-                    logger.debug(f"GET Key {key.chunk_hash:x} in batch")
+                logger.debug(f"GET Key {key.chunk_hash:x} in batch")
                 self._cache_add(key.chunk_hash)
             end_time = time.time()
             duration = end_time - start_time
@@ -545,11 +527,12 @@ class NixlObjectBackend(AllocatorBackendInterface):
         """
         Check whether key is in the storage backend.
 
-        This method attempts to read the object from storage to verify existence.
-        If successful, it caches the object in the object_map for later retrieval.
+        This method uses nixl querymem to check existence.
+        If successful, it caches the name for later use.
 
         :param key: The key to check
         :param pin: Whether to pin the object in the backend
+            (Not Implemented)
 
         :return: True if the key exists, False otherwise
         """
@@ -558,35 +541,21 @@ class NixlObjectBackend(AllocatorBackendInterface):
             logger.debug(f"Key {key.chunk_hash:x} is in put tasks")
             return False
 
-        # Check if already in object map
-        if self.object_map.contains(key.chunk_hash):
-            logger.debug(f"LOOKUP: Key {key.chunk_hash:x} exists in object map")
-            return True
-
         # Check presence cache before hitting remote storage if not prefetching
-        if not self.lookup_and_fetch and self._cache_contains(key.chunk_hash):
+        if self._cache_contains(key.chunk_hash):
             logger.debug(f"LOOKUP: Key {key.chunk_hash:x} assumed present from cache")
             return True
 
-        xfer_state = False  # not found by default
-        if pin and self.lookup_and_fetch:
-            """Only enable prefetch if lookup_and_fetch is enabled"""
-            logger.debug(f"PREFETCH key {key.chunk_hash:x}")
-            """retrieve and pin in memory for later use"""
-            obj_list = self.storage_to_mem([key], pin)
-            xfer_state = obj_list[0] is not None
+        xfer_state = self.key_exists(key)
+        if xfer_state:
+            logger.debug(f"LOOKUP Key {key.chunk_hash:x} exists in storage")
+            self._cache_add(key.chunk_hash)
         else:
-            xfer_state = self.key_exists(key)
-            if xfer_state:
-                logger.debug(f"LOOKUP Key {key.chunk_hash:x} exists in storage")
-                self._cache_add(key.chunk_hash)
-            else:
-                logger.debug(f"LOOKUP Key {key.chunk_hash:x} does not exist in storage")
-                self._cache_discard(key.chunk_hash)
+            logger.debug(f"LOOKUP Key {key.chunk_hash:x} does not exist in storage")
+            self._cache_discard(key.chunk_hash)
 
         return xfer_state
 
-    """
     async def batched_async_contains(
         self,
         lookup_id: str,
@@ -596,11 +565,10 @@ class NixlObjectBackend(AllocatorBackendInterface):
         if not keys:
             return 0
 
-        #sem = asyncio.Semaphore(4)
-
+        # sem = asyncio.Semaphore(4)
         async def async_contains(key: CacheEngineKey) -> bool:
             # Limit concurrent threads
-            #async with sem:
+            # async with sem:
             return await asyncio.to_thread(self.contains, key, pin)
 
         # Start all tasks concurrently (semaphore will throttle)
@@ -611,9 +579,9 @@ class NixlObjectBackend(AllocatorBackendInterface):
                 ok = await t
                 if not ok:
                     # Cancel remaining tasks and return
-                    for rt in tasks[i+1:]:
+                    for rt in tasks[i + 1 :]:
                         rt.cancel()
-                    await asyncio.gather(*tasks[i+1:], return_exceptions=True)
+                    await asyncio.gather(*tasks[i + 1 :], return_exceptions=True)
                     return i
             return len(keys)
         except Exception:
@@ -623,7 +591,6 @@ class NixlObjectBackend(AllocatorBackendInterface):
                     rt.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             return 0
-    """
 
     async def _wait_for_transfer(
         self, handle: NixlXferHandle, initial_state: str, keys: Sequence[CacheEngineKey]
@@ -663,7 +630,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
             object_keys.append(object_key)
             storage_indices.append(i)
 
-        storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
+        storage_reg_descs, storage_xfer_handler = (
             self.agent.create_batched_storage_handler(object_keys, page_size)
         )
 
@@ -691,30 +658,6 @@ class NixlObjectBackend(AllocatorBackendInterface):
                 with self.progress_lock:
                     self.progress_set.discard(key.chunk_hash)
 
-    async def get_from_mem(
-        self, keys: list[CacheEngineKey]
-    ) -> list[Optional[MemoryObj]]:
-        """
-        Retrieve memory objects from storage using the object_map.
-
-        This method uses objects that were cached during contains() calls.
-        """
-        obj_list: list[Optional[MemoryObj]] = []
-
-        for key in keys:
-            entry = self.object_map.pop(key.chunk_hash)
-            if entry is None:
-                logger.debug(f"Key {key.chunk_hash:x} not found in object map")
-                obj_list.append(None)
-                self._cache_discard(key.chunk_hash)
-            else:
-                # Return the cached object
-                obj_list.append(entry.obj)
-                self._cache_add(key.chunk_hash)
-                logger.debug(f"Retrieved key {key.chunk_hash:x} from object map")
-
-        return obj_list
-
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
@@ -740,13 +683,8 @@ class NixlObjectBackend(AllocatorBackendInterface):
 
         :return: MemoryObj. None if the key does not exist.
         """
-        if self.lookup_and_fetch:
-            obj_list = asyncio.run(self.get_from_mem([key]))
-            return obj_list[0]
-        else:
-            obj_list = self.storage_to_mem([key], False)
-            return obj_list[0]
-        return None
+        obj_list = self.storage_to_mem([key], False)
+        return obj_list[0]
 
     def batched_get_blocking(
         self,
@@ -769,13 +707,12 @@ class NixlObjectBackend(AllocatorBackendInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
-        if self.lookup_and_fetch:
-            obj_list = await self.get_from_mem(keys)
-            assert None not in obj_list
-            return cast(list[MemoryObj], obj_list)
-        else:
-            # TODO zirui
-            return []
+        """
+        A non-blocking function to get the kv cache from the storage backend.
+        """
+        obj_list = self.storage_to_mem(keys, False)
+        assert None not in obj_list
+        return cast(list[MemoryObj], obj_list)
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
         """
@@ -784,21 +721,19 @@ class NixlObjectBackend(AllocatorBackendInterface):
         :param key: The key to remove.
         :param force: Whether to force removal (not used in this implementation)
         """
-        entry = self.object_map.pop(key.chunk_hash)
-        if entry is None:
-            return False
-
-        # Free the memory object if it exists
-        if entry.obj is not None:
-            self.memory_allocator.free(entry.obj)
-
         self._cache_discard(key.chunk_hash)
         return True
 
     def pin(self, key: CacheEngineKey) -> bool:
+        """
+        Not implemented yet
+        """
         return False
 
     def unpin(self, key: CacheEngineKey) -> bool:
+        """
+        Not implemented yet
+        """
         return False
 
     def close(self) -> None:
@@ -856,10 +791,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
         """
-        if eviction:
-            logger.warning("NixlObjectBackend does not support eviction for now")
-        if busy_loop:
-            logger.warning("NixlObjectBackend does not support busy loop for now")
+        eviction and busy loop are not supported for now.
         """
         return self.memory_allocator.allocate(shape, dtype, fmt)
 
@@ -872,11 +804,9 @@ class NixlObjectBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[list[MemoryObj]]:
-        if eviction:
-            logger.warning("NixlObjectBackend does not support eviction for now")
-        if busy_loop:
-            logger.warning("NixlObjectBackend does not support busy loop for now")
-
+        """
+        eviction and busy loop are not supported for now.
+        """
         return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
 
     def get_allocator_backend(self):
