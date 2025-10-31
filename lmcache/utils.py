@@ -39,6 +39,18 @@ logger = init_logger(__name__)
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
+
+# Math utility functions
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division."""
+    return -(a // -b)
+
+
+def round_down(x: int, y: int) -> int:
+    """Round down x to the nearest multiple of y."""
+    return (x // y) * y
+
+
 try:
     # First Party
     from lmcache import _version  # type: ignore[attr-defined]

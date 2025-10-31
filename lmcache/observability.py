@@ -32,6 +32,7 @@ class LMCacheStats:
     interval_lookup_tokens: int
     interval_lookup_hits: int
     interval_vllm_hit_tokens: int
+    interval_prompt_tokens: int
 
     interval_remote_read_requests: int
     interval_remote_read_bytes: int
@@ -158,6 +159,7 @@ class LMCStatsMonitor:
         self.interval_lookup_tokens = 0  # total requested tokens lookup
         self.interval_lookup_hits = 0  # total hit tokens lookup
         self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
+        self.interval_prompt_tokens = 0  # total prompt tokens
 
         # P2P transfer metrics
         self.interval_p2p_requests = 0
@@ -372,6 +374,10 @@ class LMCStatsMonitor:
     def update_interval_vllm_hit_tokens(self, delta: int):
         self.interval_vllm_hit_tokens += delta
 
+    @thread_safe
+    def update_interval_prompt_tokens(self, delta: int):
+        self.interval_prompt_tokens += delta
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -386,6 +392,7 @@ class LMCStatsMonitor:
         self.interval_lookup_tokens = 0
         self.interval_lookup_hits = 0
         self.interval_vllm_hit_tokens = 0
+        self.interval_prompt_tokens = 0
 
         self.interval_remote_read_requests = 0
         self.interval_remote_read_bytes = 0
@@ -525,6 +532,7 @@ class LMCStatsMonitor:
             p2p_time_to_transfer=p2p_time_to_transfer,
             p2p_transfer_speed=p2p_transfer_speed,
             interval_lookup_hit_rates=request_lookup_hit_rates,
+            interval_prompt_tokens=self.interval_prompt_tokens,
         )
         self._clear()
         return ret
@@ -622,6 +630,12 @@ class PrometheusLogger:
         self.counter_num_vllm_hit_tokens = self._counter_cls(
             name="lmcache:num_vllm_hit_tokens",
             documentation="Number of hit tokens in vllm",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_prompt_tokens = self._counter_cls(
+            name="lmcache:num_prompt_tokens",
+            documentation="Number of prompt tokens in lmcache",
             labelnames=labelnames,
         )
 
@@ -1042,6 +1056,7 @@ class PrometheusLogger:
         self._log_counter(self.counter_num_stored_tokens, stats.interval_stored_tokens)
         self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
         self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
+        self._log_counter(self.counter_num_prompt_tokens, stats.interval_prompt_tokens)
         self._log_counter(
             self.counter_num_vllm_hit_tokens, stats.interval_vllm_hit_tokens
         )

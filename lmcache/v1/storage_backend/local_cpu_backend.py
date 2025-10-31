@@ -573,7 +573,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         Returns:
             int: The estimated chunk budget for concurrent allocations
         """
-        logger.info("Attempting to calculate chunk budget for async loading")
+        logger.debug("Attempting to calculate chunk budget for async loading")
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
         )
@@ -597,13 +597,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
         else:
             # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
             chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
-        logger.info(
+        logger.debug(
             f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
             f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
             f"dtype_size={dtype_size}, "
             f"hidden_dim={hidden_dim}"
         )
-        logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
+        logger.debug(f"Calculated bytes per chunk per rank: {chunk_bytes}")
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         assert hasattr(self.memory_allocator, "align_bytes")
@@ -613,8 +613,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # calculate budget with safety margin
         max_chunks = total_memory // aligned_chunk_bytes
 
-        chunk_budget = int(max_chunks)
-        return chunk_budget
+        return max_chunks
 
     def get_keys(self) -> List[CacheEngineKey]:
         """
