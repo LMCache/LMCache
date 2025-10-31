@@ -120,15 +120,18 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
-    if (not config.enable_pd or config.local_cpu) and config.max_local_cpu_size > 0:
-        local_cpu_backend = LocalCPUBackend(
-            config,
-            metadata,
-            dst_device,
-            lmcache_worker,
-        )
-        backend_name = str(local_cpu_backend)
-        storage_backends[backend_name] = local_cpu_backend
+    if not config.enable_pd or config.local_cpu:
+        if config.max_local_cpu_size > 0:
+            local_cpu_backend = LocalCPUBackend(
+                config,
+                metadata,
+                dst_device,
+                lmcache_worker,
+            )
+            backend_name = str(local_cpu_backend)
+            storage_backends[backend_name] = local_cpu_backend
+        else:
+            logger.info("No cpu memory is allocated as max_local_cpu_size <= 0")
 
     if config.enable_p2p:
         p2p_backend = P2PBackend(
