@@ -366,12 +366,11 @@ class RemoteBackend(StorageBackendInterface):
                         "batched get blocking timeout, trigger cancel the future task"
                     )
                     future.cancel()
-                with self.lock:
-                    self.connection = None
-                    self.failure_time = time.time()
-                logger.warning(
-                    f"Error occurred in batched_get_blocking: {e}, returning None list"
-                )
+                else:
+                    logger.warning(
+                        f"Error occurred in batched_get_blocking: {e}, "
+                        f"returning None list"
+                    )
                 return [None] * len(keys)
         else:
             futures = [
@@ -391,12 +390,10 @@ class RemoteBackend(StorageBackendInterface):
                                 "get blocking timeout, trigger cancel the future task"
                             )
                             fut.cancel()
-                        with self.lock:
-                            self.connection = None
-                            self.failure_time = time.time()
-                        logger.warning(
-                            f"Error occurred in get_blocking: {e}, returning None"
-                        )
+                        else:
+                            logger.warning(
+                                f"Error occurred in get_blocking: {e}, returning None"
+                            )
                         memory_obj = None
                     memory_objs.append(memory_obj)
                 else:
