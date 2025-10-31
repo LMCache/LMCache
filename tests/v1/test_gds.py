@@ -16,7 +16,7 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import CuFileMemoryAllocator
+from lmcache.v1.memory_management import CuFileMemoryAllocator, MemoryFormat
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
 
@@ -25,11 +25,12 @@ def test_gds_backend_metadata():
     # This is a sanity check that packing and unpacking works. We can add
     # more tensor types to be sure.
     for [tensor, expected_nbytes] in [(torch.randn(3, 10), 120)]:
-        r = pack_metadata(tensor, version="test")
-        size, dtype, nbytes, meta = unpack_metadata(r)
+        r = pack_metadata(tensor, fmt=MemoryFormat.KV_2LTD, version="test")
+        size, dtype, nbytes, fmt, meta = unpack_metadata(r)
         assert size == tensor.size()
         assert dtype == tensor.dtype
         assert expected_nbytes == nbytes
+        assert fmt == MemoryFormat.KV_2LTD
         assert meta["version"] == "test"
 
         # Make sure that safetensors can load this

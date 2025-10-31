@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
-import uuid
 
 # Third Party
 from vllm.config import (
@@ -19,7 +18,21 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils import cdiv, get_kv_cache_torch_dtype
+
+# First Party
+# Use LMCache's own math utilities instead of vllm's
+# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
+from lmcache.utils import cdiv
+
+# Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
+try:
+    # Third Party
+    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+except ImportError:
+    # Third Party
+    from vllm.utils import get_kv_cache_torch_dtype
+
+# Third Party
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 import torch
@@ -547,7 +560,6 @@ def _init_lmcache_engine(
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
-    lookup_requests_in_step: list[str] = field(default_factory=list)
 
     @_lmcache_nvtx_annotate
     def add_request(self, req_meta: ReqMeta) -> None:
@@ -602,7 +614,6 @@ class LMCacheConnectorV1Impl:
                 vllm_config, config
             )
             self._unfinished_requests: dict[str, Request] = {}
-            self._lookup_requests_in_step: list[str] = []
             self.lmcache_engine = None
         else:
             self.lmcache_engine = _init_lmcache_engine(
@@ -673,6 +684,9 @@ class LMCacheConnectorV1Impl:
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
         self._requests_priority: dict[str, int] = {}
+
+        # Track block IDs associated with failed load attempts.
+        self._invalid_block_ids: set[int] = set()
 
         # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
         if vllm_config.parallel_config.data_parallel_rank_local == 0:
@@ -825,9 +839,6 @@ class LMCacheConnectorV1Impl:
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
 
-            self._stats_monitor.update_interval_vllm_hit_tokens(
-                request.load_spec.vllm_cached_tokens
-            )
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
                 request.load_spec.vllm_cached_tokens
@@ -871,6 +882,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                     req_id=request.req_id,
+                    skip_contains_check=True,
                 )
 
                 # Check the result
@@ -888,6 +900,95 @@ class LMCacheConnectorV1Impl:
                         num_retrieved_tokens,
                         num_expected_tokens,
                     )
+                    """
+                    Report failed block IDs in case of partial failure.
+                    """
+                    missing_blocks = self.record_failed_blocks(
+                        request.req_id,
+                        token_mask[:lmcache_cached_tokens],
+                        ret_token_mask,
+                        slot_mapping[:lmcache_cached_tokens],
+                    )
+                    self._invalid_block_ids.update(missing_blocks)
+
+            self._stats_monitor.update_interval_vllm_hit_tokens(
+                request.load_spec.vllm_cached_tokens
+            )
+            self._stats_monitor.update_interval_prompt_tokens(len(tokens))
+
+    def record_failed_blocks(
+        self,
+        request_id: str,
+        expected_mask: torch.Tensor,
+        ret_mask: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> set[int]:
+        """Record block IDs associated with failed load attempts.
+
+        Args:
+            request_id: request id from vLLM.
+            expected_mask: Boolean tensor indicating which tokens were expected to
+                be loaded from LMCache. True means the token should be loaded,
+                False means the token is already cached in vLLM and does not need
+                to be loaded from LMCache.
+            ret_mask: Boolean tensor indicating which tokens were actually
+                successfully retrieved from LMCache. True means the token was
+                successfully loaded. For example, if 256 tokens are expected to be
+                loaded, but only 192 tokens are successfully loaded, then the
+                ret_mask will be a tensor of 256 items like [T, T, ..., F, F, ...]
+                where the first 192 elements are True and the last 64 elements
+                are False.
+            slot_mapping: Tensor indicating slot IDs for each token. The block
+                ID is computed by dividing the slot ID by the block size.
+
+        Example:
+            expected_mask = [F, T, T, T] meaning the 1st is in vLLM cache
+            ret_mask = [F, T, F, F] meaning failure from loading the 3rd
+            missing_mask = expected_mask & ~ret_mask = [F, F, T, T]
+            missing_indices = [2, 3]
+            then missing_blocks is calculated from slot_mapping and missing_indices
+
+        Returns:
+            set[int]: Set of block IDs that failed to load.
+        """
+
+        if expected_mask.numel() == 0:
+            return set()
+
+        expected_mask_cpu = expected_mask.to(device="cpu", dtype=torch.bool)
+        ret_mask_cpu = ret_mask.to(device="cpu", dtype=torch.bool)
+
+        if ret_mask_cpu.shape[0] != expected_mask_cpu.shape[0]:
+            logger.debug("expected_mask_cpu.shape[0] != ret_mask_cpu.shape[0]")
+            return set()
+
+        missing_mask = expected_mask_cpu & ~ret_mask_cpu
+        if not torch.any(missing_mask):
+            return set()
+
+        missing_indices = torch.nonzero(missing_mask, as_tuple=False).view(-1)
+        if missing_indices.numel() == 0:
+            return set()
+
+        slot_mapping_cpu = slot_mapping.to(device="cpu", dtype=torch.long)
+        if slot_mapping_cpu.shape[0] > missing_mask.shape[0]:
+            slot_mapping_cpu = slot_mapping_cpu[: missing_mask.shape[0]]
+
+        missing_blocks_tensor = torch.unique(
+            slot_mapping_cpu[missing_indices] // self._block_size
+        )
+        missing_blocks = {int(block.item()) for block in missing_blocks_tensor}
+
+        if not missing_blocks:
+            return set()
+
+        logger.warning(
+            "Request %s failed to load %d tokens across %d blocks",
+            request_id,
+            missing_indices.numel(),
+            len(missing_blocks),
+        )
+        return missing_blocks
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -1022,8 +1123,6 @@ class LMCacheConnectorV1Impl:
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
-        self.lmcache_engine.lookup_unpin(connector_metadata.lookup_requests_in_step)
-
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
@@ -1031,6 +1130,10 @@ class LMCacheConnectorV1Impl:
         if self.use_layerwise:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
+
+            # unpin the kv caches according to req_id
+            for request in connector_metadata.requests:
+                self.lmcache_engine.lookup_unpin(request.req_id)
             return
 
         assert len(self.kv_caches) > 0
@@ -1039,6 +1142,9 @@ class LMCacheConnectorV1Impl:
         assert self.lmcache_engine is not None
 
         for request in connector_metadata.requests:
+            # unpin the kv caches according to req_id
+            self.lmcache_engine.lookup_unpin(request.req_id)
+
             save_spec = request.save_spec
             if (
                 save_spec is None or not save_spec.can_save
@@ -1115,6 +1221,11 @@ class LMCacheConnectorV1Impl:
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         return None, None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        invalid_blocks = self._invalid_block_ids.copy()
+        self._invalid_block_ids.clear()
+        return invalid_blocks
+
     ###################
     # Scheduler side APIs
     ####################
@@ -1157,12 +1268,8 @@ class LMCacheConnectorV1Impl:
         request_configs = extract_request_configs(request.sampling_params)
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
-        if self.async_loading:
-            lookup_id = request.request_id
-        else:
-            lookup_id = str(uuid.uuid4())
 
-        self._lookup_requests_in_step.append(lookup_id)
+        lookup_id = request.request_id
 
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,
@@ -1219,6 +1326,10 @@ class LMCacheConnectorV1Impl:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
+
+        # Clear local status in lookup client when a new request is
+        # successfully scheduled.
+        self.lookup_client.clear_lookup_status(request.request_id)
 
         kv_transfer_params = (
             request.kv_transfer_params
@@ -1289,10 +1400,6 @@ class LMCacheConnectorV1Impl:
         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
         meta = LMCacheConnectorMetadata()
-
-        # set and update lookup requests for unpin
-        meta.lookup_requests_in_step = self._lookup_requests_in_step
-        self._lookup_requests_in_step = []
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)

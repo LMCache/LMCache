@@ -16,6 +16,8 @@ from lmcache.v1.cache_controller.message import (
     HeartbeatMsg,
     QueryInstMsg,
     QueryInstRetMsg,
+    QueryWorkerInfoMsg,
+    QueryWorkerInfoRetMsg,
     RegisterMsg,
 )
 from lmcache.v1.cache_controller.utils import WorkerInfo
@@ -188,3 +190,24 @@ class RegistrationController:
         else:
             # update worker info
             self.worker_info_mapping[worker_key].last_heartbeat_time = time.time()
+
+    async def query_worker_info(self, msg: QueryWorkerInfoMsg) -> QueryWorkerInfoRetMsg:
+        """
+        Query worker info.
+        """
+        event_id = msg.event_id
+        worker_infos = []
+        if msg.instance_id not in self.worker_mapping:
+            logger.warning(f"instance {msg.instance_id} not registered.")
+        else:
+            worker_ids = msg.worker_ids
+            if worker_ids is None or len(worker_ids) == 0:
+                worker_ids = self.worker_mapping[msg.instance_id]
+            for worker_id in worker_ids:
+                worker_key = (msg.instance_id, worker_id)
+                if worker_key in self.worker_info_mapping:
+                    worker_infos.append(self.worker_info_mapping[worker_key])
+                else:
+                    logger.warning(f"worker {worker_key} not registered.")
+
+        return QueryWorkerInfoRetMsg(event_id=event_id, worker_infos=worker_infos)

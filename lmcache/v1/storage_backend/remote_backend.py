@@ -161,6 +161,38 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Returning False")
             return False
 
+    def support_batched_contains(self) -> bool:
+        return (
+            self.connection is not None and self.connection.support_batched_contains()
+        )
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+        stop_after_first_not_exits: bool = True,
+    ) -> List[bool]:
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in batched_contains, returning all False"
+            )
+            return [False] * len(keys)
+
+        if self._mla_worker_id_as0_mode:
+            keys = [
+                CacheEngineKey(
+                    key.fmt,
+                    key.model_name,
+                    key.world_size,
+                    0,
+                    key.chunk_hash,
+                    key.request_configs,
+                )
+                for key in keys
+            ]
+
+        return self.connection.batched_contains(keys, stop_after_first_not_exits)
+
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:
             return key in self.put_tasks
@@ -459,7 +491,17 @@ class RemoteBackend(StorageBackendInterface):
         return True
 
     def remove(self, key, force=True):
-        raise NotImplementedError("Remote backend does not support remove now.")
+        if self.connection is None:
+            logger.warning("Connection is None in remove, returning False")
+            return False
+
+        try:
+            return self.connection.remove_sync(key)
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove key {key} from remote backend, error: {e}"
+            )
+            return False
 
     def get_allocator_backend(self):
         return self.local_cpu_backend

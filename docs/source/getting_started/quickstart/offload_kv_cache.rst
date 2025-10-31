@@ -376,3 +376,29 @@ LMCache now supports offloading KV cache to the following destinations:
 - :doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`
 - :doc:`Redis <../../kv_cache/storage_backends/redis>`
 - :doc:`ValKey <../../kv_cache/storage_backends/valkey>`
+
+Troubleshooting
+---------------
+
+If you encounter the following error:
+
+.. code-block:: text
+
+    (EngineCore_DP0 pid=55437) ERROR 10-04 14:44:47 [core.py:708] RuntimeError: 
+    Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use the 'spawn' start method
+
+You can resolve this issue using one of the following methods:
+
+- Set ``VLLM_WORKER_MULTIPROC_METHOD=spawn`` in the environment variables.
+- Or update the Python code to guard usage of vllm behind a if ``__name__ == '__main__':`` block.
+
+.. code-block:: python
+
+    if __name__ == '__main__':
+        from vllm import LLM, SamplingParams
+        from vllm.config import KVTransferConfig
+        from lmcache.v1.cache_engine import LMCacheEngineBuilder
+        from lmcache.integration.vllm.utils import ENGINE_NAME
+        main()
+
+For details, please refer to the `vLLM Troubleshooting Guide: Python multiprocessing <https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing>`_.

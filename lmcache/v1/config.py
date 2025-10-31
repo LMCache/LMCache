@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Optional, Union
+import ast
 import json
 import os
 import re
+import uuid
 
 # Third Party
 import yaml
@@ -71,6 +73,33 @@ def _to_bool(
     return str(value).strip().lower() in ["true", "1"]
 
 
+def _parse_quoted_string(value: str) -> str:
+    """Parse a string that may be surrounded by quotes and handle escape characters.
+
+    Args:
+        value: The input string that may be quoted
+
+    Returns:
+        The unquoted string with escape characters properly handled
+    """
+    if not value:
+        return value
+
+    value = value.strip()
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        try:
+            evaluated = ast.literal_eval(value)
+            if isinstance(evaluated, str):
+                return evaluated
+        except (ValueError, SyntaxError):
+            # If ast.literal_eval fails, it's not a valid Python literal.
+            # Fall back to simply stripping the outer quotes.
+            return value[1:-1]
+
+    return value
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -101,6 +130,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
+    "reserve_local_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
     "local_disk": {
         "type": Optional[str],
         "default": None,
@@ -176,8 +206,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "lmcache_instance_id": {
-        "type": str,
-        "default": "lmcache_default_instance",
+        "type": Optional[str],
+        "default": None,
         "env_converter": str,
     },
     "controller_pull_url": {
@@ -361,6 +391,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": float,
     },
+    "lookup_server_worker_ids": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
 }
 
 
@@ -404,6 +439,9 @@ def _create_config_class():
     from dataclasses import make_dataclass
 
     def _post_init(self):
+        # Generate random instance ID if not set
+        if not self.lmcache_instance_id:
+            self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
         self.validate()
 
     cls = make_dataclass(
@@ -415,6 +453,7 @@ def _create_config_class():
             "log_config": _log_config,
             "to_original_config": _to_original_config,
             "get_extra_config_value": _get_extra_config_value,
+            "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
             "from_defaults": classmethod(_from_defaults),
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
@@ -434,6 +473,7 @@ def _create_config_class():
 
 def _validate_config(self):
     """Validate configuration"""
+
     # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
     if self.enable_async_loading or self.use_layerwise:
         logger.warning(
@@ -469,8 +509,7 @@ def _validate_config(self):
 
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
-        assert self.extra_config.get("nixl_path") is not None
-        assert self.extra_config.get("nixl_file_pool_size") is not None
+        assert self.extra_config.get("nixl_pool_size") is not None
         assert self.nixl_buffer_size is not None
         assert self.nixl_buffer_device is not None
 
@@ -513,6 +552,20 @@ def _get_extra_config_value(self, key, default_value=None):
         return self.extra_config.get(key, default_value)
     else:
         return default_value
+
+
+def _get_lookup_server_worker_ids(self, use_mla, world_size):
+    if self.lookup_server_worker_ids is None:
+        # if mla is not enabled, return [], which means start
+        # lookup server on all worker as default;
+        # if mla is enabled, return [0], which means start lookup
+        # server on worker 0 as default.
+        return [0] if use_mla else []
+
+    # check the input
+    for worker_id in self.lookup_server_worker_ids:
+        assert -1 < worker_id < world_size
+    return self.lookup_server_worker_ids
 
 
 def _from_defaults(cls, **kwargs):
@@ -646,12 +699,25 @@ def _update_config_from_env(self):
     for name, config in _CONFIG_DEFINITIONS.items():
         if name in resolved_config:
             try:
-                value = resolved_config[name]
+                # Parse quoted strings and handle escape characters
+                raw_value = resolved_config[name]  # Keep original value for logging
+                value = _parse_quoted_string(raw_value)
                 converted_value = config["env_converter"](value)
                 setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
-                logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
+                logger.warning(
+                    f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
+                )
                 # Keep existing value if conversion fails
+
+    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
+    if self.enable_async_loading or self.use_layerwise:
+        logger.warning(
+            "Automatically setting save_unfull_chunk=False because "
+            "enable_async_loading=True or use_layerwise=True to prevent "
+            "CPU memory fragmentation"
+        )
+        self.save_unfull_chunk = False
 
     return self
 

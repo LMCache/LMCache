@@ -487,12 +487,10 @@ async def main(args):
     query_mean_ttft = benchmark_df["ttft"].mean()
     CSI = "\x1b["
     RESET = CSI + "0m"
+    print(f"Warmup round mean TTFT: {warmup_mean_ttft:.3f}s")
+    print(f"Warmup round time: {warmup_end_time - warmup_start_time:.3f}s")
+    print(f"Warmup round prompt count: {len(warmup_df)}")
     print(f"{CSI}36;1m\n=== BENCHMARK RESULTS ==={RESET}")
-    print(f"{CSI}32mWarmup round mean TTFT: {warmup_mean_ttft:.3f}s{RESET}")
-    print(
-        f"{CSI}33mWarmup round time: {warmup_end_time - warmup_start_time:.3f}s{RESET}"
-    )
-    print(f"{CSI}35mWarmup round prompt count: {len(warmup_df)}{RESET}")
     print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
     print(
         f"{CSI}33mQuery round time: "

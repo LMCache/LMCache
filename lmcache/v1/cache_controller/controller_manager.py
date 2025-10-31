@@ -37,6 +37,7 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     OrchRetMsg,
     PinMsg,
     QueryInstMsg,
+    QueryWorkerInfoMsg,
     RegisterMsg,
     WorkerMsg,
     WorkerReqMsg,
@@ -147,6 +148,8 @@ class LMCacheControllerManager:
             # FIXME(Jiayi): This `check_finish` thing
             # shouldn't be implemented in kv_controller.
             return await self.kv_controller.check_finish(msg)
+        elif isinstance(msg, QueryWorkerInfoMsg):
+            return await self.reg_controller.query_worker_info(msg)
         else:
             logger.error(f"Unknown orchestration message type: {msg}")
             raise RuntimeError(f"Unknown orchestration message type: {msg}")

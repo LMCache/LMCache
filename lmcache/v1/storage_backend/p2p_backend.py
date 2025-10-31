@@ -11,6 +11,7 @@ import zmq
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
@@ -108,7 +109,7 @@ class P2PBackend(StorageBackendInterface):
         self.config = config
         self.loop = loop
         self.lmcache_worker = lmcache_worker
-
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         assert config.p2p_host is not None, "p2p_host must be specified"
         assert config.p2p_init_ports is not None, "p2p_init_ports must be specified"
         assert config.p2p_lookup_ports is not None, "p2p_lookup_ports must be specified"
@@ -143,6 +144,7 @@ class P2PBackend(StorageBackendInterface):
         self.full_size_shape = list(self.memory_allocator.cpu_allocator.shape)
         # TODO(Jiayi): remove this hardcode
         self.fmt: MemoryFormat = MemoryFormat.KV_2LTD
+        self.chunk_size = config.chunk_size
 
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
@@ -230,6 +232,9 @@ class P2PBackend(StorageBackendInterface):
             msg_bytes = await self.async_peer_socket.recv()
             msg = msgspec.msgpack.decode(msg_bytes, type=P2PMsg)
 
+            num_tokens = len(msg.mem_indexes) * self.chunk_size
+            monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
+
             if isinstance(msg, BatchedLookupAndGetMsg):
                 logger.info("Received P2P batched get msg")
 
@@ -309,6 +314,9 @@ class P2PBackend(StorageBackendInterface):
                 ret_msg = BatchedLookupAndPutRetMsg(
                     num_read_chunks=len(local_mem_objs),
                 )
+
+            logger.info(f"P2P transfer finished for request {monitor_req_id}")
+            self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
 

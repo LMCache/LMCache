@@ -136,11 +136,14 @@ class LMCacheEngine:
 
         self.use_layerwise = config.use_layerwise
         self.num_layers = metadata.kv_shape[0]
+        self.fmt = None
         if self.use_layerwise:
             if config.enable_blending:
                 self.fmt = MemoryFormat.KV_2TD
             else:
                 self.fmt = MemoryFormat.KV_T2D
+        if metadata.use_mla:
+            self.fmt = MemoryFormat.KV_MLA_FMT
 
         # NOTE(ApostaC): we haven't support lookup-cache yet
         self.lookup_cache: dict[CacheEngineKey, Any] = {}
@@ -164,9 +167,9 @@ class LMCacheEngine:
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-            self.storage_manager.post_init(async_lookup_server=self.async_lookup_server)
+            self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:
+            self.storage_manager.post_init(**kwargs)
             logger.info("Post-initializing LMCacheEngine")
             self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
@@ -256,6 +259,7 @@ class LMCacheEngine:
                 kv_shape,
                 kv_dtype,
                 busy_loop=self.force_store_wait,
+                fmt=self.fmt,
             )
             if memory_obj is None:
                 logger.warning(
@@ -679,28 +683,26 @@ class LMCacheEngine:
         """
 
         if tokens is not None:
-            self.stats_monitor.on_lookup_request(len(tokens))
+            lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
         else:
             assert offsets is not None
             assert hashes is not None
-            self.stats_monitor.on_lookup_request(sum(offsets))
+            lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
+        res = 0
         try:
-            end = 0
-            prev_end = 0
-
-            if pin:
-                assert lookup_id is not None, "lookup_id is required when pin is True"
-
-            for start, end, key in self.token_database.process_tokens(
+            chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
                 hashes=hashes,
                 offsets=offsets,
                 request_configs=request_configs,
-            ):
-                assert isinstance(key, CacheEngineKey)
+            )
 
-                if self.use_layerwise:
+            # TODO: support batched_contains when layerwise is enabled
+            if self.use_layerwise:
+                for start, end, key in chunk_info_iterator:
+                    assert isinstance(key, CacheEngineKey)
+
                     # TODO(Jiayi): Optimize by checking only the existence of the key
                     # of one layer
                     key_all_layers = key.split_layers(self.num_layers)
@@ -713,34 +715,48 @@ class LMCacheEngine:
                             found = True
                     if found:
                         if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
                             self.lookup_pins[lookup_id].extend(  # type: ignore
                                 key_all_layers
                             )
-                        prev_end = end
+                        res = end
                         continue
-                    end = prev_end
-                    return prev_end
-                else:
-                    if self.storage_manager.contains(key, search_range, pin):
-                        if pin:
-                            self.lookup_pins[lookup_id].append(  # type: ignore
-                                key
-                            )
-                        prev_end = end
-                        continue
+                    return res
+            else:
+                chunk_info_list = []
+                keys = []
+                for chunk_info in chunk_info_iterator:
+                    assert isinstance(chunk_info[2], CacheEngineKey)
+                    chunk_info_list.append(chunk_info)
+                    keys.append(chunk_info[2])
 
-                    end = prev_end
-                    return prev_end
+                batched_contains_res = self.storage_manager.batched_contains(
+                    keys, search_range, pin, True
+                )
+                assert len(batched_contains_res) == len(chunk_info_list)
+                for (start, end, key), exists in zip(
+                    chunk_info_list, batched_contains_res, strict=False
+                ):
+                    if exists:
+                        if pin:
+                            assert lookup_id is not None, (
+                                "lookup_id is required when pin is True"
+                            )
+                            self.lookup_pins[lookup_id].append(key)
+                        res = end
+                        continue
+                    return res
 
             # all tokens where found, return the maximal end
-            return end
+            return res
         finally:
-            self.stats_monitor.on_lookup_finished(end)
+            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()
 
-    # FIXME
     @_lmcache_nvtx_annotate
     def move(
         self,
@@ -963,11 +979,10 @@ class LMCacheEngine:
         return num_tokens
 
     @_lmcache_nvtx_annotate
-    def lookup_unpin(self, lookup_ids: list[str]) -> None:
-        for lookup_id in lookup_ids:
-            if lookup_id in self.lookup_pins:
-                self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
-                del self.lookup_pins[lookup_id]
+    def lookup_unpin(self, lookup_id: str) -> None:
+        if lookup_id in self.lookup_pins:
+            self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
+            del self.lookup_pins[lookup_id]
 
     @_lmcache_nvtx_annotate
     def clear(
@@ -980,11 +995,9 @@ class LMCacheEngine:
         if self.save_only_first_rank:
             if self.metadata.is_first_rank():
                 num_removed = self._clear(tokens, locations, request_configs)
-                self.broadcast_object_fn(num_removed, self.metadata.first_rank)
                 return num_removed
             else:
-                num_removed = self.broadcast_object_fn(None, self.metadata.first_rank)
-                return int(num_removed)
+                return 0
         return self._clear(tokens, locations, request_configs)
 
     def _clear(
@@ -1060,22 +1073,24 @@ class LMCacheEngine:
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
-        for idx, (start, end, key) in enumerate(
-            self.token_database.process_tokens(
-                tokens=tokens,
-                mask=mask,
-                request_configs=request_configs,
-            )
+        used_indices = set()
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens,
+            mask=mask,
+            request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
+            idx = start // self.config.chunk_size
             memory_obj = memory_objs[idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
+            used_indices.add(idx)
 
         # NOTE: free the memory objects that are not hit.
-        for unused_mem_obj in memory_objs[len(chunks) :]:
-            unused_mem_obj.ref_count_down()
+        for idx, unused_mem_obj in enumerate(memory_objs):
+            if idx not in used_indices:
+                unused_mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 
@@ -1109,6 +1124,14 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        # In some scenarios, lookup is called first, and then the original tokens
+        # is sliced based on the lookup result. In these scenarios, the tokens
+        # passed in must exist in LMCache, and we can set skip_contains_check to True.
+        # When skip_contains_check is True and there is only one backend, the `contains`
+        # call can be skipped.
+        skip_contains_check = (
+            kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
+        )
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -1116,14 +1139,21 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
 
+            location = None
             if key in self.lookup_cache:
                 # TODO(Jiayi): we can reduce the number of `contains` calls
                 # by checking the lookup cache first (should be updated in `lookup`)
                 pass
             else:
-                # NOTE: key should always be in the lookup cache once
-                # we support it.
-                location = self.storage_manager.contains(key)
+                # NOTE: key should always be in the lookup cache once we support it.
+                # TODO: use lookup_cache to skip the contains
+                if (
+                    skip_contains_check
+                    and len(self.storage_manager.non_allocator_backends) == 1
+                ):
+                    location = self.storage_manager.non_allocator_backends[0]
+                else:
+                    location = self.storage_manager.contains(key)
                 if location is None:
                     break
 
