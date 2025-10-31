@@ -235,7 +235,6 @@ class RemoteBackend(StorageBackendInterface):
             self.put_tasks.add(key)
 
         compressed_memory_obj = self.serializer.serialize(memory_obj)
-        memory_obj.ref_count_down()
 
         # NOTE: No need to do error handling here
         # since the `future` is never waited
@@ -273,7 +272,6 @@ class RemoteBackend(StorageBackendInterface):
             for memory_obj in memory_objs:
                 memory_obj.ref_count_up()
                 compressed_memory_objs.append(self.serializer.serialize(memory_obj))
-                memory_obj.ref_count_down()
 
             future = asyncio.run_coroutine_threadsafe(
                 self.connection.batched_put(keys, compressed_memory_objs),  # type: ignore
