@@ -15,7 +15,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, cast
+from typing import Any, List, Optional, Sequence, Union, cast
 from urllib.parse import quote as url_quote
 import asyncio
 import threading
@@ -29,6 +29,7 @@ from nixl._api import nixl_xfer_handle as NixlXferHandle
 from nixl._api import (
     nixlBind,
 )
+from bloom_filter2 import BloomFilter
 
 import torch
 import time
@@ -48,7 +49,58 @@ from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterfac
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
+ENABLE_NIXL_PRESENCE_CACHE = True
 
+class SetPresenceCache:
+    """Default presence cache using a thread-safe Python set."""
+
+    def __init__(self) -> None:
+        self._keys: set[int] = set()
+
+    def add(self, key: int) -> None:
+        #logger.debug(f"Adding key {key:x} to presence cache， current size {len(self._keys)}")
+        self._keys.add(key)
+
+    def discard(self, key: int) -> None:
+        #logger.debug(f"Removing key {key:x} from presence cache， current size {len(self._keys)}")
+        self._keys.discard(key)
+
+    def contains(self, key: int) -> bool:
+        #logger.debug(f"key {key:x} in presence cache: {key in self._keys}")
+        return key in self._keys
+
+
+class BloomPresenceCache:
+    """Presence cache backed by a Bloom filter with negative tracking."""
+
+    def __init__(
+        self,
+        max_elements: int = 1_000_000,
+        error_rate: float = 1e-6,
+    ) -> None:
+        self._bloom = BloomFilter(max_elements=max_elements, error_rate=error_rate)
+        # Keys confirmed to exist (allowing removals despite Bloom filter limitations).
+        self._confirmed: set[int] = set()
+        # Keys proven absent to mask Bloom filter false positives.
+        self._negatives: set[int] = set()
+
+    def add(self, key: int) -> None:
+        self._bloom.add(key)
+        self._confirmed.add(key)
+        self._negatives.discard(key)
+
+    def discard(self, key: int) -> None:
+        self._confirmed.discard(key)
+        self._negatives.add(key)
+
+    def contains(self, key: int) -> bool:
+        if key in self._negatives:
+            return False
+        if key in self._confirmed:
+            return True
+        return key in self._bloom
+
+PresenceCache = Union[SetPresenceCache, BloomPresenceCache]
 
 @dataclass
 class NixlObjectConfig:
@@ -240,6 +292,11 @@ class NixlObjectAgent:
         
         return state == "DONE"
 
+    def post_blocking_async(self, handle: NixlXferHandle):
+        """Non-blocking async post for WRITE operations."""
+        state = self.nixl_agent.transfer(handle)
+        return state
+
     def release_handle(self, handle):
         self.nixl_agent.release_xfer_handle(handle)
 
@@ -278,6 +335,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
+        cache_policy: Optional[PresenceCache] = None,
     ):
         """
         Initialize the Nixl object storage backend.
@@ -291,6 +349,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         self.progress_lock = threading.Lock()
         self.progress_set: set[int] = set()
 
+        self.async_mode = False
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.agent = NixlObjectAgent(
@@ -303,13 +362,50 @@ class NixlObjectBackend(AllocatorBackendInterface):
         self.lookup_and_fetch = nixl_config.lookup_and_fetch
 
         # Initialize object map to track keys and their objects
+        # for prefetch and pinned obj only
         self.object_map = NixlObjectMap()
+
+        # Presence cache to reduce remote contains checks
+        self.hit_counter = 0
+        self.total_counter = 0
+        self.key_presence_cache: Optional[PresenceCache] = None
+        if ENABLE_NIXL_PRESENCE_CACHE:
+            self.key_presence_cache = (
+                cache_policy
+                if cache_policy is not None
+                else SetPresenceCache()
+            )
 
         # Initialize metadata from config
         self.meta_shape: Optional[torch.Size] = None
         self.meta_dtype: Optional[torch.dtype] = None
         self.meta_fmt: Optional[MemoryFormat] = None
         self.init_chunk_meta(config, metadata)
+
+    def set_presence_cache(self, cache: PresenceCache) -> None:
+        """Configure a custom cache policy for key presence tracking."""
+        if ENABLE_NIXL_PRESENCE_CACHE:
+            self.key_presence_cache = cache
+
+    def _cache_contains(self, chunk_hash: int) -> bool:
+        if not ENABLE_NIXL_PRESENCE_CACHE or self.key_presence_cache is None:
+            return False
+        found = self.key_presence_cache.contains(chunk_hash)
+        self.hit_counter += 1 if found else 0
+        self.total_counter += 1
+        if self.total_counter % 10 == 0:
+            logger.info(f"Cache hit: {self.hit_counter} vs {self.total_counter}")
+        return found
+
+    def _cache_add(self, chunk_hash: int) -> None:
+        if not ENABLE_NIXL_PRESENCE_CACHE or self.key_presence_cache is None:
+            return
+        self.key_presence_cache.add(chunk_hash)
+
+    def _cache_discard(self, chunk_hash: int) -> None:
+        if not ENABLE_NIXL_PRESENCE_CACHE or self.key_presence_cache is None:
+            return
+        self.key_presence_cache.discard(chunk_hash)
 
     def init_chunk_meta(
         self,
@@ -364,7 +460,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         with self.progress_lock:
             return key.chunk_hash in self.progress_set
 
-    def get_objects_to_mem(
+    def storage_to_mem(
         self, keys: list[CacheEngineKey], pin: bool = False
     ) -> list[Optional[MemoryObj]]:
         obj_list: list[Optional[MemoryObj]] = []
@@ -376,8 +472,8 @@ class NixlObjectBackend(AllocatorBackendInterface):
         start_time = time.time()
 
         # Prepare mem and storage indice
-        for key in keys:
-            object_key = self._format_object_key(key)
+        for idx in range(len(keys)):
+            object_key = self._format_object_key(keys[idx])
             object_keys.append(object_key)
 
             # Allocate memory for the object
@@ -388,6 +484,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
                 self.meta_shape, self.meta_dtype, self.meta_fmt
             )
             if obj is None:
+                # TODO free previous allocated objects
                 logger.warning("Failed to allocate memory for contains check")
                 self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
                 return None
@@ -395,7 +492,6 @@ class NixlObjectBackend(AllocatorBackendInterface):
             obj_list.append(obj)
             mem_indices.append(obj.metadata.address)
             storage_indices.append(idx)
-            idx += 1
         
         # Create batched storage handler
         storage_reg_descs, storage_xfer_descs, storage_xfer_handler = (
@@ -427,15 +523,18 @@ class NixlObjectBackend(AllocatorBackendInterface):
                     logger.debug(f"PREFETCH Key {key.chunk_hash:x} in batch and keep in map")
                 else:
                     logger.debug(f"GET Key {key.chunk_hash:x} in batch")
+                self._cache_add(key.chunk_hash)
             end_time = time.time()
             duration = end_time - start_time
-            logger.info(f"get_objects_to_mem for {len(keys)} objects size {page_size*len(keys)} took {duration:.6f} seconds")                
+            logger.info(f"GET storage_to_mem for {len(keys)} objects size {page_size*len(keys)} took {duration:.6f} seconds")                
             return obj_list
         else:
             # Object doesn't exist, free the allocated memory
             for obj in obj_list:
                 self.memory_allocator.free(obj)
             logger.debug(f"Get keys failed")
+            for key in keys:
+                self._cache_discard(key.chunk_hash)
             return [None] * len(keys)
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -460,19 +559,29 @@ class NixlObjectBackend(AllocatorBackendInterface):
             logger.debug(f"LOOKUP: Key {key.chunk_hash:x} exists in object map")
             return True
 
+        # Check presence cache before hitting remote storage if not prefetching
+        if (not self.lookup_and_fetch and
+            self._cache_contains(key.chunk_hash)):
+            logger.debug(
+                f"LOOKUP: Key {key.chunk_hash:x} assumed present from cache"
+            )
+            return True
+
         xfer_state = False # not found by default
         if (pin and self.lookup_and_fetch):
             """Only enable prefetch if lookup_and_fetch is enabled"""
             logger.debug(f"PREFETCH key {key.chunk_hash:x}")
-            '''retrieve and pin in memory for later use'''
-            obj_list = self.get_objects_to_mem([key], pin)
+            """retrieve and pin in memory for later use"""
+            obj_list = self.storage_to_mem([key], pin)
             xfer_state = (obj_list[0] is not None)
         else:
             xfer_state = self.key_exists(key)
             if xfer_state:
                 logger.debug(f"LOOKUP Key {key.chunk_hash:x} exists in storage")
+                self._cache_add(key.chunk_hash)
             else:
                 logger.debug(f"LOOKUP Key {key.chunk_hash:x} does not exist in storage")
+                self._cache_discard(key.chunk_hash)
 
         return xfer_state
 
@@ -514,8 +623,25 @@ class NixlObjectBackend(AllocatorBackendInterface):
             await asyncio.gather(*tasks, return_exceptions=True)
             return 0
     """
+    async def _wait_for_transfer(self, handle: NixlXferHandle, initial_state: str, keys: Sequence[CacheEngineKey]):
+        """Asynchronously wait for transfer to complete without blocking."""
+        try:
+            state = initial_state
+            while state != "DONE" and state != "ERR":
+                state = self.agent.nixl_agent.check_xfer_state(handle)
+                await asyncio.sleep(0.001)  # Avoid busy-waiting, yield to event loop
+            if state == "ERR":
+                raise RuntimeError("NIXL transfer failed")
 
-    def mem_to_storage_parallel(
+            for key in keys:
+                with self.progress_lock:
+                    self.progress_set.discard(key.chunk_hash)
+                self._cache_add(key.chunk_hash)
+        finally:
+            # Release the handle after transfer completes (success or failure)
+            self.agent.release_handle(handle)
+
+    async def mem_to_storage(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> None:
         start_time = time.time()
@@ -538,17 +664,23 @@ class NixlObjectBackend(AllocatorBackendInterface):
         )   
 
         handle = self.agent.get_mem_to_storage_handle(mem_indices, storage_xfer_handler, storage_indices)
-        self.agent.post_blocking(handle)
-        self.agent.release_handle(handle)
-        self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
 
-        end_time = time.time()
-        duration = end_time - start_time
-        logger.info(f"mem_to_storage_parallel for {len(keys)} objects size {page_size*len(keys)} took {duration:.6f} seconds")
+        if self.async_mode:
+            initial_state = self.agent.post_blocking_async(handle)
+            # Submit the async wait to the event loop and return immediately
+            asyncio.create_task(self._wait_for_transfer(handle, initial_state, keys))
+        else:
+            self.agent.post_blocking(handle)
+            self.agent.release_handle(handle)
+            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
 
-        for key in keys:
-            with self.progress_lock:
-                self.progress_set.discard(key.chunk_hash)
+            end_time = time.time()
+            duration = end_time - start_time
+            logger.info(f"mem_to_storage for {len(keys)} objects size {page_size*len(keys)} took {duration:.6f} seconds")
+
+            for key in keys:
+                with self.progress_lock:
+                    self.progress_set.discard(key.chunk_hash)
 
     async def get_from_mem(
         self, keys: list[CacheEngineKey]
@@ -565,9 +697,11 @@ class NixlObjectBackend(AllocatorBackendInterface):
             if entry is None:
                 logger.debug(f"Key {key.chunk_hash:x} not found in object map")
                 obj_list.append(None)
+                self._cache_discard(key.chunk_hash)
             else:
                 # Return the cached object
                 obj_list.append(entry.obj)
+                self._cache_add(key.chunk_hash)
                 logger.debug(f"Retrieved key {key.chunk_hash:x} from object map")
 
         return obj_list
@@ -582,7 +716,12 @@ class NixlObjectBackend(AllocatorBackendInterface):
             for key in keys:
                 self.progress_set.add(key.chunk_hash)
 
-        self.mem_to_storage_parallel(keys, memory_objs)
+        if self.async_mode:
+            asyncio.run_coroutine_threadsafe(
+                self.mem_to_storage(keys, memory_objs), self.loop
+            )
+        else:
+            asyncio.run(self.mem_to_storage(keys, memory_objs))
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -596,7 +735,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
             obj_list = asyncio.run(self.get_from_mem([key]))
             return obj_list[0]
         else:
-            obj_list = self.get_objects_to_mem([key], False)
+            obj_list = self.storage_to_mem([key], False)
             return obj_list[0]
         return None
 
@@ -612,7 +751,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         if not keys:
             return []
 
-        obj_list = self.get_objects_to_mem(keys, False)
+        obj_list = self.storage_to_mem(keys, False)
         return obj_list
 
     async def batched_get_non_blocking(
@@ -644,6 +783,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         if entry.obj is not None:
             self.memory_allocator.free(entry.obj)
 
+        self._cache_discard(key.chunk_hash)
         return True
 
     def pin(self, key: CacheEngineKey) -> bool:
