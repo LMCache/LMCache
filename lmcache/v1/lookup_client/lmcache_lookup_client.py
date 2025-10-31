@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import namedtuple
 from typing import TYPE_CHECKING, Optional, Union
 import json
 import threading
@@ -68,8 +69,19 @@ class LMCacheLookupClient(LookupClientInterface):
         else:
             ranks = [i for i in range(self.num_ranks)]
 
-        # Set timeout values from config
-        timeout_ms = config.lookup_timeout_ms
+        # Store socket creation parameters for recreation
+        SocketParams = namedtuple("SocketParams", ["socket_path", "rank"])
+        self.socket_params = [
+            SocketParams(
+                socket_path=get_zmq_rpc_path_lmcache(
+                    vllm_config, "lookup", rpc_port, rank
+                ),
+                rank=rank,
+            )
+            for rank in ranks
+        ]
+        self.timeout_ms = config.lookup_timeout_ms
+        self.socket_lock = threading.Lock()
 
         # NOTE: map from lookup_id (i.e., req_id) to req's status.
         # int indicates number of hit tokens.
@@ -78,25 +90,22 @@ class LMCacheLookupClient(LookupClientInterface):
         # same result.
         self.reqs_status: dict[str, int] = {}
 
-        for rank in ranks:
-            socket_path = get_zmq_rpc_path_lmcache(
-                vllm_config, "lookup", rpc_port, rank
-            )
+        for params in self.socket_params:
             logger.info(
-                f"lmcache lookup client connect to rank {rank} "
-                f"with socket path {socket_path}"
+                f"lmcache lookup client connect to rank {params.rank} "
+                f"with socket path {params.socket_path}"
             )
             socket = get_zmq_socket(
                 self.ctx,
-                socket_path,
+                params.socket_path,
                 "ipc",
                 zmq.REQ,
                 "connect",
             )
 
             # Set socket timeout during initialization
-            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+            socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
 
             self.sockets.append(socket)
 
@@ -113,6 +122,42 @@ class LMCacheLookupClient(LookupClientInterface):
             self.token_database = SegmentTokenDatabase(config, metadata)
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
+
+    def _recreate_socket(self) -> None:
+        """Recreate all sockets."""
+        with self.socket_lock:
+            for rank_idx in range(self.num_ranks):
+                # Close old socket
+                old_socket = self.sockets[rank_idx]
+                if old_socket is not None:
+                    try:
+                        old_socket.close(linger=0)
+                    except zmq.ZMQError as e:
+                        logger.warning(
+                            f"ZMQ error closing old socket for rank {rank_idx}: {e}"
+                        )
+                    except AttributeError:
+                        # Socket already closed or invalid
+                        pass
+
+                # Create new socket using stored parameters
+                params = self.socket_params[rank_idx]
+                logger.info(
+                    f"Recreating socket for rank {params.rank} "
+                    f"with path {params.socket_path}"
+                )
+
+                new_socket = get_zmq_socket(
+                    self.ctx,
+                    params.socket_path,
+                    "ipc",
+                    zmq.REQ,
+                    "connect",
+                )
+                new_socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+                new_socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+
+                self.sockets[rank_idx] = new_socket
 
     def lookup(
         self,
@@ -157,20 +202,32 @@ class LMCacheLookupClient(LookupClientInterface):
             ]
 
         results = []
+        failed_rank = -1
         try:
             for i in range(self.num_ranks):
-                self.sockets[i].send_multipart(msg_buf, copy=False)
+                failed_rank = i
+                with self.socket_lock:
+                    self.sockets[i].send_multipart(msg_buf, copy=False)
 
             # TODO(Jiayi): we can use zmq poll to optimize a bit
             for i in range(self.num_ranks):
-                resp = self.sockets[i].recv()
+                failed_rank = i
+                with self.socket_lock:
+                    resp = self.sockets[i].recv()
                 result = int.from_bytes(resp, "big")
                 results.append(result)
-        except zmq.Again:
-            logger.error(f"Timeout occurred for rank {i}")
+        except zmq.Again as e:
+            logger.error(
+                f"Timeout occurred for rank {failed_rank}, "
+                f"recreating all sockets. Error: {str(e)}"
+            )
+            self._recreate_socket()
             return 0
         except zmq.ZMQError as e:
-            logger.error(f"ZMQ error for rank {i}: {str(e)}")
+            logger.error(
+                f"ZMQ error for rank {failed_rank}: {str(e)}, recreating all sockets"
+            )
+            self._recreate_socket()
             return 0
 
         assert len(results) == self.num_ranks
