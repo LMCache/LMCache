@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# First Party
+from lmcache.v1.compute.models.base import LMCBaseModel
+
+
+class LMCQwen2Model(LMCBaseModel):
+    def _process_qkv(self, q, k, v, layer):
+        """Process QKV tensors for Qwen2 model (no additional processing)."""
+        return q, k, v
