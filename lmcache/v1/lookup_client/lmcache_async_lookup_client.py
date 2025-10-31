@@ -34,12 +34,14 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - mla_lookup_server_worker_id:
-        is a flag to control whether to create lookup server only on one worker.
-        if mla is not enabled, default is -1;
-        if mla is enabled, default is 0;
-        - if mla_lookup_server_worker_id < 0, start lookup server on all workers
-        - if mla_lookup server_worker_id >= 0, start lookup server on the given worker
+    - lookup_server_worker_ids:
+        is a config to control create lookup server on some workers.
+        if mla is not enabled, default is [];
+        if mla is enabled, default is [0];
+        - if lookup_server_worker_ids is [], start lookup server on all workers
+        - if lookup_server_worker_ids is [0], start lookup server on worker0
+        - if lookup_server_worker_ids is [0, 3, 6], start lookup server on
+          worker0, worker3 and worker6
     """
 
     def __init__(
@@ -53,24 +55,26 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
+        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.mla_lookup_server_worker_id = config.get_mla_lookup_server_worker_id(
-            metadata.use_mla
+        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
+            metadata.use_mla, metadata.world_size
         )
-        assert self.mla_lookup_server_worker_id < metadata.world_size
 
         self.push_sockets = []
-        if self.mla_lookup_server_worker_id >= 0:
-            ranks = [self.mla_lookup_server_worker_id]
+        if len(self.lookup_server_worker_ids) > 0:
+            ranks = self.lookup_server_worker_ids
+            self.num_ranks = len(self.lookup_server_worker_ids)
         else:
-            ranks = [i for i in range(self.tensor_parallel_size)]
+            ranks = [i for i in range(self.num_ranks)]
 
-        for tp_rank in ranks:
+        for rank in ranks:
             worker_socket_path = get_zmq_rpc_path_lmcache(
-                vllm_config, "lookup_worker", rpc_port, tp_rank
+                vllm_config, "lookup_worker", rpc_port, rank
             )
             logger.info(
-                f"lmcache lookup client connect to tp_rank {tp_rank} "
+                f"lmcache lookup client connect to rank {rank} "
                 f"with worker socket path {worker_socket_path}"
             )
 
@@ -183,10 +187,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             request_configs_buf,
         ]
 
-        ranks = self.tensor_parallel_size
-        if self.mla_lookup_server_worker_id >= 0:
-            ranks = 1
-        for i in range(ranks):
+        for i in range(self.num_ranks):
             self.push_sockets[i].send_multipart(msg_buf, copy=False)
         time.sleep(self.lookup_backoff_time)
         return None
@@ -205,13 +206,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.res_for_each_worker[lookup_id].append(res)
                 all_res = self.res_for_each_worker[lookup_id]
 
-                if len(all_res) == self.tensor_parallel_size or (
-                    self.mla_lookup_server_worker_id >= 0 and len(all_res) == 1
-                ):
+                if len(all_res) == self.num_ranks:
                     self.res_for_each_worker.pop(lookup_id)
 
                     # NOTE: it is possible that the number of hit
-                    # tokens is different across TP ranks, so we
+                    # tokens is different across (TP and PP) ranks, so we
                     # can use the minimum value as the number of
                     # hit tokens.
                     self.reqs_status[lookup_id] = min(all_res)

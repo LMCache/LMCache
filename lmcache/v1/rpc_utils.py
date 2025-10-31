@@ -81,7 +81,7 @@ def get_zmq_rpc_path_lmcache(
     vllm_config: Optional["VllmConfig"] = None,
     service_name: ServiceKind = "lookup",
     rpc_port: int = 0,
-    tp_rank: int = 0,
+    rank: int = 0,
 ) -> str:
     """Get the ZMQ RPC path for LMCache lookup and offload communication."""
     # Third Party
@@ -100,9 +100,9 @@ def get_zmq_rpc_path_lmcache(
     engine_id = vllm_config.kv_transfer_config.engine_id
 
     if isinstance(rpc_port, str):
-        rpc_port = rpc_port + str(tp_rank)
+        rpc_port = rpc_port + str(rank)
     else:
-        rpc_port += tp_rank
+        rpc_port += rank
 
     logger.debug(
         "Base URL: %s, Engine: %s, Service Name: %s, RPC Port: %s",
