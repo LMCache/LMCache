@@ -24,12 +24,9 @@ class EventManager:
 
     def __init__(self) -> None:
         # Structure: events[event_type][event_status][event_id] = future
-        self.events: dict[EventType, dict[EventStatus, dict[str, asyncio.Future]]] = {}
-        for event_type in EventType:
-            self.events[event_type] = {}
-            for event_status in EventStatus:
-                self.events[event_type][event_status] = {}
-
+        self.events: dict[EventType, dict[EventStatus, dict[str, asyncio.Future]]] = {
+            et: {es: {} for es in EventStatus} for et in EventType
+        }
         self.lock = threading.Lock()
 
     def add_event(

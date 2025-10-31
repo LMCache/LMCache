@@ -240,26 +240,25 @@ class StorageManager:
 
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.storage_events_ongoing_count.set_function(
-                lambda: self.event_manager.get_events_count_by_status(
-                    EventType.LOADING, EventStatus.ONGOING
-                )
-            )
-            prometheus_logger.storage_events_done_count.set_function(
-                lambda: self.event_manager.get_events_count_by_status(
-                    EventType.LOADING, EventStatus.DONE
-                )
-            )
-            prometheus_logger.storage_events_not_found_count.set_function(
-                lambda: self.event_manager.get_events_count_by_status(
-                    EventType.LOADING, EventStatus.NOT_FOUND
-                )
-            )
-        else:
+        if prometheus_logger is None:
             logger.warning(
                 "PrometheusLogger is not initialized, "
                 "event metrics will not be collected"
+            )
+            return
+
+        metric_map = {
+            "storage_events_ongoing_count": EventStatus.ONGOING,
+            "storage_events_done_count": EventStatus.DONE,
+            "storage_events_not_found_count": EventStatus.NOT_FOUND,
+        }
+
+        for metric_name, status in metric_map.items():
+            metric = getattr(prometheus_logger, metric_name)
+            metric.set_function(
+                lambda s=status: self.event_manager.get_events_count_by_status(
+                    EventType.LOADING, s
+                )
             )
 
     def post_init(self, **kwargs) -> None:
