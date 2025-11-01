@@ -215,11 +215,9 @@ class StorageManager:
 
         self.enable_pd = config.enable_pd
 
-        self.allocator_backend = (
-            self._get_allocator_backend(config)
-            if metadata.role != "scheduler"
-            else None
-        )
+        self.allocator_backend = None
+        if metadata.role != "scheduler":
+            self.allocator_backend = self._get_allocator_backend(config)
         if config.local_cpu:
             self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
