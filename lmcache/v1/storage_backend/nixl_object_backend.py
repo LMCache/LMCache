@@ -23,7 +23,6 @@ import time
 import uuid
 
 # Third Party
-from bloom_filter2 import BloomFilter
 from nixl._api import nixl_agent as NixlAgent
 from nixl._api import nixl_agent_config as NixlAgentConfig
 from nixl._api import nixl_prepped_dlist_handle as NixlDlistHandle
@@ -64,40 +63,7 @@ class SetPresenceCache:
     def contains(self, key: int) -> bool:
         return key in self._keys
 
-
-class BloomPresenceCache:
-    """Presence cache backed by a Bloom filter with negative tracking."""
-
-    def __init__(
-        self,
-        max_elements: int = 1_000_000,
-        error_rate: float = 1e-6,
-    ) -> None:
-        self._bloom = BloomFilter(max_elements=max_elements, error_rate=error_rate)
-        # Keys confirmed to exist (allowing removals despite Bloom filter limitations).
-        self._confirmed: set[int] = set()
-        # Keys proven absent to mask Bloom filter false positives.
-        self._negatives: set[int] = set()
-
-    def add(self, key: int) -> None:
-        self._bloom.add(key)
-        self._confirmed.add(key)
-        self._negatives.discard(key)
-
-    def discard(self, key: int) -> None:
-        self._confirmed.discard(key)
-        self._negatives.add(key)
-
-    def contains(self, key: int) -> bool:
-        if key in self._negatives:
-            return False
-        if key in self._confirmed:
-            return True
-        return key in self._bloom
-
-
-PresenceCache = Union[SetPresenceCache, BloomPresenceCache]
-
+PresenceCache = Union[SetPresenceCache]
 
 @dataclass
 class NixlObjectConfig:
