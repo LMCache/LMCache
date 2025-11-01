@@ -80,7 +80,7 @@ class LMCacheEngine:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         token_database: TokenDatabase,
-        gpu_connector: GPUConnectorInterface,
+        gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
     ):
@@ -97,7 +97,7 @@ class LMCacheEngine:
             and metadata.use_mla
         )
 
-        if self.save_only_first_rank:
+        if self.save_only_first_rank and self.gpu_connector is not None:
             self.broadcast_stream = (
                 self.gpu_connector.load_stream
                 if hasattr(self.gpu_connector, "load_stream")
@@ -171,7 +171,8 @@ class LMCacheEngine:
         if not self.post_inited:
             self.storage_manager.post_init(**kwargs)
             logger.info("Post-initializing LMCacheEngine")
-            self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
+            if self.gpu_connector is not None:
+                self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
 
     @_lmcache_nvtx_annotate
@@ -203,6 +204,10 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for store operation"
+        )
+
         if self._is_passive():
             logger.debug(f"rank={self.metadata.worker_id} ignore store")
             return
@@ -331,6 +336,9 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for store_layer operation"
+        )
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -446,6 +454,10 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for retrieve operation"
+        )
+
         tot_kv_size = 0
         t = time.perf_counter()
 
@@ -553,6 +565,9 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for retrieve_layer operation"
+        )
 
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
@@ -1395,7 +1410,7 @@ class LMCacheEngineBuilder:
         instance_id: str,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        gpu_connector: GPUConnectorInterface,
+        gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
     ) -> LMCacheEngine:

@@ -6,12 +6,16 @@ from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
 )
+from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
+    LMCacheBypassLookupClient,
+)
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 
 __all__ = [
     "LookupClientInterface",
     "LookupClientFactory",
     "MooncakeLookupClient",
+    "LMCacheBypassLookupClient",
     "LMCacheLookupClient",
     "LMCacheLookupServer",
 ]

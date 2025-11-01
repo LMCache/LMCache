@@ -28,7 +28,7 @@ class RemoteBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         dst_device: str = "cuda",
     ):
         super().__init__(dst_device=dst_device)
@@ -289,6 +289,13 @@ class RemoteBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in get_blocking "
+                "(likely scheduler role), returning None"
+            )
+            return None
 
         if self.connection is None:
             logger.warning("Connection is None in get_blocking, returning None")
@@ -332,6 +339,14 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_blocking "
+                "(likely scheduler role), returning None list"
+            )
+            return [None] * len(keys)
+
         if self.connection is None:
             logger.warning("Connection is None in batched_get_blocking, returning None")
             return [None] * len(keys)
@@ -466,6 +481,14 @@ class RemoteBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> List[MemoryObj]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_non_blocking "
+                "(likely scheduler role), returning empty list"
+            )
+            return []
+
         if self.connection is None:
             logger.warning(
                 "Connection is None in batched_get_non_blocking, returning empty list"
@@ -501,6 +524,10 @@ class RemoteBackend(StorageBackendInterface):
             return False
 
     def get_allocator_backend(self):
+        assert self.local_cpu_backend is not None, (
+            "local_cpu_backend is required for get_allocator_backend, "
+            "should not be called in scheduler role"
+        )
         return self.local_cpu_backend
 
     def close(self):
