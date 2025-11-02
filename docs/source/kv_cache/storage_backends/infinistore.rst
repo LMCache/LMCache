@@ -121,11 +121,11 @@ Query TTFT Improvement
 
 Once the OpenAI compatible server is running, let's query it twice and see the TTFT improvement.
 
-Run vLLM's ``benchmark_serving.py`` script twice with the following parameters:
+Run vLLM's serving benchmark twice with the following parameters:
 
 .. code-block:: bash
 
-    python3 vllm/benchmarks/benchmark_serving.py \
+    vllm bench serve \
         --backend vllm \
         --model Qwen/Qwen2.5-7B-Instruct \
         --num-prompts 50 \
@@ -192,7 +192,7 @@ TTFT Improvement: 33.323 seconds (12.6x faster).
 
 **Tips:** 
 
-- If you want to run the ``benchmark_serving.py`` script multiple times, you'll need to either restart the vLLM LMCache server and the InfiniStore server, or change the ``--seed`` parameter to a different value each time, since you've already warmed up LMCache.
+- If you want to run vLLM's serving benchmark multiple times, you'll need to either restart the vLLM LMCache server and the InfiniStore server, or change the ``--seed`` parameter to a different value each time, since you've already warmed up LMCache.
 - The benchmark result here was produced by running an L40 with 48GB of GPU memory with ``--gpu-memory-utilization 0.8``. You can adjust the GPU memory utilization and increase the max model length to use more of the long context. LMCache TTFT improvement becomes more pronounced as the context length increases!
 
 
