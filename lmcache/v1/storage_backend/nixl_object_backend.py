@@ -403,8 +403,6 @@ class NixlObjectBackend(AllocatorBackendInterface):
                 logger.warning("Failed to allocate memory")
                 for obj in obj_list:
                     self.memory_allocator.free(obj)
-                for key in keys:
-                    self._cache_discard(key.chunk_hash)                
                 return [None] * len(keys)
 
             obj_list.append(obj)
@@ -436,7 +434,6 @@ class NixlObjectBackend(AllocatorBackendInterface):
         if xfer_state:
             for i in range(len(keys)):
                 key = keys[i]
-                logger.debug(f"GET Key {key.chunk_hash:x} in batch")
                 self._cache_add(key.chunk_hash)
             end_time = time.time()
             duration = end_time - start_time
@@ -446,7 +443,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
             )
             return obj_list
         else:
-            # Object doesn't exist, free the allocated memory
+            # Free the allocated memory and discard cache if transfer failed
             for obj in obj_list:
                 self.memory_allocator.free(obj)
             for key in keys:
@@ -473,16 +470,11 @@ class NixlObjectBackend(AllocatorBackendInterface):
 
         # Check presence cache before hitting remote storage if not prefetching
         if self._cache_contains(key.chunk_hash):
-            logger.debug(f"LOOKUP: Key {key.chunk_hash:x} assumed present from cache")
             return True
 
         xfer_state = self.key_exists(key)
         if xfer_state:
-            logger.debug(f"LOOKUP Key {key.chunk_hash:x} exists in storage")
             self._cache_add(key.chunk_hash)
-        else:
-            logger.debug(f"LOOKUP Key {key.chunk_hash:x} does not exist in storage")
-            self._cache_discard(key.chunk_hash)
 
         return xfer_state
 
@@ -598,6 +590,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
             for key in keys:
                 with self.progress_lock:
                     self.progress_set.discard(key.chunk_hash)
+                self._cache_add(key.chunk_hash)
 
     def batched_submit_put_task(
         self,
