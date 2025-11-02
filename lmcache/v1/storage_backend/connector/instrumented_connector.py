@@ -114,6 +114,8 @@ class InstrumentedRemoteConnector(RemoteConnector):
     ):
         try:
             await self._connector.batched_put(keys, memory_objs)
+        except Exception as e:
+            logger.warning(f"batched put error: {e}")
         finally:
             for memory_obj in memory_objs:
                 memory_obj.ref_count_down()
