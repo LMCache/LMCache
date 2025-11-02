@@ -16,6 +16,15 @@ from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 logger = init_logger(__name__)
 
 
+def NotAudit(func):
+    """
+    Decorator to mark methods that should not be audited.
+    These methods will be directly forwarded to the real connector without logging.
+    """
+    func._not_audit = True
+    return func
+
+
 class RemoteConnector(metaclass=abc.ABCMeta):
     """
     Interface for remote connector
@@ -28,6 +37,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     full_chunk_size: Optional[int] = None
     single_token_size: Optional[int] = None
 
+    @NotAudit
     def init_chunk_meta(
         self,
         config: Optional[LMCacheEngineConfig],
@@ -73,6 +83,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             f"single token size: {self.single_token_size}"
         )
 
+    @NotAudit
     def reshape_partial_chunk(
         self,
         memory_obj: MemoryObj,
@@ -103,6 +114,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
 
         return memory_obj
 
+    @NotAudit
     def post_init(self):
         """
         Post-initialization method to be called after the connector is created.
