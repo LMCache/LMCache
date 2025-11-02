@@ -517,6 +517,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         storage_reg_descs: nixlBind.nixlRegDList,
         storage_xfer_handler: NixlDlistHandle,
+        mem_objs: List[MemoryObj],
     ):
         """Asynchronously wait for transfer to complete without blocking."""
         try:
@@ -537,6 +538,8 @@ class NixlObjectBackend(AllocatorBackendInterface):
             self.agent.release_storage_handler(
                 storage_reg_descs, storage_xfer_handler
             )
+            for mem_obj in mem_objs:
+                mem_obj.ref_count_down()
 
     async def mem_to_storage(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
@@ -565,12 +568,15 @@ class NixlObjectBackend(AllocatorBackendInterface):
         )
 
         if self.async_mode:
+            for mem_obj in mem_objs:
+                mem_obj.ref_count_up()
             initial_state = self.agent.post_blocking_async(handle)
             # Submit the async wait to the event loop and return immediately
             asyncio.create_task(
                 self._wait_for_transfer(
                     handle, initial_state, keys, 
-                    storage_reg_descs, storage_xfer_handler
+                    storage_reg_descs, storage_xfer_handler,
+                    mem_objs
                 )
             )
         else:
