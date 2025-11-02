@@ -301,6 +301,8 @@ def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
 ) -> torch.Tensor:
+    if size == 0:
+        return torch.empty(0, dtype=torch.uint8)
     if numa_mapping:
         if torch.cuda.is_available():
             current_device_id = torch.cuda.current_device()
@@ -1406,10 +1408,13 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(ptr)
-        self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+        if size == 0:
+            self.buffer = torch.empty(0, dtype=torch.uint8)
+        else:
+            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+            array_type = ctypes.c_uint8 * size
+            buf = array_type.from_address(ptr)
+            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
         self._unregistered = False
 
         self.allocator: MemoryAllocatorInterface
@@ -1480,6 +1485,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            if self.buffer.numel() == 0:
+                return
             lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
@@ -1621,6 +1628,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            if self.buffer.numel() == 0:
+                return
             if self.numa_mapping:
                 lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
             else:

@@ -73,4 +73,5 @@ class AuditConnectorAdapter(ConnectorAdapter):
             context.config,
             context.metadata,
         )
-        return AuditConnector(connector.getWrappedConnector(), context.config)
+        # Metaclass dynamically implements all abstract methods at runtime
+        return AuditConnector(connector.getWrappedConnector(), context.config)  # type: ignore[abstract]
