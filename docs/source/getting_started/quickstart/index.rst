@@ -1,3 +1,5 @@
+.. _quickstart_examples:
+
 Quickstart Examples
 ===================
 

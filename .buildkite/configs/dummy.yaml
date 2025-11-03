@@ -17,3 +17,5 @@ vllm:
     - "--enforce-eager"
     - "--load-format"
     - "dummy"
+    - "--kv-transfer-config"
+    - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"

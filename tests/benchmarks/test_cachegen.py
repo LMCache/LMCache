@@ -53,6 +53,10 @@ def to_blob(kv_tuples):
 @pytest.mark.benchmark(group="cachegen")
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [64, 256, 768])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to CacheGenSerializer/Deserializer",
+)
 def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
     metadata = LMCacheEngineMetadata(

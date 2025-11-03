@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 import time
 
 # First Party
@@ -19,7 +19,7 @@ class AuditBackend(StorageBackendInterface):
     """
 
     def __init__(self, real_backend: StorageBackendInterface):
-        super().__init__(real_backend.dst_device)
+        super().__init__(dst_device=real_backend.dst_device)
         self.real_backend = real_backend
         self.logger = logger.getChild("audit")
         self.logger.info(
@@ -110,7 +110,7 @@ class AuditBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         sizes = [len(obj.byte_array) for obj in memory_objs]
         start_time = time.perf_counter()
@@ -129,6 +129,7 @@ class AuditBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         start_time = time.perf_counter()
         try:
@@ -224,3 +225,6 @@ class AuditBackend(StorageBackendInterface):
         except Exception as e:
             self._log_operation("BATCHED_REMOVE", start_time, None, False, error=e)
             raise
+
+    def get_allocator_backend(self):
+        return self.real_backend.get_allocator_backend()

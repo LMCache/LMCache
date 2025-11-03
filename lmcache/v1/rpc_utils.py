@@ -19,8 +19,11 @@ logger = init_logger(__name__)
 ServiceKind = Literal["lookup", "offload", "lookup_worker", "lookup_scheduler"]
 
 
-def get_zmq_context():
-    return zmq.asyncio.Context.instance()
+def get_zmq_context(use_asyncio: bool = True):
+    if use_asyncio:
+        return zmq.asyncio.Context.instance()
+    else:
+        return zmq.Context.instance()
 
 
 def get_zmq_socket(

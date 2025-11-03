@@ -33,7 +33,10 @@ extensions = [
     "sphinx.ext.viewcode",
     "sphinx.ext.napoleon",
     "sphinx.ext.autosectionlabel",
+    "sphinxcontrib.mermaid",
     # "sphinx_copybutton",
+    "sphinx_multiversion",
+    "sphinxcontrib.images",
 ]
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
@@ -110,8 +113,13 @@ theme_options = ThemeOptions(  # Add your theme options.
                 'fill="currentColor"/></svg>'
             ),
         }
-    }
+    },
 )
+
+images_config = {
+    "default_image_width": "80%",
+    "default_image_target": "_blank",
+}
 
 html_theme_options = asdict(theme_options)
 
@@ -155,3 +163,21 @@ autodoc_mock_imports = [
     "safetensors",
     "torch.Tensor",
 ]
+
+# -- sphinx-multiversion configuration -------------------------------------------
+
+# Whitelist pattern for tags (build docs for all v* tags)
+smv_tag_whitelist = r"^v\d+\.\d+.*$"
+
+# Whitelist pattern for branches (build docs for dev and main)
+smv_branch_whitelist = r"^(dev|main)$"
+
+# Pattern for released versions (tags only)
+smv_released_pattern = r"^tags/v.*$"
+
+# Remote whitelist pattern (for security)
+smv_remote_whitelist = r"^(origin)$"
+
+# Output directories
+smv_latest_version = "dev"  # Point latest to dev branch
+smv_prefer_remote_refs = False

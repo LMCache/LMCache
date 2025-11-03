@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Optional, Union
+import json
 import threading
 
 # Third Party
@@ -40,6 +41,7 @@ class LMCacheLookupClient(LookupClientInterface):
 
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.config = config
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
@@ -54,6 +56,10 @@ class LMCacheLookupClient(LookupClientInterface):
         self.sockets = []
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
+
+        # Set timeout values from config
+        timeout_ms = config.lookup_timeout_ms
+
         for tp_rank in range(ranks):
             socket_path = get_zmq_rpc_path_lmcache(
                 vllm_config, "lookup", rpc_port, tp_rank
@@ -62,12 +68,16 @@ class LMCacheLookupClient(LookupClientInterface):
                 f"lmcache lookup client connect to tp_rank {tp_rank} "
                 f"with socket path {socket_path}"
             )
-            socket = self.socket = make_zmq_socket(
+            socket = make_zmq_socket(
                 self.ctx,
                 socket_path,
                 zmq.REQ,  # type: ignore[attr-defined]
                 bind=False,
             )
+
+            # Set socket timeout during initialization
+            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
 
             self.sockets.append(socket)
 
@@ -78,54 +88,73 @@ class LMCacheLookupClient(LookupClientInterface):
             TokenDatabase,
         )
 
+        self.enable_blending = config.enable_blending
         self.token_database: TokenDatabase
-        if config.enable_blending:
+        if self.enable_blending:
             self.token_database = SegmentTokenDatabase(config, metadata)
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
+    # FIXME(Jiayi): Cacheblend need token ids
     def lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        hashes = []
-        offsets = []
-        for start, end, key in self.token_database.process_tokens(
-            token_ids, make_key=False
-        ):
-            hashes.append(key)
-            offsets.append(end - start)
-        hash_buf = self.encoder.encode(hashes)
-        offset_buf = self.encoder.encode(offsets)
-
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
-            request_configs_str = "@".join(
-                [f"{k}%{v}" for k, v in request_configs.items()]
-            )
+            request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
         ranks = self.tensor_parallel_size
         if self.create_lookup_server_only_on_worker_0_for_mla:
             ranks = 1
+
+        # NOTE(Jiayi): We cannot only send hashes when blending enabled
+        # because the blender need the input embedding.
+        if not self.enable_blending:
+            hashes = []
+            offsets = []
+            for start, end, key in self.token_database.process_tokens(
+                token_ids, make_key=False
+            ):
+                hashes.append(key)
+                offsets.append(end - start)
+            hash_buf = self.encoder.encode(hashes)
+            offset_buf = self.encoder.encode(offsets)
+            msg_buf = [
+                hash_buf,
+                offset_buf,
+                lookup_id_buf,
+                request_configs_buf,
+            ]
+        else:
+            tokens_buf = self.encoder.encode(token_ids)
+            msg_buf = [
+                tokens_buf,
+                lookup_id_buf,
+                request_configs_buf,
+            ]
+
         results = []
-        msg_buf = [
-            hash_buf,
-            offset_buf,
-            lookup_id_buf,
-            request_configs_buf,
-        ]  # hash_offset_bufs+ [lookup_id_buf, request_configs_buf]
-        for i in range(ranks):
-            self.sockets[i].send_multipart(msg_buf, copy=False)
+        try:
+            for i in range(ranks):
+                self.sockets[i].send_multipart(msg_buf, copy=False)
 
-        # TODO(Jiayi): we can use zmq poll to optimize a bit
-        for i in range(ranks):
-            resp = self.sockets[i].recv()
-            result = int.from_bytes(resp, "big")
-            results.append(result)
+            # TODO(Jiayi): we can use zmq poll to optimize a bit
+            for i in range(ranks):
+                resp = self.sockets[i].recv()
+                result = int.from_bytes(resp, "big")
+                results.append(result)
+        except zmq.Again:
+            logger.error(f"Timeout occurred for rank {i}")
+            return 0
+        except zmq.ZMQError as e:
+            logger.error(f"ZMQ error for rank {i}: {str(e)}")
+            return 0
 
+        assert len(results) == ranks
         if len(set(results)) > 1:
             logger.warning(
                 f"Lookup results (number of hit tokens) differ "
@@ -141,7 +170,17 @@ class LMCacheLookupClient(LookupClientInterface):
         return True
 
     def close(self):
-        self.socket.close(linger=0)
+        for socket in self.sockets:
+            try:
+                socket.close(linger=0)
+            except Exception as e:
+                logger.warning(f"Error closing socket: {e}")
+
+        try:
+            if self.ctx:
+                self.ctx.term()
+        except Exception as e:
+            logger.warning(f"Error terminating ZMQ context: {e}")
 
 
 class LMCacheLookupServer:
@@ -166,39 +205,39 @@ class LMCacheLookupServer:
         self.lmcache_engine = lmcache_engine
         self.running = True
 
+        self.enable_blending = lmcache_engine.config.enable_blending
+
         def process_request():
             while self.running:
                 frames = self.socket.recv_multipart(copy=False)
-                hash_frames = frames[0]
-                offset_frames = frames[1]
-
                 lookup_id = frames[-2].bytes.decode("utf-8")
                 request_configs_str = frames[-1].bytes.decode("utf-8")
                 request_configs = None
                 if request_configs_str != "":
-                    request_configs = {}
-                    request_configs_list = request_configs_str.split("@")
-                    for kv in request_configs_list:
-                        kvs = kv.split("%", 1)
-                        if len(kvs) != 2:
-                            raise ValueError("Unexpected tags_str: {tags_str}")
-                        request_configs[kvs[0]] = kvs[1]
-
-                hashes = self.decoder.decode(hash_frames)
-                offsets = self.decoder.decode(offset_frames)
-                result = self.lmcache_engine.lookup(
-                    hashes=hashes,
-                    offsets=offsets,
-                    lookup_id=lookup_id,
-                    pin=True,
-                    request_configs=request_configs,
-                )
+                    request_configs = json.loads(request_configs_str)
+                if not self.enable_blending:
+                    hash_frames = frames[0]
+                    offset_frames = frames[1]
+                    hashes = self.decoder.decode(hash_frames)
+                    offsets = self.decoder.decode(offset_frames)
+                    result = self.lmcache_engine.lookup(
+                        hashes=hashes,
+                        offsets=offsets,
+                        lookup_id=lookup_id,
+                        pin=True,
+                        request_configs=request_configs,
+                    )
+                else:
+                    token_frames = frames[0]
+                    tokens = self.decoder.decode(token_frames)
+                    result = self.lmcache_engine.lookup(
+                        tokens=tokens,
+                        lookup_id=lookup_id,
+                        pin=True,
+                        request_configs=request_configs,
+                    )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
-                # except Exception as e:
-                #    logger.error("Error in LMCache lookup server: %s", e)
-                #    break
-                # continue
 
         logger.info(f"lmcache lookup server start on {socket_path}")
         self.thread = threading.Thread(target=process_request, daemon=True)

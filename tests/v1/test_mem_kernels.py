@@ -4,19 +4,28 @@ from typing import List
 import random
 
 # Third Party
-from utils import (
+import pytest
+import torch
+
+# First Party
+from lmcache.v1.memory_management import PinMemoryAllocator
+
+pytest.importorskip(
+    "lmc_ops",
+    reason="TODO: require non CUDA implementations for CUDA enhanced functions",
+)
+
+# First Party
+import lmcache.c_ops as lmc_ops
+
+# Local
+from .utils import (
     check_mem_obj_equal,
     check_paged_kv_cache_equal,
     generate_kv_cache_paged,
     generate_kv_cache_paged_list_tensors,
     generate_mla_kv_cache_paged_list_tensors,
 )
-import pytest
-import torch
-
-# First Party
-from lmcache.v1.memory_management import PinMemoryAllocator
-import lmcache.c_ops as lmc_ops
 
 
 def _tuple_kv_to_blob(

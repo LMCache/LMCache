@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
+import pytest
 import torch
 
 # First Party
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 
 
-# TODO: test more configurations
-def verify_rope():
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non CUDA implementations for CUDA enhanced functions",
+)
+def test_rope():
     head_dim = 128
     max_position_embeddings = 8192
     rope_scaling = None
@@ -26,7 +30,3 @@ def verify_rope():
     )
 
     assert fused_rotary_emb is not None, "Failed to get fused rotary embedding"
-
-
-if __name__ == "__main__":
-    verify_rope()

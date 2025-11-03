@@ -30,9 +30,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
-
-
 class LocalDiskWorker:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.put_lock = threading.Lock()
@@ -43,11 +42,14 @@ class LocalDiskWorker:
 
         # TODO(Jiayi): make executor and its parameters configurable
         self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
+        self.loop = loop
+        self._closed = False
 
     async def submit_task(
         self,
         task_type: str,
         task: Callable,
+        *args,
         **kwargs,
     ) -> Any:
         if task_type == "prefetch":
@@ -62,6 +64,7 @@ class LocalDiskWorker:
 
         return await self.executor.submit_job(
             task,
+            *args,
             priority=priority,
             **kwargs,
         )
@@ -82,7 +85,11 @@ class LocalDiskWorker:
             return key in self.put_tasks
 
     def close(self):
-        self.thread.join()
+        # Gracefully shut down the executor
+        if self._closed:
+            return
+        self._closed = True
+        self.executor.shutdown(wait=True)
 
 
 class LocalDiskBackend(StorageBackendInterface):
@@ -94,7 +101,11 @@ class LocalDiskBackend(StorageBackendInterface):
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
-        super().__init__(dst_device)
+        if torch.cuda.is_available():
+            super().__init__(dst_device)
+        else:
+            super().__init__("cpu")
+
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.dict = self.cache_policy.init_mutable_mapping()
 
@@ -209,12 +220,14 @@ class LocalDiskBackend(StorageBackendInterface):
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
-        res = asyncio.run_coroutine_threadsafe(
-            self.disk_worker.submit_task("delete", os.remove, path=path),
-            self.loop,
-        )
+        # NOTE: The following code will cause deadlock
+        # res = asyncio.run_coroutine_threadsafe(
+        #     self.disk_worker.submit_task("delete", os.remove, path),
+        #     self.loop,
+        # )
+        # res.result()
 
-        res.result()
+        os.remove(path)
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -278,7 +291,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 )
                 if not evict_keys:
                     logger.warning(
-                        "No eviction candidates found.", "Disk space under pressure."
+                        "No eviction candidates found. Disk space under pressure."
                     )
                     evict_success = False
                     break
@@ -291,9 +304,6 @@ class LocalDiskBackend(StorageBackendInterface):
                 all_evict_keys.extend(evict_keys)
             if evict_success:
                 self.current_cache_size += required_size
-
-        if all_evict_keys:
-            self._on_evict(all_evict_keys)
 
         if not evict_success:
             return None
@@ -316,7 +326,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             self.submit_put_task(key, memory_obj)
@@ -360,6 +370,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
@@ -549,8 +560,8 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
 
+    def get_allocator_backend(self):
+        return self.local_cpu_backend
+
     def close(self) -> None:
-        with self.disk_lock:
-            keys = list(self.dict.keys())
-        if keys:
-            super()._on_evict(keys)
+        self.disk_worker.close()

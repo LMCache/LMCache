@@ -125,9 +125,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         )
         self.thread.start()
 
+        # default backoff time
+        self.lookup_backoff_time = 0.01
         if config.extra_config is not None:
             self.lookup_backoff_time = float(
-                config.extra_config.get("lookup_backoff_time", 0.01)
+                config.extra_config.get("lookup_backoff_time", self.lookup_backoff_time)
             )
 
     # TODO(Jiayi): Consider batching here
@@ -141,6 +143,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             # -1 indicates not found; None indicates ongoing.
             req_status = self.reqs_status.get(lookup_id, -1)
             if req_status is None:
+                time.sleep(self.lookup_backoff_time)
                 return None
             elif req_status != -1:
                 self.reqs_status.pop(lookup_id)
@@ -193,7 +196,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.res_for_each_worker[lookup_id].append(res)
                 all_res = self.res_for_each_worker[lookup_id]
 
-                if len(all_res) == self.tensor_parallel_size:
+                if len(all_res) == self.tensor_parallel_size or (
+                    self.create_lookup_server_only_on_worker_0_for_mla
+                    and len(all_res) == 1
+                ):
                     self.res_for_each_worker.pop(lookup_id)
 
                     # NOTE: it is possible that the number of hit
@@ -207,7 +213,16 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         return True
 
     def close(self):
-        self.socket.close(linger=0)
+        self.running = False
+        try:
+            if self.thread.is_alive():
+                self.thread.join(timeout=1.0)
+            for s in self.push_sockets:
+                s.close(linger=0)  # type: ignore[arg-type]
+            self.pull_socket.close(linger=0)  # type: ignore[arg-type]
+            self.ctx.term()
+        except Exception as e:
+            logger.warning(f"Failed to join thread during close: {e}")
 
 
 class LMCacheAsyncLookupServer:
@@ -294,5 +309,13 @@ class LMCacheAsyncLookupServer:
         self.push_socket.send_multipart([lookup_id_buf, num_hit_tokens_buf], copy=False)
 
     def close(self):
-        self.socket.close(linger=0)
-        # TODO: close the thread!
+        self.running = False
+        try:
+            if self.thread.is_alive():
+                self.thread.join(timeout=1.0)
+            for s in self.push_sockets:
+                s.close(linger=0)  # type: ignore[arg-type]
+            self.pull_socket.close(linger=0)  # type: ignore[arg-type]
+            self.ctx.term()
+        except Exception as e:
+            logger.warning(f"Failed to join thread during close: {e}")

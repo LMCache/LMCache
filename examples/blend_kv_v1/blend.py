@@ -31,8 +31,11 @@ def setup_environment_variables(
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
     os.environ["LMCACHE_BLEND_SPECIAL_STR"] = blend_special_str
     os.environ["LMCACHE_USE_LAYERWISE"] = "True"
+    os.environ["LMCACHE_BLEND_CHECK_LAYERS"] = "1"
+    os.environ["LMCACHE_BLEND_RECOMPUTE_RATIOS"] = "0.15"
 
     if enable_sparse:
+        os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
         os.environ["LMCACHE_EXTRA_CONFIG"] = '{"enable_sparse": true}'
 
     if use_disk:

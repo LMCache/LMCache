@@ -103,19 +103,19 @@ All prefillers share the same configuration via ``configs/lmcache-prefiller-conf
    max_local_cpu_size: 0
    max_local_disk_size: 0
 
-   enable_nixl: True
-   enable_xpyd: True
-   nixl_role: "sender"
-   nixl_proxy_host: "localhost"
-   nixl_proxy_port: 7500
-   nixl_buffer_size: 1073741824 # 1GB
-   nixl_buffer_device: "cuda"
+   enable_pd: True
+   transfer_channel: "nixl"
+   pd_role: "sender"
+   pd_proxy_host: "localhost"
+   pd_proxy_port: 7500
+   pd_buffer_size: 1073741824 # 1GB
+   pd_buffer_device: "cuda"
 
 Key settings:
 
-- ``nixl_role: "sender"`` - Configures these instances to send KV cache data
-- ``nixl_buffer_size: 1073741824 # 1GB`` - Buffer size for NIXL transfers
-- ``nixl_buffer_device: "cuda"`` - Uses GPU memory for buffering
+- ``pd_role: "sender"`` - Configures these instances to send KV cache data
+- ``pd_buffer_size: 1073741824 # 1GB`` - Buffer size for transfers
+- ``pd_buffer_device: "cuda"`` - Uses GPU memory for buffering
 
 Decoder Configuration
 ^^^^^^^^^^^^^^^^^^^^^
@@ -127,21 +127,21 @@ The decoder(s) are configured via ``configs/lmcache-decoder-x-config.yaml``:
    local_cpu: False
    max_local_cpu_size: 0
 
-   enable_nixl: True
-   enable_xpyd: True
-   nixl_role: "receiver"
-   nixl_peer_host: "localhost"
-   nixl_peer_init_port: 730x
-   nixl_peer_alloc_port: 740x
-   nixl_buffer_size: 2147483648 # 2GB
-   nixl_buffer_device: "cuda"
-   nixl_backends: [UCX]
+   enable_pd: True
+   transfer_channel: "nixl"
+   pd_role: "receiver"
+   pd_peer_host: "localhost"
+   pd_peer_init_port: 730x
+   pd_peer_alloc_port: 740x
+   pd_buffer_size: 2147483648 # 2GB
+   pd_buffer_device: "cuda"
+   pd_backends: [UCX]
 
 Key settings:
 
-- ``nixl_role: "receiver"`` - Configures these instances to receive KV cache data
-- ``nixl_buffer_size: 2147483648 # 2GB`` - Buffer size for NIXL transfers
-- ``nixl_buffer_device: "cuda"`` - Uses GPU memory for buffering
+- ``pd_role: "receiver"`` - Configures these instances to receive KV cache data
+- ``pd_buffer_size: 2147483648 # 2GB`` - Buffer size for transfers
+- ``pd_buffer_device: "cuda"`` - Uses GPU memory for buffering
 
 Components Deep Dive
 ~~~~~~~~~~~~~~~~~~~~

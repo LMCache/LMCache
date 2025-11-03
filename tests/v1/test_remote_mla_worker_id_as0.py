@@ -57,8 +57,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
         use_layerwise=False,
         save_decode_cache=False,
         enable_blending=False,
-        blend_recompute_ratio=0.15,
-        blend_min_tokens=256,
         extra_config={"remote_enable_mla_worker_id_as0": True},
     )
 
@@ -86,7 +84,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
     from lmcache.v1.memory_management import AdHocMemoryAllocator
 
     pin_allocator = AdHocMemoryAllocator()
-    local_cpu_backend = LocalCPUBackend(config, pin_allocator)
+    local_cpu_backend = LocalCPUBackend(config, memory_allocator=pin_allocator)
 
     loop = asyncio.new_event_loop()
     backend = RemoteBackend(
@@ -94,7 +92,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
         metadata=metadata,
         loop=loop,
         local_cpu_backend=local_cpu_backend,
-        lookup_server=None,
     )
     backend.connection = MockConnector()
 
@@ -116,7 +113,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
         metadata=metadata0,
         loop=loop,
         local_cpu_backend=local_cpu_backend,
-        lookup_server=None,
     )
     backend0.connection = backend.connection
     # Create key

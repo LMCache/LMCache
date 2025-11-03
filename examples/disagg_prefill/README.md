@@ -21,26 +21,16 @@ This architecture provides several benefits:
 ### 1p1d - Single Prefill, Single Decode
 Directory: [`1p1d/`](./1p1d/)
 
-A basic setup with:
-- 1 prefill server (port 8100)
-- 1 decode server (port 8200)
-- 1 proxy server (port 9000)
-
 **Requirements**: At least 2 GPUs
 
 This is the simplest configuration to get started with disaggregated prefill.
 
-### xp1d - Multiple Prefill, Single Decode
-Directory: [`xp1d/`](./xp1d/)
-
-A scaled setup with:
-- 2 prefill servers (ports 8100, 8101)
-- 1 decode server (port 8200)
-- 1 proxy server with round-robin load balancing (port 9000)
+### xpyd - Multiple Prefill, Multiple Decode
+Directory: [`xpyd/`](./xpyd/)
 
 **Requirements**: At least 3 GPUs
 
-This configuration demonstrates how to scale prefill capacity while maintaining a single decode instance.
+This configuration demonstrates multiple prefills and multiple decodes.
 
 ## Prerequisites
 
@@ -51,29 +41,19 @@ Before running any example, ensure you have:
 - Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B Instruct
 - Sufficient GPU resources (see individual example requirements)
 
-## Quick Start
+## Quick Start & Benchmarking
 
 1. Choose the appropriate example based on your GPU resources:
    - For 2 GPUs: Use [`1p1d/`](./1p1d/)
-   - For 3+ GPUs: Use [`xp1d/`](./xp1d/)
+   - For 3+ GPUs: Use [`xpyd/`](./xpyd/)
 
 2. Navigate to the chosen directory:
    ```bash
-   cd 1p1d/  # or cd xp1d/
+   cd 1p1d/  # or cd xpyd/
    ```
 
 3. Follow the specific README instructions in that directory
 
-## Benchmarking
-
-Both examples can be benchmarked using vLLM's `benchmark_serving.py`:
-
-```bash
-python benchmark_serving.py --port 9000 --seed $(date +%s) \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --dataset-name random --random-input-len 7500 --random-output-len 200 \
-    --num-prompts 30 --burstiness 100 --request-rate 1 --ignore-eos
-```
 
 ## Architecture Components
 

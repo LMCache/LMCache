@@ -6,6 +6,7 @@ import threading
 import time
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -13,6 +14,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 
+pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
+
+# First Party
 # from lmcache.v1.storage_backend.connector.nixl_connector import (
 #    NixlChannel, NixlConfig, NixlObserverInterface, NixlRole)
 from lmcache.v1.storage_backend.connector.nixl_connector import (

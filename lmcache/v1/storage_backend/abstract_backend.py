@@ -1,15 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Sequence
+from concurrent.futures import Future
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import abc
+import asyncio
 
 # Third Party
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.storage_backend.storage_backend_listener import StorageBackendListener
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+)
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.storage_backend import LocalCPUBackend
 
 
 class StorageBackendInterface(metaclass=abc.ABCMeta):
@@ -31,20 +42,6 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             raise
 
         self.dst_device = dst_device
-        self._listener: Optional[StorageBackendListener] = None
-
-    def set_listener(self, listener: StorageBackendListener):
-        """
-        Set the listener to receive events.
-        """
-        self._listener = listener
-
-    def _on_evict(self, keys: List[CacheEngineKey]) -> None:
-        """
-        Evict keys from the storage backend.
-        """
-        if self._listener is not None:
-            self._listener.on_evict(self, keys)
 
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
@@ -75,19 +72,33 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
-        transfer_spec=None,
-    ) -> None:
+        transfer_spec: Any = None,
+    ) -> Union[List[Future], None]:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
 
-        :return: Nothing
+        :return:  Union[List[Future], None]: A list of `Future` objects if the
+        storage persistence operation is asynchronous and is successful.
+        `None` if the operation is synchronous, or the asynchronous fails
+        or is skipped.
 
         :note: This function will have the side effect that modifies the
             underlying key-value mappings in the storage backend. The side
             effect may change the result of lookup and get.
+        """
+        raise NotImplementedError
+
+    async def async_batched_submit_put_task(
+        self,
+        keys: Sequence[CacheEngineKey],
+        objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> None:
+        """
+        An async version of batched_submit_put_task.
         """
         raise NotImplementedError
 
@@ -128,6 +139,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
         A non-blcocking function to get the kv cache from the storage backend.
@@ -216,6 +228,16 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         return num_removed
 
     @abc.abstractmethod
+    def get_allocator_backend(self) -> "AllocatorBackendInterface":
+        """
+        Get the allocator backend that is used by the current storage backend
+        to allocate memory objects during `get` operations.
+
+        :return: an instance of AllocateBackendInterface
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def close(
         self,
     ) -> None:
@@ -227,10 +249,33 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """
-    return self.allocator_backend.allocate(
-        shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
-    )
+    AllocatorBackendInterface extends the StorageBackendInterface with
+    the ability to actively allocate the memory objects.
     """
+
+    @abc.abstractmethod
+    def initialize_allocator(
+        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+    ) -> MemoryAllocatorInterface:
+        """
+        Create the correct memory allocator for the current storage backend
+
+        Args:
+            config: The cache engine config
+            metadata: the cache engine metadata
+
+        Returns:
+            The memory allocator for this storage backend
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_memory_allocator(self) -> MemoryAllocatorInterface:
+        """
+        Returns:
+            The underlying memory allocator
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def allocate(
@@ -268,7 +313,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
-    ) -> Optional[MemoryObj]:
+    ) -> Optional[list[MemoryObj]]:
         """
         Allocates memory in the backend to hold a tensor of the given shape
         in a batched manner. The allocated memory objects will have the same
@@ -289,3 +334,44 @@ class AllocatorBackendInterface(StorageBackendInterface):
         :rtype: Optional[MemoryObj]
         """
         raise NotImplementedError
+
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the chunk budget for the allocator backend.
+        """
+        raise NotImplementedError
+
+
+class ConfigurableStorageBackendInterface(StorageBackendInterface):
+    """The Configurable Storage Backend Interface needs to be implemented
+    when you want to add a storage backend in a configurable or plug and play
+    fashion."""
+
+    def __init__(
+        self,
+        dst_device: str = "cuda",
+        config: Optional[LMCacheEngineConfig] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ):
+        """
+        Initialize a configurable storage backend. This constructor will be called
+        when loading the configurable storage backends from the configuration file.
+
+        :param str dst_device: The target device for tensor operations
+            (e.g., "cuda" or "cpu").
+        :param LMCacheEngineConfig config: Optional configuration object for the
+            cache engine.
+        :param LMCacheEngineMetadata metadata: Optional metadata describing the cache
+            engine state or version.
+        :param LocalCPUBackend local_cpu_backend: Optional backend for local CPU-based
+            inference or caching.
+        :param asyncio.AbstractEventLoop loop: Optional asyncio event loop for
+            asynchronous operations.
+        """
+        super().__init__(dst_device=dst_device)
+        self.config = config
+        self.metadata = metadata
+        self.local_cpu_backend = local_cpu_backend
+        self.loop = loop

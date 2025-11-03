@@ -27,6 +27,10 @@ The image name and tag can be found on DockerHub - `LMCache/vllm-openai <https:/
 See example run file in `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details.
 
 .. note::
+
     DockerHub contains the following image types:
-    - Nightly build images of LMCache and vLLM latest code
-    - Images of stable releases of LMCache and vLLM
+
+    - Nightly build images of LMCache and vLLM latest code (e.g. tagged with `latest-nightly` and `nightly-<date>`)
+    - Images of stable releases of LMCache and vLLM (tagged with `v0.x.x`, the exact version of vllm a version of lmcache was built with can be discovered by consulting the compatibility matrix inside of `installation <../installation.rst>`_)
+    
+    - Lightweight image that cannot run PD disaggregation (tagged with `lightweight`)

@@ -38,7 +38,9 @@ class LMCacheEngine:
         self.hit_tokens_count = 0
         self.hit_rate = 0.0
 
-        self.engine_ = CreateStorageBackend(config, metadata)
+        self.engine_ = CreateStorageBackend(
+            config, metadata, "cuda" if torch.cuda.is_available() else "cpu"
+        )
         logger.debug(f"Current storage backend type {type(self.engine_)}")
 
         InitializeUsageContext(config, metadata)
@@ -532,7 +534,6 @@ class LMCacheEngineBuilder:
     @classmethod
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
-        # TODO: unit test for this
         if instance_id in cls._instances:
             engine = cls._instances[instance_id]
             engine.close()
