@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import asyncio
 import hashlib
 import threading
@@ -111,6 +111,22 @@ TORCH_DTYPE_TO_STR_DTYPE = {
 }
 
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
+
+
+def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
+    """Parse a key string into either a CacheEngineKey or LayerCacheEngineKey.
+
+    Args:
+        key_str: String in format:
+            fmt@model@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
+
+    Returns:
+        CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
+    """
+    parts = key_str.strip().split("@")
+    if len(parts) >= 6 and parts[5].isdigit():
+        return LayerCacheEngineKey.from_string(key_str)
+    return CacheEngineKey.from_string(key_str)
 
 
 @dataclass(order=True)

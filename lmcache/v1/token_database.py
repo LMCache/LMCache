@@ -17,6 +17,10 @@ logger = init_logger(__name__)
 
 NONE_HASH: int
 
+# Type alias for process_tokens return value
+# (start_index, end_index, cache_engine_key｜hash)
+ProcessTokensResult = Tuple[int, int, Union[CacheEngineKey, int]]
+
 
 class TokenDatabase(metaclass=abc.ABCMeta):
     """TokenDatabase is used to convert input tokens into list of
@@ -82,7 +86,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
         request_configs: Optional[dict] = None,
-    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
+    ) -> Iterable[ProcessTokensResult]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Optional[Union[torch.Tensor, List[int]]] tokens: The tokens to process.
@@ -220,7 +224,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
         request_configs: Optional[dict] = None,
-    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
+    ) -> Iterable[ProcessTokensResult]:
         """Process the tokens/hashes and return the corresponding cache engine keys.
 
         :param Optional[Union[torch.Tensor, List[int]]] tokens: The tokens to process.
@@ -345,7 +349,7 @@ class SegmentTokenDatabase(TokenDatabase):
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
         request_configs: Optional[dict] = None,
-    ) -> Iterable[Tuple[int, int, Union[CacheEngineKey, int]]]:
+    ) -> Iterable[ProcessTokensResult]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
