@@ -8,8 +8,9 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 
-if torch.cuda.is_available():
+if accelerator.has_c_ops():
     # First Party
     import lmcache.c_ops as lmc_ops
 
@@ -113,9 +114,9 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     hidden_dim = head_size * 8
     num_tokens = 10
 
-    dumb_q = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
-    dumb_k = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
-    positions = torch.arange(num_tokens, device="cuda")
+    dumb_q = torch.rand((num_tokens, hidden_dim), device=accelerator.name, dtype=torch.bfloat16)
+    dumb_k = torch.rand((num_tokens, hidden_dim), device=accelerator.name, dtype=torch.bfloat16)
+    positions = torch.arange(num_tokens, device=accelerator.name)
 
     q1 = dumb_q.clone()
     k1 = dumb_k.clone()
@@ -130,7 +131,7 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
 
     q_no_pos = dumb_q.clone()
     k_no_pos = dumb_k.clone()
-    positions2 = torch.arange(100, 100 + num_tokens, device="cuda")
+    positions2 = torch.arange(100, 100 + num_tokens, device=accelerator.name)
     _, k_pos2 = rope(positions2, q_no_pos, k_no_pos)
 
     k_no_pos = dumb_k.clone()

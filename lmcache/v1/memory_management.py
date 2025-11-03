@@ -15,12 +15,13 @@ import sortedcontainers
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.system_detection import NUMAMapping
 
-if torch.cuda.is_available():
+if accelerator.is_available():
     # First Party
     import lmcache.c_ops as lmc_ops
 else:
@@ -302,8 +303,8 @@ def _allocate_cpu_memory(
     numa_mapping: Optional[NUMAMapping] = None,
 ) -> torch.Tensor:
     if numa_mapping:
-        if torch.cuda.is_available():
-            current_device_id = torch.cuda.current_device()
+        if accelerator.is_available():
+            current_device_id = accelerator.current_device()
         else:
             current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
@@ -1478,8 +1479,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if accelerator.is_available():
+                accelerator.synchronize()
             lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
@@ -1619,8 +1620,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if accelerator.is_available():
+                accelerator.synchronize()
             if self.numa_mapping:
                 lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
             else:
@@ -1637,7 +1638,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
     def __init__(
         self,
         size: int,
-        device="cuda",
+        device=accelerator.name,
         align_bytes: Optional[int] = None,
         use_paging: bool = False,
         **kwargs,
@@ -1646,7 +1647,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the GPU memory in bytes.
         :param Optional[int] align_bytes: The byte alignment for allocations.
         """
-        if not torch.cuda.is_available():
+        if not accelerator.is_available():
             device = "cpu"
 
         self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
@@ -1730,7 +1731,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         """
         :param str device: The device of the ad hoc memory allocator.
         """
-        if not torch.cuda.is_available():
+        if not accelerator.is_available():
             self.device = "cpu"
         else:
             self.device = device
@@ -1817,8 +1818,8 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         if device is None:
             # TODO(Serapheim): Ideally we'd get the device from the upper
             # layer - for now just use the current device.
-            if torch.cuda.is_available():
-                device = f"cuda:{torch.cuda.current_device()}"
+            if accelerator.is_available():
+                device = f"{accelerator.name}:{accelerator.current_device()}"
             else:
                 device = "cpu:0"
         super().__init__(size, device, align_bytes=4096)
@@ -1848,7 +1849,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        device: str = "cuda",
+        device: str = accelerator.name,
     ):
         self.gpu_buffer = torch.empty(
             size,

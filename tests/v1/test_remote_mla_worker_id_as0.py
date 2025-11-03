@@ -11,6 +11,7 @@ import threading
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -42,8 +43,8 @@ class MockConnector(RemoteConnector):
         return []
 
 
-# Mock the entire torch.cuda.Stream class
-@mock.patch("torch.cuda.Stream")
+# Mock the entire accelerator.Stream class
+@mock.patch("accelerator.Stream")
 def test_remote_mla_worker_id_as0(mock_stream):
     # Create configuration
     config = LMCacheEngineConfig(

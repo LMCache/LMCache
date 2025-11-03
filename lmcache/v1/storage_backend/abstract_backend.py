@@ -9,6 +9,7 @@ import asyncio
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -26,13 +27,13 @@ if TYPE_CHECKING:
 class StorageBackendInterface(metaclass=abc.ABCMeta):
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
     ):
         """
         Initialize the storage backend.
 
         :param dst_device: the device where the blocking retrieved KV is stored,
-            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
+            could be either "cpu", "cuda", "xpu" or "cuda:0", "cuda:1", etc.
 
         :raise: RuntimeError if the device is not valid
         """
@@ -384,7 +385,7 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
 
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,
@@ -395,7 +396,7 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
         when loading the configurable storage backends from the configuration file.
 
         :param str dst_device: The target device for tensor operations
-            (e.g., "cuda" or "cpu").
+            (e.g., "cuda", "xpu" or "cpu").
         :param LMCacheEngineConfig config: Optional configuration object for the
             cache engine.
         :param LMCacheEngineMetadata metadata: Optional metadata describing the cache

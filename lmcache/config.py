@@ -11,6 +11,7 @@ import yaml
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 
 logger = init_logger(__name__)
 
@@ -76,7 +77,7 @@ class LMCacheEngineConfig:
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
-        local_device: str = "cuda",
+        local_device: str = accelerator.name,
         max_local_cache_size: int = 5,
         remote_url: Optional[str] = "redis://localhost:6379",
         remote_serde: Optional[str] = "torch",
@@ -106,7 +107,7 @@ class LMCacheEngineConfig:
     @staticmethod
     def from_legacy(
         chunk_size: int = 256,
-        backend: str = "cuda",
+        backend: str = accelerator.name,
         max_local_cache_size: int = 5,
         persist_path: Optional[str] = None,
         remote_serde: Optional[str] = "torch",
@@ -117,7 +118,7 @@ class LMCacheEngineConfig:
         remote_url: Optional[str] = None
 
         match backend:
-            case "cpu" | "cuda":
+            case "cpu" | "cuda" | "xpu":
                 local_device = backend
                 remote_url = None
             case path if re.match(r"file://(.*)/", path):  # local disk directory
@@ -163,7 +164,7 @@ class LMCacheEngineConfig:
         blend_add_special_in_precomp = config.get("blend_add_special_in_precomp", False)
 
         match local_device:
-            case "cpu" | "cuda" | None:
+            case "cpu" | "cuda" | "xpu" | None:
                 pass
             case path if re.match(r"file://(.*)/", path):  # local disk directory
                 local_device = path[7:]

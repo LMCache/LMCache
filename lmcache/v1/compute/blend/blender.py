@@ -7,6 +7,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache.v1.compute.models.utils import infer_model_from_vllm
@@ -159,7 +160,7 @@ class LMCBlender:
         """
 
         if isinstance(tokens, list):
-            tokens = torch.tensor(tokens).cuda()
+            tokens = torch.tensor(tokens).to(accelerator.current_device_name())
 
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 

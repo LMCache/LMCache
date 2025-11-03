@@ -9,6 +9,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -35,7 +36,7 @@ def test_ipc_cache_engine_key_serialization():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="CUDA is required for CudaIPCWrapper tests",
 )
 def test_cudaipc_wrapper_serialization():
@@ -61,7 +62,7 @@ def test_cudaipc_wrapper_serialization():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="CUDA is required for CudaIPCWrapper tests",
 )
 def test_cudaipc_wrapper_list_serialization():
@@ -121,7 +122,7 @@ def _worker_process_deserialize_and_reconstruct(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="CUDA is required for CudaIPCWrapper multiprocessing tests",
 )
 def test_cudaipc_wrapper_multiprocess_serialization():

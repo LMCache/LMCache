@@ -13,6 +13,7 @@ from lmcache.config import (
     LMCacheMemPoolMetadata,
 )
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.local_backend import LMCLocalBackend
 from lmcache.storage_backend.remote_backend import (
@@ -36,7 +37,7 @@ class LMCHybridBackend(LMCBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         mpool_metadata: LMCacheMemPoolMetadata,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
     ):
         super().__init__(dst_device)
         self.local_store = LMCLocalBackend(config, mpool_metadata, dst_device)

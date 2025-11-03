@@ -9,6 +9,7 @@ import time
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
@@ -44,14 +45,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheEngineMetadata] = None,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
     ):
-        if torch.cuda.is_available():
-            super().__init__(dst_device)
-        else:
-            super().__init__("cpu")
+        super().__init__(dst_device if accelerator.name != "cpu" else "cpu")
 
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.hot_cache = self.cache_policy.init_mutable_mapping()

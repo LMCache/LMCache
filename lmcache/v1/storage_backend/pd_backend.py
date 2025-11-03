@@ -12,6 +12,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import (
@@ -217,8 +218,8 @@ class PDBackend(AllocatorBackendInterface):
             config.pd_buffer_device,
             metadata.worker_id,
         )
-        logger.info(f"Setting cuda device to {corrected_device} ")
-        torch.cuda.set_device(corrected_device)
+        logger.info(f"Setting accelerator device to {corrected_device} ")
+        accelerator.set_device(corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         paged_mem_allocator.init_gpu_memory_allocator(

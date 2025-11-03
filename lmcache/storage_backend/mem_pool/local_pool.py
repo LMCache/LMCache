@@ -9,6 +9,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheMemPoolMetadata
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 from lmcache.storage_backend.mem_pool.base_pool import BasePool, KVObj
 
 logger = init_logger(__name__)
@@ -75,7 +76,7 @@ class LocalCPUPool(LocalPool):
         self.chunk_size = metadata.kv_shape[2]
         self.size_per_chunk = prod(metadata.kv_shape) * metadata.kv_dtype.itemsize
         self.max_chunk_num = self.init_max_chunk_num(metadata)
-        use_pinned_memory = True if torch.cuda.is_available() else False
+        use_pinned_memory = accelerator.support_pinned_memory()
         kv_dtype = metadata.kv_dtype
 
         logger.info(
@@ -123,10 +124,10 @@ class LocalGPUPool(LocalPool):
         self.max_chunk_num = self.init_max_chunk_num(metadata)
         kv_dtype = metadata.kv_dtype
 
-        logger.info("Initializing gpu mem")
+        logger.info(f"Initializing {accelerator.name} mem")
         with torch.inference_mode():
             self.mem_pool = [
-                torch.empty(metadata.kv_shape, dtype=kv_dtype, device="cuda")
+                torch.empty(metadata.kv_shape, dtype=kv_dtype, device=accelerator.name)
                 for i in range(self.max_chunk_num)
             ]
 

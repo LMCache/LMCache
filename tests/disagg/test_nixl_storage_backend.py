@@ -15,6 +15,7 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -34,7 +35,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device="cuda" if accelerator.name == "cuda" else "cpu",
     )
     for i in range(num_objs):
         keys.append(
@@ -61,8 +62,8 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 
 def create_test_config(
-    buffer_device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    backend: str = "GDS_MT" if torch.cuda.is_available() else "POSIX",
+    buffer_device: str = "cuda" if accelerator.name == "cuda" else "cpu",
+    backend: str = "GDS_MT" if accelerator.name == "cuda" else "POSIX",
 ) -> LMCacheEngineConfig:
     """Create a test configuration for NixlStorageBackend"""
     config = LMCacheEngineConfig()
@@ -119,7 +120,7 @@ def test_nixl_storage_config():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.skipif(not accelerator.name == "cuda", reason="Requires CUDA")
 def test_nixl_storage_backend_basic():
     """Test basic NixlStorageBackend operations"""
     config = create_test_config()
@@ -173,7 +174,7 @@ def test_nixl_storage_backend_basic():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.skipif(not accelerator.name == "cuda", reason="Requires CUDA")
 def test_nixl_storage_backend_put_get():
     """Test put and get operations in NixlStorageBackend"""
     config = create_test_config()
@@ -242,7 +243,7 @@ def test_nixl_storage_backend_put_get():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.skipif(not accelerator.name == "cuda", reason="Requires CUDA")
 def test_nixl_storage_backend_different_backends():
     """Test NixlStorageBackend with different backend types"""
     backends = (
@@ -253,7 +254,7 @@ def test_nixl_storage_backend_different_backends():
             ("GDS", "cpu"),
             ("POSIX", "cpu"),
         ]
-        if torch.cuda.is_available()
+        if accelerator.name == "cuda"
         else [
             ("GDS_MT", "cpu"),
             ("GDS", "cpu"),

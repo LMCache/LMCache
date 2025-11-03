@@ -9,6 +9,7 @@ from lmcache.config import (
     LMCacheMemPoolMetadata,
 )
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.hybrid_backend import (  # , LMCPipelinedHybridBackend
     LMCHybridBackend,
@@ -25,11 +26,11 @@ logger = init_logger(__name__)
 def CreateStorageBackend(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
-    dst_device: str = "cuda",
+    dst_device: str = accelerator.name,
 ) -> LMCBackendInterface:
-    # Replace 'cuda' with 'cuda:<device id>'
-    if dst_device == "cuda":
-        dst_device = f"cuda:{torch.cuda.current_device()}"
+    # Get current accelerator name if not specified
+    if ":" not in dst_device:
+        dst_device = f"{accelerator.current_device_name()}"
 
     mpool_metadata = LMCacheMemPoolMetadata(
         metadata.kv_shape, metadata.kv_dtype, config.max_local_cache_size
@@ -47,7 +48,7 @@ def CreateStorageBackend(
         ):
             # local only
             match config.local_device:
-                case "cpu" | "cuda":
+                case "cpu" | "cuda" | "xpu":
                     logger.info(
                         f"Initializing local-only ({config.local_device}) backend"
                     )

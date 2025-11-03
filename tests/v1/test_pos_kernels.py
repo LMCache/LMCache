@@ -4,11 +4,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="TODO: Add non CUDA implementations for CUDA enhanced functions",
 )
 def test_rope():

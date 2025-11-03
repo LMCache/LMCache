@@ -10,6 +10,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
 from lmcache.storage_backend.connector import CreateConnector
 from lmcache.storage_backend.connector.base_connector import (
@@ -38,7 +39,7 @@ class LMCRemoteBackend(LMCBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
     ):
         """
         Throws:
@@ -227,7 +228,7 @@ class LMCPipelinedRemoteBackend(LMCRemoteBackend):
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
     ):
         """
         Throws:

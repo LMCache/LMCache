@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
@@ -54,7 +55,7 @@ def to_blob(kv_tuples):
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [64, 256, 768])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="TODO: Add non-CUDA implementation to CacheGenSerializer/Deserializer",
 )
 def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
@@ -70,7 +71,7 @@ def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size, fmt, accelerator.name))
     output = serializer.to_bytes(kv)
 
     benchmark(deserializer.from_bytes, output)

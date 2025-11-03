@@ -12,6 +12,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -35,7 +36,7 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
 
 
 def create_test_memory_obj(
-    shape=(2, 16, 8, 128), dtype=torch.bfloat16, device="cuda"
+    shape=(2, 16, 8, 128), dtype=torch.bfloat16, device=accelerator.name
 ) -> MemoryObj:
     allocator = AdHocMemoryAllocator(device=device)
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
@@ -86,7 +87,7 @@ def gds_backend(temp_gds_path, async_loop):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="Requires CUDA for TestGdsBackend",
 )
 @pytest.mark.skipif(sys.platform != "linux", reason="TestGdsBackend runs only on Linux")
@@ -139,12 +140,12 @@ class TestGdsBackend:
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(
-        not torch.cuda.is_available(),
+        not accelerator.name == "cuda",
         reason="Requires CUDA for GdsBackend get_blocking",
     )
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
         key = create_test_key(0)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=accelerator.name)
         # submit_put_task returns a Future
         future = gds_backend.submit_put_task(key, memory_obj)
         assert future is not None
@@ -161,7 +162,7 @@ class TestGdsBackend:
     @pytest.mark.asyncio
     async def test_batched_submit_put_task(self, gds_backend):
         keys = [create_test_key(i) for i in range(2, 5)]
-        memory_objs = [create_test_memory_obj(device="cuda") for _ in range(3)]
+        memory_objs = [create_test_memory_obj(device=accelerator.name) for _ in range(3)]
         futures = gds_backend.batched_submit_put_task(keys, memory_objs)
         assert futures is not None
         assert len(futures) == 3

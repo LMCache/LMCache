@@ -9,6 +9,7 @@ import importlib  # Added for dynamic import
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
@@ -97,12 +98,10 @@ def CreateStorageBackends(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
-    dst_device: str = "cuda",
+    dst_device: str = accelerator.name,
     lmcache_worker: Optional["LMCacheWorker"] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
-    # Replace 'cuda' with 'cuda:<device id>'
-    if dst_device == "cuda":
-        dst_device = f"cuda:{torch.cuda.current_device()}"
+    dst_device = accelerator.current_device_name() if accelerator.name != "cpu" else "cpu" 
 
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 

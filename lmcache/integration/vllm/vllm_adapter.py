@@ -38,6 +38,7 @@ from vllm.config import (
 from vllm.sequence import IntermediateTensors
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 
@@ -51,7 +52,7 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 logger = init_logger(__name__)
 
-LMCACHE_CUDA_STREAM = torch.cuda.Stream()
+LMCACHE_ACCELERATOR_STREAM = accelerator.Stream()
 
 SUPPORTED_BACKEND_METADATA = (
     FlashAttentionMetadata,

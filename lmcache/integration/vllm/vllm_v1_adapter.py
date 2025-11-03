@@ -38,6 +38,7 @@ from vllm.version import __version__ as VLLM_VERSION
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache import utils
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
@@ -488,10 +489,10 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.cuda.device_count()
+    num_gpus = accelerator.device_count()
     local_rank = parallel_config.rank % num_gpus
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    accelerator.set_device(local_rank)
+    device = torch.device(f"{accelerator.name}:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
@@ -833,7 +834,7 @@ class LMCacheConnectorV1Impl:
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = request.slot_mapping.cuda()
+            slot_mapping = request.slot_mapping.to(accelerator.current_device_name())
             assert len(tokens) == len(slot_mapping)
 
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
@@ -982,7 +983,7 @@ class LMCacheConnectorV1Impl:
                 assert len(slot_mapping) == len(token_ids)
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
-                slot_mapping = slot_mapping.cuda()
+                slot_mapping = slot_mapping.to(accelerator.current_device_name())
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
@@ -1071,7 +1072,7 @@ class LMCacheConnectorV1Impl:
             assert len(slot_mapping) == len(token_ids)
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = slot_mapping.cuda()
+            slot_mapping = slot_mapping.to(accelerator.current_device_name())
 
             skip_leading_tokens = save_spec.skip_leading_tokens
             if self.kv_role == "kv_producer":

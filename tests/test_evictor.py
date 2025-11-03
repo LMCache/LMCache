@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
@@ -76,7 +77,7 @@ def get_tensor_size(tensor):
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="Requires CUDA for test_lru",
 )
 def test_lru(backend, dst_device, autorelease):
@@ -130,7 +131,7 @@ def test_lru(backend, dst_device, autorelease):
 @pytest.mark.parametrize("dst_device", ["cuda:0"])
 @pytest.mark.parametrize("backend", ["cuda", "cpu"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="Requires CUDA for test_lru_fragmentation",
 )
 def test_lru_fragmentation(backend, dst_device, autorelease):

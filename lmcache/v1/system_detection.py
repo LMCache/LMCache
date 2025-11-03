@@ -8,7 +8,10 @@ import platform
 import psutil
 import torch
 
-if torch.cuda.is_available():
+# First Party
+from lmcache.accelerator import accelerator
+
+if accelerator.name == "cuda":
     try:
         # First Party
         from lmcache.c_ops import get_gpu_pci_bus_id
@@ -98,7 +101,7 @@ class NUMADetector:
         """
 
         try:
-            device_index = torch.cuda.current_device()
+            device_index = accelerator.current_device()
             pci_bus_id = get_gpu_pci_bus_id(device_index).lower()
 
             numa_node_file = f"/sys/bus/pci/devices/{pci_bus_id}/numa_node"

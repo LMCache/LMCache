@@ -8,6 +8,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.accelerator import accelerator
 from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
@@ -16,12 +17,12 @@ logger = init_logger(__name__)
 class LMCBackendInterface(metaclass=abc.ABCMeta):
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
     ):
         """Initialize the storage backend.
 
         :param dst_device: the device where the retrieved KV be stored,
-            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
+            could be either "cpu", "cuda", "xpu", or "cuda:0", "cuda:1", etc.
 
         :raise: RuntimeError if the device is not valid
         """

@@ -19,6 +19,7 @@ import threading
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import (
@@ -59,7 +60,7 @@ def allocate_and_copy_objects(
     allocator_backend: AllocatorBackendInterface,
     keys: Sequence[CacheEngineKey],
     src_memory_objs: list[MemoryObj],
-    stream: torch.cuda.Stream,
+    stream: accelerator.Stream,
 ) -> tuple[Sequence[CacheEngineKey], list[MemoryObj]]:
     """
     Allocate the memory objects and copy the data from src_memory_objs to
@@ -70,7 +71,7 @@ def allocate_and_copy_objects(
           objects
         keys: the cache engine keys corresponding to the memory objects
         src_memory_objs: the memory objects to copy from
-        stream: the cuda stream to run the copy in
+        stream: the accelerator stream to run the copy in
 
     Returns:
         - list of cache engine keys that corresponds to the memory objects
@@ -92,7 +93,7 @@ def allocate_and_copy_objects(
         if memory_obj is None or memory_obj.tensor is None:
             break
 
-        with torch.cuda.stream(stream):
+        with accelerator.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
@@ -195,8 +196,8 @@ class StorageManager:
         )
         self.thread.start()
 
-        if torch.cuda.is_available():
-            dst_device = "cuda"
+        if accelerator.is_available():
+            dst_device = accelerator.name
         else:
             dst_device = "cpu"
         self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
@@ -229,9 +230,9 @@ class StorageManager:
         self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
         self.async_serializer: Optional[AsyncSerializer] = None
 
-        # The cuda stream for internal copies during put
-        if torch.cuda.is_available():
-            self.internal_copy_stream = torch.cuda.Stream()
+        # The accelerator stream for internal copies during put
+        if accelerator.is_available():
+            self.internal_copy_stream = accelerator.Stream()
         else:
             self.internal_copy_stream = None
 

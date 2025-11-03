@@ -13,6 +13,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineKey
 from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
@@ -470,7 +471,7 @@ def test_mq_noop_multiple_clients():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not accelerator.name == "cuda",
     reason="CUDA is required for REGISTER_KV_CACHE tests",
 )
 def test_mq_register_kv_cache():

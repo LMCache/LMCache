@@ -21,6 +21,7 @@ import requests
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
@@ -238,9 +239,9 @@ class UsageContext:
         return num_cpu, cpu_type, cpu_family_model_stepping
 
     def _get_gpu_info(self):
-        if torch.cuda.is_available():
-            device_property = torch.cuda.get_device_properties(0)
-            gpu_count = torch.cuda.device_count()
+        if accelerator.is_available():
+            device_property = accelerator.get_device_properties(0)
+            gpu_count = accelerator.device_count()
             gpu_type = device_property.name
             gpu_memory_per_device = device_property.total_memory
         else:

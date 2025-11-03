@@ -9,6 +9,7 @@ import threading
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
@@ -105,7 +106,7 @@ def generate_sglang_kv_cache_paged_list_tensors(
     num_heads,
     head_size,
     use_mla=False,
-    device="cuda",
+    device=accelerator.name,
     dtype=torch.bfloat16,
 ):
     """

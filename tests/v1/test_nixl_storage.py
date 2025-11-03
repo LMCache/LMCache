@@ -11,6 +11,7 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -185,7 +186,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.skipif(not accelerator.name == "cuda", reason="Requires CUDA")
 def test_nixl_gds_mt_cuda_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
@@ -216,7 +217,7 @@ def test_nixl_gds_mt_cpu_backend():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.skipif(not accelerator.name == "cuda", reason="Requires CUDA")
 def test_nixl_gds_cuda_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
