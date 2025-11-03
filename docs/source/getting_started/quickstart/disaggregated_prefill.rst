@@ -9,18 +9,21 @@ Right now, LMCache uses NIXL as a transport layer to enable fast KV cache transf
 This guide demonstrates how to run LMCache with disaggregated prefill using a single prefiller and decoder setup (1P1D) on a single machine.
 The architecture splits the LLM inference into two stages: prefill and decode, running on separate GPUs for better resource utilization.
 
+.. note::
+
+    This guide has been tested with **vLLM 0.11.0** and **LMCache 0.3.9** using the Qwen/Qwen2.5-7B-Instruct model.
+
 Prerequisites
 -------------
 
 Before you begin, ensure you have:
 
-* At least 2 GPUs 
+* At least 2 GPUs
 * Python packages installed:
     * ``lmcache`` (0.2.1 or above)
     * ``nixl`` (Install instructions `here <https://github.com/ai-dynamo/nixl>`_)
     * ``vllm`` (latest main branch)
     * ``httpx``, ``fastapi``, and ``uvicorn``
-* A valid Hugging Face token (``HF_TOKEN``) with access to Llama 3.1 8B models
 
 * (Recommended) A machine with NVLink or RDMA enabled GPUs
 
@@ -34,9 +37,9 @@ Architecture Overview
 
 The disaggregated prefill setup consists of three main components:
 
-1. **Prefiller Server (Port 8100)**: Handles the prefill phase of LLM inference
-2. **Decoder Server (Port 8200)**: Manages the decoding/generation phase
-3. **Proxy Server (Port 9000)**: Coordinates between prefiller and decoder
+1. **Prefiller Server (Port 7100)**: Handles the prefill phase of LLM inference
+2. **Decoder Server (Port 7200)**: Manages the decoding/generation phase
+3. **Proxy Server (Port 9100)**: Coordinates between prefiller and decoder
 
 Configuration
 -------------
@@ -54,7 +57,9 @@ Configuration
        pd_proxy_host: "localhost" # Host where proxy server is running
        pd_proxy_port: 7500        # Port where proxy server is listening
        pd_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
-       nixl_buffer_device: "cuda"   # Use GPU memory for buffer
+       pd_buffer_device: "cuda"   # Use GPU memory for buffer
+       nixl_backends:
+         - "UCX"
 
 2. **Decoder Server Configuration** (``lmcache-decoder-config.yaml``):
 
@@ -71,19 +76,13 @@ Configuration
        pd_peer_alloc_port: 7400   # Port for memory allocation
        pd_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
        pd_buffer_device: "cuda"   # Use GPU memory for buffer
+       nixl_backends:
+         - "UCX"
 
 Step-by-Step Setup
 ------------------
 
-1. **Environment Setup**
-
-   Set your Hugging Face token before running the vLLM servers.
-
-   .. code-block:: bash
-
-       export HF_TOKEN=your_hugging_face_token
-
-2. **Launch the vLLM + LMCache Inference Servers**
+1. **Launch the vLLM + LMCache Inference Servers**
 
    You can launch the components individually:
 
@@ -93,8 +92,9 @@ Step-by-Step Setup
 
           UCX_TLS=cuda_ipc,cuda_copy,tcp \
               LMCACHE_CONFIG_FILE=lmcache-decoder-config.yaml \
+              LMCACHE_USE_EXPERIMENTAL=True \
               CUDA_VISIBLE_DEVICES=1 \
-              vllm serve meta-llama/Llama-3.1-8B-Instruct \
+              vllm serve Qwen/Qwen2.5-7B-Instruct \
               --port 7200 \
               --disable-log-requests \
               --kv-transfer-config \
@@ -106,8 +106,9 @@ Step-by-Step Setup
 
           UCX_TLS=cuda_ipc,cuda_copy,tcp \
               LMCACHE_CONFIG_FILE=lmcache-prefiller-config.yaml \
+              LMCACHE_USE_EXPERIMENTAL=True \
               CUDA_VISIBLE_DEVICES=0 \
-              vllm serve meta-llama/Llama-3.1-8B-Instruct \
+              vllm serve Qwen/Qwen2.5-7B-Instruct \
               --port 7100 \
               --disable-log-requests \
               --kv-transfer-config \
@@ -150,26 +151,26 @@ Step-by-Step Setup
 Usage
 -----
 
-Send requests to the proxy server (port 9000) using either the completions or chat completions endpoint:
+Send requests to the proxy server (port 9100) using either the completions or chat completions endpoint:
 
 .. code-block:: bash
 
-    curl http://localhost:9000/v1/completions \
+    curl http://localhost:9100/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
-            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
             "prompt": "Tell me a story",
             "max_tokens": 100
         }'
 
-You can also test the setup with the following command, which runs the `benchmark_serving.py <https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/benchmark_serving.py>`_ from vLLM. 
+You can also test the setup with the following command, which runs the `benchmark_serving.py <https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/benchmark_serving.py>`_ from vLLM.
 
 .. code-block:: bash
 
     git clone https://github.com/vllm-project/vllm.git
     cd vllm/benchmarks
-    python benchmark_serving.py --port 9000 --seed $(date +%s) \
-        --model meta-llama/Llama-3.1-8B-Instruct \
+    python benchmark_serving.py --port 9100 --seed $(date +%s) \
+        --model Qwen/Qwen2.5-7B-Instruct \
         --dataset-name random --random-input-len 5000 --random-output-len 200 \
         --num-prompts 50 --burstiness 100 --request-rate 1
 
@@ -204,5 +205,4 @@ Common issues and solutions:
 
 1. **GPU Requirements**: Ensure you have at least 2 GPUs available
 2. **Port Conflicts**: Check if ports used above are available
-3. **HF Token**: Verify your token starts with ``hf_`` and has necessary model access
-4. **CUDA Errors**: Ensure CUDA_VISIBLE_DEVICES is set correctly for each server
+3. **CUDA Errors**: Ensure CUDA_VISIBLE_DEVICES is set correctly for each server

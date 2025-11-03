@@ -52,8 +52,9 @@ Run centralized sharing example
 .. code-block:: bash
 
     LMCACHE_CONFIG_FILE=lmcache_config.yaml \
+    LMCACHE_USE_EXPERIMENTAL=True \
     CUDA_VISIBLE_DEVICES=0 \
-    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+    vllm serve Qwen/Qwen2.5-7B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8000 --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
@@ -63,8 +64,9 @@ In another terminal,
 .. code-block:: bash
 
     LMCACHE_CONFIG_FILE=lmcache_config.yaml \
+    LMCACHE_USE_EXPERIMENTAL=True \
     CUDA_VISIBLE_DEVICES=1 \
-    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+    vllm serve Qwen/Qwen2.5-7B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8001 \
         --kv-transfer-config \
@@ -79,7 +81,7 @@ Wait until both engines are ready.
     curl -X POST http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
             "prompt": "Explain the significance of KV cache in language models.",
             "max_tokens": 10
         }'
@@ -91,7 +93,7 @@ Wait until both engines are ready.
     curl -X POST http://localhost:8001/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
             "prompt": "Explain the significance of KV cache in language models.",
             "max_tokens": 10
         }'
@@ -155,7 +157,8 @@ Start vllm engine 1 at port 8000:
 
     CUDA_VISIBLE_DEVICES=0 \
     LMCACHE_CONFIG_FILE=lmcache_config1.yaml \
-    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+    LMCACHE_USE_EXPERIMENTAL=True \
+    vllm serve Qwen/Qwen2.5-7B-Instruct \
         --max-model-len 4096 \
         --gpu-memory-utilization 0.8 \
         --port 8000 \
@@ -168,7 +171,8 @@ Start vllm engine 2 at port 8001:
 
     CUDA_VISIBLE_DEVICES=1 \
     LMCACHE_CONFIG_FILE=lmcache_config2.yaml \
-    vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+    LMCACHE_USE_EXPERIMENTAL=True \
+    vllm serve Qwen/Qwen2.5-7B-Instruct \
         --max-model-len 4096 \
         --gpu-memory-utilization 0.8 \
         --port 8001 \
@@ -184,7 +188,7 @@ Note that the two distributed cache servers will start at port 8200 and 8201.
     curl -X POST http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
-        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "model": "Qwen/Qwen2.5-7B-Instruct",
         "prompt": "Explain the significance of KV cache in language models.",
         "max_tokens": 100
         }'
@@ -196,7 +200,7 @@ Note that the two distributed cache servers will start at port 8200 and 8201.
     curl -X POST http://localhost:8001/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
-        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "model": "Qwen/Qwen2.5-7B-Instruct",
         "prompt": "Explain the significance of KV cache in language models.",
         "max_tokens": 100
         }'
