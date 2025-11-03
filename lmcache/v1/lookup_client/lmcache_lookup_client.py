@@ -91,8 +91,9 @@ class LMCacheLookupClient(LookupClientInterface):
 
         for params in self.socket_params:
             logger.info(
-                f"lmcache lookup client connect to rank {params.rank} "
-                f"with socket path {params.socket_path}"
+                "lmcache lookup client connect to rank %s with socket path %s",
+                params.rank,
+                params.socket_path,
             )
             socket = get_zmq_socket(
                 self.ctx,
@@ -132,7 +133,9 @@ class LMCacheLookupClient(LookupClientInterface):
                     old_socket.close(linger=0)
                 except zmq.ZMQError as e:
                     logger.warning(
-                        f"ZMQ error closing old socket for rank {rank_idx}: {e}"
+                        "ZMQ error closing old socket for rank %s: %s",
+                        rank_idx,
+                        e,
                     )
                 except AttributeError:
                     # Socket already closed or invalid
@@ -141,8 +144,9 @@ class LMCacheLookupClient(LookupClientInterface):
             # Create new socket using stored parameters
             params = self.socket_params[rank_idx]
             logger.info(
-                f"Recreating socket for rank {params.rank} "
-                f"with path {params.socket_path}"
+                "Recreating socket for rank %s with path %s",
+                params.rank,
+                params.socket_path,
             )
 
             new_socket = get_zmq_socket(
@@ -214,14 +218,17 @@ class LMCacheLookupClient(LookupClientInterface):
                 results.append(result)
         except zmq.Again as e:
             logger.error(
-                f"Timeout occurred for rank {failed_rank}, "
-                f"recreating all sockets. Error: {str(e)}"
+                "Timeout occurred for rank %s, recreating all sockets. Error: %s",
+                failed_rank,
+                e,
             )
             self._recreate_socket()
             return 0
         except zmq.ZMQError as e:
             logger.error(
-                f"ZMQ error for rank {failed_rank}: {str(e)}, recreating all sockets"
+                "ZMQ error for rank %s: %s, recreating all sockets",
+                failed_rank,
+                e,
             )
             self._recreate_socket()
             return 0
@@ -229,8 +236,9 @@ class LMCacheLookupClient(LookupClientInterface):
         assert len(results) == self.num_ranks
         if len(set(results)) > 1:
             logger.warning(
-                f"Lookup results (number of hit tokens) differ "
-                f"across (TP and PP) ranks: {results}."
+                "Lookup results (number of hit tokens) differ "
+                "across (TP and PP) ranks: %s.",
+                results,
             )
         # NOTE: it is possible that the number of hit tokens is different
         # across (TP and PP) ranks, so we can use the minimum value as the
@@ -252,13 +260,13 @@ class LMCacheLookupClient(LookupClientInterface):
             try:
                 socket.close(linger=0)
             except Exception as e:
-                logger.warning(f"Error closing socket: {e}")
+                logger.warning("Error closing socket: %s", e)
 
         try:
             if self.ctx:
                 self.ctx.term()
         except Exception as e:
-            logger.warning(f"Error terminating ZMQ context: {e}")
+            logger.warning("Error terminating ZMQ context: %s", e)
 
 
 class LMCacheLookupServer:
@@ -318,7 +326,7 @@ class LMCacheLookupServer:
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 
-        logger.info(f"lmcache lookup server start on {socket_path}")
+        logger.info("lmcache lookup server start on %s", socket_path)
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
