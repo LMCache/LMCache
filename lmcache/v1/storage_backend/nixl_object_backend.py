@@ -63,7 +63,9 @@ class SetPresenceCache:
     def contains(self, key: int) -> bool:
         return key in self._keys
 
+
 PresenceCache = Union[SetPresenceCache]
+
 
 @dataclass
 class NixlObjectConfig:
@@ -535,9 +537,7 @@ class NixlObjectBackend(AllocatorBackendInterface):
         finally:
             # Release the handle after transfer completes (success or failure)
             self.agent.release_handle(handle)
-            self.agent.release_storage_handler(
-                storage_reg_descs, storage_xfer_handler
-            )
+            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
             for mem_obj in mem_objs:
                 mem_obj.ref_count_down()
 
@@ -574,17 +574,18 @@ class NixlObjectBackend(AllocatorBackendInterface):
             # Submit the async wait to the event loop and return immediately
             asyncio.create_task(
                 self._wait_for_transfer(
-                    handle, initial_state, keys, 
-                    storage_reg_descs, storage_xfer_handler,
-                    mem_objs
+                    handle,
+                    initial_state,
+                    keys,
+                    storage_reg_descs,
+                    storage_xfer_handler,
+                    mem_objs,
                 )
             )
         else:
             self.agent.post_blocking(handle)
             self.agent.release_handle(handle)
-            self.agent.release_storage_handler(
-                storage_reg_descs, storage_xfer_handler
-            )
+            self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
 
             end_time = time.time()
             duration = end_time - start_time
