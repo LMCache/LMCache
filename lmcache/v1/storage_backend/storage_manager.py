@@ -960,14 +960,39 @@ class StorageManager:
         return storage_names
 
     def close(self):
-        for backend in self.storage_backends.values():
-            backend.close()
+        logger.info("Closing StorageManager...")
 
-        # using threadsafe method here as stop modifies
-        # the internal state of the loop (in another thread)
-        if self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.loop.stop)
+        # Close all backends
+        for name, backend in self.storage_backends.items():
+            try:
+                logger.info(f"Closing storage backend: {name}")
+                backend.close()
+                logger.info(f"Storage backend {name} closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing backend {name}: {e}")
+
+        # Stop event loop
+        try:
+            if self.loop.is_running():
+                logger.info("Stopping event loop...")
+                self.loop.call_soon_threadsafe(self.loop.stop)
+                logger.info("Event loop stop signaled")
+        except Exception as e:
+            logger.error(f"Error stopping event loop: {e}")
+
+        # Wait for thread with timeout
         if self.thread.is_alive():
-            self.thread.join()
+            logger.info("Waiting for storage manager thread to finish...")
+            self.thread.join(timeout=10.0)
+
+            if self.thread.is_alive():
+                logger.warning(
+                    "Storage manager thread did not terminate within 10s timeout. "
+                    "Proceeding with shutdown anyway."
+                )
+            else:
+                logger.info("Storage manager thread terminated successfully")
+        else:
+            logger.info("Storage manager thread already stopped")
 
         logger.info("Storage manager closed.")

@@ -1152,12 +1152,23 @@ class LMCacheEngine:
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
+        logger.info("Closing LMCacheEngine...")
 
         if self.lmcache_worker is not None:
-            self.lmcache_worker.close()
+            try:
+                logger.info("Closing lmcache_worker...")
+                self.lmcache_worker.close()
+                logger.info("lmcache_worker closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing lmcache_worker: {e}")
 
-        if self.storage_manager is not None:
-            self.storage_manager.close()
+        try:
+            logger.info("Closing storage_manager...")
+            if self.storage_manager is not None:
+                self.storage_manager.close()
+            logger.info("storage_manager closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing storage_manager: {e}")
 
         logger.info("LMCacheEngine closed.")
 
@@ -1541,13 +1552,42 @@ class LMCacheEngineBuilder:
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
+        logger.info(f"Destroying LMCacheEngine instance: {instance_id}")
+
         if instance_id in cls._instances:
             stat_logger = cls._stat_loggers[instance_id]
-            stat_logger.shutdown()
+            try:
+                logger.info("Shutting down stats logger...")
+                stat_logger.shutdown()
+                logger.info("Stats logger shut down successfully")
+            except Exception as e:
+                logger.error(f"Error shutting down stats logger: {e}")
+
             engine = cls._instances[instance_id]
-            engine.close()
-            cls._instances.pop(instance_id, None)
-            cls._cfgs.pop(instance_id, None)
-            cls._metadatas.pop(instance_id, None)
-            cls._stat_loggers.pop(instance_id, None)
-            LMCStatsMonitor.DestroyInstance()
+            try:
+                logger.info("Closing cache engine...")
+                engine.close()
+                logger.info("Cache engine closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing cache engine: {e}")
+
+            try:
+                logger.info("Cleaning up instance dictionaries...")
+                cls._instances.pop(instance_id, None)
+                cls._cfgs.pop(instance_id, None)
+                cls._metadatas.pop(instance_id, None)
+                cls._stat_loggers.pop(instance_id, None)
+                logger.info("Instance dictionaries cleaned up")
+            except Exception as e:
+                logger.error(f"Error cleaning up instances: {e}")
+
+            try:
+                logger.info("Destroying stats monitor...")
+                LMCStatsMonitor.DestroyInstance()
+                logger.info("Stats monitor destroyed successfully")
+            except Exception as e:
+                logger.error(f"Error destroying stats monitor: {e}")
+
+            logger.info(f"LMCacheEngine instance {instance_id} destroyed")
+        else:
+            logger.warning(f"Instance {instance_id} not found for destruction")
