@@ -273,7 +273,8 @@ class RemoteBackend(StorageBackendInterface):
             for memory_obj in memory_objs:
                 # Do nothing related ref count within serialize
                 compressed_memory_obj = self.serializer.serialize(memory_obj)
-                # Increase ref count for async put, will ref_count_down after put is done
+                # Increase ref count for async put, will ref_count_down
+                # after put is done
                 compressed_memory_obj.ref_count_up()
                 compressed_memory_objs.append(compressed_memory_obj)
 
