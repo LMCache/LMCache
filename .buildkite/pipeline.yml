@@ -14,6 +14,7 @@ steps:
       uv pip install --upgrade pip setuptools wheel
       uv pip install -r requirements/common.txt
       uv pip install -r requirements/test.txt
+      uv pip install vllm
       uv pip install -e . --no-build-isolation
       uv pip freeze
 
