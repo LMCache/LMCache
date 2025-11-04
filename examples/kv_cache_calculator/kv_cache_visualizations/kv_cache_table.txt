@@ -1,0 +1,39 @@
+KV Cache Memory Requirements - float16 precision
+============================================================================================================================================
+
+Model                                             4K          8K         16K         32K         64K        128K        256K        512K          1M
+--------------------------------------------------------------------------------------------------------------------------------------------
+Llama-3.2-1B-Instruct                      125.0 MiB   250.0 MiB   500.0 MiB  1000.0 MiB     2.0 GiB     3.9 GiB     7.8 GiB    15.6 GiB    30.5 GiB
+Llama-3.2-3B-Instruct                      437.5 MiB   875.0 MiB     1.7 GiB     3.4 GiB     6.8 GiB    13.7 GiB    27.3 GiB    54.7 GiB   106.8 GiB
+Qwen2.5-3B-Instruct                        140.6 MiB   281.2 MiB   562.5 MiB     1.1 GiB     2.2 GiB     4.4 GiB     8.8 GiB    17.6 GiB    34.3 GiB
+Mistral-7B-Instruct-v0.2                   500.0 MiB  1000.0 MiB     2.0 GiB     3.9 GiB     7.8 GiB    15.6 GiB    31.2 GiB    62.5 GiB   122.1 GiB
+Llama-3.1-8B-Instruct                      500.0 MiB  1000.0 MiB     2.0 GiB     3.9 GiB     7.8 GiB    15.6 GiB    31.2 GiB    62.5 GiB   122.1 GiB
+Qwen2.5-7B-Instruct                        218.8 MiB   437.5 MiB   875.0 MiB     1.7 GiB     3.4 GiB     6.8 GiB    13.7 GiB    27.3 GiB    53.4 GiB
+gemma-2-9b                                   1.1 GiB     2.2 GiB     4.5 GiB     9.0 GiB    17.9 GiB    35.9 GiB    71.8 GiB   143.6 GiB   280.4 GiB
+Qwen2.5-14B-Instruct                       750.0 MiB     1.5 GiB     2.9 GiB     5.9 GiB    11.7 GiB    23.4 GiB    46.9 GiB    93.8 GiB   183.1 GiB
+gemma-2-27b                                  1.6 GiB     3.2 GiB     6.3 GiB    12.6 GiB    25.3 GiB    50.5 GiB   101.1 GiB   202.1 GiB   394.8 GiB
+Qwen2.5-32B-Instruct                      1000.0 MiB     2.0 GiB     3.9 GiB     7.8 GiB    15.6 GiB    31.2 GiB    62.5 GiB   125.0 GiB   244.1 GiB
+Qwen3-32B                                 1000.0 MiB     2.0 GiB     3.9 GiB     7.8 GiB    15.6 GiB    31.2 GiB    62.5 GiB   125.0 GiB   244.1 GiB
+Llama-3.1-70B-Instruct                       1.2 GiB     2.4 GiB     4.9 GiB     9.8 GiB    19.5 GiB    39.1 GiB    78.1 GiB   156.2 GiB   305.2 GiB
+Qwen2.5-72B-Instruct                         1.2 GiB     2.4 GiB     4.9 GiB     9.8 GiB    19.5 GiB    39.1 GiB    78.1 GiB   156.2 GiB   305.2 GiB
+Mistral-Large-Instruct-2407                  1.3 GiB     2.7 GiB     5.4 GiB    10.7 GiB    21.5 GiB    43.0 GiB    85.9 GiB   171.9 GiB   335.7 GiB
+Llama-3.1-405B                               1.9 GiB     3.8 GiB     7.7 GiB    15.4 GiB    30.8 GiB    61.5 GiB   123.0 GiB   246.1 GiB   480.7 GiB
+DeepSeek-V3                                268.1 MiB   536.1 MiB     1.0 GiB     2.1 GiB     4.2 GiB     8.4 GiB    16.8 GiB    33.5 GiB    65.4 GiB
+Mixtral-8x7B-Instruct-v0.1                 500.0 MiB  1000.0 MiB     2.0 GiB     3.9 GiB     7.8 GiB    15.6 GiB    31.2 GiB    62.5 GiB   122.1 GiB
+Mixtral-8x22B-v0.1                         875.0 MiB     1.7 GiB     3.4 GiB     6.8 GiB    13.7 GiB    27.3 GiB    54.7 GiB   109.4 GiB   213.6 GiB
+Phi-3.5-MoE-instruct                       500.0 MiB  1000.0 MiB     2.0 GiB     3.9 GiB     7.8 GiB    15.6 GiB    31.2 GiB    62.5 GiB   122.1 GiB
+Qwen3-Next-80B-A3B-Instruct                 46.9 MiB    93.8 MiB   187.5 MiB   375.0 MiB   750.0 MiB     1.5 GiB     2.9 GiB     5.9 GiB    11.4 GiB
+Qwen3-Omni-30B-A3B-Instruct                187.5 MiB   375.0 MiB   750.0 MiB     1.5 GiB     2.9 GiB     5.9 GiB    11.7 GiB    23.4 GiB    45.8 GiB
+
+============================================================================================================================================
+
+Legend:
+- Memory sizes shown in MiB (Mebibytes), GiB (Gibibytes), and TiB (Tebibytes)
+- 1 GiB = 1,024 MiB; 1 TiB = 1,024 GiB
+- Calculations based on float16 precision (2 bytes per parameter)
+- DeepSeek models use KV-LoRA optimization (reduced memory footprint)
+
+Generated using KV cache calculator formulas:
+- Standard models: 2 × layers × tokens × kv_heads × (hidden_size/attention_heads)
+- DeepSeek models: layers × tokens × (kv_lora_rank + qk_rope_head_dim)
+- Qwen3 models: 2 × layers × tokens × kv_heads × head_dim
