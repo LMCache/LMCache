@@ -14,6 +14,8 @@ from lmcache.v1.storage_backend.connector import ConnectorAdapter, ConnectorCont
 
 logger = init_logger(__name__)
 
+# Unique prefix for easy log filtering
+LOG_PREFIX = "[S3-RDMA]"
 
 @dataclass
 class S3RdmaConnectorSettings:
@@ -104,7 +106,7 @@ class S3RdmaConnectorAdapter(ConnectorAdapter):
         return S3RdmaConnectorSettings(
             bucket=bucket,
             endpoint=endpoint,
-            prefix=prefix,
+            prefix=None,
             region=region,
             max_parallel_requests=max_parallel_requests,
             max_segment_size=max_segment_size,
