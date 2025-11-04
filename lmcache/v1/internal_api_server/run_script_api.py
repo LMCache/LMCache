@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any
+import importlib
 
 # Third Party
 from fastapi import APIRouter
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
+
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 router = APIRouter()
 
@@ -21,6 +27,26 @@ async def run_script(request: Request):
     script_content = await script_file.read()
 
     try:
+        # Get allowed imports from config
+        config = request.app.state.lmcache_adapter.config
+        allowed_imports = config.script_allowed_imports or []
+
+        # Pre-import allowed modules
+        allowed_modules = {}
+        for module_name in allowed_imports:
+            try:
+                module = importlib.import_module(module_name)
+                allowed_modules[module_name] = module
+                logger.info(f"Imported allowed module: {module_name}")
+            except ImportError as e:
+                logger.warning(f"Failed to import module {module_name}: {e}")
+
+        # Create custom __import__ function that only allows configured modules
+        def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in allowed_modules:
+                return allowed_modules[name]
+            raise ImportError(f"Import of '{name}' is not allowed")
+
         restricted_globals = {
             "__builtins__": {
                 "print": print,
@@ -31,9 +57,11 @@ async def run_script(request: Request):
                 "dict": dict,
                 "tuple": tuple,
                 "set": set,
+                "__import__": restricted_import,
             },
             "app": request.app,
         }
+
         restricted_locals: dict[str, Any] = {}
 
         exec(script_content, restricted_globals, restricted_locals)
