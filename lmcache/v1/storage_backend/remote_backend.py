@@ -191,7 +191,11 @@ class RemoteBackend(StorageBackendInterface):
                 for key in keys
             ]
 
-        return self.connection.batched_contains(keys, stop_after_first_not_exits)
+        try:
+            return self.connection.batched_contains(keys, stop_after_first_not_exits)
+        except Exception as e:
+            logger.warning(f"Remote connection failed in batched_contains: {e}")
+            return [False] * len(keys)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:
