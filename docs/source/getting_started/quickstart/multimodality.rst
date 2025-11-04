@@ -40,12 +40,28 @@ Send a simple text request to verify LMCache is working:
        }'   
 
 
+**Example Output:**
+
+You should receive a response like:
+
+.. code-block:: json
+
+   {
+     "id": "cmpl-...",
+     "object": "text_completion",
+     "model": "Qwen/Qwen2-VL-2B-Instruct",
+     "choices": [{
+       "text": " Blue is a color that is often associated with the sky, water, and the ocean. It is a cool color that is often used to represent calmness, tranquility, and serenity. Blue is also a color that is often used in fashion"
+     }]
+   }
+
 **Monitoring LMCache:**
 
 After running the first request, check the vLLM logs to see LMCache storing the KV cache:
 
 .. code-block:: text
 
+   LMCache INFO: Reqid: 0, Total tokens 5, LMCache hit tokens: 0, need to load: 0
    LMCache INFO: Storing KV cache for 5 out of 5 tokens (skip_leading_tokens=0) for request 0
    LMCache INFO: Stored 5 out of total 5 tokens. size: 0.0001 gb, cost 0.5948 ms, throughput: 0.2245 GB/s
 
@@ -53,7 +69,7 @@ Run the same request again, and you'll see LMCache retrieving the cached KV:
 
 .. code-block:: text
 
-   LMCache INFO: Reqid: 0, Total tokens 5, LMCache hit tokens: 0, need to load: 0
+   LMCache INFO: Reqid: 1, Total tokens 5, LMCache hit tokens: 5, need to load: 5
    LMCache INFO: Retrieved 5 out of 5 out of total 5 tokens
 
 This demonstrates that LMCache successfully caches and retrieves KV values for multimodal models.
