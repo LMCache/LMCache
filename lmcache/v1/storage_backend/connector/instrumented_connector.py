@@ -112,7 +112,13 @@ class InstrumentedRemoteConnector(RemoteConnector):
     async def batched_put(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
     ):
-        return await self._connector.batched_put(keys, memory_objs)
+        try:
+            await self._connector.batched_put(keys, memory_objs)
+        except Exception as e:
+            logger.warning(f"batched put error: {e}")
+        finally:
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_down()
 
     def remove_sync(self, key: CacheEngineKey) -> bool:
         return self._connector.remove_sync(key)
