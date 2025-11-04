@@ -142,6 +142,7 @@ class RemoteBackend(StorageBackendInterface):
                 key.world_size,
                 0,
                 key.chunk_hash,
+                key.dtype,
                 key.request_configs,
             )
 
@@ -312,6 +313,7 @@ class RemoteBackend(StorageBackendInterface):
                 key.world_size,
                 0,
                 key.chunk_hash,
+                key.dtype,
                 key.request_configs,
             )
         t1 = time.perf_counter()
@@ -364,6 +366,7 @@ class RemoteBackend(StorageBackendInterface):
                     key.world_size,
                     0,
                     key.chunk_hash,
+                    key.dtype,
                     key.request_configs,
                 )
                 for key in keys
@@ -459,6 +462,7 @@ class RemoteBackend(StorageBackendInterface):
                     key.world_size,
                     0,
                     key.chunk_hash,
+                    key.dtype,
                     key.request_configs,
                 )
                 for key in keys

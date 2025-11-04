@@ -106,6 +106,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
         world_size=4,
         worker_id=2,
         chunk_hash="test_hash",
+        dtype=torch.float32,
     )
 
     backend0 = RemoteBackend(
@@ -122,6 +123,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
         world_size=4,
         worker_id=0,
         chunk_hash="test_hash",
+        dtype=torch.float32,
     )
 
     # Test not contains before adding data

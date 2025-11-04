@@ -124,6 +124,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             self.metadata.world_size,
             self.metadata.worker_id,
             chunk_hash,
+            self.metadata.kv_dtype,
             request_configs,
         )
 
