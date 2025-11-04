@@ -9,7 +9,6 @@ import asyncio
 import ctypes
 import ctypes.util
 import os
-import threading
 
 # Third Party
 import torch
@@ -151,7 +150,7 @@ class S3RdmaConnector(RemoteConnector):
         self.local_cpu_backend = local_cpu_backend
 
         self._client: Optional[S3RdmaClient] = None
-        self._client_lock = threading.Lock()
+        # self._client_lock = threading.Lock()
         self._boto_client = None
         self._object_size_cache: Dict[str, int] = {}
         self._inflight_sema: Optional[asyncio.Semaphore] = None
@@ -277,14 +276,21 @@ class S3RdmaConnector(RemoteConnector):
 
             logger.debug("RDMA GET: bucket=%s, key=%s, size=%s", self.settings.bucket, s3_key, storage_size)
 
-            with self._client_lock:
-                self._client.get_object_buffers(
-                    BufferGetObject(
-                        bucket=self.settings.bucket,
-                        key=s3_key,
-                        buffer=memoryview(buffer)
-                        )
-                )
+            # with self._client_lock:
+            #     self._client.get_object_buffers(
+            #         BufferGetObject(
+            #             bucket=self.settings.bucket,
+            #             key=s3_key,
+            #             buffer=memoryview(buffer)
+            #             )
+            #     )
+            self._client.get_object_buffers(
+                BufferGetObject(
+                    bucket=self.settings.bucket,
+                    key=s3_key,
+                    buffer=memoryview(buffer)
+                    )
+            )
 
             logger.debug("%s End RDMA GET to GPU memory: %s", LOG_PREFIX, s3_key)
             logger.debug("%s RDMA transfer complete - data is in GPU memory", LOG_PREFIX)
@@ -447,14 +453,21 @@ class S3RdmaConnector(RemoteConnector):
             buffer_view = memory_obj.byte_array
             logger.debug("RDMA PUT: bucket=%s, key=%s, size=%s", self.settings.bucket, s3_key, len(buffer_view))
 
-            with self._client_lock:
-                self._client.put_object_buffers(
-                    BufferPutObject(
-                        bucket=self.settings.bucket,
-                        key=s3_key,
-                        buffer=buffer_view
-                    )
+            # with self._client_lock:
+            #     self._client.put_object_buffers(
+            #         BufferPutObject(
+            #             bucket=self.settings.bucket,
+            #             key=s3_key,
+            #             buffer=buffer_view
+            #         )
+            #     )
+            self._client.put_object_buffers(
+                BufferPutObject(
+                    bucket=self.settings.bucket,
+                    key=s3_key,
+                    buffer=buffer_view
                 )
+            )
 
             # Cache the size
             self._object_size_cache[s3_key] = len(buffer_view)
