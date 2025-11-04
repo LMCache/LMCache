@@ -229,13 +229,13 @@ class RemoteBackend(StorageBackendInterface):
         if self.exists_in_put_tasks(key):
             return create_immediate_empty_future()
 
+        memory_obj.ref_count_up()
+
         with self.lock:
             self.put_tasks.add(key)
 
-        # Do nothing related ref count within serialize
         compressed_memory_obj = self.serializer.serialize(memory_obj)
-        # Increase ref count for async put, will ref_count_down after put is done
-        compressed_memory_obj.ref_count_up()
+        memory_obj.ref_count_down()
 
         # NOTE: No need to do error handling here
         # since the `future` is never waited
@@ -271,12 +271,9 @@ class RemoteBackend(StorageBackendInterface):
             compressed_memory_objs = []
 
             for memory_obj in memory_objs:
-                # Do nothing related ref count within serialize
-                compressed_memory_obj = self.serializer.serialize(memory_obj)
-                # Increase ref count for async put, will ref_count_down
-                # after put is done
-                compressed_memory_obj.ref_count_up()
-                compressed_memory_objs.append(compressed_memory_obj)
+                memory_obj.ref_count_up()
+                compressed_memory_objs.append(self.serializer.serialize(memory_obj))
+                memory_obj.ref_count_down()
 
             future = asyncio.run_coroutine_threadsafe(
                 self.connection.batched_put(keys, compressed_memory_objs),  # type: ignore

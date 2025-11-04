@@ -9,6 +9,7 @@ class NaiveSerializer(Serializer):
         pass
 
     def serialize(self, memory_obj: MemoryObj) -> MemoryObj:
+        memory_obj.ref_count_up()
         return memory_obj
 
 
