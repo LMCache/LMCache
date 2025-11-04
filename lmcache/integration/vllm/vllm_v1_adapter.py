@@ -1192,13 +1192,14 @@ class LMCacheConnectorV1Impl:
                 if request.disagg_spec:
                     request.disagg_spec.is_last_prefill = True
             else:
-                token_len = len(token_ids)
-                aligned_token_len = (
-                    token_len // self._lmcache_chunk_size * self._lmcache_chunk_size
-                )
-                token_ids = token_ids[:aligned_token_len]
-                store_mask = store_mask[:aligned_token_len]
-                slot_mapping = slot_mapping[:aligned_token_len]
+                if not self.enable_blending:
+                    token_len = len(token_ids)
+                    aligned_token_len = (
+                        token_len // self._lmcache_chunk_size * self._lmcache_chunk_size
+                    )
+                    token_ids = token_ids[:aligned_token_len]
+                    store_mask = store_mask[:aligned_token_len]
+                    slot_mapping = slot_mapping[:aligned_token_len]
 
             self.lmcache_engine.store(
                 token_ids,
