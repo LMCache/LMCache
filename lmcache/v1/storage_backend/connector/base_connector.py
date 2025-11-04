@@ -278,25 +278,40 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     ) -> List[MemoryObj]:
         """Batched get the memory_objs of the corresponding keys (non-blocking)
 
+        This method returns only the consecutive prefix of successfully retrieved
+        memory objects. Once a key is not found (None) or an exception occurs,
+        all subsequent memory objects (even if successfully retrieved) will be
+        released to avoid memory leaks, and only the prefix before the first
+        failure will be returned.
+
         Args:
             lookup_id: Identifier for this lookup operation
             keys: List of keys to get
 
         Returns:
-            List of memory objects that exist (excludes None values)
+            List of consecutive memory objects from the beginning until the first
+            failure (None or Exception). Empty list if the first key fails.
         """
         # Use asyncio.gather to fetch all keys concurrently
         results = await asyncio.gather(
             *(self.get(key) for key in keys), return_exceptions=True
         )
 
-        # Filter out None values and exceptions, return only valid memory objects
+        # Only return consecutive prefix of valid memory objects
         memory_objs = []
+        found_failure = False
         for result in results:
-            if isinstance(result, MemoryObj):
+            if found_failure:
+                # Release subsequent memory objects to avoid memory leak
+                if isinstance(result, MemoryObj):
+                    result.ref_count_down()
+            elif isinstance(result, MemoryObj):
                 memory_objs.append(result)
-            elif isinstance(result, Exception):
-                logger.warning(f"Exception during batched get: {result}")
+            else:
+                # First failure encountered (None or Exception)
+                if isinstance(result, Exception):
+                    logger.warning(f"Exception during batched get: {result}")
+                found_failure = True
 
         return memory_objs
 
