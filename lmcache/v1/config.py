@@ -405,49 +405,60 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
+    },
+    #
     # KV events configuration
+    #
+    # Enable KV events publishing
     "enable_kv_events": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
     },
+    # Tool that performs the publishing
     "kv_events_publisher_type": {
         "type": str,
         "default": "zmq",
         "env_converter": str,
     },
+    # Endpoint where events are published
     "kv_events_publisher_endpoint": {
         "type": str,
         "default": "tcp://*:5557",
         "env_converter": str,
     },
+    # Endpoint where events are replayed
     "kv_events_publisher_replay_endpoint": {
         "type": str,
         "default": "tcp://*:5558",
         "env_converter": str,
     },
+    # Topic or channel where events are published on
     "kv_events_publisher_topic": {
         "type": str,
         "default": "kv-events",
         "env_converter": str,
     },
+    # Number of past events to keep for replay
     "kv_events_publisher_buffer_steps": {
         "type": int,
         "default": 10_000,
         "env_converter": int,
     },
+    # High water mark which is a limit on the number of messages that can be queued in
+    # memory for a socket before it starts dropping or blocking messages
     "kv_events_publisher_hwm": {
         "type": int,
         "default": 100_000,
         "env_converter": int,
     },
+    # Maximum number of events to buffer in memory
     "kv_events_publisher_max_queue_size": {
         "type": int,
         "default": 100_000,
         "env_converter": int,
     },
 }
-
 
 def _resolve_config_aliases(config_dict: dict, source: str) -> dict:
     """Resolve configuration aliases and handle deprecated configurations."""
