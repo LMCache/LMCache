@@ -1022,6 +1022,17 @@ class PrometheusLogger:
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
 
+        event_statuses = ["ongoing", "done", "not_found"]
+        for status in event_statuses:
+            metric_name = f"storage_events_{status}_count"
+            gauge = self._gauge_cls(
+                name=f"lmcache:{metric_name}",
+                documentation=f"The number of {status.replace('_', ' ')} events",
+                labelnames=labelnames,
+                multiprocess_mode="sum",
+            ).labels(**self.labels)
+            setattr(self, metric_name, gauge)
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
