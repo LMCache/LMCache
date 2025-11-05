@@ -560,6 +560,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     fdo.readinto(buffer)
         except FileNotFoundError:
+            logger.warning(f"File not found on disk: {path}")
             if self.dict.get(key, None):
                 self.dict.pop(key)
             return
