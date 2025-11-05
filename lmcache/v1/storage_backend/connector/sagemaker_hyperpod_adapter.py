@@ -56,6 +56,7 @@ class SageMakerHyperPodConnectorAdapter(ConnectorAdapter):
             "lease_ttl_s": 30.0,
             "put_stream_chunk_bytes": 65536,
             "use_https": False,
+            "max_lease_size_mb": None,
         }
 
         # Extract and validate configuration
@@ -100,6 +101,23 @@ class SageMakerHyperPodConnectorAdapter(ConnectorAdapter):
         use_https = bool(
             extra_config.get("sagemaker_hyperpod_use_https", defaults["use_https"])
         )
+        max_lease_size_mb = extra_config.get(
+            "sagemaker_hyperpod_max_lease_size_mb", defaults["max_lease_size_mb"]
+        )
+
+        if max_lease_size_mb is not None:
+            try:
+                max_lease_size_mb = float(max_lease_size_mb)
+                if max_lease_size_mb <= 0:
+                    raise ValueError(
+                        f"sagemaker_hyperpod_max_lease_size_mb must be positive,"
+                        f" got {max_lease_size_mb}"
+                    )
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"Invalid value for sagemaker_hyperpod_max_lease_size_mb:"
+                    f" {max_lease_size_mb}"
+                ) from e
 
         # Parse and construct URL
         url = self._parse_url(context.url, use_https)
@@ -110,6 +128,8 @@ class SageMakerHyperPodConnectorAdapter(ConnectorAdapter):
             f"max_connections={max_connections}, "
             f"max_concurrent_requests={max_concurrent_requests}, "
             f"timeout_ms={timeout_ms}, lease_ttl_s={lease_ttl_s}s"
+            f"max_lease_size_mb="
+            f"{max_lease_size_mb if max_lease_size_mb else 'unlimited'}"
         )
 
         # Create connector instance
@@ -125,6 +145,7 @@ class SageMakerHyperPodConnectorAdapter(ConnectorAdapter):
             timeout_ms=timeout_ms,
             lease_ttl_s=lease_ttl_s,
             put_stream_chunk_bytes=put_stream_chunk_bytes,
+            max_lease_size_mb=max_lease_size_mb,
         )
 
         # Initialize shared memory connection

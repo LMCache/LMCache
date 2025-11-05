@@ -80,6 +80,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
         timeout_ms: int,
         lease_ttl_s: float = 10.0,
         put_stream_chunk_bytes: int = DEFAULT_CHUNK_SIZE_BYTES,
+        max_lease_size_mb: Optional[float] = None,
         **kwargs,  # Accept and ignore unused legacy parameters
     ):
         """
@@ -111,6 +112,9 @@ class SageMakerHyperPodConnector(RemoteConnector):
         self.shared_memory_name = shared_memory_name
         self.lease_ttl_s = lease_ttl_s
         self.put_stream_chunk_bytes = max(1024, put_stream_chunk_bytes)  # Minimum 1KB
+        self.max_lease_size_bytes = (
+            int(max_lease_size_mb * 1024 * 1024) if max_lease_size_mb else None
+        )
 
         # HTTP configuration
         self.max_concurrent_requests = max(1, max_concurrent_requests)
@@ -380,8 +384,21 @@ class SageMakerHyperPodConnector(RemoteConnector):
             offsets=offsets,
         )
 
-        self.stats["lease_acquired"] += 1
         total_size = sum(length for _, length in offsets)
+
+        if (
+            self.max_lease_size_bytes is not None
+            and total_size > self.max_lease_size_bytes
+        ):
+            logger.warning(
+                f"Lease size {total_size / 1024:.2f} KB exceeds limit "
+                f"{self.max_lease_size_bytes / 1024:.2f} KB, releasing"
+            )
+            await self._release_lease(key, lease_info.lease_id)
+            return None
+
+        self.stats["lease_acquired"] += 1
+
         logger.debug(
             f"Lease acquired: key={key_str}, lease_id={lease_info.lease_id}, "
             f"size={total_size / 1024:.2f} KB, blocks={len(offsets)}"
@@ -403,7 +420,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
         self, key: CacheEngineKey, lease_info: LeaseInfo
     ) -> Optional[MemoryObj]:
         """
-        Read data from shared memory using lease offsets (zero-copy).
+        Read data from shared memory using lease offsets.
 
         Data format: [RemoteMetadata header (28 bytes)] + [KV cache payload]
         Data may be fragmented across multiple blocks in shared memory.
