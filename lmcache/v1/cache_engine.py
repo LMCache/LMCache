@@ -33,7 +33,6 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.kv_events import MEDIUM_GPU, EventPublisherFactory
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -44,6 +43,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.messaging import MEDIUM_GPU, MessageBatch, MessagePublisherFactory
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.v1.token_database import (
@@ -55,7 +55,7 @@ from lmcache.v1.token_database import (
 vllm_is_available = True
 try:
     # Third Party
-    from vllm.distributed.kv_events import BlockStored, KVCacheEvent, KVEventBatch
+    from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 except ImportError:
     # kv events are available through vLLM only
     vllm_is_available = False
@@ -143,8 +143,15 @@ class LMCacheEngine:
         if vllm_is_available:
             self.kv_events_enabled = config.enable_kv_events
             if self.kv_events_enabled:
-                self.kv_event_publisher = EventPublisherFactory.create(
-                    config,
+                self.kv_event_publisher = MessagePublisherFactory.create(
+                    data_parallel_rank=0,
+                    endpoint=config.kv_events_publisher_endpoint,
+                    replay_endpoint=config.kv_events_publisher_replay_endpoint,
+                    buffer_steps=config.kv_events_publisher_buffer_steps,
+                    hwm=config.kv_events_publisher_hwm,
+                    max_queue_size=config.kv_events_publisher_max_queue_size,
+                    topic=config.kv_events_publisher_topic,
+                    message_publisher=config.kv_events_publisher_type,
                 )
                 self.kv_event_queue: List[KVCacheEvent] = []
                 logger.info("KV events are enabled.")
@@ -359,7 +366,7 @@ class LMCacheEngine:
         # Publish KV events
         if vllm_is_available and self.kv_events_enabled:
             logger.info("Publish kv events")
-            batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
+            batch = MessageBatch(ts=time.time(), messages=self.kv_event_queue)  # type: ignore[arg-type]
             self.kv_event_queue = []
             if self.kv_event_publisher:
                 self.kv_event_publisher.publish(batch)
@@ -504,7 +511,7 @@ class LMCacheEngine:
         # Publish the KV events
         if vllm_is_available and self.kv_events_enabled:
             logger.info("Publish kv events")
-            batch = KVEventBatch(ts=time.time(), events=self.kv_event_queue)  # type: ignore[arg-type]
+            batch = MessageBatch(ts=time.time(), messages=self.kv_event_queue)  # type: ignore[arg-type]
             self.kv_event_queue = []
             if self.kv_event_publisher:
                 self.kv_event_publisher.publish(batch)
