@@ -77,7 +77,9 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 # ==============================================================================
 
 
-def store_handler(keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]) -> bool:
+def store_handler(
+    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
+) -> bool:
     """
     Dummy handler for STORE requests.
 
@@ -95,6 +97,9 @@ def store_handler(keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]) ->
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
+    )
+    assert isinstance(ipc_handle, bytes), (
+        f"Expected ipc_handle to be bytes, got {type(ipc_handle)}"
     )
     # Return success
     return True

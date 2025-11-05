@@ -443,6 +443,10 @@ class MessageQueueServer:
             except Exception as e:
                 logger.error("Error in blocking handler: %s", e)
 
+        # TODO: HERE'S A BUG: WE CANNOT SEND RESPONSE IN THE FUTURE THREAD
+        # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
+        # WE SHOULD USE A ZMQ SOCKET TO NOTIFY THE MAIN THREAD TO SEND THE
+        # RESPONSE AND USE THE THREAD-QUEUE TO PASS THE RESPONSE DATA
         future.add_done_callback(_send_response)
 
     def _call_handler(

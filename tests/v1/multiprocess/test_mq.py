@@ -564,6 +564,7 @@ def test_mq_store():
     ]
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
+    test_handle = b"\x00" * 64
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5562")
@@ -572,7 +573,7 @@ def test_mq_store():
     # Run test with STORE request
     helper.run_test(
         request_type=RequestType.STORE,
-        payloads=[keys, gpu_id, gpu_block_ids],
+        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
         expected_response=True,
         num_requests=1,
     )

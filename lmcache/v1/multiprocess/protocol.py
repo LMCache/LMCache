@@ -111,9 +111,10 @@ _PROTOCOL_DEFINTIONS = {
     # - keys: list[KeyType]
     # - instance_id: int
     # - gpu_block_ids: list[int]
+    # - event_ipc_handle: bytes
     # Returns: bool (success)
     RequestType.STORE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int]],
+        payload_classes=[list[KeyType], int, list[int], bytes],
         response_class=bool,
         handler_type=HandlerType.BLOCKING,
     ),

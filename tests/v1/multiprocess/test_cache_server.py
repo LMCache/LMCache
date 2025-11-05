@@ -277,11 +277,13 @@ def test_store_and_lookup(
     num_keys = 10
     keys = [create_cache_key(i) for i in range(num_keys)]
     gpu_block_ids = list(range(0, 16 * num_keys))
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
 
     # Store
     store_future = client.submit_request(
         RequestType.STORE,
-        [keys, registered_instance, gpu_block_ids],
+        [keys, registered_instance, gpu_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
     store_result = store_future.result()
@@ -323,12 +325,14 @@ def test_store_retrieve_verify(
     """
     num_keys = 20
     keys = [create_cache_key(i) for i in range(num_keys)]
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
 
     # Store at the beginning of the cache
     store_block_ids = list(range(0, 16 * num_keys))
     store_future = client.submit_request(
         RequestType.STORE,
-        [keys, registered_instance, store_block_ids],
+        [keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
     store_result = store_future.result()
@@ -383,10 +387,12 @@ def test_retrieve_partial_miss(
     num_stored = 30
     stored_keys = [create_cache_key(i) for i in range(num_stored)]
     store_block_ids = list(range(0, 16 * num_stored))
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
 
     store_future = client.submit_request(
         RequestType.STORE,
-        [stored_keys, registered_instance, store_block_ids],
+        [stored_keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
     assert store_future.result() is True
@@ -419,6 +425,95 @@ def test_retrieve_partial_miss(
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
+    reason="Multiple retrieve operations require CUDA",
+)
+def test_multiple_retrieve_operations(
+    client: MessageQueueClient,
+    client_context: ClientContext,
+    registered_instance: int,
+):
+    """
+    Test multiple retrieve operations:
+    Store 8,8,8,8 keys and then retrieve 8,8,8,8 keys in sequence.
+    """
+    num_batches = 4
+    keys_per_batch = 8
+    pages_per_key = 16
+
+    # Initialize the values in GPU KV cache
+    for layer in range(client_context.num_layers):
+        layer_cache = client_context.gpu_kv_caches[layer]
+        for i in range(num_batches):
+            start_page = (i * keys_per_batch) * pages_per_key
+            end_page = start_page + (keys_per_batch * pages_per_key)
+            layer_cache[:, start_page:end_page] = (i + 1) / num_batches
+
+    # Store in batches
+    for batch_idx in range(num_batches):
+        keys = [
+            create_cache_key(batch_idx * keys_per_batch + i)
+            for i in range(keys_per_batch)
+        ]
+        blocks = list(
+            range(
+                (batch_idx * keys_per_batch) * 16,
+                (batch_idx * keys_per_batch + keys_per_batch) * 16,
+            )
+        )
+        event = torch.cuda.Event(interprocess=True)
+        event.record()
+
+        store_result = client.submit_request(
+            RequestType.STORE,
+            [keys, registered_instance, blocks, event.ipc_handle()],
+            get_response_class(RequestType.STORE),
+        ).result()
+        assert store_result is True
+
+    # Retrieve in batches
+    retrieve_offset = 32  # Start retrieving at offset of 32 chunks
+    retrieve_futures = []
+    for batch_idx in range(num_batches):
+        keys = [
+            create_cache_key(batch_idx * keys_per_batch + i)
+            for i in range(keys_per_batch)
+        ]
+        blocks = list(
+            range(
+                (batch_idx * keys_per_batch + retrieve_offset) * pages_per_key,
+                (batch_idx * keys_per_batch + retrieve_offset + keys_per_batch)
+                * pages_per_key,
+            )
+        )
+
+        retrieve_future = client.submit_request(
+            RequestType.RETRIEVE,
+            [keys, registered_instance, blocks],
+            get_response_class(RequestType.RETRIEVE),
+        )
+        retrieve_futures.append(retrieve_future)
+
+    for retrieve_future in retrieve_futures:
+        retrieve_result = retrieve_future.result()
+        assert len(retrieve_result) == keys_per_batch
+        assert all(retrieve_result), "All keys should be retrieved successfully"
+
+    # Verify correctness
+    for layer in range(client_context.num_layers):
+        layer_cache = client_context.gpu_kv_caches[layer]
+        for batch_idx in range(num_batches):
+            start_page = (retrieve_offset + batch_idx * keys_per_batch) * pages_per_key
+            end_page = start_page + (keys_per_batch * pages_per_key)
+            retrieved_tensor = layer_cache[:, start_page:end_page]
+            expected_value = (batch_idx + 1) / num_batches
+            assert torch.allclose(
+                retrieved_tensor,
+                torch.full_like(retrieved_tensor, expected_value),
+            ), f"Mismatch in batch {batch_idx}, layer {layer}"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
     reason="Multiple store operations require CUDA",
 )
 def test_multiple_store_operations(
@@ -432,9 +527,12 @@ def test_multiple_store_operations(
     # Store batch 1
     keys1 = [create_cache_key(i) for i in range(30)]
     blocks1 = list(range(0, 16 * 30))
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
     result1 = client.submit_request(
         RequestType.STORE,
-        [keys1, registered_instance, blocks1],
+        [keys1, registered_instance, blocks1, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     ).result()
     assert result1 is True
@@ -442,9 +540,11 @@ def test_multiple_store_operations(
     # Store batch 2
     keys2 = [create_cache_key(i + 30) for i in range(20)]
     blocks2 = list(range(30 * 16, 50 * 16))
+
+    # Test with the same event for 2 store requests
     result2 = client.submit_request(
         RequestType.STORE,
-        [keys2, registered_instance, blocks2],
+        [keys2, registered_instance, blocks2, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     ).result()
     assert result2 is True

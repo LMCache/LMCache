@@ -8,6 +8,8 @@
 # - Double buffer for store/retrieve (5% optimization)
 # - Integrate with vLLM
 # - Refactor and reuse the existing LMCache classes
+# - Lock and unlock
+# - BUG of memory allocation
 ###
 
 # Standard
@@ -97,6 +99,9 @@ class GPUCacheContext:
             tmp_buffer_shape, dtype=self.dtype, device=self.device_
         )
 
+        # Cuda stream
+        self.cuda_stream_ = torch.cuda.Stream(device=self.device_)
+
     @property
     def dtype(self) -> torch.dtype:
         return self.kv_caches_[0].dtype
@@ -115,6 +120,13 @@ class GPUCacheContext:
         Returns a GPU tensor of the KV cache pointers
         """
         return self.kv_cache_pointers_
+
+    @property
+    def stream(self) -> torch.cuda.Stream:
+        """
+        Returns the CUDA stream for KV cache operations
+        """
+        return self.cuda_stream_
 
     @property
     def block_size(self) -> int:
@@ -212,19 +224,31 @@ class MPCacheEngine:
 
     @_lmcache_nvtx_annotate
     def store(
-        self, keys: list[IPCCacheEngineKey], instance_id: int, gpu_block_ids: list[int]
+        self,
+        keys: list[IPCCacheEngineKey],
+        instance_id: int,
+        gpu_block_ids: list[int],
+        event_ipc_handle: bytes,
     ) -> bool:
         st = time.perf_counter()
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
         )
-
         gpu_context = self.gpu_contexts[instance_id]
 
         slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
-        with torch.cuda.device(gpu_context.device):
+        with (
+            torch.cuda.device(gpu_context.device),
+            torch.cuda.stream(gpu_context.stream),
+        ):
             event = torch.cuda.Event()
+
+            # Wait for vLLM to finish
+            vllm_event = torch.cuda.Event.from_ipc_handle(
+                gpu_context.device, event_ipc_handle
+            )
+            vllm_event.wait()
 
             for idx, key in enumerate(keys):
                 start = idx * self.chunk_size
@@ -244,6 +268,7 @@ class MPCacheEngine:
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
                 lmc_ops.multi_layer_kv_transfer(
                     tmp_buffer,
+                    # memory_obj.tensor,
                     gpu_context.kv_pointers,
                     slot_mapping,
                     gpu_context.device,
@@ -251,6 +276,7 @@ class MPCacheEngine:
                     True,
                     gpu_context.is_mla,
                 )
+                torch.cuda.synchronize()
                 memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
                 self.hot_buffer[key] = memory_obj
             event.record()
@@ -293,7 +319,11 @@ class MPCacheEngine:
         slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
         results = []
 
-        with torch.cuda.device(gpu_context.device):
+        with (
+            torch.cuda.device(gpu_context.device),
+            torch.cuda.stream(gpu_context.stream),
+        ):
+            torch.cuda.synchronize()
             event = torch.cuda.Event()
 
             skip_remaining = False
@@ -334,6 +364,7 @@ class MPCacheEngine:
             event.record()
 
             event.synchronize()
+            torch.cuda.synchronize()
 
         ed = time.perf_counter()
         tokens_retrieved = sum(results) * self.chunk_size
@@ -369,6 +400,49 @@ class MPCacheEngine:
             results.append(exists)
         return results
 
+    def debug(self) -> str:
+        if not hasattr(self, "_checked_keys"):
+            self._checked_keys: set[IPCCacheEngineKey] = set()
+
+        def _display_memory_obj(mem_obj: MemoryObj) -> str:
+            # Print each layer of the memory object
+            num_layers = mem_obj.get_shape()[1]
+            logstr = ""
+            for i in range(num_layers):
+                layer_tensor = mem_obj.tensor[:, i, ...]  # type: ignore
+                # logstr += f"Layer {i:03d}: Mean={layer_tensor.mean().item():.6f}\n"
+                if layer_tensor.mean().abs() < 1e-6:
+                    logstr += (
+                        f"Layer {i:03d}: Mostly Zeros with mean = "
+                        + f"{layer_tensor.mean().item():.6f}\n"
+                    )
+            return logstr
+
+        logger.info("Received debug request!")
+        for key, mem_obj in self.hot_buffer.items():
+            if key in self._checked_keys:
+                continue
+            self._checked_keys.add(key)
+            logstr = _display_memory_obj(mem_obj)
+            if len(logstr) > 0:
+                logger.error("========================================")
+                logger.error("Key: %s", str(key))
+                logger.error(logstr)
+                logger.error("========================================")
+
+        return "OK"
+
+    def clear(self) -> str:
+        logger.info("Received clear request!")
+        self.memory_allocator.memcheck()
+        length = len(self.hot_buffer)
+        for obj in self.hot_buffer.values():
+            obj.ref_count_down()
+        self.hot_buffer.clear()
+        logger.info("Cleared %d cached items", length)
+        self.memory_allocator.memcheck()
+        return "OK"
+
 
 def add_handler_helper(
     server: MessageQueueServer, request_type: RequestType, handler_function
@@ -388,13 +462,16 @@ def run_cache_server(
     port: int = 5555,
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
+    max_workers: int = 1,
 ):
     # Initialize the engine
     engine = MPCacheEngine(chunk_size, cpu_buffer_size)
 
     # Initialize the message queue server
     context = zmq.Context.instance()
-    server = MessageQueueServer(bind_url=f"tcp://{host}:{port}", context=context)
+    server = MessageQueueServer(
+        bind_url=f"tcp://{host}:{port}", context=context, max_workers=max_workers
+    )
 
     # Add handlers
     add_handler_helper(server, RequestType.REGISTER_KV_CACHE, engine.register_kv_cache)
@@ -404,6 +481,7 @@ def run_cache_server(
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
+    add_handler_helper(server, RequestType.NOOP, engine.clear)
 
     # Start the server
     torch.cuda.init()
@@ -433,6 +511,9 @@ def parse_args():
     parser.add_argument(
         "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
     )
+    parser.add_argument(
+        "--max-workers", type=int, default=1, help="Maximum number of worker threads"
+    )
     return parser.parse_args()
 
 
@@ -443,4 +524,5 @@ if __name__ == "__main__":
         port=args.port,
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
+        max_workers=args.max_workers,
     )
