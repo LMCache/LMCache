@@ -74,6 +74,7 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
+    cached_positions: Optional[torch.Tensor] = None
     fmt: Optional[MemoryFormat] = None
     pin_count: int = 0
 

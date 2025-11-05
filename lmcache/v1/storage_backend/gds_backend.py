@@ -341,8 +341,15 @@ class GdsBackend(AllocatorBackendInterface):
             f"extra_metadata={extra_metadata}"
         )
         # TODO(extra_metadata)
+        # TODO(Jiayi): need to support `cached_positions`.
+        # Currently we just fill it as None.
         metadata = DiskCacheMetadata(
-            filename.removesuffix(_METADATA_FILE_SUFFIX), size, shape, dtype, fmt
+            filename.removesuffix(_METADATA_FILE_SUFFIX),
+            size,
+            shape,
+            dtype,
+            None,
+            fmt,
         )
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
@@ -472,7 +479,8 @@ class GdsBackend(AllocatorBackendInterface):
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         with self.hot_lock:
-            self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, fmt)
+            # TODO(Jiayi): need to support `cached_positions`.
+            self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
 
     def submit_prefetch_task(
         self,
@@ -522,6 +530,7 @@ class GdsBackend(AllocatorBackendInterface):
         dtype = entry.dtype
         shape = entry.shape
         fmt = entry.fmt
+        logger.warning(entry)
         assert dtype is not None
         assert shape is not None
         assert fmt is not None

@@ -584,6 +584,8 @@ class LMCacheEngine:
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
+
+        location = None
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -594,7 +596,17 @@ class LMCacheEngine:
             keys_multi_layer = key.split_layers(self.num_layers)
 
             # NOTE: Only check the first layer
-            if not self.storage_manager.contains(keys_multi_layer[0]):
+            if current_location := self.storage_manager.contains(keys_multi_layer[0]):
+                if location is None:
+                    location = current_location
+                else:
+                    # TODO(Jiayi): Support multi-location retrieval in the future
+                    assert location == current_location, (
+                        "All retrieved keys should be from the same location "
+                        "when use layerwise retrieval."
+                        "Please support multi-location retrieval in the future."
+                    )
+            else:
                 break
 
             starts.append(start)
@@ -607,7 +619,10 @@ class LMCacheEngine:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
-            get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)
+            get_generator = self.storage_manager.layerwise_batched_get(
+                keys_layer_major,
+                location=location,
+            )
 
             assert isinstance(
                 self.gpu_connector,

@@ -196,6 +196,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 request_configs_buf,
             ]
         else:
+            # print(len(token_ids))
             tokens_buf = self.encoder.encode(token_ids)
             msg_buf = [
                 tokens_buf,

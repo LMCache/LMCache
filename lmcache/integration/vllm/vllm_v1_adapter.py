@@ -335,11 +335,12 @@ class ReqMeta:
         # NOTE(vladnosiv): for the input_token_len chunk prefill,
         # we are required to discard partial chunks,
         # as new tokens will be added in the next iteration.
-        num_tokens_to_save = (
-            (input_token_len // lmcache_chunk_size * lmcache_chunk_size)
-            if not is_last_prefill or discard_partial_chunks
-            else input_token_len
-        )
+        if not is_last_prefill or discard_partial_chunks:
+            num_tokens_to_save = (
+                input_token_len // lmcache_chunk_size * lmcache_chunk_size
+            )
+        else:
+            num_tokens_to_save = input_token_len
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
@@ -1218,13 +1219,14 @@ class LMCacheConnectorV1Impl:
                 if request.disagg_spec:
                     request.disagg_spec.is_last_prefill = True
             else:
-                token_len = len(token_ids)
-                aligned_token_len = (
-                    token_len // self._lmcache_chunk_size * self._lmcache_chunk_size
-                )
-                token_ids = token_ids[:aligned_token_len]
-                store_mask = store_mask[:aligned_token_len]
-                slot_mapping = slot_mapping[:aligned_token_len]
+                if not self.enable_blending:
+                    token_len = len(token_ids)
+                    aligned_token_len = (
+                        token_len // self._lmcache_chunk_size * self._lmcache_chunk_size
+                    )
+                    token_ids = token_ids[:aligned_token_len]
+                    store_mask = store_mask[:aligned_token_len]
+                    slot_mapping = slot_mapping[:aligned_token_len]
 
             self.lmcache_engine.store(
                 token_ids,
