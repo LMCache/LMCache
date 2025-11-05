@@ -569,7 +569,7 @@ class LMCacheEngine:
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
-        
+
         location = None
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,

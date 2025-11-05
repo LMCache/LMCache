@@ -145,12 +145,15 @@ def main():
     with build_llm_with_lmcache(lmcache_connector, model) as llm:
         # Define the shared prompt and specific prompts
         warmup_prompt = tokenizer.encode("Nice to meet you" * 500)[1:]
-        sys_prompt = [1, 733, 16289, 28793] + tokenizer.encode("You are a very helpful assistant. Please answer the question with instructions.")
+        sys_prompt = [1, 733, 16289, 28793] + tokenizer.encode(
+            "You are a very helpful assistant. "
+            "Please answer the question with instructions."
+        )
         chunk1_prompt = tokenizer.encode("Hello, how are you?" * 500)[1:]
         chunk2_prompt = tokenizer.encode("Hello, what's up?" * 500)[1:]
         chunk3_prompt = tokenizer.encode("Hi, what are you up to?" * 500)[1:]
         blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))[1:]
-        
+
         first_prompt = (
             sys_prompt
             + blend_special_str
@@ -160,7 +163,8 @@ def main():
             + blend_special_str
             + chunk3_prompt
             + blend_special_str
-            + tokenizer.encode("Hello, my name is")[1:] + [733, 28748, 16289, 28793]
+            + tokenizer.encode("Hello, my name is")[1:]
+            + [733, 28748, 16289, 28793]
         )
 
         second_prompt = (
@@ -172,7 +176,8 @@ def main():
             + blend_special_str
             + chunk3_prompt
             + blend_special_str
-            + tokenizer.encode("Hello, how are you?")[1:] + [733, 28748, 16289, 28793]
+            + tokenizer.encode("Hello, how are you?")[1:]
+            + [733, 28748, 16289, 28793]
         )
 
         third_prompt = (
@@ -184,9 +189,9 @@ def main():
             + blend_special_str
             + chunk3_prompt
             + blend_special_str
-            + tokenizer.encode("Hello, what's up?")[1:] + [733, 28748, 16289, 28793]
+            + tokenizer.encode("Hello, what's up?")[1:]
+            + [733, 28748, 16289, 28793]
         )
-
 
         sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
@@ -206,7 +211,6 @@ def main():
 
         # print the third output
         print_output(llm, third_prompt, sampling_params, "third")
-
 
 
 if __name__ == "__main__":

@@ -260,7 +260,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 has_stored = True
             else:
                 self.dict[key] = DiskCacheMetadata(
-                    path, size, shape, dtype, cached_positions, fmt, 0)
+                    path, size, shape, dtype, cached_positions, fmt, 0
+                )
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
@@ -458,7 +459,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # `submit_put_task` above.
         # Ref count down better be before `insert_key` for testing
         # purposes (e.g., testing mem_leak).
-        # TODO(Jiayi): This could be problematic if the 
+        # TODO(Jiayi): This could be problematic if the
         # freed memory object is immediately reused.
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
