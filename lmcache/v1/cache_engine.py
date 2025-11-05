@@ -795,15 +795,7 @@ class LMCacheEngine:
                 for start, end, key in chunk_info_iterator:
                     if end <= skip_n_tokens:
                         continue
-                    if start < skip_n_tokens < end:
-                        logger.warning(
-                            "skip_n_tokens %d is not aligned "
-                            "with chunk boundary: %s-%s",
-                            skip_n_tokens,
-                            start,
-                            end,
-                        )
-                        continue
+                    assert not (start < skip_n_tokens < end)
                     assert isinstance(key, CacheEngineKey)
 
                     # TODO(Jiayi): Optimize by checking only the existence of the key
@@ -835,15 +827,7 @@ class LMCacheEngine:
                     start, end, _ = chunk_info
                     if end <= skip_n_tokens:
                         continue
-                    if start < skip_n_tokens < end:
-                        logger.warning(
-                            "skip_n_tokens %d is not aligned "
-                            "with chunk boundary: %s-%s",
-                            skip_n_tokens,
-                            start,
-                            end,
-                        )
-                        continue
+                    assert not (start < skip_n_tokens < end)
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
 
@@ -993,14 +977,7 @@ class LMCacheEngine:
         ):
             if end <= skip_n_tokens:
                 continue
-            if start < skip_n_tokens < end:
-                logger.warning(
-                    "skip_n_tokens %d is not aligned with chunk boundary: %s-%s",
-                    skip_n_tokens,
-                    start,
-                    end,
-                )
-                continue
+            assert not (start < skip_n_tokens < end)
             assert isinstance(key, CacheEngineKey)
             keys.append(key)
             cum_chunk_lengths.append(end)
