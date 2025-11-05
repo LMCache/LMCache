@@ -652,6 +652,7 @@ def _from_legacy(cls, **kwargs):
             config_values[name] = config["default"]
 
     instance = cls(**config_values)
+    instance.validate()
     return instance
 
 
