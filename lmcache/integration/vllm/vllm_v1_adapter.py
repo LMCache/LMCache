@@ -333,11 +333,11 @@ class ReqMeta:
         # NOTE(vladnosiv): for the input_token_len chunk prefill,
         # we are required to discard partial chunks,
         # as new tokens will be added in the next iteration.
-        num_tokens_to_save = (
-            (input_token_len // lmcache_chunk_size * lmcache_chunk_size)
-            if not is_last_prefill or discard_partial_chunks
-            else input_token_len
-        )
+        if not is_last_prefill or discard_partial_chunks:
+            num_tokens_to_save = input_token_len // lmcache_chunk_size * lmcache_chunk_size
+        else:
+            num_tokens_to_save = input_token_len
+        
 
         # If we need to save, update the number of saved tokens
         if not skip_save:

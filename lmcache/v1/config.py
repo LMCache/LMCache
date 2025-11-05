@@ -316,7 +316,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "save_unfull_chunk": {
         "type": bool,
-        "default": True,
+        "default": False,
         "env_converter": _to_bool,
     },
     "blocking_timeout_secs": {"type": int, "default": 10, "env_converter": int},
@@ -442,7 +442,6 @@ def _create_config_class():
         # Generate random instance ID if not set
         if not self.lmcache_instance_id:
             self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
-        self.validate()
 
     cls = make_dataclass(
         "LMCacheEngineConfig",
@@ -475,13 +474,22 @@ def _validate_config(self):
     """Validate configuration"""
 
     # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading or self.use_layerwise:
+    if self.enable_async_loading:
         logger.warning(
             "Automatically setting save_unfull_chunk=False because "
             "enable_async_loading=True or use_layerwise=True to prevent "
             "CPU memory fragmentation"
         )
         self.save_unfull_chunk = False
+    
+    logger.warning(f"{self.save_unfull_chunk}, {self.enable_blending}")
+    if self.enable_blending:
+        if not self.save_unfull_chunk:
+            logger.warning(
+                "Automatically setting save_unfull_chunk=True because "
+                "enable_blending=True"
+            )
+            self.save_unfull_chunk = True
 
     if self.enable_p2p:
         assert self.enable_controller
@@ -709,16 +717,7 @@ def _update_config_from_env(self):
                     f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
                 )
                 # Keep existing value if conversion fails
-
-    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading or self.use_layerwise:
-        logger.warning(
-            "Automatically setting save_unfull_chunk=False because "
-            "enable_async_loading=True or use_layerwise=True to prevent "
-            "CPU memory fragmentation"
-        )
-        self.save_unfull_chunk = False
-
+    self.validate()
     return self
 
 

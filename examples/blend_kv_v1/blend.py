@@ -148,7 +148,7 @@ def main():
         sys_prompt = [1, 733, 16289, 28793] + tokenizer.encode("You are a very helpful assistant. Please answer the question with instructions.")
         chunk1_prompt = tokenizer.encode("Hello, how are you?" * 500)[1:]
         chunk2_prompt = tokenizer.encode("Hello, what's up?" * 500)[1:]
-        #chunk3_prompt = tokenizer.encode("Hi, what are you up to?" * 500)[1:]
+        chunk3_prompt = tokenizer.encode("Hi, what are you up to?" * 500)[1:]
         blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))[1:]
         
         first_prompt = (
@@ -158,8 +158,8 @@ def main():
             + blend_special_str
             + chunk2_prompt
             + blend_special_str
-            #+ chunk3_prompt
-            #+ blend_special_str
+            + chunk3_prompt
+            + blend_special_str
             + tokenizer.encode("Hello, my name is")[1:] + [733, 28748, 16289, 28793]
         )
 
@@ -170,8 +170,8 @@ def main():
             + blend_special_str
             + chunk1_prompt
             + blend_special_str
-            #+ chunk3_prompt
-            #+ blend_special_str
+            + chunk3_prompt
+            + blend_special_str
             + tokenizer.encode("Hello, how are you?")[1:] + [733, 28748, 16289, 28793]
         )
 
@@ -182,34 +182,11 @@ def main():
             + blend_special_str
             + chunk1_prompt
             + blend_special_str
-            #+ chunk3_prompt
-            #+ blend_special_str
+            + chunk3_prompt
+            + blend_special_str
             + tokenizer.encode("Hello, what's up?")[1:] + [733, 28748, 16289, 28793]
         )
 
-        fourth_prompt = (
-            sys_prompt
-            + blend_special_str
-            + chunk2_prompt
-            + blend_special_str
-            + chunk1_prompt
-            + blend_special_str
-            #+ chunk3_prompt
-            #+ blend_special_str
-            + tokenizer.encode("Hi, what's up?")[1:] + [733, 28748, 16289, 28793]
-        )
-
-        # third_prompt = (
-        #     sys_prompt
-        #     + blend_special_str
-        #     + chunk3_prompt
-        #     + blend_special_str
-        #     + chunk1_prompt
-        #     + blend_special_str
-        #     + chunk2_prompt
-        #     + blend_special_str
-        #     + tokenizer.encode("Hello, what's up?")[1:]
-        # )
 
         sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
@@ -230,7 +207,6 @@ def main():
         # print the third output
         print_output(llm, third_prompt, sampling_params, "third")
 
-        print_output(llm, fourth_prompt, sampling_params, "fourth")
 
 
 if __name__ == "__main__":

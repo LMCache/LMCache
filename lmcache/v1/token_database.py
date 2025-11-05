@@ -317,7 +317,6 @@ class SegmentTokenDatabase(TokenDatabase):
     def _fast_split_by_subtensor(self, tokens: torch.Tensor) -> Iterable[torch.Tensor]:
         """Match the `sep_tokens` with sliding windows"""
 
-        tokens = tokens.clone()
         if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
 
@@ -329,10 +328,6 @@ class SegmentTokenDatabase(TokenDatabase):
         matches = (
             (windows == self.sep_tokens).all(dim=1).nonzero(as_tuple=True)[0].tolist()
         )
-
-        #print(tokens.cpu().tolist())
-        # print(f"aaa{len(tokens.cpu().tolist())}")
-
 
         # Split based on matches
         start = 0
