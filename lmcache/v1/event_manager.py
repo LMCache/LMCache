@@ -23,6 +23,7 @@ class EventManager:
     """
 
     def __init__(self) -> None:
+        # Guard by lock
         # Structure: events[event_type][event_status][event_id] = future
         self.events: dict[EventType, dict[EventStatus, dict[str, asyncio.Future]]] = {
             et: {es: {} for es in EventStatus} for et in EventType
