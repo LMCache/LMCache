@@ -28,7 +28,7 @@ class RemoteBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         dst_device: str = "cuda",
     ):
         super().__init__(dst_device=dst_device)
@@ -142,6 +142,7 @@ class RemoteBackend(StorageBackendInterface):
                 key.world_size,
                 0,
                 key.chunk_hash,
+                key.dtype,
                 key.request_configs,
             )
 
@@ -191,7 +192,11 @@ class RemoteBackend(StorageBackendInterface):
                 for key in keys
             ]
 
-        return self.connection.batched_contains(keys, stop_after_first_not_exits)
+        try:
+            return self.connection.batched_contains(keys, stop_after_first_not_exits)
+        except Exception as e:
+            logger.warning(f"Remote connection failed in batched_contains: {e}")
+            return [False] * len(keys)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:
@@ -289,6 +294,13 @@ class RemoteBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in get_blocking "
+                "(likely scheduler role), returning None"
+            )
+            return None
 
         if self.connection is None:
             logger.warning("Connection is None in get_blocking, returning None")
@@ -301,6 +313,7 @@ class RemoteBackend(StorageBackendInterface):
                 key.world_size,
                 0,
                 key.chunk_hash,
+                key.dtype,
                 key.request_configs,
             )
         t1 = time.perf_counter()
@@ -332,6 +345,14 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_blocking "
+                "(likely scheduler role), returning None list"
+            )
+            return [None] * len(keys)
+
         if self.connection is None:
             logger.warning("Connection is None in batched_get_blocking, returning None")
             return [None] * len(keys)
@@ -345,6 +366,7 @@ class RemoteBackend(StorageBackendInterface):
                     key.world_size,
                     0,
                     key.chunk_hash,
+                    key.dtype,
                     key.request_configs,
                 )
                 for key in keys
@@ -366,12 +388,11 @@ class RemoteBackend(StorageBackendInterface):
                         "batched get blocking timeout, trigger cancel the future task"
                     )
                     future.cancel()
-                with self.lock:
-                    self.connection = None
-                    self.failure_time = time.time()
-                logger.warning(
-                    f"Error occurred in batched_get_blocking: {e}, returning None list"
-                )
+                else:
+                    logger.warning(
+                        f"Error occurred in batched_get_blocking: {e}, "
+                        f"returning None list"
+                    )
                 return [None] * len(keys)
         else:
             futures = [
@@ -391,12 +412,10 @@ class RemoteBackend(StorageBackendInterface):
                                 "get blocking timeout, trigger cancel the future task"
                             )
                             fut.cancel()
-                        with self.lock:
-                            self.connection = None
-                            self.failure_time = time.time()
-                        logger.warning(
-                            f"Error occurred in get_blocking: {e}, returning None"
-                        )
+                        else:
+                            logger.warning(
+                                f"Error occurred in get_blocking: {e}, returning None"
+                            )
                         memory_obj = None
                     memory_objs.append(memory_obj)
                 else:
@@ -443,6 +462,7 @@ class RemoteBackend(StorageBackendInterface):
                     key.world_size,
                     0,
                     key.chunk_hash,
+                    key.dtype,
                     key.request_configs,
                 )
                 for key in keys
@@ -469,6 +489,14 @@ class RemoteBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> List[MemoryObj]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_non_blocking "
+                "(likely scheduler role), returning empty list"
+            )
+            return []
+
         if self.connection is None:
             logger.warning(
                 "Connection is None in batched_get_non_blocking, returning empty list"
@@ -504,6 +532,10 @@ class RemoteBackend(StorageBackendInterface):
             return False
 
     def get_allocator_backend(self):
+        assert self.local_cpu_backend is not None, (
+            "local_cpu_backend is required for get_allocator_backend, "
+            "should not be called in scheduler role"
+        )
         return self.local_cpu_backend
 
     def close(self):

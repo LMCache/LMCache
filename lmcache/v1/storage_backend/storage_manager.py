@@ -32,7 +32,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend import CreateStorageBackends
+from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
@@ -195,7 +195,8 @@ class StorageManager:
         )
         self.thread.start()
 
-        if torch.cuda.is_available():
+        # For scheduler role, always use CPU device
+        if is_cuda_worker(metadata):
             dst_device = "cuda"
         else:
             dst_device = "cpu"
@@ -214,7 +215,9 @@ class StorageManager:
 
         self.enable_pd = config.enable_pd
 
-        self.allocator_backend = self._get_allocator_backend(config)
+        self.allocator_backend = None
+        if metadata.role != "scheduler":
+            self.allocator_backend = self._get_allocator_backend(config)
         if config.local_cpu:
             self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
@@ -230,7 +233,7 @@ class StorageManager:
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
-        if torch.cuda.is_available():
+        if is_cuda_worker(metadata):
             self.internal_copy_stream = torch.cuda.Stream()
         else:
             self.internal_copy_stream = None
@@ -246,6 +249,7 @@ class StorageManager:
         if not self.enable_pd and (
             self.config.enable_async_loading or self.config.use_layerwise
         ):
+            assert self.allocator_backend is not None
             self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
     def _get_allocator_backend(
@@ -273,6 +277,7 @@ class StorageManager:
         """
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
+        assert self.allocator_backend is not None
         return self.allocator_backend.allocate(
             shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
         )
@@ -293,6 +298,8 @@ class StorageManager:
         """
         # TODO (Jiayi): We might need to pre-allocate and management
         # disk in a similar way as CPU.
+        if self.allocator_backend is None:
+            raise RuntimeError("Allocator backend not available for scheduler role")
         return self.allocator_backend.batched_allocate(
             shape, dtype, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
         )
@@ -336,6 +343,9 @@ class StorageManager:
             str,
             tuple[Sequence[CacheEngineKey], list[MemoryObj]],
         ] = {}
+        if self.allocator_backend is None:
+            # For scheduler role, no allocator backend available
+            raise RuntimeError("Batched put not available for scheduler role")
         obj_dict[get_backend_cname(self.allocator_backend)] = (
             keys,
             memory_objs,
@@ -379,7 +389,10 @@ class StorageManager:
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj:
-                if backend_name not in ["LocalCPUBackend", "PDBackend"]:
+                if (
+                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    and "LocalCPUBackend" in self.storage_backends
+                ):
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
                     local_cpu_backend.submit_put_task(key, memory_obj)

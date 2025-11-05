@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import asyncio
 import hashlib
 import threading
@@ -104,24 +104,56 @@ TORCH_DTYPE_TO_STR_DTYPE = {
     torch.bfloat16: "bfloat16",
     torch.float: "float",
     torch.float32: "float",
-    torch.float64: "double",
     torch.double: "double",
-    torch.uint8: "fp8",
-    torch.float8_e4m3fn: "fp8_e4m3",
-    torch.float8_e5m2: "fp8_e5m2",
+    torch.float64: "double",
+    torch.int8: "int8",
+    torch.uint8: "uint8",
+    torch.int16: "int16",
+    torch.int32: "int32",
+    torch.int64: "int64",
+    torch.bool: "bool",
 }
+
+# FP8 variants (PyTorch ≥2.1)
+if hasattr(torch, "float8_e4m3fn"):
+    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e4m3fn] = "fp8_e4m3"
+if hasattr(torch, "float8_e4m3fnuz"):
+    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e4m3fnuz] = "fp8_e4m3"
+if hasattr(torch, "float8_e5m2"):
+    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e5m2] = "fp8_e5m2"
+if hasattr(torch, "float8_e5m2fnuz"):
+    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e5m2fnuz] = "fp8_e5m2"
 
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
 
-@dataclass(order=True)
+def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
+    """Parse a key string into either a CacheEngineKey or LayerCacheEngineKey.
+
+    Args:
+        key_str: String in format:
+            fmt@model@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
+
+    Returns:
+        CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
+    """
+    parts = key_str.strip().split("@")
+    if len(parts) >= 6 and parts[5].isdigit():
+        return LayerCacheEngineKey.from_string(key_str)
+    return CacheEngineKey.from_string(key_str)
+
+
+@dataclass(slots=True)
 class CacheEngineKey:
     fmt: str
     model_name: str
     world_size: int
     worker_id: int
     chunk_hash: int
-    request_configs: Optional[dict] = None
+    dtype: torch.dtype
+    request_configs: Optional[dict] = field(default_factory=dict)
+    tags: Optional[tuple] = field(init=False, default=None)
+    _dtype_str: str = field(init=False, default="")
 
     def __post_init__(self):
         tag_list = None
@@ -131,6 +163,9 @@ class CacheEngineKey:
                     if tag_list is None:
                         tag_list = []
                     tag_list.append((k[len("lmcache.tag.") :], v))
+        if self.dtype not in TORCH_DTYPE_TO_STR_DTYPE:
+            raise ValueError(f"Unsupported dtype in CacheEngineKey: {self.dtype}")
+        self._dtype_str = TORCH_DTYPE_TO_STR_DTYPE[self.dtype]
         # use tuple to save tags
         self.tags = None if tag_list is None else tuple(tag_list)
 
@@ -142,6 +177,7 @@ class CacheEngineKey:
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                self._dtype_str,
                 self.tags,
             )
         )
@@ -154,6 +190,7 @@ class CacheEngineKey:
                 and self.world_size == other.world_size
                 and self.worker_id == other.worker_id
                 and self.chunk_hash == other.chunk_hash
+                and self.dtype == other.dtype
                 and self.tags == other.tags
             )
 
@@ -162,7 +199,7 @@ class CacheEngineKey:
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}"
+            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags]
@@ -180,6 +217,7 @@ class CacheEngineKey:
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
+                    self.dtype,
                     self.request_configs,
                     layer_id,
                 )
@@ -194,6 +232,7 @@ class CacheEngineKey:
             self.world_size,
             self.worker_id,
             self.chunk_hash,
+            self.dtype,
             self.request_configs,
             0,
         )
@@ -202,12 +241,12 @@ class CacheEngineKey:
     @staticmethod
     def from_string(s):
         parts = s.split("@")
-        if len(parts) < 5:
+        if len(parts) < 6:
             raise ValueError(f"Invalid key string: {s}")
         request_configs = None
-        if len(parts) >= 6:
+        if len(parts) >= 7:
             request_configs = {}
-            for kv in parts[5:]:
+            for kv in parts[6:]:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
@@ -218,6 +257,7 @@ class CacheEngineKey:
             int(parts[2]),
             int(parts[3]),
             int(parts[4], 16),
+            STR_DTYPE_TO_TORCH_DTYPE[parts[5]],
             request_configs,
         )
 
@@ -230,6 +270,7 @@ class CacheEngineKey:
             "world_size": self.world_size,
             "worker_id": self.worker_id,
             "chunk_hash": self.chunk_hash,
+            "dtype": self._dtype_str,
         }
         if self.request_configs is not None and len(self.request_configs) != 0:
             msg["request_configs"] = [
@@ -253,11 +294,12 @@ class CacheEngineKey:
             world_size=d["world_size"],
             worker_id=d["worker_id"],
             chunk_hash=d["chunk_hash"],
+            dtype=STR_DTYPE_TO_TORCH_DTYPE[d["dtype"]],
             request_configs=request_configs,
         )
 
 
-@dataclass(order=True)
+@dataclass(slots=True)
 class LayerCacheEngineKey(CacheEngineKey):
     """A key for the layer cache engine"""
 
@@ -271,6 +313,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                 self.world_size,
                 self.worker_id,
                 self.chunk_hash,
+                self._dtype_str,
                 self.tags,
                 self.layer_id,
             )
@@ -285,7 +328,7 @@ class LayerCacheEngineKey(CacheEngineKey):
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}@{self.layer_id}"
+            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags]
@@ -303,6 +346,7 @@ class LayerCacheEngineKey(CacheEngineKey):
                     self.world_size,
                     self.worker_id,
                     self.chunk_hash,
+                    self.dtype,
                     self.request_configs,
                     layer_id,
                 )
@@ -312,12 +356,12 @@ class LayerCacheEngineKey(CacheEngineKey):
     @staticmethod
     def from_string(s):
         parts = s.split("@")
-        if len(parts) < 6:
+        if len(parts) < 7:
             raise ValueError(f"Invalid key string: {s}")
         request_configs = None
-        if len(parts) >= 7:
+        if len(parts) >= 8:
             request_configs = {}
-            for kv in parts[6:]:
+            for kv in parts[7:]:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
@@ -328,8 +372,9 @@ class LayerCacheEngineKey(CacheEngineKey):
             int(parts[2]),
             int(parts[3]),
             int(parts[4], 16),
+            STR_DTYPE_TO_TORCH_DTYPE[parts[5]],
             request_configs,
-            int(parts[5]),
+            int(parts[6]),
         )
 
 

@@ -62,7 +62,7 @@ python disagg_proxy_server.py \
 ```
 #### Example benchmark command
 
-If you have vLLM [benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py), you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
+If you have vLLM's serving benchmark tool, you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
 
 ```bash
 vllm bench serve --port 9100 --seed $(date +%s) \

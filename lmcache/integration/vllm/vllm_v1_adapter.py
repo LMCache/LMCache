@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
 
@@ -54,6 +55,7 @@ from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
 from lmcache.v1.gpu_connector import (
+    GPUConnectorInterface,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
@@ -442,6 +444,7 @@ def _calculate_draft_layers(vllm_config, model_config):
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
     vllm_config: "VllmConfig",
+    role: str,
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -501,21 +504,24 @@ def _init_lmcache_engine(
         kv_dtype,
         kv_shape,
         use_mla,
+        role,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
-    vllm_gpu_connector: Union[
-        VLLMBufferLayerwiseGPUConnector,
-        VLLMPagedMemGPUConnectorV2,
-        VLLMPagedMemLayerwiseGPUConnector,
-    ]
+    vllm_gpu_connector: Optional[GPUConnectorInterface]
 
     if use_mla and lmcache_config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
 
     # When use_mla is True, num_kv_head is 1
     hidden_dim_size = num_kv_head * head_size
-    if lmcache_config.use_layerwise:
+    if role == "scheduler":
+        vllm_gpu_connector = None
+        # Create a dummy tpg object with broadcast and broadcast_object methods
+        tpg = SimpleNamespace()
+        tpg.broadcast = lambda tensor, src: tensor
+        tpg.broadcast_object = lambda obj, src: obj
+    elif lmcache_config.use_layerwise:
         if lmcache_config.enable_blending:
             # Use layerwise connector for blending
             vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
@@ -535,6 +541,7 @@ def _init_lmcache_engine(
                 dtype=kv_dtype,
                 device=device,
             )
+        tpg = get_tp_group()
     else:
         vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
             hidden_dim_size,
@@ -545,7 +552,7 @@ def _init_lmcache_engine(
             device=device,
             use_mla=use_mla,
         )
-    tpg = get_tp_group()
+        tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         lmcache_config,
@@ -554,7 +561,13 @@ def _init_lmcache_engine(
         tpg.broadcast,
         tpg.broadcast_object,
     )
-
+    if role == "scheduler" and lmcache_config.enable_scheduler_bypass_lookup:
+        assert engine.save_only_first_rank or lmcache_config.get_extra_config_value(
+            "remote_enable_mla_worker_id_as0", metadata.use_mla
+        ), (
+            "enable_scheduler_bypass_lookup is only supported with "
+            "save_only_first_rank or remote_enable_mla_worker_id_as0"
+        )
     return engine
 
 
@@ -610,9 +623,18 @@ class LMCacheConnectorV1Impl:
         ] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
+            self.lmcache_engine: Optional[LMCacheEngine] = None
+            # Check if bypass lookup is enabled for scheduler
+            if config.enable_scheduler_bypass_lookup:
+                # Create LMCacheEngine for scheduler when bypass is enabled
+                self.lmcache_engine = _init_lmcache_engine(
+                    config,
+                    vllm_config,
+                    role="scheduler",
+                )
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
-                vllm_config, config
+                vllm_config, config, self.lmcache_engine
             )
             self._unfinished_requests: dict[str, Request] = {}
             self.lmcache_engine = None
@@ -620,12 +642,16 @@ class LMCacheConnectorV1Impl:
             self.lmcache_engine = _init_lmcache_engine(
                 config,
                 vllm_config,
+                role="worker",
             )
 
             self.use_layerwise = config.use_layerwise
             self.enable_blending = config.enable_blending
 
             if self.enable_blending:
+                assert self.lmcache_engine.gpu_connector is not None, (
+                    "GPU connector must be available for blending"
+                )
                 self.blender = LMCBlenderBuilder.get_or_create(
                     ENGINE_NAME,
                     self.lmcache_engine,

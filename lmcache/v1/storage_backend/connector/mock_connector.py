@@ -209,7 +209,8 @@ class MockConnector(RemoteConnector):
         )
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError("MockConnector does not support synchronous exists")
+        """Synchronous exists check without async lock (for testing purposes)"""
+        return key in self.lru_store.dict
 
     async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         mock_obj = await self.lru_store.get(key)
