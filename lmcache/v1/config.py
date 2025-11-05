@@ -460,6 +460,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
 }
 
+
 def _resolve_config_aliases(config_dict: dict, source: str) -> dict:
     """Resolve configuration aliases and handle deprecated configurations."""
     resolved = {}
