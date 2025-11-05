@@ -16,8 +16,13 @@ from lmcache.storage_backend.serde.cachegen_basics import (
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.utils import _lmcache_nvtx_annotate
 
-if torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
+try:
+    if torch.cuda.is_available():
+        # First Party
+        import lmcache.c_ops as lmc_ops
+except (ModuleNotFoundError, ImportError):
+    lmc_ops = None
+    pass
 
 # First Party
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics

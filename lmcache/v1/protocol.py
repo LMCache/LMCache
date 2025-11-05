@@ -12,7 +12,7 @@ import torch
 from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
 
-MAX_KEY_LENGTH = 150
+MAX_KEY_LENGTH = 250
 
 
 class ClientCommand(IntEnum):
