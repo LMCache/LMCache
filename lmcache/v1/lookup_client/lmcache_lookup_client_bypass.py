@@ -58,6 +58,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         try:
             if not self.enable_blending:
@@ -77,6 +78,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     lookup_id=lookup_id,
                     pin=True,
                     request_configs=request_configs,
+                    num_computed_tokens=num_computed_tokens,
                 )
             else:
                 # For blending mode, pass tokens directly
@@ -85,6 +87,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     lookup_id=lookup_id,
                     pin=True,
                     request_configs=request_configs,
+                    num_computed_tokens=num_computed_tokens,
                 )
 
             return result
