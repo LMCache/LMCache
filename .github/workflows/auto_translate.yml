@@ -79,9 +79,9 @@ jobs:
         id: check_changes
         run: |
           if git diff --quiet docs/source/locale/; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
       
       - name: Create Pull Request
