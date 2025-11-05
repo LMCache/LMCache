@@ -44,7 +44,7 @@ def main():
                     model_name="",
                     world_size=0,
                     worker_id=0,
-                    chunk_hash="",
+                    chunk_hash=0,
                     dtype=torch.float16,
                 ),
                 length=0,
