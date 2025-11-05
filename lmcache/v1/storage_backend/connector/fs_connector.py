@@ -259,64 +259,6 @@ class FSConnector(RemoteConnector):
             keys.extend([f.stem for f in base_path.glob("*.data")])
         return keys
 
-    def support_batched_async_contains(self) -> bool:
-        return True
-
-    async def batched_async_contains(
-        self,
-        lookup_id: str,
-        keys: List[CacheEngineKey],
-        pin: bool = False,
-    ) -> int:
-        """Check how many keys exist in file system in batch
-
-        Args:
-            lookup_id: Identifier for this lookup operation
-            keys: List of keys to check
-            pin: Whether to pin the keys (not used in FS connector)
-
-        Returns:
-            Number of consecutive keys that exist, starting from the first key
-        """
-        tasks = [self.exists(key) for key in keys]
-        results = await asyncio.gather(*tasks)
-        try:
-            return results.index(False)
-        except ValueError:
-            return len(results)
-
-    def support_batched_get_non_blocking(self) -> bool:
-        return True
-
-    async def batched_get_non_blocking(
-        self,
-        lookup_id: str,
-        keys: List[CacheEngineKey],
-    ) -> List[MemoryObj]:
-        """Batched get the memory_objs of the corresponding keys (non-blocking)
-
-        Args:
-            lookup_id: Identifier for this lookup operation
-            keys: List of keys to get
-
-        Returns:
-            List of memory objects that exist (excludes None values)
-        """
-        # Use asyncio.gather to fetch all keys concurrently
-        results = await asyncio.gather(
-            *(self.get(key) for key in keys), return_exceptions=True
-        )
-
-        # Filter out None values and exceptions, return only valid memory objects
-        memory_objs = []
-        for result in results:
-            if isinstance(result, MemoryObj):
-                memory_objs.append(result)
-            elif isinstance(result, Exception):
-                logger.warning(f"Exception during batched get: {result}")
-
-        return memory_objs
-
     async def close(self):
         """Clean up resources"""
         logger.info("Closed the file system connector")

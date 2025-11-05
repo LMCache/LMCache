@@ -2,6 +2,7 @@
 # Standard
 from typing import List, Optional
 import abc
+import asyncio
 
 # Third Party
 import torch
@@ -255,10 +256,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     def support_batched_async_contains(self) -> bool:
-        """
-        Connectors that support batched async contains should override this method.
-        """
-        return False
+        return True
 
     async def batched_async_contains(
         self,
@@ -266,26 +264,68 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
+        """Check how many keys exist in file system in batch
+
+        Args:
+            lookup_id: Identifier for this lookup operation
+            keys: List of keys to check
+            pin: Whether to pin the keys (not used in FS connector)
+
+        Returns:
+            Number of consecutive keys that exist, starting from the first key
         """
-        Check if the remote server contains the keys
-        """
-        raise NotImplementedError
+        tasks = [self.exists(key) for key in keys]
+        results = await asyncio.gather(*tasks)
+        if False in results:
+            return results.index(False)
+        return len(results)
 
     def support_batched_get_non_blocking(self) -> bool:
-        """
-        Connectors that support batched get non-blocking should override this method.
-        """
-        return False
+        return True
 
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
+        """Batched get the memory_objs of the corresponding keys (non-blocking)
+
+        This method returns only the consecutive prefix of successfully retrieved
+        memory objects. Once a key is not found (None) or an exception occurs,
+        all subsequent memory objects (even if successfully retrieved) will be
+        released to avoid memory leaks, and only the prefix before the first
+        failure will be returned.
+
+        Args:
+            lookup_id: Identifier for this lookup operation
+            keys: List of keys to get
+
+        Returns:
+            List of consecutive memory objects from the beginning until the first
+            failure (None or Exception). Empty list if the first key fails.
         """
-        Batched get the memory_objs of the corresponding keys
-        """
-        raise NotImplementedError
+        # Use asyncio.gather to fetch all keys concurrently
+        results = await asyncio.gather(
+            *(self.get(key) for key in keys), return_exceptions=True
+        )
+
+        # Only return consecutive prefix of valid memory objects
+        memory_objs = []
+        found_failure = False
+        for result in results:
+            if found_failure:
+                # Release subsequent memory objects to avoid memory leak
+                if isinstance(result, MemoryObj):
+                    result.ref_count_down()
+            elif isinstance(result, MemoryObj):
+                memory_objs.append(result)
+            else:
+                # First failure encountered (None or Exception)
+                if isinstance(result, Exception):
+                    logger.warning(f"Exception during batched get: {result}")
+                found_failure = True
+
+        return memory_objs
 
     def remove_sync(self, key: CacheEngineKey) -> bool:
         """
