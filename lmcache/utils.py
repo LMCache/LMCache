@@ -320,7 +320,7 @@ class LayerCacheEngineKey(CacheEngineKey):
         )
 
     def __eq__(self, other):
-        if super().__eq__(other):
+        if super(LayerCacheEngineKey, self).__eq__(other):
             return self.layer_id == other.layer_id
 
         return False
