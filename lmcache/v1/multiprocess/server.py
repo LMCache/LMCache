@@ -396,6 +396,9 @@ class MPCacheEngine:
 
         return results
 
+    def get_chunk_size(self) -> int:
+        return self.chunk_size
+
     @_lmcache_nvtx_annotate
     def lookup(
         self,
@@ -491,6 +494,7 @@ def run_cache_server(
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.NOOP, engine.clear)
+    add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
 
     # Start the server
     torch.cuda.init()

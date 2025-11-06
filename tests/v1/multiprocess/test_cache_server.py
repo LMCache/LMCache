@@ -567,3 +567,21 @@ def test_multiple_store_operations(
 
     assert len(lookup_result) == 50
     assert all(lookup_result), "All stored keys from both batches should exist"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Get chunk size requires CUDA"
+)
+def test_get_chunk_size(
+    client: MessageQueueClient,
+):
+    """
+    Test retrieving the chunk size from the server.
+    """
+    chunk_size = client.submit_request(
+        RequestType.GET_CHUNK_SIZE,
+        [],
+        get_response_class(RequestType.GET_CHUNK_SIZE),
+    ).result()
+
+    assert chunk_size == CHUNK_SIZE, f"Chunk size should be {CHUNK_SIZE}"

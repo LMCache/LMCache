@@ -45,6 +45,9 @@ class RequestType(enum.Enum):
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
 
+    # For configuration read commands
+    GET_CHUNK_SIZE = enum.auto()
+
     # For debug, could be used as heartbeats
     NOOP = enum.auto()
 
@@ -138,6 +141,12 @@ _PROTOCOL_DEFINTIONS = {
         payload_classes=[list[KeyType], Optional[bool]],
         response_class=list[bool],
         handler_type=HandlerType.BLOCKING,
+    ),
+    # Configuration read commands
+    RequestType.GET_CHUNK_SIZE: ProtocolDefinition(
+        payload_classes=[],
+        response_class=int,
+        handler_type=HandlerType.SYNC,
     ),
     # Debug commands
     RequestType.NOOP: ProtocolDefinition(
