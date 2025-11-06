@@ -594,6 +594,7 @@ def test_mq_retrieve():
     ]
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
+    test_handle = b"\x00" * 64
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5563")
@@ -604,7 +605,7 @@ def test_mq_retrieve():
     # Run test with RETRIEVE request
     helper.run_test(
         request_type=RequestType.RETRIEVE,
-        payloads=[keys, gpu_id, gpu_block_ids],
+        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
         expected_response=[True, True, True],
         num_requests=1,
     )

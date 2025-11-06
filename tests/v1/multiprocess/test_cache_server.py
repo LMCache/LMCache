@@ -338,13 +338,16 @@ def test_store_retrieve_verify(
     store_result = store_future.result()
     assert store_result is True
 
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
     # Retrieve to a different location in the cache
     # Use offset of 40 blocks (640 pages total needed: 320 + 320)
     retrieve_offset = 40 * 16
     retrieve_block_ids = list(range(retrieve_offset, retrieve_offset + 16 * num_keys))
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [keys, registered_instance, retrieve_block_ids],
+        [keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.result()
@@ -407,9 +410,12 @@ def test_retrieve_partial_miss(
         range(retrieve_offset_keys * 16, (retrieve_offset_keys + num_requested) * 16)
     )
 
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [all_keys, registered_instance, retrieve_block_ids],
+        [all_keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.result()
@@ -473,6 +479,8 @@ def test_multiple_retrieve_operations(
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
     retrieve_futures = []
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
     for batch_idx in range(num_batches):
         keys = [
             create_cache_key(batch_idx * keys_per_batch + i)
@@ -488,7 +496,7 @@ def test_multiple_retrieve_operations(
 
         retrieve_future = client.submit_request(
             RequestType.RETRIEVE,
-            [keys, registered_instance, blocks],
+            [keys, registered_instance, blocks, event.ipc_handle()],
             get_response_class(RequestType.RETRIEVE),
         )
         retrieve_futures.append(retrieve_future)

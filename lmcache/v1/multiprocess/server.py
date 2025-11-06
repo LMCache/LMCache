@@ -231,24 +231,24 @@ class MPCacheEngine:
         event_ipc_handle: bytes,
     ) -> bool:
         st = time.perf_counter()
+
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
-
-        slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
             event = torch.cuda.Event()
+            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
             # Wait for vLLM to finish
             vllm_event = torch.cuda.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
-            vllm_event.wait()
+            vllm_event.wait(stream=gpu_context.stream)
 
             for idx, key in enumerate(keys):
                 start = idx * self.chunk_size
@@ -276,12 +276,14 @@ class MPCacheEngine:
                     True,
                     gpu_context.is_mla,
                 )
-                torch.cuda.synchronize()
+
+                # torch.cuda.synchronize()
                 memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
                 self.hot_buffer[key] = memory_obj
             event.record()
 
             event.synchronize()
+            torch.cuda.synchronize()
 
         ed = time.perf_counter()
         total_size = (
@@ -309,6 +311,7 @@ class MPCacheEngine:
         keys: list[IPCCacheEngineKey],
         instance_id: int,
         gpu_block_ids: list[int],
+        event_ipc_handle: bytes,
     ) -> list[bool]:
         st = time.perf_counter()
         assert instance_id in self.gpu_contexts, (
@@ -316,13 +319,18 @@ class MPCacheEngine:
         )
 
         gpu_context = self.gpu_contexts[instance_id]
-        slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
         results = []
 
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
+            # vllm_event = torch.cuda.Event.from_ipc_handle(
+            #    gpu_context.device, event_ipc_handle
+            # )
+            # vllm_event.wait()
+            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+
             torch.cuda.synchronize()
             event = torch.cuda.Event()
 
@@ -433,6 +441,7 @@ class MPCacheEngine:
         return "OK"
 
     def clear(self) -> str:
+        self.debug()
         logger.info("Received clear request!")
         self.memory_allocator.memcheck()
         length = len(self.hot_buffer)

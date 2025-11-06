@@ -111,7 +111,7 @@ def store_handler(
 
 
 def retrieve_handler(
-    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]
+    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int], event_handler: bytes
 ) -> list[bool]:
     """
     Dummy handler for RETRIEVE requests.
@@ -130,6 +130,9 @@ def retrieve_handler(
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
+    )
+    assert isinstance(event_handler, bytes), (
+        f"Expected event_handler to be bytes, got {type(event_handler)}"
     )
     # Return success
     return [True for _ in keys]

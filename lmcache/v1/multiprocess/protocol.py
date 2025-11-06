@@ -122,10 +122,11 @@ _PROTOCOL_DEFINTIONS = {
     # - keys: list[KeyType]
     # - instance_id: int
     # - gpu_block_ids: list[int]
+    # - event_ipc_handle: bytes
     # Returns: list[bool]
     # NOTE: no layerwise support for now
     RequestType.RETRIEVE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int]],
+        payload_classes=[list[KeyType], int, list[int], bytes],
         response_class=list[bool],
         handler_type=HandlerType.BLOCKING,
     ),
