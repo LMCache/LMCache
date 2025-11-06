@@ -1,0 +1,21 @@
+chunk_size: 256
+local_cpu: False
+save_unfull_chunk: False
+enable_async_loading: False # set to True to test async loading
+# buffer size has to be divisible by chunk size
+# 2880MiB is divisible by 256 token chunk for Qwen3-4B/8B/32B
+nixl_buffer_size: 3019898880
+nixl_buffer_device: cpu
+extra_config:
+  enable_nixl_storage: true
+  nixl_backend: OBJ
+  nixl_pool_size: 0
+  nixl_presence_cache: False
+  nixl_async_put: False
+  nixl_backend_params:
+    access_key: ACCESS_KEY
+    secret_key: SECRET
+    bucket: nixl-test-bucket
+    region: any
+    endpoint_override: https://url-to-object-storage
+    ca_bundle: path to self-signed certificate # remove this line if not using self-signed certificate
