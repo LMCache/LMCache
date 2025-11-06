@@ -467,34 +467,34 @@ class LMCStatsMonitor:
             else self.interval_lookup_hits / self.interval_lookup_tokens
         )
 
-        def filter_out_invalid(stats: List[float]):
+        def filter_out_zeros(stats: List[float]):
             return [x for x in stats if x != 0]
 
-        time_to_retrieve = filter_out_invalid(
+        time_to_retrieve = filter_out_zeros(
             [stats.time_to_retrieve() for stats in self.retrieve_requests.values()]
         )
 
-        time_to_store = filter_out_invalid(
+        time_to_store = filter_out_zeros(
             [stats.time_to_store() for stats in self.store_requests.values()]
         )
 
-        retrieve_speed = filter_out_invalid(
+        retrieve_speed = filter_out_zeros(
             [stats.retrieve_speed() for stats in self.retrieve_requests.values()]
         )
 
-        store_speed = filter_out_invalid(
+        store_speed = filter_out_zeros(
             [stats.store_speed() for stats in self.store_requests.values()]
         )
 
-        p2p_time_to_transfer = filter_out_invalid(
+        p2p_time_to_transfer = filter_out_zeros(
             [stats.time_to_transfer() for stats in self.p2p_requests.values()]
         )
 
-        p2p_transfer_speed = filter_out_invalid(
+        p2p_transfer_speed = filter_out_zeros(
             [stats.transfer_speed() for stats in self.p2p_requests.values()]
         )
 
-        request_lookup_hit_rates = filter_out_invalid(
+        request_lookup_hit_rates = filter_out_zeros(
             [
                 stats.hit_rate()
                 for stats in self.lookup_requests.values()
