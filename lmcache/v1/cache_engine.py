@@ -33,6 +33,7 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
+from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -43,6 +44,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.v1.token_database import (
@@ -89,6 +91,7 @@ class LMCacheEngine:
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
+        lmcache_adapter: Optional[Any] = None,
     ):
         logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
@@ -97,6 +100,7 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
+        self.lmcache_adapter = lmcache_adapter
         # save_only_first_rank only works when use mla
         self.save_only_first_rank = (
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
@@ -191,11 +195,50 @@ class LMCacheEngine:
             "force_store_wait", False
         )
 
+        if (
+            metadata.role == LMCacheEngineMetadata.ROLE_SCHEDULER
+            and config.enable_scheduler_bypass_lookup
+        ):
+            assert self.save_only_first_rank or config.get_extra_config_value(
+                "remote_enable_mla_worker_id_as0", metadata.use_mla
+            ), (
+                "enable_scheduler_bypass_lookup is only supported with "
+                "save_only_first_rank or remote_enable_mla_worker_id_as0"
+            )
+            # Avoid creating storage manager if scheduler with bypass lookup
+            self.storage_manager = None
+        else:
+            self.storage_manager = StorageManager(
+                config,
+                metadata,
+                # self.memory_allocator,
+                event_manager=self.event_manager,
+                lmcache_worker=self.lmcache_worker,
+            )
+
+            # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
+            # TODO(baoloongmao): enable for other fmt
+            if metadata.dp_rank_local == 0 and metadata.fmt == "vllm":
+                # Start internal API server if enabled
+                # The enabled check is in the InternalAPIServer constructor
+                self.api_server = InternalAPIServer(self, lmcache_adapter)
+                self.api_server.start()
+                # Launch plugins
+                self.plugin_launcher = PluginLauncher(
+                    config,
+                    metadata,
+                )
+                self.plugin_launcher.launch_plugins()
+            else:
+                self.api_server = None  # type: ignore[assignment]
+                self.plugin_launcher = None  # type: ignore[assignment]
+
         gc.collect()
         if not config.py_enable_gc:
             gc.disable()
 
     def post_init(self, **kwargs) -> None:
+        assert self.metadata.role != LMCacheEngineMetadata.ROLE_SCHEDULER
         if "async_lookup_server" in kwargs:
             self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:
@@ -1467,6 +1510,7 @@ class LMCacheEngineBuilder:
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
+        lmcache_adapter: Optional[Any] = None,
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
@@ -1489,6 +1533,7 @@ class LMCacheEngineBuilder:
                 gpu_connector,
                 broadcast_fn,
                 broadcast_object_fn,
+                lmcache_adapter,
             )
 
             cls._instances[instance_id] = engine

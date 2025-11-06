@@ -28,7 +28,7 @@ async def run_script(request: Request):
 
     try:
         # Get allowed imports from config
-        config = request.app.state.lmcache_adapter.config
+        config = request.app.state.lmcache_engine.config
         allowed_imports = config.script_allowed_imports or []
 
         # Pre-import allowed modules

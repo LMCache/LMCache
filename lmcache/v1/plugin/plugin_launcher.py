@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import Any
 import atexit
 import os
 import shutil
@@ -8,18 +9,24 @@ import subprocess
 import threading
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
 
 class PluginLauncher:
-    def __init__(self, config, role, worker_count, worker_id):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         self.config = config
-        self.role = role
-        self.worker_count = worker_count
-        self.worker_id = worker_id
-        self.plugin_processes = []
+        self.role = metadata.role
+        self.worker_count = metadata.world_size
+        self.worker_id = (
+            -1
+            if metadata.role == LMCacheEngineMetadata.ROLE_SCHEDULER
+            else metadata.worker_id,
+        )
+        self.plugin_processes: list[Any] = []
         # Register cleanup handler
         atexit.register(self.stop_plugins)
 
@@ -56,7 +63,7 @@ class PluginLauncher:
 
         # Check role match
         plugin_role = parts[0].upper()
-        if plugin_role != "ALL" and plugin_role != self.role.name:
+        if plugin_role != "ALL" and plugin_role != self.role:
             logger.info(f"Skipping {file}: requires role {plugin_role}")
             return True
 

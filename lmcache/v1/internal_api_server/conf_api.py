@@ -27,7 +27,7 @@ def _get_config_dict(
 
 @router.get("/conf")
 async def get_config(request: Request, names: Optional[str] = None):
-    config = request.app.state.lmcache_adapter.config
+    config = request.app.state.lmcache_engine.config
     # Parse query parameter names (comma-separated list of config names)
     keys = names.split(",") if names else None
     config_dict = _get_config_dict(config, keys)
@@ -41,11 +41,7 @@ async def get_metadata(request: Request, names: Optional[str] = None):
     """
     Get metadata of the cache engine
     """
-    lmcache_engine = request.app.state.lmcache_adapter.lmcache_engine
-    if not lmcache_engine:
-        return PlainTextResponse(
-            content="/meta api only work for lmcache_engine", status_code=500
-        )
+    lmcache_engine = request.app.state.lmcache_engine
     metadata = lmcache_engine.metadata
 
     if names:

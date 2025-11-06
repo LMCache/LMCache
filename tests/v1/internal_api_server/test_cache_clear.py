@@ -31,6 +31,7 @@ class TestCacheClearAPI:
     def client_with_adapter(self, mock_lmcache_adapter):
         """Create a test client with mocked adapter."""
         app.state.lmcache_adapter = mock_lmcache_adapter
+        app.state.lmcache_engine = mock_lmcache_adapter.lmcache_engine
         return TestClient(app)
 
     def test_cache_clear_success(self, client_with_adapter, mock_lmcache_adapter):
@@ -118,12 +119,7 @@ class TestCacheClearAPI:
 
     def test_cache_clear_adapter_attribute_error(self):
         """Test cache clear when adapter doesn't have lmcache_engine attribute."""
-
-        # Arrange
-        class AdapterWithoutEngine:
-            pass
-
-        app.state.lmcache_adapter = AdapterWithoutEngine()
+        app.state.lmcache_engine = None
         client = TestClient(app)
         # Act
         response = client.delete("/cache/clear")

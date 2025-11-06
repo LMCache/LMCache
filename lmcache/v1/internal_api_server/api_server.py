@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import asyncio
 import os
 import threading
@@ -13,11 +13,12 @@ import uvicorn
 from lmcache.logging import init_logger
 
 # Local
+from ...config import LMCacheEngineMetadata
 from .api_registry import APIRegistry
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from lmcache.v1.cache_engine import LMCacheEngine
 
 logger = init_logger(__name__)
 
@@ -29,11 +30,15 @@ registry.register_all_apis()
 
 
 class InternalAPIServer:
-    def __init__(self, lmcache_adapter: "LMCacheConnectorV1Impl"):
-        config = lmcache_adapter.config
-        lmcache_engine = lmcache_adapter.lmcache_engine
+    def __init__(self, lmcache_engine: "LMCacheEngine", lmcache_adapter: Any = None):
         # 0 for scheduler, 1 for worker 0, 2 for worker 1, ...
-        port_offset = 0 if not lmcache_engine else 1 + lmcache_engine.metadata.worker_id
+        config = lmcache_engine.config
+        metadata = lmcache_engine.metadata
+        port_offset = (
+            0
+            if metadata.role == LMCacheEngineMetadata.ROLE_SCHEDULER
+            else 1 + metadata.worker_id
+        )
         self.port = config.internal_api_server_port_start + port_offset
         self.socket_path_prefix = config.internal_api_server_socket_path_prefix
         self.socket_path = (
@@ -84,6 +89,7 @@ class InternalAPIServer:
             uvicorn_config["port"] = self.port
 
         self.server = uvicorn.Server(uvicorn.Config(**uvicorn_config))
+        app.state.lmcache_engine = lmcache_engine
         app.state.lmcache_adapter = lmcache_adapter
 
     async def run(self):

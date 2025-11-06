@@ -19,6 +19,9 @@ logger = init_logger(__name__)
 class LMCacheEngineMetadata:
     """name of the LLM model"""
 
+    ROLE_SCHEDULER = "scheduler"
+    ROLE_WORKER = "worker"
+
     model_name: str
     """ world size when running under a distributed setting """
     world_size: int
@@ -35,9 +38,10 @@ class LMCacheEngineMetadata:
     use_mla: bool = False
     """ the role of the current instance (e.g., 'scheduler', 'worker') """
     role: Optional[str] = None
+    """ the local dp rank """
+    dp_rank_local: int = 0
     """ the first rank of the distributed setting """
-    # TODO(baoloongmao): first_rank should be configurable
-    first_rank = 0
+    first_rank: int = 0
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""

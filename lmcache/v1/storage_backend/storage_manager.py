@@ -217,10 +217,10 @@ class StorageManager:
         self.enable_pd = config.enable_pd
 
         self.allocator_backend = None
-        if metadata.role != "scheduler":
+        if metadata.role != LMCacheEngineMetadata.ROLE_SCHEDULER:
             self.allocator_backend = self._get_allocator_backend(config)
-        if config.local_cpu:
-            self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+            if config.local_cpu:
+                self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
         self.manager_lock = threading.Lock()
 

@@ -61,13 +61,11 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
     LMCacheAsyncLookupServer,
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 
 if TYPE_CHECKING:
     # Third Party
@@ -442,136 +440,6 @@ def _calculate_draft_layers(vllm_config, model_config):
     return num_draft_layers
 
 
-def _init_lmcache_engine(
-    lmcache_config: LMCacheEngineConfig,
-    vllm_config: "VllmConfig",
-    role: str,
-) -> LMCacheEngine:
-    """Initialize the LMCache engine by the given model config and parallel
-    config. This function will check the environment variable
-    `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
-    variable is not set, this function will return None.
-
-    :param lmcache_config: The LMCache configuration.
-    :type lmcache_config: LMCacheEngineConfig
-    :param vllm_config: The vLLM configuration.
-    :type vllm_config: VllmConfig
-
-    :return: The initialized LMCache engine
-    :rtype: LMCacheEngine
-    """
-    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
-        return curr_engine
-
-    model_config = vllm_config.model_config
-    parallel_config = vllm_config.parallel_config
-    cache_config = vllm_config.cache_config
-
-    assert isinstance(lmcache_config, LMCacheEngineConfig), (
-        "LMCache v1 configuration is should be passed."
-    )
-
-    kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
-
-    use_mla = mla_enabled(model_config)
-    if use_mla and (
-        lmcache_config.remote_serde != "naive"
-        and lmcache_config.remote_serde is not None
-    ):
-        raise ValueError("MLA only works with naive serde mode..")
-
-    # construct kv shape (for mem pool)
-    num_layer = model_config.get_num_layers(parallel_config)
-    num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
-    num_layer += num_draft_layers
-    chunk_size = lmcache_config.chunk_size
-    num_kv_head = model_config.get_num_kv_heads(parallel_config)
-    head_size = model_config.get_head_size()
-    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-    logger.info(
-        f"use mla: {use_mla}, kv shape: {kv_shape}, num_draft_layers:{num_draft_layers}"
-    )
-
-    # Change current device.
-    num_gpus = torch.cuda.device_count()
-    local_rank = parallel_config.rank % num_gpus
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-    metadata = LMCacheEngineMetadata(
-        model_config.model,
-        parallel_config.world_size,
-        parallel_config.rank,
-        "vllm",
-        kv_dtype,
-        kv_shape,
-        use_mla,
-        role,
-    )
-
-    use_gpu = need_gpu_interm_buffer(lmcache_config)
-    vllm_gpu_connector: Optional[GPUConnectorInterface]
-
-    if use_mla and lmcache_config.use_layerwise:
-        raise ValueError("layerwise MLA connector is not supported yet")
-
-    # When use_mla is True, num_kv_head is 1
-    hidden_dim_size = num_kv_head * head_size
-    if role == "scheduler":
-        vllm_gpu_connector = None
-        # Create a dummy tpg object with broadcast and broadcast_object methods
-        tpg = SimpleNamespace()
-        tpg.broadcast = lambda tensor, src: tensor
-        tpg.broadcast_object = lambda obj, src: obj
-    elif lmcache_config.use_layerwise:
-        if lmcache_config.enable_blending:
-            # Use layerwise connector for blending
-            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-            )
-        else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-            )
-        tpg = get_tp_group()
-    else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
-        tpg = get_tp_group()
-    engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME,
-        lmcache_config,
-        metadata,
-        vllm_gpu_connector,
-        tpg.broadcast,
-        tpg.broadcast_object,
-    )
-    if role == "scheduler" and lmcache_config.enable_scheduler_bypass_lookup:
-        assert engine.save_only_first_rank or lmcache_config.get_extra_config_value(
-            "remote_enable_mla_worker_id_as0", metadata.use_mla
-        ), (
-            "enable_scheduler_bypass_lookup is only supported with "
-            "save_only_first_rank or remote_enable_mla_worker_id_as0"
-        )
-    return engine
-
-
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
@@ -617,22 +485,18 @@ class LMCacheConnectorV1Impl:
                         )
 
         self.config = config
-
+        self.lmcache_engine: Optional[LMCacheEngine] = None
         self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
-            self.lmcache_engine: Optional[LMCacheEngine] = None
-            # Check if bypass lookup is enabled for scheduler
-            if config.enable_scheduler_bypass_lookup:
-                # Create LMCacheEngine for scheduler when bypass is enabled
-                self.lmcache_engine = _init_lmcache_engine(
-                    config,
-                    vllm_config,
-                    role="scheduler",
-                )
+            self.lmcache_engine = self._init_lmcache_engine(
+                config,
+                vllm_config,
+                role=LMCacheEngineMetadata.ROLE_SCHEDULER,
+            )
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine
@@ -640,10 +504,10 @@ class LMCacheConnectorV1Impl:
             self._unfinished_requests: dict[str, Request] = {}
             self.lmcache_engine = None
         else:
-            self.lmcache_engine = _init_lmcache_engine(
+            self.lmcache_engine = self._init_lmcache_engine(
                 config,
                 vllm_config,
-                role="worker",
+                role=LMCacheEngineMetadata.ROLE_WORKER,
             )
 
             self.use_layerwise = config.use_layerwise
@@ -661,7 +525,6 @@ class LMCacheConnectorV1Impl:
                 )
 
             # Create lookup server using factory
-            assert self.lmcache_engine is not None
             self.lookup_server = LookupClientFactory.create_lookup_server(
                 self.lmcache_engine, vllm_config
             )
@@ -673,7 +536,7 @@ class LMCacheConnectorV1Impl:
             )
 
             # In case of MLA, the lookup server is only created on worker 0
-            if self.async_loading and self.lookup_server is not None:
+            if self.async_loading:
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
                 self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
 
@@ -716,31 +579,142 @@ class LMCacheConnectorV1Impl:
         # Track block IDs associated with failed load attempts.
         self._invalid_block_ids: set[int] = set()
 
-        # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
-        if vllm_config.parallel_config.data_parallel_rank_local == 0:
-            # Start internal API server if enabled
-            # The enabled check is in the InternalAPIServer constructor
-            self.api_server = InternalAPIServer(self)
-            self.api_server.start()
-            # Launch plugins
-            self.plugin_launcher = PluginLauncher(
-                self.config,
-                role,
-                self.worker_count,
-                -1
-                if self.lmcache_engine is None  # scheduler side
-                else self.lmcache_engine.metadata.worker_id,
-            )
-            self.plugin_launcher.launch_plugins()
-        else:
-            self.api_server = None  # type: ignore[assignment]
-            self.plugin_launcher = None  # type: ignore[assignment]
         logger.info(
             f"LMCache initialized for role {role} with version {utils.get_version()}, "
             f"vllm version {VLLM_VERSION}, "
             "lmcache cache_engine metadata: "
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
+
+    def _init_lmcache_engine(
+        self,
+        lmcache_config: LMCacheEngineConfig,
+        vllm_config: "VllmConfig",
+        role: str,
+    ) -> LMCacheEngine:
+        """Initialize the LMCache engine by the given model config and parallel
+        config. This function will check the environment variable
+        `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
+        variable is not set, this function will return None.
+
+        :param lmcache_config: The LMCache configuration.
+        :type lmcache_config: LMCacheEngineConfig
+        :param vllm_config: The vLLM configuration.
+        :type vllm_config: VllmConfig
+        :param lmcache_adapter: The LMCache adapter instance (optional).
+        :type lmcache_adapter: Optional[Any]
+
+        :return: The initialized LMCache engine
+        :rtype: LMCacheEngine
+        """
+        if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+            return curr_engine
+
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
+
+        assert isinstance(lmcache_config, LMCacheEngineConfig), (
+            "LMCache v1 configuration is should be passed."
+        )
+
+        kv_dtype = get_kv_cache_torch_dtype(
+            cache_config.cache_dtype, model_config.dtype
+        )
+
+        use_mla = mla_enabled(model_config)
+        if use_mla and (
+            lmcache_config.remote_serde != "naive"
+            and lmcache_config.remote_serde is not None
+        ):
+            raise ValueError("MLA only works with naive serde mode..")
+
+        # construct kv shape (for mem pool)
+        num_layer = model_config.get_num_layers(parallel_config)
+        num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
+        num_layer += num_draft_layers
+        chunk_size = lmcache_config.chunk_size
+        num_kv_head = model_config.get_num_kv_heads(parallel_config)
+        head_size = model_config.get_head_size()
+        kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
+        logger.info(
+            f"use mla: {use_mla}, kv shape: {kv_shape}, "
+            f"num_draft_layers:{num_draft_layers}"
+        )
+
+        # Change current device.
+        num_gpus = torch.cuda.device_count()
+        local_rank = parallel_config.rank % num_gpus
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        metadata = LMCacheEngineMetadata(
+            model_name=model_config.model,
+            world_size=parallel_config.world_size,
+            worker_id=parallel_config.rank,
+            fmt="vllm",
+            kv_dtype=kv_dtype,
+            kv_shape=kv_shape,
+            use_mla=use_mla,
+            role=role,
+            dp_rank_local=vllm_config.parallel_config.data_parallel_rank_local,
+        )
+
+        use_gpu = need_gpu_interm_buffer(lmcache_config)
+        vllm_gpu_connector: Optional[GPUConnectorInterface]
+
+        if use_mla and lmcache_config.use_layerwise:
+            raise ValueError("layerwise MLA connector is not supported yet")
+
+        # When use_mla is True, num_kv_head is 1
+        hidden_dim_size = num_kv_head * head_size
+        if role == LMCacheEngineMetadata.ROLE_SCHEDULER:
+            vllm_gpu_connector = None
+            # Create a dummy tpg object with broadcast and broadcast_object methods
+            tpg = SimpleNamespace()
+            tpg.broadcast = lambda tensor, src: tensor
+            tpg.broadcast_object = lambda obj, src: obj
+        elif lmcache_config.use_layerwise:
+            if lmcache_config.enable_blending:
+                # Use layerwise connector for blending
+                vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
+            else:
+                vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
+            tpg = get_tp_group()
+        else:
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+            tpg = get_tp_group()
+        engine = LMCacheEngineBuilder.get_or_create(
+            ENGINE_NAME,
+            lmcache_config,
+            metadata,
+            vllm_gpu_connector,
+            tpg.broadcast,
+            tpg.broadcast_object,
+            self,
+        )
+        return engine
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.

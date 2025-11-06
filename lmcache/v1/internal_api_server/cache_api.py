@@ -53,8 +53,7 @@ async def clear(
         ```
     """
     try:
-        lmcache_adapter = request.app.state.lmcache_adapter
-        lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
+        lmcache_engine = request.app.state.lmcache_engine
         if not lmcache_engine:
             error_info = {
                 "error": "/cache/clear API is unavailable",
