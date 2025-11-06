@@ -492,7 +492,6 @@ def _validate_config(self):
         )
         self.save_unfull_chunk = False
 
-    logger.warning(f"{self.save_unfull_chunk}, {self.enable_blending}")
     if self.enable_blending:
         if not self.save_unfull_chunk:
             logger.warning(
