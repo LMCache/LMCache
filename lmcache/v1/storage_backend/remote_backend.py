@@ -172,10 +172,7 @@ class RemoteBackend(StorageBackendInterface):
             return [False] * len(keys)
 
         if self._mla_worker_id_as0_mode:
-            keys = [
-                self._reconstruct_cache_engine_key(key)
-                for key in keys
-            ]
+            keys = [self._reconstruct_cache_engine_key(key) for key in keys]
 
         try:
             return self.connection.batched_contains(keys, stop_after_first_not_exits)
@@ -336,10 +333,7 @@ class RemoteBackend(StorageBackendInterface):
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            new_keys = [
-                self._reconstruct_cache_engine_key(key)
-                for key in keys
-            ]
+            new_keys = [self._reconstruct_cache_engine_key(key) for key in keys]
         else:
             new_keys = keys
 
@@ -424,10 +418,7 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in batched_async_contains, returning 0")
             return 0
         if self._mla_worker_id_as0_mode:
-            keys = [
-                self._reconstruct_cache_engine_key(key)
-                for key in keys
-            ]
+            keys = [self._reconstruct_cache_engine_key(key) for key in keys]
 
         try:
             assert self.connection.support_batched_async_contains(), (
@@ -515,11 +506,11 @@ class RemoteBackend(StorageBackendInterface):
     ) -> CacheEngineKey:
         # Reconstruct the cache engine key with new worker id
         return CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    new_worker_id,
-                    key.chunk_hash,
-                    key.dtype,
-                    key.request_configs,
-                )
+            key.fmt,
+            key.model_name,
+            key.world_size,
+            new_worker_id,
+            key.chunk_hash,
+            key.dtype,
+            key.request_configs,
+        )
