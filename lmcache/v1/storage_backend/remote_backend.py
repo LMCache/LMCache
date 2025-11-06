@@ -136,15 +136,7 @@ class RemoteBackend(StorageBackendInterface):
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.dtype,
-                key.request_configs,
-            )
+            key = self._reconstruct_cache_engine_key(key)
 
         try:
             if self.config.extra_config is not None and self.config.extra_config.get(
@@ -181,14 +173,7 @@ class RemoteBackend(StorageBackendInterface):
 
         if self._mla_worker_id_as0_mode:
             keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.request_configs,
-                )
+                self._reconstruct_cache_engine_key(key)
                 for key in keys
             ]
 
@@ -307,15 +292,7 @@ class RemoteBackend(StorageBackendInterface):
             return None
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.dtype,
-                key.request_configs,
-            )
+            key = self._reconstruct_cache_engine_key(key)
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
@@ -360,15 +337,7 @@ class RemoteBackend(StorageBackendInterface):
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
             new_keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.dtype,
-                    key.request_configs,
-                )
+                self._reconstruct_cache_engine_key(key)
                 for key in keys
             ]
         else:
@@ -456,15 +425,7 @@ class RemoteBackend(StorageBackendInterface):
             return 0
         if self._mla_worker_id_as0_mode:
             keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.dtype,
-                    key.request_configs,
-                )
+                self._reconstruct_cache_engine_key(key)
                 for key in keys
             ]
 
@@ -548,3 +509,17 @@ class RemoteBackend(StorageBackendInterface):
             logger.info("Remote backend closed.")
         except Exception as e:
             logger.warning(f"Error occurred when closing remote connection: {e}")
+
+    def _reconstruct_cache_engine_key(
+        self, key: CacheEngineKey, new_worker_id: int = 0
+    ) -> CacheEngineKey:
+        # Reconstruct the cache engine key with new worker id
+        return CacheEngineKey(
+                    key.fmt,
+                    key.model_name,
+                    key.world_size,
+                    new_worker_id,
+                    key.chunk_hash,
+                    key.dtype,
+                    key.request_configs,
+                )
