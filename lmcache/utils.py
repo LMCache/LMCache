@@ -298,6 +298,18 @@ class CacheEngineKey:
             request_configs=request_configs,
         )
 
+    def with_new_worker_id(self, new_worker_id: int) -> "CacheEngineKey":
+        # Reconstruct the cache engine key with new worker id
+        return CacheEngineKey(
+            self.fmt,
+            self.model_name,
+            self.world_size,
+            new_worker_id,
+            self.chunk_hash,
+            self.dtype,
+            self.request_configs,
+        )
+
 
 @dataclass(slots=True)
 class LayerCacheEngineKey(CacheEngineKey):
