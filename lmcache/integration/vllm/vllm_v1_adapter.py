@@ -1306,7 +1306,7 @@ class LMCacheConnectorV1Impl:
         )
 
         if num_external_hit_tokens is None:
-            logger.info(
+            logger.debug(
                 "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
                 request.request_id,
                 request.num_tokens,
