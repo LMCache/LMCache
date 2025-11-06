@@ -124,7 +124,7 @@ def server_process() -> Generator[mp.Process, None, None]:
     The server runs for the entire test module.
     """
     # Start server process
-    mp.set_start_method("spawn")
+    mp.set_start_method("spawn", force=True)
     process = mp.Process(
         target=server_process_runner,
         args=(SERVER_HOST, SERVER_PORT, CHUNK_SIZE, CPU_BUFFER_SIZE),
