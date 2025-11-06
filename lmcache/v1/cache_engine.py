@@ -53,6 +53,12 @@ from lmcache.v1.token_database import (
 
 logger = init_logger(__name__)
 
+# Type aliases for processed chunks
+# (cache_key, memory_obj, start_index, end_index)
+ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
+# (list of processed chunks, total kv size)
+ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
+
 
 class CacheEngineEndSignal:
     pass
@@ -469,7 +475,7 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
-        reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        reordered_chunks: List[ProcessedChunk] = []
         if not self._is_passive():
             if self.async_loading:
                 reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
@@ -1078,7 +1084,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+    ) -> ProcessTokensInternalResult:
         """
         This function is used to get the memory objects from the event manager.
 
@@ -1094,7 +1100,7 @@ class LMCacheEngine:
             assert isinstance(request_configs, dict)
 
         tot_kv_size = 0
-        chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
         memory_objs = future.result()
@@ -1130,7 +1136,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+    ) -> ProcessTokensInternalResult:
         """Process tokens and populate the reordered lists.
 
         This function is used to process tokens and populate the reordered lists.
@@ -1148,7 +1154,7 @@ class LMCacheEngine:
             list
         )
 
-        reordered_chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        reordered_chunks: List[ProcessedChunk] = []
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
