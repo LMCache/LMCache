@@ -1322,7 +1322,7 @@ class LMCacheConnectorV1Impl:
                         self.config.blocking_timeout_secs,
                     )
                     return 0
-            logger.info(
+            logger.debug(
                 "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
                 request.request_id,
                 request.num_tokens,
