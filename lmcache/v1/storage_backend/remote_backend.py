@@ -136,15 +136,7 @@ class RemoteBackend(StorageBackendInterface):
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.dtype,
-                key.request_configs,
-            )
+            key = key.with_new_worker_id(0)
 
         try:
             if self.config.extra_config is not None and self.config.extra_config.get(
@@ -180,17 +172,7 @@ class RemoteBackend(StorageBackendInterface):
             return [False] * len(keys)
 
         if self._mla_worker_id_as0_mode:
-            keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.request_configs,
-                )
-                for key in keys
-            ]
+            keys = [key.with_new_worker_id(0) for key in keys]
 
         try:
             return self.connection.batched_contains(keys, stop_after_first_not_exits)
@@ -307,15 +289,7 @@ class RemoteBackend(StorageBackendInterface):
             return None
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.dtype,
-                key.request_configs,
-            )
+            key = key.with_new_worker_id(0)
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
@@ -359,26 +333,13 @@ class RemoteBackend(StorageBackendInterface):
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            new_keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.dtype,
-                    key.request_configs,
-                )
-                for key in keys
-            ]
-        else:
-            new_keys = keys
+            keys = [key.with_new_worker_id(0) for key in keys]
 
         t1 = time.perf_counter()
         # batched get
         if self.connection.support_batched_get():
             future = asyncio.run_coroutine_threadsafe(
-                self.connection.batched_get(new_keys), self.loop
+                self.connection.batched_get(keys), self.loop
             )
             try:
                 memory_objs = future.result(self.blocking_timeout_secs)
@@ -397,7 +358,7 @@ class RemoteBackend(StorageBackendInterface):
         else:
             futures = [
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
-                for key in new_keys
+                for key in keys
             ]
             memory_objs = []
             failed = False
@@ -455,18 +416,7 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in batched_async_contains, returning 0")
             return 0
         if self._mla_worker_id_as0_mode:
-            keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.dtype,
-                    key.request_configs,
-                )
-                for key in keys
-            ]
+            keys = [key.with_new_worker_id(0) for key in keys]
 
         try:
             assert self.connection.support_batched_async_contains(), (
