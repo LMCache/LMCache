@@ -390,6 +390,16 @@ class LayerCacheEngineKey(CacheEngineKey):
         )
 
 
+@dataclass
+class CacheStoreEvent:
+    block_hashes: list[int]
+    parent_block_hash: int | None
+    token_ids: list[int]
+    block_size: int
+    lora_id: int | None
+    medium: str | None
+
+
 ##### NVTX annotation #####
 _NVTX_COLORS = ["green", "blue", "purple", "rapids"]
 
