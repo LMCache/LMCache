@@ -197,9 +197,6 @@ class GdsBackend(AllocatorBackendInterface):
         self.gds_path = config.gds_path
         self.fstype = get_fstype(config.gds_path)
 
-    def is_using_dma(self) -> bool:
-        return True
-
         # Log the fstype - this is useful in reports and varying optimizations
         # based on the kind of fstype used.
         logger.info(
@@ -361,6 +358,9 @@ class GdsBackend(AllocatorBackendInterface):
 
     def __str__(self):
         return self.__class__.__name__
+
+    def is_using_dma(self) -> bool:
+        return True
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         # TODO: implement pin() semantics

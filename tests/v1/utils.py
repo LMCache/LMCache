@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import List, Optional, Sequence
 import asyncio
 import random
 import string
@@ -12,6 +13,8 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 
 
 def recover_engine_states(engine):
@@ -307,3 +310,94 @@ class DummyLMCacheAsyncLookupServer:
         retrieved_length: int,
     ) -> None:
         pass
+
+
+class _BaseTestStorageBackend(StorageBackendInterface):
+    def __init__(
+        self,
+        config=None,
+        metadata=None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        local_cpu_backend=None,
+        dst_device: str = "cpu",
+    ):
+        super().__init__(dst_device=dst_device)
+        self.config = config
+        self.metadata = metadata
+        self.loop = loop
+        self.local_cpu_backend = local_cpu_backend
+
+    def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:  # noqa: ARG002
+        return False
+
+    def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:  # noqa: ARG002
+        return False
+
+    def batched_submit_put_task(
+        self,
+        keys: Sequence[CacheEngineKey],  # noqa: ARG002
+        objs: List[MemoryObj],  # noqa: ARG002
+        transfer_spec=None,  # noqa: ARG002
+    ):
+        return None
+
+    async def async_batched_submit_put_task(
+        self,
+        keys: Sequence[CacheEngineKey],  # noqa: ARG002
+        objs: List[MemoryObj],  # noqa: ARG002
+        transfer_spec=None,  # noqa: ARG002
+    ) -> None:
+        return None
+
+    def get_blocking(
+        self,
+        key: CacheEngineKey,  # noqa: ARG002
+    ) -> Optional[MemoryObj]:
+        return None
+
+    def get_non_blocking(
+        self,
+        key: CacheEngineKey,  # noqa: ARG002
+        location: Optional[str] = None,  # noqa: ARG002
+    ):
+        return None
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,  # noqa: ARG002
+        keys: List[CacheEngineKey],  # noqa: ARG002
+        pin: bool = False,  # noqa: ARG002
+    ) -> int:
+        return 0
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,  # noqa: ARG002
+        keys: list[CacheEngineKey],  # noqa: ARG002
+        transfer_spec=None,  # noqa: ARG002
+    ) -> list[MemoryObj]:
+        return []
+
+    def pin(self, key: CacheEngineKey) -> bool:  # noqa: ARG002
+        return False
+
+    def unpin(self, key: CacheEngineKey) -> bool:  # noqa: ARG002
+        return False
+
+    def remove(self, key: CacheEngineKey, force: bool = True) -> bool:  # noqa: ARG002
+        return False
+
+    def get_allocator_backend(self):
+        raise NotImplementedError("Test backend does not expose an allocator")
+
+    def close(self) -> None:
+        return None
+
+
+class NonDmaTestBackend(_BaseTestStorageBackend):
+    pass
+
+
+class DmaTestBackend(_BaseTestStorageBackend):
+    def is_using_dma(self) -> bool:
+        return True

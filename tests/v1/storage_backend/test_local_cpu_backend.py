@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import asyncio
 import threading
 
 # Third Party
@@ -9,13 +10,16 @@ import torch
 # First Party
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from tests.v1.utils import dumb_metadata
 
 
 class MockLookupServer:
@@ -321,8 +325,6 @@ class TestLocalCPUBackend:
 
         # Check that evict message was sent
         assert len(lmcache_worker.messages) == 2  # 1 admit + 1 evict
-        # First Party
-        from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 
         assert any(isinstance(msg, KVAdmitMsg) for msg in lmcache_worker.messages)
         assert any(isinstance(msg, KVEvictMsg) for msg in lmcache_worker.messages)
@@ -485,3 +487,54 @@ class TestLocalCPUBackend:
         local_cpu_backend.remove(key)
         assert memory_obj.get_ref_count() == initial_ref_count + 1
         local_cpu_backend.memory_allocator.close()
+
+
+def _build_dynamic_backend_config(
+    backend_name: str, class_name: str, *, local_cpu: bool, max_local_cpu_size: float
+) -> LMCacheEngineConfig:
+    config = LMCacheEngineConfig.from_defaults()
+    config.local_cpu = local_cpu
+    config.max_local_cpu_size = max_local_cpu_size
+    config.external_backends = [backend_name]
+    config.extra_config = {
+        f"external_backend.{backend_name}.module_path": "tests.v1.utils",
+        f"external_backend.{backend_name}.class_name": class_name,
+    }
+    return config
+
+
+def test_create_storage_backends_requires_cpu_for_non_dma():
+    config = _build_dynamic_backend_config(
+        backend_name="NonDma",
+        class_name="NonDmaTestBackend",
+        local_cpu=False,
+        max_local_cpu_size=0.0,
+    )
+    metadata = dumb_metadata()
+    metadata.role = "worker"
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(AssertionError) as exc_info:
+            CreateStorageBackends(config, metadata, loop)
+        msg = str(exc_info.value)
+        assert "Local CPU cache is disabled" in msg or "max_local_cpu_size" in msg
+    finally:
+        loop.close()
+
+
+def test_create_storage_backends_all_dma_skip_cpu_backend():
+    config = _build_dynamic_backend_config(
+        backend_name="DmaOnly",
+        class_name="DmaTestBackend",
+        local_cpu=False,
+        max_local_cpu_size=0.0,
+    )
+    metadata = dumb_metadata()
+    metadata.role = "worker"
+    loop = asyncio.new_event_loop()
+    try:
+        storage_backends = CreateStorageBackends(config, metadata, loop)
+        assert "LocalCPUBackend" not in storage_backends
+        assert storage_backends["DmaOnly"].is_using_dma()
+    finally:
+        loop.close()
