@@ -38,8 +38,8 @@ class RegistrationController:
         # Mapping from `(instance_id, worker_id)` -> `distributed_url`
         # NOTE(Jiayi): `distributed_url` is used for actual KV cache transfer(p2p),
         # It's not the lmcache_worker_url.
-        # if p2p is not used, distributed_url is None
-        self.distributed_url_mapping: dict[tuple[str, int], Optional[str]] = {}
+        # if p2p is not used, distributed_url is None and not registered.
+        self.distributed_url_mapping: dict[tuple[str, int], str] = {}
 
         # Mapping from `(instance_id, worker_id)` -> `socket`
         self.socket_mapping: dict[tuple[str, int], zmq.asyncio.Socket] = {}
@@ -108,7 +108,13 @@ class RegistrationController:
         port = msg.port
         url = f"{ip}:{port}"
         distributed_url = msg.distributed_url
-        self.distributed_url_mapping[(instance_id, worker_id)] = distributed_url
+        if distributed_url is not None:
+            self.distributed_url_mapping[(instance_id, worker_id)] = distributed_url
+        else:
+            logger.info(
+                f"distributed url of {(instance_id, worker_id)} is None, "
+                f"only register when p2p is used."
+            )
 
         self.instance_mapping[ip] = instance_id
 
