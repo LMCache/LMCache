@@ -43,6 +43,12 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
         self.dst_device = dst_device
 
+    def is_using_dma(self) -> bool:
+        """
+        Indicates whether this backend avoids staging through host (CPU) memory.
+        """
+        return False
+
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
