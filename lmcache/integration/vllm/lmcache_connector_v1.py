@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, List, Optional
+import time
 
 # Third Party
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -28,52 +27,11 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+
 logger = init_logger(__name__)
 
 
-@dataclass
-class LMCacheKVEvents(KVConnectorStats):
-    """
-    Maintain a list of KV events from worker to scheduler
-    """
-
-    def aggregate(self, other: "KVConnectorStats") -> "LMCacheKVEvents":
-        if not other and not isinstance(other, LMCacheKVEvents):
-            raise TypeError("Can only aggregate with another LMCacheKVEvents")
-
-        if other.is_empty():
-            return self
-
-        if self.is_empty():
-            self.data["kv_events"] = []
-
-        other_events = other.get_kv_events()
-        for other_event in other_events:
-            self.data["kv_events"].append(other_event)
-
-        return self
-
-    def reset(self):
-        self.data.clear()
-
-    def reduce(self) -> dict[str, List[BlockStored]]:
-        return self.data
-
-    def add_kv_event(self, event: BlockStored):
-        if self.is_empty():
-            self.data["kv_events"] = []
-        self.data["kv_events"].append(event)
-
-    def get_kv_events(self) -> Optional[List[BlockStored]]:
-        if self.is_empty():
-            return None
-        return self.data["kv_events"]
-
-    def is_empty(self) -> bool:
-        return not self.data or self.data.get("kv_events", 0) == 0
-
-
-class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
+class LMCacheConnectorV1(KVConnectorBase_V1):
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -166,18 +124,18 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         """
         return self._lmcache_engine.get_finished(finished_req_ids)
 
-    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+    def get_kv_connector_kv_cache_events(self) -> Optional["KVEventBatch"]:
         """
-        Get the KV connector stats collected during the last interval.
+        Get the KV connector kv cache events collected during the last interval.
         """
         events = self._lmcache_engine.get_kv_events()
         if not events:
             return None
 
-        lmcache_kv_events: LMCacheKVEvents | None = None
+        lmcache_kv_events: KVEventBatch | None = None
         for event in events:
             if lmcache_kv_events is None:
-                lmcache_kv_events = LMCacheKVEvents()
+                lmcache_kv_events = KVEventBatch(ts=time.time(), events=[])
             block = BlockStored(
                 block_hashes=event.block_hashes,
                 parent_block_hash=event.parent_block_hash,
@@ -186,7 +144,7 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
                 block_size=event.block_size,
                 medium=event.medium,
             )
-            lmcache_kv_events.add_kv_event(block)
+            lmcache_kv_events.events.append(block)
 
         return lmcache_kv_events
 
@@ -254,14 +212,14 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
                 connectors output.
         """
         # Get the KV events
-        kv_events = connector_output.kv_connector_stats
+        kv_events = connector_output.kv_cache_events
         if (
             not kv_events
-            or not isinstance(kv_events, LMCacheKVEvents)
-            or kv_events.is_empty()
+            or not isinstance(kv_events, KVEventBatch)
+            or not kv_events.events
         ):
             return
-        self._kv_events = kv_events.get_kv_events()
+        self._kv_events.extend(kv_events.events)
         return
 
     def request_finished(
@@ -291,9 +249,3 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         if self._kv_events is not None:
             yield from self._kv_events
             self._kv_events.clear()
-
-    @classmethod
-    def build_kv_connector_stats(
-        cls, data: dict[str, Any] | None = None
-    ) -> KVConnectorStats | None:
-        return LMCacheKVEvents(data=data) if data is not None else LMCacheKVEvents()
