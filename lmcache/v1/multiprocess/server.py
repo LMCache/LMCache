@@ -251,6 +251,10 @@ class MPCacheEngine:
             vllm_event.wait(stream=gpu_context.stream)
 
             for idx, key in enumerate(keys):
+                if key in self.hot_buffer:
+                    # Already stored
+                    continue
+
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
                 slot_mapping = slot_mapping_tensor[start:end]
