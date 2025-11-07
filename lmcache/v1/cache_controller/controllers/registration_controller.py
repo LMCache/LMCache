@@ -75,7 +75,8 @@ class RegistrationController:
         url = self.distributed_url_mapping.get((instance_id, worker_id))
         if url is None:
             logger.warning(
-                f"Instance-worker {(instance_id, worker_id)} not registered or P2P is not used"
+                f"Instance-worker {(instance_id, worker_id)} not registered "
+                f"or P2P is not used"
             )
         return url
 
