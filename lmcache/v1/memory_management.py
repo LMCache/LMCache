@@ -1029,6 +1029,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         if chunk_size <= 0:
             raise ValueError("chunk_size must be a positive integer")
         default_alignment = chunk_size * 4096
+        alignment = default_alignment
+
         if hasattr(model_meta, "kv_shape") and hasattr(model_meta, "kv_dtype"):
             kv_shape = list(model_meta.kv_shape)
             if len(kv_shape) >= 3:
@@ -1037,12 +1039,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                     [], dtype=model_meta.kv_dtype
                 ).element_size()
                 alignment = math.prod(kv_shape) * element_size
-            else:
-                alignment = default_alignment
-        else:
-            alignment = default_alignment
-        if alignment <= 0:
-            raise ValueError("Calculated alignment must be greater than zero")
+
         return int(alignment)
 
     def __init__(
