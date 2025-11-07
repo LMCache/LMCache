@@ -537,6 +537,12 @@ class StorageManager:
         #   cum_chunk_lengths_total = [0, 256, 512, 768, 1024, 1280, 1536, 1792]
         #   tier_expected_chunks = [3, 2, 2]  # Tier 0: 3, Tier 1: 2, Tier 2: 2
         #
+        #   Chunks:
+        #   [0 1 2 3 4 5 6]
+        #   |-----|          <--- stored in Tier0, tier_expected_chunks[0]==3
+        #         |---|      <--- stored in Tier1, tier_expected_chunks[1]==2
+        #             |---|  <--- stored in Tier2, tier_expected_chunks[2]==2
+        #
         # Case 1: All chunks retrieved successfully
         #   res = [[obj0, obj1, obj2], [obj3, obj4], [obj5, obj6]]
         #   total_retrieved_chunks = 7
