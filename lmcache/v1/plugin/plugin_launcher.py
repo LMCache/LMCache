@@ -24,7 +24,7 @@ class PluginLauncher:
         self.worker_id = (
             -1
             if metadata.role == LMCacheEngineMetadata.ROLE_SCHEDULER
-            else metadata.worker_id,
+            else metadata.worker_id
         )
         self.plugin_processes: list[Any] = []
         # Register cleanup handler
@@ -63,7 +63,7 @@ class PluginLauncher:
 
         # Check role match
         plugin_role = parts[0].upper()
-        if plugin_role != "ALL" and plugin_role != self.role:
+        if plugin_role != "ALL" and plugin_role != self.role.upper():
             logger.info(f"Skipping {file}: requires role {plugin_role}")
             return True
 

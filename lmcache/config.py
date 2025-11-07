@@ -37,7 +37,7 @@ class LMCacheEngineMetadata:
     """ whether use MLA"""
     use_mla: bool = False
     """ the role of the current instance (e.g., 'scheduler', 'worker') """
-    role: Optional[str] = None
+    role: str = ""
     """ the local dp rank """
     dp_rank_local: int = 0
     """ the first rank of the distributed setting """
