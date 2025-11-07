@@ -93,7 +93,17 @@ class LMCacheWorker:
                 bind_or_connect="connect",
             )
 
-        lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
+        lmcache_worker_ids = config.get_lmcache_worker_ids(
+            metadata.use_mla, metadata.world_size
+        )
+        if len(lmcache_worker_ids) != len(config.lmcache_worker_ports):
+            raise ValueError(
+                f"lmcache_worker_ids and lmcache_worker_ports must have the same length, "
+                f"len of lmcache_worker_ids: {len(lmcache_worker_ids)}, "
+                f"len of lmcache_worker_ports: {len(config.lmcache_worker_ports)}"
+            )
+        index = lmcache_worker_ids.index(self.worker_id)
+        lmcache_worker_port = config.lmcache_worker_ports[index]
 
         self.lmcache_worker_internal_url = f"*:{lmcache_worker_port}"
         self.lmcache_worker_ip = get_ip()
