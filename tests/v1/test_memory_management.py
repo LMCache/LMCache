@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+import math
+
 # Third Party
 import pytest
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
     GPUMemoryAllocator,
@@ -14,6 +18,86 @@ from lmcache.v1.memory_management import (
     PinMemoryAllocator,
     TensorMemoryAllocator,
 )
+
+
+@pytest.mark.parametrize(
+    ("use_mla", "kv_size"),
+    [
+        (False, 2),
+        (True, 32),
+    ],
+)
+def test_required_alignment_matches_metadata(use_mla: bool, kv_size: int):
+    chunk_size = 256
+    metadata = LMCacheEngineMetadata(
+        model_name="test-model",
+        world_size=1,
+        worker_id=0,
+        fmt="unit-test",
+        kv_dtype=torch.bfloat16,
+        kv_shape=(
+            4,  # num_layers
+            kv_size,
+            chunk_size,
+            4,
+            128,
+        ),
+        use_mla=use_mla,
+    )
+
+    alignment = PagedTensorMemoryAllocator.required_alignment(metadata, chunk_size)
+    dtype_size = torch.tensor([], dtype=metadata.kv_dtype).element_size()
+    expected_alignment = math.prod(metadata.kv_shape) * dtype_size
+
+    assert alignment == expected_alignment
+
+
+@pytest.mark.parametrize(
+    ("use_mla", "kv_size"),
+    [
+        (False, 2),
+        (True, 32),
+    ],
+)
+def test_paged_allocator_handles_alignment_for_mla(use_mla: bool, kv_size: int):
+    chunk_size = 128
+    metadata = LMCacheEngineMetadata(
+        model_name="test-model",
+        world_size=1,
+        worker_id=0,
+        fmt="unit-test",
+        kv_dtype=torch.float16,
+        kv_shape=(
+            2,  # num_layers
+            kv_size,
+            chunk_size,
+            8,
+            64,
+        ),
+        use_mla=use_mla,
+    )
+
+    alignment = PagedTensorMemoryAllocator.required_alignment(metadata, chunk_size)
+    buffer = torch.empty(alignment * 2, dtype=torch.uint8)
+
+    allocator_shape = torch.Size(
+        [
+            metadata.kv_shape[1],
+            metadata.kv_shape[0],
+            chunk_size,
+            metadata.kv_shape[3] * metadata.kv_shape[4],
+        ]
+    )
+
+    allocator = PagedTensorMemoryAllocator(
+        tensor=buffer,
+        shape=allocator_shape,
+        dtype=metadata.kv_dtype,
+        fmt=MemoryFormat.KV_2LTD,
+    )
+
+    assert allocator.align_bytes == alignment
+
 
 
 def check_allocator(allocator, max_size):
