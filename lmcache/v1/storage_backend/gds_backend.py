@@ -197,6 +197,9 @@ class GdsBackend(AllocatorBackendInterface):
         self.gds_path = config.gds_path
         self.fstype = get_fstype(config.gds_path)
 
+    def is_using_dma(self) -> bool:
+        return True
+
         # Log the fstype - this is useful in reports and varying optimizations
         # based on the kind of fstype used.
         logger.info(

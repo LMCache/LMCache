@@ -168,6 +168,9 @@ class P2PBackend(StorageBackendInterface):
     def __str__(self) -> str:
         return "P2PBackend"
 
+    def is_using_dma(self) -> bool:
+        return True
+
     async def batched_async_contains(
         self,
         lookup_id: str,
