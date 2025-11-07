@@ -2,7 +2,7 @@
 """Lazy memory allocator with async progressive expansion and zero-copy."""
 
 # Standard
-from typing import Callable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 import threading
 
 # Third Party
@@ -24,6 +24,10 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.system_detection import NUMAMapping
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
+
 if torch.cuda.is_available():
     # First Party
     import lmcache.c_ops as lmc_ops
@@ -44,6 +48,13 @@ class CompositeBuffer:
         self.lock = threading.Lock()
 
     def add_segment(self, new_buffer: torch.Tensor) -> int:
+        """Add a new memory segment to the composite buffer.
+
+        Thread-safe: Protected by self.lock.
+
+        Returns:
+            int: The offset of the new segment in the unified address space.
+        """
         with self.lock:
             offset = self.total_size
             self.segments.append(new_buffer)
@@ -103,16 +114,23 @@ class CompositeTensorMemoryAllocator(TensorMemoryAllocator):
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
     def expand_with_new_segment(self, new_buffer: torch.Tensor):
+        """Expand the allocator with a new memory segment.
+
+        Thread Safety:
+        ==============
+        This method modifies shared data structures (explicit_list, segment_boundaries)
+        that are also accessed by allocate/free operations in the main thread.
+
+        The caller MUST hold the host_mem_lock before calling this method to prevent
+        race conditions.
+        """
         offset = self.composite_buffer.add_segment(new_buffer)
         new_size = new_buffer.numel()
         self.segment_boundaries.append(offset + new_size)
 
         new_free_block = FreeBlock(start=offset, size=new_size)
-        index = self.explicit_list.bisect_right(new_free_block)
-        prev_block = self.explicit_list[index - 1] if index > 0 else None
-        succ_block = (
-            self.explicit_list[index] if index < len(self.explicit_list) else None
-        )
+        prev_block = self.explicit_list[-1] if len(self.explicit_list) > 0 else None
+        succ_block = None
 
         if not self._coalesce(new_free_block, prev_block, succ_block):
             self.explicit_list.add(new_free_block)
@@ -146,7 +164,35 @@ class CompositeTensorMemoryAllocator(TensorMemoryAllocator):
 
 
 class AsyncMemoryExpander:
-    """Asynchronously expands memory in background."""
+    """Asynchronously expands memory in background.
+
+    Design Philosophy:
+    ==================
+    This is a ONE-WAY, EXPANSION-ONLY mechanism designed to:
+    1. Reduce startup latency: Start with a small initial allocation
+    2. Minimize initial memory footprint: Avoid allocating full capacity upfront
+    3. Progressive growth: Expand memory as needed in the background
+
+    Key Characteristics:
+    - NO SHRINKING: Once memory is allocated, it is never released back to
+      the system
+    - ONE-TIME EXPANSION: The expander thread runs until target size is
+      reached, then stops
+    - LAZY ALLOCATION: Memory is allocated progressively, not all at once
+
+    This design is optimal for workloads with monotonically increasing memory
+    needs, where the memory will eventually be fully utilized and doesn't need
+    to be reclaimed.
+
+    Thread Safety Overview:
+    =======================
+    This class manages a background daemon thread (_expansion_worker) that
+    progressively allocates and adds new memory segments to the allocator.
+
+    Concurrency Model:
+    - Main thread: Performs allocate/free operations on the allocator
+    - Expander thread: Adds new memory segments via expand_with_new_segment()
+    """
 
     def __init__(
         self,
@@ -154,6 +200,7 @@ class AsyncMemoryExpander:
         allocator: CompositeTensorMemoryAllocator,
         total_size: int,
         step_ratio: float,
+        host_mem_lock: threading.Lock,
         numa_mapping: Optional[NUMAMapping] = None,
         memory_limit_callback=None,
     ):
@@ -163,6 +210,7 @@ class AsyncMemoryExpander:
         self.step_ratio = step_ratio
         self.numa_mapping = numa_mapping
         self.memory_limit_callback = memory_limit_callback
+        self.host_mem_lock = host_mem_lock
         self.expansion_thread: Optional[threading.Thread] = None
         self.stop_flag = threading.Event()
         self.expansion_lock = threading.Lock()
@@ -180,24 +228,47 @@ class AsyncMemoryExpander:
             self.expansion_thread.start()
             logger.info("Started async expansion")
 
+    def _get_effective_limit(self, current_size: int) -> Optional[int]:
+        """Calculate the effective memory limit based on callback.
+
+        Args:
+            current_size: Current allocated memory size in bytes
+
+        Returns:
+            Effective memory limit in bytes, or None if expansion should stop
+        """
+        if not self.memory_limit_callback:
+            return self.total_size
+
+        try:
+            limit_bytes = self.memory_limit_callback()
+            if limit_bytes <= 0:
+                return self.total_size
+
+            effective_limit = min(self.total_size, limit_bytes)
+            if current_size >= effective_limit:
+                logger.warning(
+                    f"Expansion stopped: {current_size} >= {effective_limit}"
+                )
+                return None
+
+            return effective_limit
+        except Exception as e:
+            logger.warning(f"Memory limit callback failed: {e}")
+            return self.total_size
+
     def _expansion_worker(self):
+        """Background worker that progressively expands memory to target size.
+
+        Runs in daemon thread. Allocates memory in steps (step_ratio at a time)
+        until total_size is reached or memory limit is hit. Never shrinks.
+        """
         try:
             current_size = self.composite_buffer.numel()
             while current_size < self.total_size and not self.stop_flag.is_set():
-                effective_limit = self.total_size
-                if self.memory_limit_callback:
-                    try:
-                        limit_bytes = self.memory_limit_callback()
-                        if limit_bytes > 0:
-                            effective_limit = min(self.total_size, limit_bytes)
-                            if current_size >= effective_limit:
-                                logger.warning(
-                                    f"Expansion stopped: "
-                                    f"{current_size} >= {effective_limit}"
-                                )
-                                break
-                    except Exception as e:
-                        logger.warning(f"Memory limit callback failed: {e}")
+                effective_limit = self._get_effective_limit(current_size)
+                if effective_limit is None:
+                    break
 
                 next_size = min(
                     int(self.total_size * self.step_ratio),
@@ -210,16 +281,17 @@ class AsyncMemoryExpander:
                     f"Expanding: +{next_size}, current={current_size}, "
                     f"target={self.total_size}"
                 )
+
                 try:
                     new_buffer = _allocate_cpu_memory(next_size, self.numa_mapping)
                 except Exception as e:
                     logger.error(f"Allocation failed: {e}")
                     break
 
-                self.allocator.expand_with_new_segment(new_buffer)
+                with self.host_mem_lock:
+                    self.allocator.expand_with_new_segment(new_buffer)
+
                 current_size += next_size
-                if not self.stop_flag.wait(timeout=0.1):
-                    continue
 
             logger.info(f"Expansion completed: {self.composite_buffer.numel()} bytes")
         except Exception as e:
@@ -235,18 +307,28 @@ class AsyncMemoryExpander:
 
 
 class LazyMixedMemoryAllocator(MixedMemoryAllocator):
-    """Lazy allocator: starts small, expands async when needed (zero-copy)."""
+    """Lazy allocator: starts small, expands async when needed (zero-copy).
+
+    Starts with initial_ratio of target size, triggers one-time background
+    expansion when usage exceeds expand_trigger_ratio. Ideal for fast startup
+    with low initial memory footprint.
+
+    See AsyncMemoryExpander for detailed design philosophy.
+    """
 
     def __init__(
         self,
         size: int,
-        initial_ratio: float = 0.2,
-        expand_trigger_ratio: float = 0.5,
-        step_ratio: float = 0.1,
+        config: "LMCacheEngineConfig",
         use_paging: bool = False,
         memory_limit_callback: Optional[Callable] = None,
         **kwargs,
     ):
+        # Extract configuration values from config
+        initial_ratio = config.lazy_memory_initial_ratio
+        expand_trigger_ratio = config.lazy_memory_expand_trigger_ratio
+        step_ratio = config.lazy_memory_step_ratio
+
         self.total_size = size
         self.initial_ratio = initial_ratio
         self.expand_trigger_ratio = expand_trigger_ratio
@@ -272,6 +354,7 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
                 self.pin_allocator,
                 self.total_size,
                 self.step_ratio,
+                self.host_mem_lock,
                 self.numa_mapping,
                 self.memory_limit_callback,
             )
@@ -358,8 +441,3 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
 
     def __str__(self):
         return "LazyMixedMemoryAllocator"
-
-    def set_memory_limit_callback(self, callback):
-        if self.async_expander:
-            self.async_expander.memory_limit_callback = callback
-            logger.info("Memory limit callback set")

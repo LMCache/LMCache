@@ -375,9 +375,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 )
                 return LazyMixedMemoryAllocator(
                     int(cpu_size * 1024**3),
-                    initial_ratio=config.lazy_memory_initial_ratio,
-                    expand_trigger_ratio=config.lazy_memory_expand_trigger_ratio,
-                    step_ratio=config.lazy_memory_step_ratio,
+                    config=config,
                     numa_mapping=numa_mapping,
                     memory_limit_callback=lambda: int(
                         self._calculate_effective_cpu_size(cpu_size, config, metadata)

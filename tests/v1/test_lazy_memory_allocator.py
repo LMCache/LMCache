@@ -8,6 +8,7 @@ import time
 import torch
 
 # First Party
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lazy_memory_allocator import (
     CompositeBuffer,
     CompositeTensorMemoryAllocator,
@@ -21,11 +22,14 @@ class TestLazyMemoryAllocator:
 
     @staticmethod
     def _create_allocator(size_mb=10, initial=0.2, trigger=0.5, step=0.1):
+        config = LMCacheEngineConfig.from_defaults(
+            lazy_memory_initial_ratio=initial,
+            lazy_memory_expand_trigger_ratio=trigger,
+            lazy_memory_step_ratio=step,
+        )
         return LazyMixedMemoryAllocator(
             size=size_mb * 1024 * 1024,
-            initial_ratio=initial,
-            expand_trigger_ratio=trigger,
-            step_ratio=step,
+            config=config,
         )
 
     @staticmethod

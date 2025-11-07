@@ -707,7 +707,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     def _Compute_aligned_size(raw_size: int, align: int) -> int:
         return (raw_size + align - 1) & ~(align - 1)
 
-    @_lmcache_nvtx_annotate
     def _can_merge_with_prev(
         self, curr_block: FreeBlock, prev_block: FreeBlock
     ) -> bool:
@@ -720,6 +719,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """Hook: Check if curr_block can merge with succ_block."""
         return curr_block.can_be_coalesced(succ_block)
 
+    @_lmcache_nvtx_annotate
     def _coalesce(
         self,
         curr_block: FreeBlock,
