@@ -1022,9 +1022,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
 
     @staticmethod
-    def required_alignment(
-        model_meta: LMCacheEngineMetadata, chunk_size: int
-    ) -> int:
+    def required_alignment(model_meta: LMCacheEngineMetadata, chunk_size: int) -> int:
         """
         Calculate the alignment requirement for a KV chunk given model metadata
         and the desired chunk size.

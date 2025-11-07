@@ -99,7 +99,6 @@ def test_paged_allocator_handles_alignment_for_mla(use_mla: bool, kv_size: int):
     assert allocator.align_bytes == alignment
 
 
-
 def check_allocator(allocator, max_size):
     # 512 * 512 * 4 = 1MB
     data1 = allocator.allocate([512, 512], torch.float)
