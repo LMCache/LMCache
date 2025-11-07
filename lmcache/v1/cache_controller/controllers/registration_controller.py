@@ -36,9 +36,10 @@ class RegistrationController:
         self.worker_mapping: dict[str, list[int]] = {}
 
         # Mapping from `(instance_id, worker_id)` -> `distributed_url`
-        # NOTE(Jiayi): `distributed_url` is used for actual KV cache transfer.
-        # It's not the lmcache_worker_url
-        self.distributed_url_mapping: dict[tuple[str, int], str] = {}
+        # NOTE(Jiayi): `distributed_url` is used for actual KV cache transfer(p2p),
+        # It's not the lmcache_worker_url.
+        # if p2p is not used, distributed_url is None
+        self.distributed_url_mapping: dict[tuple[str, int], Optional[str]] = {}
 
         # Mapping from `(instance_id, worker_id)` -> `socket`
         self.socket_mapping: dict[tuple[str, int], zmq.asyncio.Socket] = {}
@@ -73,7 +74,9 @@ class RegistrationController:
         """
         url = self.distributed_url_mapping.get((instance_id, worker_id))
         if url is None:
-            logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
+            logger.warning(
+                f"Instance-worker {(instance_id, worker_id)} not registered or P2P is not used"
+            )
         return url
 
     def get_workers(self, instance_id: str) -> list[int]:
