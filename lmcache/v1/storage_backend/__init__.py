@@ -213,6 +213,18 @@ def CreateStorageBackends(
             storage_backends,
         )
 
+    non_dma_backend_names = [
+        name
+        for name, backend in storage_backends.items()
+        if name != "LocalCPUBackend" and not backend.is_using_dma()
+    ]
+
+    if metadata.role != "scheduler" and non_dma_backend_names:
+        assert config.max_local_cpu_size > 0, (
+            "max_local_cpu_size must be greater than 0 "
+            f"because backends {non_dma_backend_names} require CPU memory"
+        )
+
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
         "audit_backend_enabled", False
