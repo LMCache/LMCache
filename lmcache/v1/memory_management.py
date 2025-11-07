@@ -15,6 +15,7 @@ import sortedcontainers
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -1021,7 +1022,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
 
     @staticmethod
-    def required_alignment(model_meta, chunk_size: int) -> int:
+    def required_alignment(
+        model_meta: LMCacheEngineMetadata, chunk_size: int
+    ) -> int:
         """
         Calculate the alignment requirement for a KV chunk given model metadata
         and the desired chunk size.
