@@ -79,6 +79,17 @@ class TPWorkerInfo:
     tp_size: Optional[int] = None
 
 
+@dataclass
+class ShardingSpec:
+    """
+    Specifies how to shard a transfer for asymmetric tensor parallelism.
+    This is passed via the `transfer_spec` to the channel's write/read methods.
+    """
+
+    shard_index: int  # The index of the current slice
+    num_shards: int  # The total number of slices (the dp_ratio)
+
+
 class NixlChannel(BaseTransferChannel):
     def __init__(
         self,
@@ -445,7 +456,6 @@ class NixlChannel(BaseTransferChannel):
         :return: Number of successfully transferred objects.
         """
         assert transfer_spec is not None
-        # First Party
 
         local_indexes = self.get_local_mem_indices(objects)
         remote_indexes = transfer_spec["remote_indexes"]
@@ -500,6 +510,8 @@ class NixlChannel(BaseTransferChannel):
         """
 
         assert transfer_spec is not None
+
+        self.prepare_transfer(transfer_spec)
 
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
@@ -584,7 +596,7 @@ class NixlChannel(BaseTransferChannel):
         for remote_xfer_handler in self.remote_xfer_handlers_dict.values():
             self.nixl_agent.release_dlist_handle(remote_xfer_handler)
 
-    def get_block_descs(
+    def _get_block_descs(
         self, remote_tp_group_rank: int, dp_ratio: int
     ) -> list[tuple[int, ...]]:
         """
@@ -612,7 +624,7 @@ class NixlChannel(BaseTransferChannel):
             )
         return blocks_data
 
-    def update_agent_from_blocks_data(
+    def _update_agent_from_blocks_data(
         self, blocks_data: list[tuple[int, ...]], receiver_id: str
     ):
         """
@@ -620,17 +632,22 @@ class NixlChannel(BaseTransferChannel):
         """
         self.nixl_wrapper.update_handler_from_blocks_data(blocks_data, receiver_id)
 
-    def prepare_transfer_desc(
+    def prepare_transfer(
         self,
-        receiver: TPRankRecvInfo,
-        dp_ratio: int,
+        transfer_spec: Optional[dict] = None,
     ) -> None:
         """
         Prepare the transfer descriptor for a batched write operation.
         This handles asymmetric TP logic internally if needed.
         """
-        blocks_data = self.get_block_descs(receiver.group_tp_rank, dp_ratio)
-        self.update_agent_from_blocks_data(blocks_data, receiver.receiver_id)
+        if transfer_spec and transfer_spec.get("sharding_spec", None) is not None:
+            sharding_spec: ShardingSpec = transfer_spec["sharding_spec"]
+            blocks_data = self._get_block_descs(
+                sharding_spec.shard_index, sharding_spec.num_shards
+            )
+            self._update_agent_from_blocks_data(
+                blocks_data, transfer_spec["receiver_id"]
+            )
 
 
 @dataclass

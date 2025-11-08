@@ -137,6 +137,19 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def prepare_transfer(
+        self,
+        transfer_spec: Optional[dict] = None,
+    ) -> None:
+        """
+        Prepare for a transfer. This can be overridden to
+        perform any necessary setup before a transfer.
+
+        :param transfer_spec: Additional specifications for the transfer.
+        """
+        pass
+
     ### Send and Recv must be called in pair ###
     @abc.abstractmethod
     def batched_send(

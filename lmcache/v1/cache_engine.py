@@ -258,6 +258,9 @@ class LMCacheEngine:
         transpose = maybe_transpose(transfer_spec) and self.config.enable_pd
         fmt = self.fmt
         if transpose:
+            assert self.storage_manager.allocator_backend is not None, (
+                "allocator_backend is required when using transpose"
+            )
             assert isinstance(
                 self.storage_manager.allocator_backend.get_memory_allocator(),
                 PagedCpuGpuMemoryAllocator,

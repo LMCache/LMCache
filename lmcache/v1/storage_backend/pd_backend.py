@@ -30,8 +30,11 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel, NixlChannel
-from lmcache.v1.transfer_channel.nixl_channel import TPRankRecvInfo
-from lmcache.v1.transfer_channel.transfer_utils import TransferRole, get_correct_device
+from lmcache.v1.transfer_channel.nixl_channel import ShardingSpec, TPRankRecvInfo
+from lmcache.v1.transfer_channel.transfer_utils import (
+    TransferRole,
+    get_correct_device,
+)
 
 logger = init_logger(__name__)
 
@@ -425,13 +428,20 @@ class PDBackend(AllocatorBackendInterface):
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
-        # Third Party
-        from vllm.distributed.utils import divide
+        decoder_tp_size = len(transfer_spec.receiver_init_ports)
+        assert (
+            decoder_tp_size % self.tp_world_size == 0
+        ), f"""Decoder TP size {decoder_tp_size} must be divisible 
+            by sender TP size {self.tp_world_size}."""
 
         # TODO(novahow): is there better way to obtain receiver tp_size?
-        dp_ratio = divide(len(transfer_spec.receiver_init_ports), self.tp_world_size)
-        # NOTE(novahow), assume dp_ratio = 2
+        # NOTE(novahow), dp_ratio implies how many decoder tp ranks
+        # are mapped to one prefiller tp rank. Having larger tp size on decoder
+        # side is beneficial for memory-bound workloads like decoding.
+        # For example, assume dp_ratio = 2
         # rank 0 on P maps to rank [0,1] on D
+        dp_ratio = decoder_tp_size // self.tp_world_size
+
         receiver_init_ports = transfer_spec.receiver_init_ports[
             self.tp_rank * dp_ratio : (self.tp_rank + 1) * dp_ratio
         ]
@@ -476,15 +486,16 @@ class PDBackend(AllocatorBackendInterface):
             if mem_objs_to_send:
                 # TODO(Jiayi): make this decoupled with transfer channel
                 # Construct transfer spec
+
+                sharding_spec = ShardingSpec(
+                    shard_index=receiver.group_tp_rank,
+                    num_shards=dp_ratio,
+                )
                 channel_transfer_spec = {
                     "receiver_id": receiver.receiver_id,
                     "remote_indexes": alloc_response.remote_indexes,
+                    "sharding_spec": sharding_spec,
                 }
-
-                self.transfer_channel.prepare_transfer_desc(
-                    receiver,
-                    dp_ratio,
-                )
 
                 send_task = asyncio.run_coroutine_threadsafe(
                     self.transfer_channel.async_batched_write(
@@ -560,10 +571,17 @@ class PDBackend(AllocatorBackendInterface):
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
-            key.update_rank_info_from_pd(self.tp_world_size, self.tp_rank)
+            # NOTE(novahow): `contains` checks attributes such as
+            # world_size and worker_id, but the key is from the prefiller side,
+            # which may have different tp_rank/world_size compared to decoder side,
+            # therefore to let cache to work properly on
+            # decoder in asymmetric TP setting, we need to update the rank info here.
+            decoder_key = key.with_new_world_size(
+                self.tp_world_size
+            ).with_new_worker_id(self.tp_rank)
             # NOTE(novahow): pin causes failed to allocate in L40S in TP=(2,2),
             # disable for now
-            if self.contains(key, pin=False):
+            if self.contains(decoder_key, pin=False):
                 already_send_indexes.append(idx)
                 continue
 
@@ -589,7 +607,7 @@ class PDBackend(AllocatorBackendInterface):
 
             alloc_indexes.append(mem_obj.meta.address)
 
-            self.put(key, mem_obj)
+            self.put(decoder_key, mem_obj)
 
         return AllocResponse(
             already_sent_indexes=already_send_indexes, remote_indexes=alloc_indexes

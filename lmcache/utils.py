@@ -309,11 +309,18 @@ class CacheEngineKey:
             self.dtype,
             self.request_configs,
         )
-    def update_rank_info_from_pd(
-        self, world_size: Optional[int] = None, worker_id: Optional[int] = None
-    ):
-        self.world_size = world_size or self.world_size
-        self.worker_id = worker_id or self.worker_id
+
+    def with_new_world_size(self, world_size: int):
+        # Reconstruct the cache engine key with new world size
+        return CacheEngineKey(
+            self.fmt,
+            self.model_name,
+            world_size,
+            self.worker_id,
+            self.chunk_hash,
+            self.dtype,
+            self.request_configs,
+        )
 
 
 @dataclass(slots=True)
