@@ -1303,6 +1303,46 @@ class RequestStatsMessage:
     engine_config: LMCacheEngineConfig
     engine_id: int
 
+    def to_dict(self) -> dict:
+        def serialize_request_stats_list(stats_list: List) -> List[dict]:
+            result = []
+            for stats in stats_list:
+                stats_dict = dataclasses.asdict(stats)
+                # Convert cache_engine_keys to strings
+                if (
+                    "cache_engine_keys" in stats_dict
+                    and stats_dict["cache_engine_keys"] is not None
+                ):
+                    stats_dict["cache_engine_keys"] = [
+                        key.to_dict() for key in stats.cache_engine_keys
+                    ]
+                result.append(stats_dict)
+            return result
+
+        # Serialize the main components
+        serialized = {
+            "engine_id": self.engine_id,
+            "request_stats": {
+                "lookup_requests": serialize_request_stats_list(
+                    self.request_stats.lookup_requests
+                ),
+                "store_requests": serialize_request_stats_list(
+                    self.request_stats.store_requests
+                ),
+                "retrieve_requests": serialize_request_stats_list(
+                    self.request_stats.retrieve_requests
+                ),
+                "p2p_requests": serialize_request_stats_list(
+                    self.request_stats.p2p_requests
+                ),
+            },
+            "engine_config": dataclasses.asdict(self.engine_config)
+            if self.engine_config
+            else None,
+        }
+
+        return serialized
+
 
 class ContinuousUsageLogger:
     _instance = None
@@ -1316,7 +1356,7 @@ class ContinuousUsageLogger:
         )
         self.request_stats_endpoint: str = urljoin(
             os.getenv("LMCACHE_USAGE_TRACK_URL", "https://trace.lmcache.ai"),
-            "request_stats",
+            "request-stats",
         )
         logger.info(f"sending cache usage stats to {self.cache_usage_endpoint}")
         self.min_logging_interval: int = int(
@@ -1372,13 +1412,13 @@ class ContinuousUsageLogger:
                 global_http_client.post(
                     f"{self.cache_usage_endpoint}",
                     json=dataclasses.asdict(msg),
-                    timeout=10,
+                    timeout=5,
                 )
                 logger.debug("caching usage message sent.")
                 global_http_client.post(
                     f"{self.request_stats_endpoint}",
-                    json=dataclasses.asdict(request_stats_msg),
-                    timeout=10,
+                    json=request_stats_msg.to_dict(),
+                    timeout=20,
                 )
                 logger.debug("request stats message sent.")
         except Exception as e:
