@@ -80,7 +80,10 @@ class LMCacheEngineStats:
     p2p_transfer_speed: List[float]  # Tokens per second
 
     # request lookup hit rates
+    # use bucket of interval_lookup_hit_rates to represents non-0 hit requests
+    # use interval_lookup_0_hit_requests to represents 0 hit requests
     interval_lookup_hit_rates: List[float]
+    interval_lookup_0_hit_requests: int
 
 
 @dataclass
@@ -182,6 +185,7 @@ class LMCStatsMonitor:
         self.interval_lookup_hits = 0  # total hit tokens lookup
         self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
         self.interval_prompt_tokens = 0  # total prompt tokens
+        self.interval_lookup_0_hit_requests = 0
 
         # P2P transfer metrics
         self.interval_p2p_requests = 0
@@ -264,6 +268,8 @@ class LMCStatsMonitor:
         lookup_stats.end_time = time.time()
         lookup_stats.cache_engine_keys = cache_engine_keys
         self.interval_lookup_hits += num_hit_tokens
+        if num_hit_tokens == 0:
+            self.interval_lookup_0_hit_requests += 1
 
     @thread_safe
     def on_retrieve_request(self, num_tokens: int) -> int:
@@ -467,6 +473,8 @@ class LMCStatsMonitor:
         self.interval_p2p_requests = 0
         self.interval_p2p_transferred_tokens = 0
 
+        self.interval_lookup_0_hit_requests = 0
+
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
             if retrieve_stats.end_time == 0:
@@ -511,38 +519,40 @@ class LMCStatsMonitor:
             else self.interval_lookup_hits / self.interval_lookup_tokens
         )
 
-        def filter_out_invalid(stats: List[float]):
+        def filter_out_zeros(stats: List[float]):
             return [x for x in stats if x != 0]
 
-        time_to_retrieve = filter_out_invalid(
+        time_to_retrieve = filter_out_zeros(
             [stats.time_to_retrieve() for stats in self.retrieve_requests.values()]
         )
 
-        time_to_store = filter_out_invalid(
+        time_to_store = filter_out_zeros(
             [stats.time_to_store() for stats in self.store_requests.values()]
         )
 
-        retrieve_speed = filter_out_invalid(
+        retrieve_speed = filter_out_zeros(
             [stats.retrieve_speed() for stats in self.retrieve_requests.values()]
         )
 
-        store_speed = filter_out_invalid(
+        store_speed = filter_out_zeros(
             [stats.store_speed() for stats in self.store_requests.values()]
         )
 
-        p2p_time_to_transfer = filter_out_invalid(
+        p2p_time_to_transfer = filter_out_zeros(
             [stats.time_to_transfer() for stats in self.p2p_requests.values()]
         )
 
-        p2p_transfer_speed = filter_out_invalid(
+        p2p_transfer_speed = filter_out_zeros(
             [stats.transfer_speed() for stats in self.p2p_requests.values()]
         )
 
-        request_lookup_hit_rates = [
-            stats.hit_rate()
-            for stats in self.lookup_requests.values()
-            if stats.is_finished
-        ]
+        request_lookup_hit_rates = filter_out_zeros(
+            [
+                stats.hit_rate()
+                for stats in self.lookup_requests.values()
+                if stats.is_finished
+            ]
+        )
 
         finished_lookup_req: List[LookupRequestStats] = [
             req for req in self.lookup_requests.values() if req.is_finished
@@ -606,6 +616,7 @@ class LMCStatsMonitor:
             p2p_transfer_speed=p2p_transfer_speed,
             interval_lookup_hit_rates=request_lookup_hit_rates,
             interval_prompt_tokens=self.interval_prompt_tokens,
+            interval_lookup_0_hit_requests=self.interval_lookup_0_hit_requests,
         )
         self._clear()
         return ret, req_stats
@@ -753,6 +764,12 @@ class PrometheusLogger:
         self.counter_local_cpu_evict_failed_count = self._counter_cls(
             name="lmcache:local_cpu_evict_failed_count",
             documentation="Total number of failed eviction in local cpu backend",
+            labelnames=labelnames,
+        )
+
+        self.counter_lookup_0_hit_requests = self._counter_cls(
+            name="lmcache:lookup_0_hit_requests",
+            documentation="Total number of 0 hit lookup requests",
             labelnames=labelnames,
         )
 
@@ -1095,6 +1112,17 @@ class PrometheusLogger:
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
 
+        event_statuses = ["ongoing", "done", "not_found"]
+        for status in event_statuses:
+            metric_name = f"storage_events_{status}_count"
+            gauge = self._gauge_cls(
+                name=f"lmcache:{metric_name}",
+                documentation=f"The number of {status.replace('_', ' ')} events",
+                labelnames=labelnames,
+                multiprocess_mode="sum",
+            ).labels(**self.labels)
+            setattr(self, metric_name, gauge)
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -1160,6 +1188,10 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_local_cpu_evict_failed_count,
             stats.interval_local_cpu_evict_failed_count,
+        )
+        self._log_counter(
+            self.counter_lookup_0_hit_requests,
+            stats.interval_lookup_0_hit_requests,
         )
 
         self._log_gauge(self.gauge_retrieve_hit_rate, stats.retrieve_hit_rate)

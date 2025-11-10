@@ -36,7 +36,12 @@ def _get_default_metadata(model: str) -> LMCacheEngineMetadata:
 def create_test_key(model: str, key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
-        "vllm", model, 8, 0, int(hashlib.sha256(key_id.encode()).hexdigest(), 16)
+        "vllm",
+        model,
+        8,
+        0,
+        int(hashlib.sha256(key_id.encode()).hexdigest(), 16),
+        torch.bfloat16,
     )
 
 
