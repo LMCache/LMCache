@@ -2,6 +2,7 @@
 # Standard
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
+import logging
 import threading
 import time
 
@@ -469,6 +470,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict_keys_count = 0
         num_attempts = 0
         while True:
+            debug_info = None
             # whether or not this request needs to wait or other requests
             wait_other_requests = True
             if self.use_hot:
@@ -494,6 +496,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
+                        # Collect debug info inside the lock
+                        debug_info = self._collect_cache_debug_info()
 
             if wait_other_requests:
                 if not busy_loop:
@@ -509,6 +513,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
+
+                self._log_cache_debug_info(debug_info)
                 # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
@@ -579,6 +585,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict_keys_count = 0
         num_attempts = 0
         while True:
+            debug_info = None
             wait_other_requests = True
             if self.use_hot:
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
@@ -618,6 +625,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
+                        # Collect debug info inside the lock
+                        debug_info = self._collect_cache_debug_info()
 
             if wait_other_requests:
                 if not busy_loop:
@@ -633,6 +642,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
+
+                self._log_cache_debug_info(debug_info)
                 # self.memory_allocator.memcheck()
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
@@ -746,3 +757,41 @@ class LocalCPUBackend(AllocatorBackendInterface):
             self.batched_msg_sender.close()
         self.memory_allocator.close()
         self.clear()
+
+    def _collect_cache_debug_info(self) -> Optional[tuple]:
+        """
+        Collect debug information about the current cache state.
+        Only collects if debug logging is enabled.
+        Must be called while holding self.cpu_lock.
+
+        Returns:
+            Optional tuple of (total_items, pinned_count, ref_count_summary)
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return None
+
+        total_items = len(self.hot_cache)
+        pinned_count = 0
+        ref_count_summary: dict[int, int] = {}
+        for mem_obj in self.hot_cache.values():
+            if mem_obj.is_pinned:
+                pinned_count += 1
+            ref_count = mem_obj.get_ref_count()
+            ref_count_summary[ref_count] = ref_count_summary.get(ref_count, 0) + 1
+
+        return (total_items, pinned_count, ref_count_summary)
+
+    def _log_cache_debug_info(self, debug_info: Optional[tuple]) -> None:
+        """
+        Log the collected cache debug information.
+
+        Args:
+            debug_info: Tuple of (total_items, pinned_count, ref_count_summary)
+        """
+        if debug_info is not None:
+            total_items, pinned_count, ref_count_summary = debug_info
+            logger.debug(
+                f"Local CPU backend state: total_items={total_items}, "
+                f"pinned_count={pinned_count}, "
+                f"ref_count_distribution={ref_count_summary}"
+            )
