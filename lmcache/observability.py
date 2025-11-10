@@ -1,26 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Union
+from urllib.parse import urljoin
+import dataclasses
 import os
 import threading
 import time
 
 # Third Party
 from prometheus_client import REGISTRY
+import numpy as np
 import prometheus_client
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
-from lmcache.usage_context import ContinuousUsageContext
-from lmcache.utils import thread_safe
+from lmcache.utils import CacheEngineKey, thread_safe
+from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
 
 @dataclass
-class LMCacheStats:
+class LMCacheEngineStats:
     # Counter (Note that these are incremental values,
     # which will accumulate over time in Counter)
     interval_retrieve_requests: int
@@ -83,7 +87,11 @@ class LMCacheStats:
 class LookupRequestStats:
     num_tokens: int
     hit_tokens: int
+    start_time: float
+    end_time: float
     is_finished: bool
+    request_id: int
+    cache_engine_keys: Optional[List[CacheEngineKey]] = None
 
     def hit_rate(self):
         if self.num_tokens == 0:
@@ -98,6 +106,8 @@ class RetrieveRequestStats:
     remote_hit_tokens: int  # Not used for now
     start_time: float
     end_time: float
+    request_id: int
+    cache_engine_keys: Optional[List[CacheEngineKey]] = None
 
     def time_to_retrieve(self):
         if self.end_time == 0:
@@ -117,6 +127,8 @@ class StoreRequestStats:
     num_tokens: int
     start_time: float
     end_time: float
+    request_id: int
+    cache_engine_keys: Optional[List[CacheEngineKey]] = None
 
     def time_to_store(self):
         if self.end_time == 0:
@@ -134,6 +146,8 @@ class P2PTransferRequestStats:
     num_tokens: int
     start_time: float
     end_time: float
+    request_id: int
+    cache_engine_keys: Optional[List[CacheEngineKey]] = None
 
     def time_to_transfer(self):
         if self.end_time == 0:
@@ -144,6 +158,14 @@ class P2PTransferRequestStats:
         if self.time_to_transfer() == 0:
             return 0
         return self.num_tokens / self.time_to_transfer()
+
+
+@dataclass
+class LMCacheRequestStats:
+    lookup_requests: List[LookupRequestStats] = field(default_factory=list)
+    store_requests: List[StoreRequestStats] = field(default_factory=list)
+    retrieve_requests: List[RetrieveRequestStats] = field(default_factory=list)
+    p2p_requests: List[P2PTransferRequestStats] = field(default_factory=list)
 
 
 class LMCStatsMonitor:
@@ -213,7 +235,10 @@ class LMCStatsMonitor:
         lookup_stats = LookupRequestStats(
             num_tokens=num_tokens,
             hit_tokens=0,
+            start_time=time.time(),
+            end_time=0,
             is_finished=False,
+            request_id=self.lookup_request_id,
         )
         self.interval_lookup_requests += 1
         self.interval_lookup_tokens += num_tokens
@@ -222,7 +247,12 @@ class LMCStatsMonitor:
         return self.lookup_request_id - 1
 
     @thread_safe
-    def on_lookup_finished(self, request_id: int, num_hit_tokens: int):
+    def on_lookup_finished(
+        self,
+        request_id: int,
+        num_hit_tokens: int,
+        cache_engine_keys: List[CacheEngineKey],
+    ):
         """
         This function is called when a lookup request is finished.
         It will record the number of tokens hit.
@@ -231,6 +261,8 @@ class LMCStatsMonitor:
         lookup_stats = self.lookup_requests[request_id]
         lookup_stats.hit_tokens = num_hit_tokens
         lookup_stats.is_finished = True
+        lookup_stats.end_time = time.time()
+        lookup_stats.cache_engine_keys = cache_engine_keys
         self.interval_lookup_hits += num_hit_tokens
 
     @thread_safe
@@ -246,6 +278,7 @@ class LMCStatsMonitor:
             remote_hit_tokens=0,
             start_time=curr_time,
             end_time=0,
+            request_id=self.retrieve_request_id,
         )
         self.interval_requested_tokens += num_tokens
         self.interval_retrieve_requests += 1
@@ -254,12 +287,18 @@ class LMCStatsMonitor:
         return self.retrieve_request_id - 1
 
     @thread_safe
-    def on_retrieve_finished(self, request_id: int, retrieved_tokens: int):
+    def on_retrieve_finished(
+        self,
+        request_id: int,
+        cache_engine_keys: List[CacheEngineKey],
+        retrieved_tokens: int,
+    ):
         curr_time = time.time()
         assert request_id in self.retrieve_requests
         retrieve_stats = self.retrieve_requests[request_id]
         retrieve_stats.local_hit_tokens = retrieved_tokens
         retrieve_stats.end_time = curr_time
+        retrieve_stats.cache_engine_keys = cache_engine_keys
         self.interval_hit_tokens += retrieved_tokens
 
     @thread_safe
@@ -269,7 +308,10 @@ class LMCStatsMonitor:
         """
         curr_time = time.time()
         store_stats = StoreRequestStats(
-            num_tokens=num_tokens, start_time=curr_time, end_time=0
+            num_tokens=num_tokens,
+            start_time=curr_time,
+            end_time=0,
+            request_id=self.store_request_id,
         )
         self.interval_store_requests += 1
         self.interval_stored_tokens += num_tokens
@@ -278,11 +320,17 @@ class LMCStatsMonitor:
         return self.store_request_id - 1
 
     @thread_safe
-    def on_store_finished(self, request_id: int, num_tokens: int = -1):
+    def on_store_finished(
+        self,
+        request_id: int,
+        cache_engine_keys: List[CacheEngineKey],
+        num_tokens: int = -1,
+    ):
         curr_time = time.time()
         assert request_id in self.store_requests
         store_stats = self.store_requests[request_id]
         store_stats.end_time = curr_time
+        store_stats.cache_engine_keys = cache_engine_keys
         if num_tokens >= 0:
             store_stats.num_tokens = num_tokens
 
@@ -294,17 +342,21 @@ class LMCStatsMonitor:
             num_tokens=num_tokens,
             start_time=curr_time,
             end_time=0,
+            request_id=self.p2p_request_id,
         )
         self.p2p_request_id += 1
         return self.p2p_request_id - 1
 
     @thread_safe
-    def on_p2p_transfer_finished(self, request_id: int):
+    def on_p2p_transfer_finished(
+        self, request_id: int, cache_engine_keys: List[CacheEngineKey]
+    ):
         curr_time = time.time()
         assert request_id in self.p2p_requests
         p2p_stats = self.p2p_requests[request_id]
         self.interval_p2p_transferred_tokens += p2p_stats.num_tokens
         p2p_stats.end_time = curr_time
+        p2p_stats.cache_engine_keys = cache_engine_keys
 
     @thread_safe
     def update_local_cache_usage(self, usage: int):
@@ -440,7 +492,7 @@ class LMCStatsMonitor:
         self.lookup_requests = new_lookup_requests
 
     @thread_safe
-    def get_stats_and_clear(self) -> LMCacheStats:
+    def get_stats_and_clear(self) -> Tuple[LMCacheEngineStats, LMCacheRequestStats]:
         """
         This function should be called with by prometheus adapter with
         a specific interval.
@@ -492,7 +544,28 @@ class LMCStatsMonitor:
             if stats.is_finished
         ]
 
-        ret = LMCacheStats(
+        finished_lookup_req: List[LookupRequestStats] = [
+            req for req in self.lookup_requests.values() if req.is_finished
+        ]
+        finished_store_req: List[StoreRequestStats] = [
+            req for req in self.store_requests.values() if req.end_time != 0
+        ]
+
+        finished_retrieve_req: List[RetrieveRequestStats] = [
+            req for req in self.retrieve_requests.values() if req.end_time != 0
+        ]
+        finished_p2p_req: List[P2PTransferRequestStats] = [
+            req for req in self.p2p_requests.values() if req.end_time != 0
+        ]
+
+        req_stats = LMCacheRequestStats(
+            lookup_requests=finished_lookup_req,
+            store_requests=finished_store_req,
+            retrieve_requests=finished_retrieve_req,
+            p2p_requests=finished_p2p_req,
+        )
+
+        ret = LMCacheEngineStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
             interval_lookup_requests=self.interval_lookup_requests,
@@ -535,7 +608,7 @@ class LMCStatsMonitor:
             interval_prompt_tokens=self.interval_prompt_tokens,
         )
         self._clear()
-        return ret
+        return ret, req_stats
 
     _instance = None
 
@@ -1038,7 +1111,7 @@ class PrometheusLogger:
         for value in data:
             histogram.labels(**self.labels).observe(value)
 
-    def log_prometheus(self, stats: LMCacheStats):
+    def log_prometheus(self, stats: LMCacheEngineStats):
         self._log_counter(
             self.counter_num_retrieve_requests, stats.interval_retrieve_requests
         )
@@ -1184,13 +1257,136 @@ class PrometheusLogger:
         return PrometheusLogger._instance
 
 
+@dataclass
+class ContinuousContextMessage:
+    interval_num_stored_tokens: int
+    interval_num_hit_tokens: int
+    interval_stored_kv_size: int
+    message_type: str = "ContinuousContextMessage"
+
+
+@dataclass
+class RequestStatsMessage:
+    request_stats: LMCacheRequestStats
+    engine_config: LMCacheEngineConfig
+    engine_id: int
+
+
+class ContinuousUsageLogger:
+    _instance = None
+
+    def __init__(self, metadata: LMCacheEngineMetadata, config: LMCacheEngineConfig):
+        self.metadata: LMCacheEngineMetadata = metadata
+        self.config: LMCacheEngineConfig = config
+        self.cache_usage_endpoint: str = urljoin(
+            os.getenv("LMCACHE_USAGE_TRACK_URL", "https://trace.lmcache.ai"),
+            "cache-usage",
+        )
+        self.request_stats_endpoint: str = urljoin(
+            os.getenv("LMCACHE_USAGE_TRACK_URL", "https://trace.lmcache.ai"),
+            "request_stats",
+        )
+        logger.info(f"sending cache usage stats to {self.cache_usage_endpoint}")
+        self.min_logging_interval: int = int(
+            os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "60")
+        )
+        # send the first message immediately after init
+        self.last_logged_ts: float = -1
+
+        self.request_stats: LMCacheRequestStats = LMCacheRequestStats()
+        self.interval_num_hit_tokens: int = 0
+        self.interval_num_stored_tokens: int = 0
+        self.kv_sz_per_token_bytes: int = int(
+            np.prod(self.metadata.kv_shape)
+            * self.metadata.kv_dtype.itemsize
+            / self.metadata.kv_shape[2]
+        )
+
+    @staticmethod
+    def GetOrCreate(
+        metadata: LMCacheEngineMetadata, config: LMCacheEngineConfig
+    ) -> "ContinuousUsageLogger":
+        if ContinuousUsageLogger._instance is None:
+            ContinuousUsageLogger._instance = ContinuousUsageLogger(metadata, config)
+        if ContinuousUsageLogger._instance.metadata != metadata:
+            logger.error(
+                "ContinuousUsageContext instance already created with"
+                "different metadata. This should not happen except "
+                "in test."
+            )
+        return ContinuousUsageLogger._instance
+
+    def _clear(self):
+        self.interval_num_hit_tokens = 0
+        self.interval_num_stored_tokens = 0
+        self.request_stats = LMCacheRequestStats()
+
+    def _send_and_clear_message(self):
+        msg: ContinuousContextMessage = ContinuousContextMessage(
+            interval_stored_kv_size=int(
+                self.kv_sz_per_token_bytes * self.interval_num_stored_tokens
+            ),
+            interval_num_hit_tokens=int(self.interval_num_hit_tokens),
+            interval_num_stored_tokens=int(self.interval_num_stored_tokens),
+        )
+        request_stats_msg: RequestStatsMessage = RequestStatsMessage(
+            request_stats=self.request_stats,
+            engine_config=self.config,
+            engine_id=self.metadata.worker_id,
+        )
+        try:
+            global_http_client = global_http_connection.get_sync_client()
+            if self.cache_usage_endpoint and self.request_stats_endpoint is not None:
+                global_http_client.post(
+                    f"{self.cache_usage_endpoint}",
+                    json=dataclasses.asdict(msg),
+                    timeout=10,
+                )
+                logger.debug("caching usage message sent.")
+                global_http_client.post(
+                    f"{self.request_stats_endpoint}",
+                    json=dataclasses.asdict(request_stats_msg),
+                    timeout=10,
+                )
+                logger.debug("request stats message sent.")
+        except Exception as e:
+            logger.debug(
+                "Unable to send lmcache caching usage or request stats message...", e
+            )
+        self._clear()
+
+    def incr_or_send_stats(
+        self, engine_stats: "LMCacheEngineStats", request_stats: "LMCacheRequestStats"
+    ):
+        # no-ops when user disable usage tracking
+        if os.getenv("LMCACHE_TRACK_USAGE") == "false":
+            return None
+
+        self.interval_num_hit_tokens += engine_stats.interval_hit_tokens
+        self.interval_num_stored_tokens += engine_stats.interval_stored_tokens
+        self.request_stats.lookup_requests += request_stats.lookup_requests
+        self.request_stats.store_requests += request_stats.store_requests
+        self.request_stats.retrieve_requests += request_stats.retrieve_requests
+        self.request_stats.p2p_requests += request_stats.p2p_requests
+
+        cur_ts: float = time.monotonic()
+        if cur_ts - self.last_logged_ts >= self.min_logging_interval:
+            self._send_and_clear_message()
+            self.last_logged_ts = cur_ts
+
+
 class LMCacheStatsLogger:
-    def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
+    def __init__(
+        self,
+        metadata: LMCacheEngineMetadata,
+        config: LMCacheEngineConfig,
+        log_interval: int,
+    ):
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
-        self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
+        self.lmc_usage_logger = ContinuousUsageLogger.GetOrCreate(metadata, config)
         self.is_running = True
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
@@ -1198,9 +1394,9 @@ class LMCacheStatsLogger:
 
     def log_worker(self):
         while self.is_running:
-            stats = self.monitor.get_stats_and_clear()
-            self.prometheus_logger.log_prometheus(stats)
-            self.lmc_usage_logger.incr_or_send_stats(stats)
+            engine_stats, request_stats = self.monitor.get_stats_and_clear()
+            self.prometheus_logger.log_prometheus(engine_stats)
+            self.lmc_usage_logger.incr_or_send_stats(engine_stats, request_stats)
             time.sleep(self.log_interval)
 
     def shutdown(self):

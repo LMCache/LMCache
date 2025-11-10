@@ -301,7 +301,7 @@ class LMCacheEngine:
             put_time * 1000,
         )
 
-        self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
+        self.stats_monitor.on_store_finished(monitor_req_id, keys, tot_token_num)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -385,8 +385,10 @@ class LMCacheEngine:
 
         if keys:
             # Transpose the keys and memory objects into layer major format
-            memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
-            keys = [list(row) for row in zip(*keys, strict=False)]
+            memory_objs_layer_major = [
+                list(row) for row in zip(*memory_objs, strict=False)
+            ]
+            keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
             assert isinstance(
                 self.gpu_connector,
@@ -398,7 +400,7 @@ class LMCacheEngine:
             )
 
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
-                memory_objs, starts, ends, **kwargs
+                memory_objs_layer_major, starts, ends, **kwargs
             )
 
             next(mem_obj_generator)
@@ -406,14 +408,16 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
                 next(mem_obj_generator)
-                self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+                self.storage_manager.batched_put(
+                    keys_layer_major[layer_id], memory_objs_layer_major[layer_id]
+                )
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
             for layer_id in range(self.num_layers):
                 yield
 
-        self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
+        self.stats_monitor.on_store_finished(monitor_req_id, keys, tot_token_num)
         logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
         yield
 
@@ -501,15 +505,17 @@ class LMCacheEngine:
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
+        keys: List[CacheEngineKey] = []
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
+            keys.append(key)
 
         onload_time = time.perf_counter() - t
 
-        retrieved_tokens = torch.sum(ret_mask)
-        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        retrieved_tokens: int = int(torch.sum(ret_mask).item())
+        self.stats_monitor.on_retrieve_finished(monitor_req_id, keys, retrieved_tokens)
         logger.info(
             "Retrieved %d out of %d required tokens (from %d total tokens)."
             " size: %.4f gb,"
@@ -635,8 +641,8 @@ class LMCacheEngine:
         # synchronize the last layer
         next(mem_obj_consumer)
 
-        retrieved_tokens = torch.sum(ret_mask)
-        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        retrieved_tokens: int = int(torch.sum(ret_mask).item())
+        self.stats_monitor.on_retrieve_finished(monitor_req_id, keys, retrieved_tokens)
         logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
@@ -690,6 +696,7 @@ class LMCacheEngine:
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
         res = 0
+        keys: List[CacheEngineKey] = []
         try:
             chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
@@ -702,6 +709,7 @@ class LMCacheEngine:
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
                     assert isinstance(key, CacheEngineKey)
+                    keys.append(key)
 
                     # TODO(Jiayi): Optimize by checking only the existence of the key
                     # of one layer
@@ -726,7 +734,6 @@ class LMCacheEngine:
                     return res
             else:
                 chunk_info_list = []
-                keys = []
                 for chunk_info in chunk_info_iterator:
                     assert isinstance(chunk_info[2], CacheEngineKey)
                     chunk_info_list.append(chunk_info)
@@ -752,7 +759,7 @@ class LMCacheEngine:
             # all tokens where found, return the maximal end
             return res
         finally:
-            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
+            self.stats_monitor.on_lookup_finished(lookup_request_id, res, keys)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()
@@ -1402,7 +1409,7 @@ class LMCacheEngineBuilder:
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
             token_database = cls._Create_token_database(config, metadata)
-            stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
+            stat_logger = LMCacheStatsLogger(metadata, config, log_interval=10)
 
             engine = LMCacheEngine(
                 config,
