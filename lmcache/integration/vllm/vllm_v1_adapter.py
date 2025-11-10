@@ -50,7 +50,7 @@ from lmcache.integration.vllm.utils import (
     mla_enabled,
 )
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
@@ -735,12 +735,63 @@ class LMCacheConnectorV1Impl:
         else:
             self.api_server = None  # type: ignore[assignment]
             self.plugin_launcher = None  # type: ignore[assignment]
+
+        # Setup metrics for monitoring data structures
+        self._setup_metrics()
+
         logger.info(
             f"LMCache initialized for role {role} with version {utils.get_version()}, "
             f"vllm version {VLLM_VERSION}, "
             "lmcache cache_engine metadata: "
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
+
+    def _setup_metrics(self):
+        """Setup metrics for monitoring data structures in the connector."""
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is None:
+            logger.warning(
+                "PrometheusLogger is not initialized, "
+                "connector metrics will not be collected"
+            )
+            return
+
+        # Set up metrics for scheduler-specific data structures
+        if hasattr(self, "_unfinished_requests"):
+            prometheus_logger.scheduler_unfinished_requests_count.set_function(
+                lambda: len(self._unfinished_requests)
+            )
+
+        # Set up metrics for general data structures
+        if hasattr(self, "load_specs"):
+            prometheus_logger.connector_load_specs_count.set_function(
+                lambda: len(self.load_specs)
+            )
+
+        if hasattr(self, "_request_trackers"):
+            prometheus_logger.connector_request_trackers_count.set_function(
+                lambda: len(self._request_trackers)
+            )
+
+        if hasattr(self, "kv_caches"):
+            prometheus_logger.connector_kv_caches_count.set_function(
+                lambda: len(self.kv_caches)
+            )
+
+        if hasattr(self, "layerwise_retrievers"):
+            prometheus_logger.connector_layerwise_retrievers_count.set_function(
+                lambda: len(self.layerwise_retrievers)
+            )
+
+        if hasattr(self, "_invalid_block_ids"):
+            prometheus_logger.connector_invalid_block_ids_count.set_function(
+                lambda: len(self._invalid_block_ids)
+            )
+
+        if hasattr(self, "_requests_priority"):
+            prometheus_logger.connector_requests_priority_count.set_function(
+                lambda: len(self._requests_priority)
+            )
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
