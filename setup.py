@@ -108,6 +108,8 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/ac_enc.hip",
         "csrc/ac_dec.hip",
         "csrc/pos_kernels.hip",
+        "csrc/mem_alloc_hip.cpp",
+        "csrc/utils_hip.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.

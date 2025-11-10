@@ -16,11 +16,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-ServiceKind = Literal["lookup", "offload"]
+ServiceKind = Literal["lookup", "offload", "lookup_worker", "lookup_scheduler"]
 
 
-def get_zmq_context():
-    return zmq.asyncio.Context.instance()
+def get_zmq_context(use_asyncio: bool = True):
+    if use_asyncio:
+        return zmq.asyncio.Context.instance()
+    else:
+        return zmq.Context.instance()
 
 
 def get_zmq_socket(
@@ -78,7 +81,7 @@ def get_zmq_rpc_path_lmcache(
     vllm_config: Optional["VllmConfig"] = None,
     service_name: ServiceKind = "lookup",
     rpc_port: int = 0,
-    tp_rank: int = 0,
+    rank: int = 0,
 ) -> str:
     """Get the ZMQ RPC path for LMCache lookup and offload communication."""
     # Third Party
@@ -87,7 +90,7 @@ def get_zmq_rpc_path_lmcache(
     if vllm_config is None or vllm_config.kv_transfer_config is None:
         raise ValueError("A valid kv_transfer_config with engine_id is required.")
 
-    if service_name not in {"lookup", "offload"}:
+    if service_name not in {"lookup", "offload", "lookup_worker", "lookup_scheduler"}:
         raise ValueError(
             f"service_name must be 'lookup' or 'offload', got {service_name!r}"
         )
@@ -97,9 +100,9 @@ def get_zmq_rpc_path_lmcache(
     engine_id = vllm_config.kv_transfer_config.engine_id
 
     if isinstance(rpc_port, str):
-        rpc_port = rpc_port + str(tp_rank)
+        rpc_port = rpc_port + str(rank)
     else:
-        rpc_port += tp_rank
+        rpc_port += rank
 
     logger.debug(
         "Base URL: %s, Engine: %s, Service Name: %s, RPC Port: %s",
@@ -110,7 +113,7 @@ def get_zmq_rpc_path_lmcache(
     )
 
     socket_path = (
-        f"ipc://{base_url}/engine_{engine_id}_service_{service_name}_"
+        f"{base_url}/engine_{engine_id}_service_{service_name}_"
         f"lmcache_rpc_port_{rpc_port}"
     )
 

@@ -33,6 +33,8 @@ class LMCacheEngineMetadata:
     kv_shape: tuple[int, int, int, int, int]
     """ whether use MLA"""
     use_mla: bool = False
+    """ the role of the current instance (e.g., 'scheduler', 'worker') """
+    role: Optional[str] = None
     """ the first rank of the distributed setting """
     # TODO(baoloongmao): first_rank should be configurable
     first_rank = 0
@@ -264,6 +266,11 @@ class LMCacheEngineConfig:
         )
 
         return config.log_config()
+
+    def update_config_from_env(self):
+        """Update the configuration from the environment variables"""
+        # TODO(baoloongmao): implement this when needed
+        pass
 
     def log_config(self) -> "LMCacheEngineConfig":
         """Log all configuration settings"""

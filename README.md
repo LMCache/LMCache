@@ -26,7 +26,7 @@
 
 | [**Blog**](https://blog.lmcache.ai/)
 | [**Documentation**](https://docs.lmcache.ai/)
-| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-36x1m765z-8FgDA_73vcXtlZ_4XvpE6Q)
+| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3g8e6xzz8-KzS_HI8bPERGFK5PTB~MYg)
 | [**Interest Form**](https://forms.gle/MHwLiYDU6kcW3dLj7)
 | [**Roadmap**](https://github.com/LMCache/LMCache/issues/1253)
 
@@ -47,6 +47,7 @@ By combining LMCache with vLLM, developers achieve 3-10x delay savings and GPU c
   * High performance CPU KVCache offloading
   * Disaggregated prefill
   * P2P KVCache sharing
+- [x] Integration with SGLang for KV cache offloading
 - [x] LMCache is supported in the [vLLM production stack](https://github.com/vllm-project/production-stack/), [llm-d](https://github.com/llm-d/llm-d/), and [KServe](https://github.com/kserve/kserve) 
 - [x] Stable support for non-prefix KV caches
 - [x] Storage support as follows:
@@ -88,9 +89,9 @@ Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for 
 
 ## Community meeting
 
-The [community meeting]( https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09) for LMCache is hosted bi-weekly. All are welcome to join!
+The community meeting [Zoom Link]( https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09) for LMCache is hosted bi-weekly. All are welcome to join!
 
-Meetings are held bi-weekly on: Tuesdays at 9:00 AM PT – [Add to Calendar](https://drive.usercontent.google.com/u/0/uc?id=1f5EXbooGcwNwzIpTgn5u4PHqXgfypMtu&export=download)
+Meetings are held bi-weekly on: Tuesdays at 9:00 AM PT – [Add to Google Calendar](https://calendar.google.com/calendar/u/0/r?cid=Y19mNGY2ZmMwZjUxMWYyYTZmZmE1ZTVlMGI2Yzk2NmFmZjNhM2Y4ODZiZmU5OTU5MDJlMmE3ZmUyOGZmZThlOWY5QGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20)
 
 We keep notes from each meeting on this [document](https://docs.google.com/document/d/1_Fl3vLtERFa3vTH00cezri78NihNBtSClK-_1tSrcow) for summaries of standups, discussion, and action items.
 
@@ -130,6 +131,13 @@ If you use LMCache for your research, please cite our papers:
   doi = {10.1145/3689031.3696098},
   booktitle = {Proceedings of the Twentieth European Conference on Computer Systems},
   pages = {94–109},
+}
+
+@article{cheng2025lmcache,
+  title={LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference},
+  author={Cheng, Yihua and Liu, Yuhan and Yao, Jiayi and An, Yuwei and Chen, Xiaokun and Feng, Shaoting and Huang, Yuyang and Shen, Samuel and Du, Kuntai and Jiang, Junchen},
+  journal={arXiv preprint arXiv:2510.09665},
+  year={2025}
 }
 ```
 

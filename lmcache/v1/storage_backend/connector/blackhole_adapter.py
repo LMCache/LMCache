@@ -13,9 +13,6 @@ class BlackholeConnectorAdapter(ConnectorAdapter):
     def __init__(self) -> None:
         super().__init__("blackhole://")
 
-    def can_parse(self, url: str) -> bool:
-        return url.startswith(self.schema)
-
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         # Local
         from .blackhole_connector import BlackholeConnector

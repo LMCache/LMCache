@@ -76,6 +76,24 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
     )
 
 
+class SafeLocalCPUBackend(LocalCPUBackend):
+    """
+    A safe stub for LocalCPUBackend that can be used when local_cpu_backend is None.
+    """
+
+    def __init__(self, config: LMCacheEngineConfig):
+        pass
+
+    def allocate(self, *args, **kwargs):
+        raise RuntimeError(
+            "SafeLocalCPUBackend.allocate() should never be called. "
+            "This indicates a bug where scheduler role is trying to allocate memory."
+        )
+
+    def __str__(self):
+        return "SafeLocalCPUBackend(dummy)"
+
+
 class ConnectorContext:
     """
     Context for creating a connector.
@@ -84,6 +102,7 @@ class ConnectorContext:
         url: The remote URL
         loop: The asyncio event loop
         local_cpu_backend: The local CPU backend
+            (wrapped as SafeLocalCPUBackend if None)
         config: Optional LMCache engine configuration
         parsed_url: Parsed representation of the URL
     """
@@ -92,13 +111,19 @@ class ConnectorContext:
         self,
         url: str,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig],
         metadata: Optional[LMCacheEngineMetadata],
     ):
         self.url = url
         self.loop = loop
-        self.local_cpu_backend = local_cpu_backend
+        # Wrap None as SafeLocalCPUBackend to satisfy type requirements
+        # The SafeLocalCPUBackend will raise an error if allocate() is called
+        self.local_cpu_backend: LocalCPUBackend = (
+            local_cpu_backend
+            if local_cpu_backend is not None
+            else SafeLocalCPUBackend(config)
+        )
         self.config = config
         self.metadata = metadata
 
@@ -109,12 +134,8 @@ class ConnectorAdapter(ABC):
     def __init__(self, schema: str = "") -> None:
         self.schema = schema
 
-    @abstractmethod
     def can_parse(self, url: str) -> bool:
-        """
-        Check if this adapter can parse the given URL.
-        """
-        pass
+        return self.schema != "" and url.startswith(self.schema)
 
     @abstractmethod
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
@@ -136,7 +157,7 @@ class ConnectorManager:
         self,
         url: str,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ) -> None:
@@ -201,7 +222,7 @@ class ConnectorManager:
 def CreateConnector(
     url: str,
     loop: asyncio.AbstractEventLoop,
-    local_cpu_backend: LocalCPUBackend,
+    local_cpu_backend: Optional[LocalCPUBackend],
     config: Optional[LMCacheEngineConfig] = None,
     metadata: Optional[LMCacheEngineMetadata] = None,
 ) -> InstrumentedRemoteConnector:
@@ -219,6 +240,7 @@ def CreateConnector(
     - audit://host:port[?verify=true|false]
     - fs://[host:port]/path
     - s3://[bucket].s3express-[az_id].[region].amazonaws.com"
+    - mock://[capacity]/?peeking_latency=[ms]&read_throughput=[GB/s]&write_throughput=[GB/s]
     or
     - s3://[bucket].s3.[region].amazonaws.com
 
@@ -234,13 +256,14 @@ def CreateConnector(
     - fs:///tmp/lmcache
     - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
     - s3://fakefile--use1-az4--x-s3.s3express-use1-az4.us-east-1.amazonaws.com
+    - mock://100/?peeking_latency=1&read_throughput=2&write_throughput=2
     or
     - s3://fakefile--use1-az4--x-s3.s3.us-east-1.amazonaws.com
 
     Args:
         url: The remote URL
         loop: The asyncio event loop
-        local_cpu_backend: The local CPU backend
+        local_cpu_backend: The local CPU backend (can be None for scheduler role)
         config: Optional LMCache engine configuration
         metadata: Optional LMCache engine metadata
 

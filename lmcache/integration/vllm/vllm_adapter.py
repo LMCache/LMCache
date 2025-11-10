@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from copy import deepcopy
-from enum import Enum
+from enum import Enum, auto
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import dataclasses
 
@@ -36,12 +36,14 @@ from vllm.config import (
     SchedulerConfig,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv, round_down
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+
+# Use LMCache's own math utilities instead of vllm's
+# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
+from lmcache.utils import _lmcache_nvtx_annotate, cdiv, round_down
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 # FIXME(Jiayi): temporarily comment this out
@@ -64,19 +66,19 @@ VLLM_SCHEDULER_CONFIG: Optional[SchedulerConfig] = None
 
 
 class StoreStatus(Enum):
-    PREFILL = 1
-    CHUNK_PREFILL = 2
-    DECODE = 3
-    SUFFIX_PREFILL = 4
-    NONE = 5
+    PREFILL = auto()
+    CHUNK_PREFILL = auto()
+    DECODE = auto()
+    SUFFIX_PREFILL = auto()
+    NONE = auto()
 
 
 class RetrieveStatus(Enum):
-    PREFILL = 1  # include (1) normal_prefill
+    PREFILL = auto()  # include (1) normal_prefill
     # (2) chunk_prefill_last
     # (3) prefix_prefill
-    CHUNK_PREFILL = 2  # not last chunk
-    NONE = 4
+    CHUNK_PREFILL = auto()  # not last chunk
+    NONE = auto()
 
 
 def broadcast_seq_group_list(

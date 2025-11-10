@@ -13,8 +13,10 @@ Supported Backends
    local_storage
    gds
    redis
+   s3
    infinistore
    mooncake
    valkey
    weka
    nixl
+   external_backend

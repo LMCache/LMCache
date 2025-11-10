@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.integration.vllm.utils import lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.lookup_client.hit_limit_lookup_client import HitLimitLookupClient
+from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
+    LMCacheBypassLookupClient,
+)
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 
 if TYPE_CHECKING:
@@ -15,6 +18,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
+    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+        LMCacheAsyncLookupServer,
+    )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
 
 logger = init_logger(__name__)
@@ -27,6 +33,7 @@ class LookupClientFactory:
     def create_lookup_client(
         vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
+        lmcache_engine: Optional[LMCacheEngine] = None,
     ) -> LookupClientInterface:
         """
         Create a lookup client based on the configuration.
@@ -34,29 +41,48 @@ class LookupClientFactory:
         Args:
             vllm_config: The vLLM configuration
             config: The LMCache engine configuration
+            lmcache_engine: Optional LMCacheEngine instance for bypass lookup client
 
         Returns:
             A lookup client instance
         """
 
+        client: LookupClientInterface
         # Check if external_lookup_client is configured
         if config.external_lookup_client is not None:
-            return LookupClientFactory._create_external_lookup_client(
+            if config.enable_async_loading:
+                raise ValueError(
+                    "Asynchronous loading is not supported for external lookup clients."
+                )
+            client = LookupClientFactory._create_external_lookup_client(
                 config.external_lookup_client, vllm_config
             )
         else:
             # First Party
+            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+                LMCacheAsyncLookupClient,
+            )
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupClient,
             )
 
-            return LMCacheLookupClient(vllm_config)  # , config)
+            # Check if bypass lookup is enabled and lmcache_engine is provided
+            if config.enable_scheduler_bypass_lookup and lmcache_engine is not None:
+                client = LMCacheBypassLookupClient(vllm_config, lmcache_engine)
+            elif config.enable_async_loading:
+                client = LMCacheAsyncLookupClient(vllm_config)
+            else:
+                client = LMCacheLookupClient(vllm_config)
+
+        if config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1:
+            return HitLimitLookupClient(client, config)
+        return client
 
     @staticmethod
     def create_lookup_server(
         lmcache_engine: LMCacheEngine,
         vllm_config: "VllmConfig",
-    ) -> Optional["LMCacheLookupServer"]:
+    ) -> Optional[Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]]:
         """
         Create a lookup server based on the configuration.
 
@@ -67,28 +93,31 @@ class LookupClientFactory:
         Returns:
             A lookup server instance, or None if no server should be created
         """
-        config = lmcache_get_config()
+        config = lmcache_engine.config
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 config is expected for lookup server and client"
         )
 
-        # Only create the KV lookup API server on worker rank 0
-        # when there are multiple workers and when not using external lookup client
-        create_lookup_server_only_on_worker_0_for_mla = config.get_extra_config_value(
-            "create_lookup_server_only_on_worker_0_for_mla",
-            lmcache_engine.metadata.use_mla,
+        lookup_server_worker_ids = config.get_lookup_server_worker_ids(
+            lmcache_engine.metadata.use_mla, lmcache_engine.metadata.world_size
         )
 
         if config.external_lookup_client is None and (
-            not create_lookup_server_only_on_worker_0_for_mla
-            or lmcache_engine.metadata.worker_id == 0
+            len(lookup_server_worker_ids) == 0
+            or lmcache_engine.metadata.worker_id in lookup_server_worker_ids
         ):
             # First Party
+            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+                LMCacheAsyncLookupServer,
+            )
             from lmcache.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupServer,
             )
 
-            return LMCacheLookupServer(lmcache_engine, vllm_config)
+            if config.enable_async_loading:
+                return LMCacheAsyncLookupServer(lmcache_engine, vllm_config)
+            else:
+                return LMCacheLookupServer(lmcache_engine, vllm_config)
 
         return None
 

@@ -77,13 +77,70 @@ class InstrumentedRemoteConnector(RemoteConnector):
     async def ping(self) -> int:
         return await self._connector.ping()
 
+    def support_batched_put(self) -> bool:
+        return self._connector.support_batched_put()
+
     def support_batched_get(self) -> bool:
         return self._connector.support_batched_get()
+
+    def support_batched_async_contains(self) -> bool:
+        return self._connector.support_batched_async_contains()
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        return await self._connector.batched_async_contains(lookup_id, keys, pin)
+
+    def support_batched_get_non_blocking(self) -> bool:
+        return self._connector.support_batched_get_non_blocking()
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        return await self._connector.batched_get_non_blocking(lookup_id, keys)
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
         return await self._connector.batched_get(keys)
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        try:
+            await self._connector.batched_put(keys, memory_objs)
+        except Exception as e:
+            logger.warning(f"batched put error: {e}")
+        finally:
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_down()
+
+    def remove_sync(self, key: CacheEngineKey) -> bool:
+        return self._connector.remove_sync(key)
+
+    def batched_contains(
+        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
+    ) -> List[bool]:
+        return self._connector.batched_contains(keys, stop_after_first_not_exits)
+
+    def support_batched_contains(self) -> bool:
+        return self._connector.support_batched_contains()
+
+    def init_chunk_meta(self, config, metadata) -> None:
+        return self._connector.init_chunk_meta(config, metadata)
+
+    def reshape_partial_chunk(
+        self, memory_obj: MemoryObj, bytes_read: int
+    ) -> MemoryObj:
+        return self._connector.reshape_partial_chunk(memory_obj, bytes_read)
+
+    def post_init(self):
+        return self._connector.post_init()
 
     def __repr__(self) -> str:
         return f"InstrumentedRemoteConnector({self._connector})"

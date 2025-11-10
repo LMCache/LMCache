@@ -47,6 +47,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+durations/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -77,6 +78,9 @@ lmcache/experimental/tests
 /examples/save_decode_cache/offline_inference_outputs.jsonl
 /examples/offline_inference/buggy_example.py
 /examples/test_example
+
+# benchmark results
+*.csv
 
 # disk cache
 /remote_disk

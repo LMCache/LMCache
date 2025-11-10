@@ -283,7 +283,7 @@ If you would like to feel the TTFT speed up with offloading and KV Cache reuse, 
 
 Here, we are instead going to demonstrate how to search for and modify LMCache KV Chunk entries in Redis.
 
-Please note that the official LMCache way to achieve this redis-specific functionality of viewing and modifying LMCache KV Chunks is available in :doc:`LMCache Controller <../../kv_cache_management/controller>`.
+Please note that the official LMCache way to achieve this redis-specific functionality of viewing and modifying LMCache KV Chunks is available in :doc:`LMCache Controller <../../kv_cache_management/index>`.
 
 Let's warm/populate LMCache first with ``curl`` this time:
 
@@ -417,7 +417,7 @@ larger than the ``metadata`` entry.
 This tutorial utilized the ``redis-cli`` to directly peak into a remote backend and manipualte
 KV Chunks.
 
-Once again, please refer to the :doc:`LMCache Controller <../../kv_cache_management/controller>`
+Once again, please refer to the :doc:`LMCache Controller <../../kv_cache_management/index>`
 for the official LMCache way of controlling and routing your KV Caches in your LMCache instances.
 
 **Step 4. Clean up:**

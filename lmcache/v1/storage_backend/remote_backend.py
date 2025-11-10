@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
-from typing import List, Optional, Sequence, Set
+from typing import Any, List, Optional, Sequence, Set
 import asyncio
 import threading
 import time
@@ -9,10 +9,9 @@ import time
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector import CreateConnector
@@ -29,10 +28,10 @@ class RemoteBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         dst_device: str = "cuda",
-        lookup_server: Optional[LookupServerInterface] = None,
     ):
+        super().__init__(dst_device=dst_device)
         self.put_tasks: Set[CacheEngineKey] = set()
         self.lock = threading.Lock()
 
@@ -89,6 +88,15 @@ class RemoteBackend(StorageBackendInterface):
         # Start the remote monitor thread (if ping is supported)
         self.remote_monitor.start()
 
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.remote_put_task_num.set_function(
+                lambda: len(self.put_tasks)
+            )
+
     def __str__(self):
         return self.__class__.__name__
 
@@ -128,14 +136,7 @@ class RemoteBackend(StorageBackendInterface):
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.request_configs,
-            )
+            key = key.with_new_worker_id(0)
 
         try:
             if self.config.extra_config is not None and self.config.extra_config.get(
@@ -152,6 +153,32 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning(f"Remote connection failed in contains: {e}")
             logger.warning("Returning False")
             return False
+
+    def support_batched_contains(self) -> bool:
+        return (
+            self.connection is not None and self.connection.support_batched_contains()
+        )
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+        stop_after_first_not_exits: bool = True,
+    ) -> List[bool]:
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in batched_contains, returning all False"
+            )
+            return [False] * len(keys)
+
+        if self._mla_worker_id_as0_mode:
+            keys = [key.with_new_worker_id(0) for key in keys]
+
+        try:
+            return self.connection.batched_contains(keys, stop_after_first_not_exits)
+        except Exception as e:
+            logger.warning(f"Remote connection failed in batched_contains: {e}")
+            return [False] * len(keys)
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:
@@ -213,7 +240,7 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         if self.connection is None:
             logger.warning(
@@ -221,11 +248,6 @@ class RemoteBackend(StorageBackendInterface):
             )
             return
         if self.connection.support_batched_put():
-            if self.connection is None:
-                logger.warning(
-                    "Connection is None in batched_submit_put_task, returning None"
-                )
-                return
             if self._mla_worker_id_as0_mode:
                 return
 
@@ -246,12 +268,6 @@ class RemoteBackend(StorageBackendInterface):
             for key, memory_obj in zip(keys, memory_objs, strict=False):
                 self.submit_put_task(key, memory_obj)
 
-    def submit_prefetch_task(
-        self,
-        key: CacheEngineKey,
-    ) -> bool:
-        raise NotImplementedError
-
     @_lmcache_nvtx_annotate
     def get_blocking(
         self,
@@ -260,20 +276,20 @@ class RemoteBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in get_blocking "
+                "(likely scheduler role), returning None"
+            )
+            return None
 
         if self.connection is None:
             logger.warning("Connection is None in get_blocking, returning None")
             return None
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.request_configs,
-            )
+            key = key.with_new_worker_id(0)
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
@@ -299,41 +315,31 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_obj
 
-    def get_non_blocking(
-        self,
-        key: CacheEngineKey,
-    ) -> Optional[Future]:
-        raise NotImplementedError
-
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_blocking "
+                "(likely scheduler role), returning None list"
+            )
+            return [None] * len(keys)
+
         if self.connection is None:
             logger.warning("Connection is None in batched_get_blocking, returning None")
             return [None] * len(keys)
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            new_keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.request_configs,
-                )
-                for key in keys
-            ]
-        else:
-            new_keys = keys
+            keys = [key.with_new_worker_id(0) for key in keys]
 
         t1 = time.perf_counter()
         # batched get
         if self.connection.support_batched_get():
             future = asyncio.run_coroutine_threadsafe(
-                self.connection.batched_get(new_keys), self.loop
+                self.connection.batched_get(keys), self.loop
             )
             try:
                 memory_objs = future.result(self.blocking_timeout_secs)
@@ -343,17 +349,16 @@ class RemoteBackend(StorageBackendInterface):
                         "batched get blocking timeout, trigger cancel the future task"
                     )
                     future.cancel()
-                with self.lock:
-                    self.connection = None
-                    self.failure_time = time.time()
-                logger.warning(
-                    f"Error occurred in batched_get_blocking: {e}, returning None list"
-                )
+                else:
+                    logger.warning(
+                        f"Error occurred in batched_get_blocking: {e}, "
+                        f"returning None list"
+                    )
                 return [None] * len(keys)
         else:
             futures = [
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
-                for key in new_keys
+                for key in keys
             ]
             memory_objs = []
             failed = False
@@ -368,12 +373,10 @@ class RemoteBackend(StorageBackendInterface):
                                 "get blocking timeout, trigger cancel the future task"
                             )
                             fut.cancel()
-                        with self.lock:
-                            self.connection = None
-                            self.failure_time = time.time()
-                        logger.warning(
-                            f"Error occurred in get_blocking: {e}, returning None"
-                        )
+                        else:
+                            logger.warning(
+                                f"Error occurred in get_blocking: {e}, returning None"
+                            )
                         memory_obj = None
                     memory_objs.append(memory_obj)
                 else:
@@ -397,6 +400,60 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_objs
 
+    async def support_batched_async_contains(self) -> bool:
+        return (
+            self.connection is not None
+            and self.connection.support_batched_async_contains()
+        )
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        if self.connection is None:
+            logger.warning("Connection is None in batched_async_contains, returning 0")
+            return 0
+        if self._mla_worker_id_as0_mode:
+            keys = [key.with_new_worker_id(0) for key in keys]
+
+        try:
+            assert self.connection.support_batched_async_contains(), (
+                f"Connector {self.connection} does not support batched async contains"
+            )
+            return await self.connection.batched_async_contains(lookup_id, keys, pin)
+        except Exception as e:
+            logger.warning(f"Error occurred in batched_async_contains: {e}")
+            return 0
+
+    async def support_batched_get_non_blocking(self) -> bool:
+        return (
+            self.connection is not None
+            and self.connection.support_batched_get_non_blocking()
+        )
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        transfer_spec: Any = None,
+    ) -> List[MemoryObj]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_non_blocking "
+                "(likely scheduler role), returning empty list"
+            )
+            return []
+
+        if self.connection is None:
+            logger.warning(
+                "Connection is None in batched_get_non_blocking, returning empty list"
+            )
+            return []
+        return await self.connection.batched_get_non_blocking(lookup_id, keys)
+
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(
             "Remote backend does not support pin. "
@@ -412,7 +469,24 @@ class RemoteBackend(StorageBackendInterface):
         return True
 
     def remove(self, key, force=True):
-        raise NotImplementedError("Remote backend does not support remove now.")
+        if self.connection is None:
+            logger.warning("Connection is None in remove, returning False")
+            return False
+
+        try:
+            return self.connection.remove_sync(key)
+        except Exception as e:
+            logger.exception(
+                f"Failed to remove key {key} from remote backend, error: {e}"
+            )
+            return False
+
+    def get_allocator_backend(self):
+        assert self.local_cpu_backend is not None, (
+            "local_cpu_backend is required for get_allocator_backend, "
+            "should not be called in scheduler role"
+        )
+        return self.local_cpu_backend
 
     def close(self):
         try:

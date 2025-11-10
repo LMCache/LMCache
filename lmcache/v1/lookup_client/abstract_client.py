@@ -20,7 +20,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-    ) -> int:
+    ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
 
@@ -33,7 +33,8 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             includes tags and the other configs
 
         Returns:
-            The number of tokens that can be loaded from cache
+            The number of tokens that can be loaded from cache.
+            None indicates the lookup/prefetch is in progress.
         """
         raise NotImplementedError
 
@@ -50,3 +51,12 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             True if producer reuse is supported, False otherwise
         """
         return False
+
+    def clear_lookup_status(self, lookup_id: str) -> None:
+        """
+        Clear temporary lookup status for a given lookup ID.
+
+        Args:
+            lookup_id: The lookup ID whose status needs to be cleared.
+        """
+        return

@@ -1,0 +1,12 @@
+local_cpu: False
+max_local_cpu_size: 0
+
+enable_pd: True
+transfer_channel: "nixl"
+pd_role: "receiver"
+pd_peer_host: "localhost"
+pd_peer_init_port: 7300
+pd_peer_alloc_port: 7400
+pd_buffer_size: 2147483648 # 2GB
+pd_buffer_device: "cuda"
+nixl_backends: [UCX]

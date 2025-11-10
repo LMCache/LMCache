@@ -1,28 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from enum import IntEnum, auto
+from typing import Optional, Union
 import struct
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
 
 MAX_KEY_LENGTH = 150
 
 
-class Constants:
-    CLIENT_PUT = 1
-    CLIENT_GET = 2
-    CLIENT_EXIST = 3
-    CLIENT_LIST = 4
-    CLIENT_HEALTH = 5
+class ClientCommand(IntEnum):
+    PUT = auto()
+    GET = auto()
+    EXIST = auto()
+    LIST = auto()
+    HEALTH = auto()
 
-    SERVER_SUCCESS = 200
-    SERVER_FAIL = 400
+
+class ServerReturnCode(IntEnum):
+    SUCCESS = 200
+    FAIL = 400
 
 
 DTYPE_TO_INT = {
@@ -127,8 +130,8 @@ class ClientMetaMessage:
     Request message from LMCache workers or servers.
     """
 
-    command: int
-    key: CacheEngineKey
+    command: ClientCommand
+    key: Union[CacheEngineKey, LayerCacheEngineKey]
     length: int
     fmt: MemoryFormat
     dtype: Optional[torch.dtype]
@@ -147,7 +150,7 @@ class ClientMetaMessage:
 
         packed_bytes = struct.pack(
             f"iiiiiiiii{MAX_KEY_LENGTH}s",
-            self.command,
+            self.command.value,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
@@ -166,8 +169,8 @@ class ClientMetaMessage:
             struct.unpack(f"iiiiiiiii{MAX_KEY_LENGTH}s", s)
         )
         return ClientMetaMessage(
-            command,
-            CacheEngineKey.from_string(key.decode().strip()),
+            ClientCommand(command),
+            parse_cache_key(key.decode().strip()),
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],
@@ -187,7 +190,7 @@ class ServerMetaMessage:
     Reply message from LMCache workers or servers.
     """
 
-    code: int
+    code: ServerReturnCode
     length: int
     fmt: MemoryFormat
     dtype: Optional[torch.dtype]
@@ -198,7 +201,7 @@ class ServerMetaMessage:
         assert len(self.shape) == 4, "Shape dimension should be 4"
         packed_bytes = struct.pack(
             "iiiiiiiii",
-            self.code,
+            self.code.value,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
@@ -220,7 +223,7 @@ class ServerMetaMessage:
             struct.unpack("iiiiiiiii", s)
         )
         return ServerMetaMessage(
-            code,
+            ServerReturnCode(code),
             length,
             MemoryFormat(fmt),
             INT_TO_DTYPE[dtype],

@@ -18,10 +18,11 @@ import torch
 # First Party
 from lmcache.v1.protocol import (
     CacheEngineKey,
+    ClientCommand,
     ClientMetaMessage,
-    Constants,
     MemoryFormat,
     ServerMetaMessage,
+    ServerReturnCode,
 )
 
 
@@ -37,9 +38,14 @@ def main():
         with socket.create_connection((host, port), timeout=5) as s:
             # Create and send health check message
             msg = ClientMetaMessage(
-                Constants.CLIENT_HEALTH,
+                ClientCommand.HEALTH,
                 key=CacheEngineKey(
-                    fmt="", model_name="", world_size=0, worker_id=0, chunk_hash=""
+                    fmt="",
+                    model_name="",
+                    world_size=0,
+                    worker_id=0,
+                    chunk_hash=0,
+                    dtype=torch.float16,
                 ),
                 length=0,
                 fmt=MemoryFormat(1),
@@ -58,7 +64,7 @@ def main():
             meta = ServerMetaMessage.deserialize(resp)
 
             # Check if server responded with success
-            if meta.code == Constants.SERVER_SUCCESS:
+            if meta.code == ServerReturnCode.SUCCESS:
                 sys.exit(0)
             else:
                 print(f"Server returned error code: {meta.code}", file=sys.stderr)
