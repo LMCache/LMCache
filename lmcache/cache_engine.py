@@ -509,7 +509,7 @@ class LMCacheEngineBuilder:
         if instance_id not in cls._instances:
             engine = LMCacheEngine(config, metadata)
             # TODO(ApostaC): Remove the hard-coded log interval here
-            stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
+            stat_logger = LMCacheStatsLogger(metadata, config=config, log_interval=10)
             cls._instances[instance_id] = engine
             cls._cfgs[instance_id] = config
             cls._metadatas[instance_id] = metadata
