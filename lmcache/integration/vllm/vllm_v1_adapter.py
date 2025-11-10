@@ -1107,6 +1107,8 @@ class LMCacheConnectorV1Impl:
                 request_configs=request.request_configs,
             )
 
+            # Update skip_leading_tokens only on last rank to ensure
+            # each PP stage stores its own KV cache
             if get_pp_group().is_last_rank:
                 # NOTE(Jiayi): We assume all tokens are saved
                 save_spec.skip_leading_tokens = len(token_ids)
