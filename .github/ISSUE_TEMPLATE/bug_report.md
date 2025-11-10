@@ -7,7 +7,7 @@ assignees: ''
 
 ---
 **Label**
-Please label your issue with "bug" and any other relevant labels so that it can easily be easily categorized under [LMCache Onboarding](https://github.com/LMCache/LMCache/issues/627)
+Please label your issue with "bug" and any other relevant labels so that it can easily be easily categorized under [LMCache Onboarding](https://github.com/LMCache/LMCache/issues/1882)
 
 **Describe the bug**
 A clear and concise description of what the bug is.

@@ -31,7 +31,7 @@ def create_test_config(gds_path: str):
 
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
-    return CacheEngineKey("vllm", "testmodel", 3, 123, key_id)
+    return CacheEngineKey("vllm", "testmodel", 3, 123, key_id, torch.bfloat16)
 
 
 def create_test_memory_obj(

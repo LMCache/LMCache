@@ -53,6 +53,12 @@ from lmcache.v1.token_database import (
 
 logger = init_logger(__name__)
 
+# Type aliases for processed chunks
+# (cache_key, memory_obj, start_index, end_index)
+ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
+# (list of processed chunks, total kv size)
+ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
+
 
 class CacheEngineEndSignal:
     pass
@@ -80,7 +86,7 @@ class LMCacheEngine:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         token_database: TokenDatabase,
-        gpu_connector: GPUConnectorInterface,
+        gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
     ):
@@ -97,7 +103,7 @@ class LMCacheEngine:
             and metadata.use_mla
         )
 
-        if self.save_only_first_rank:
+        if self.save_only_first_rank and self.gpu_connector is not None:
             self.broadcast_stream = (
                 self.gpu_connector.load_stream
                 if hasattr(self.gpu_connector, "load_stream")
@@ -171,7 +177,8 @@ class LMCacheEngine:
         if not self.post_inited:
             self.storage_manager.post_init(**kwargs)
             logger.info("Post-initializing LMCacheEngine")
-            self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
+            if self.gpu_connector is not None:
+                self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
 
     @_lmcache_nvtx_annotate
@@ -203,6 +210,10 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for store operation"
+        )
+
         if self._is_passive():
             logger.debug(f"rank={self.metadata.worker_id} ignore store")
             return
@@ -331,6 +342,9 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for store_layer operation"
+        )
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -446,6 +460,10 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for retrieve operation"
+        )
+
         tot_kv_size = 0
         t = time.perf_counter()
 
@@ -457,7 +475,7 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
-        reordered_chunks: List[Tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        reordered_chunks: List[ProcessedChunk] = []
         if not self._is_passive():
             if self.async_loading:
                 reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
@@ -553,6 +571,9 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for retrieve_layer operation"
+        )
 
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
@@ -569,6 +590,8 @@ class LMCacheEngine:
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
+
+        location = None
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
@@ -579,7 +602,17 @@ class LMCacheEngine:
             keys_multi_layer = key.split_layers(self.num_layers)
 
             # NOTE: Only check the first layer
-            if not self.storage_manager.contains(keys_multi_layer[0]):
+            if current_location := self.storage_manager.contains(keys_multi_layer[0]):
+                if location is None:
+                    location = current_location
+                else:
+                    # TODO(Jiayi): Support multi-location retrieval in the future
+                    assert location == current_location, (
+                        "All retrieved keys should be from the same location "
+                        "when use layerwise retrieval."
+                        "Please support multi-location retrieval in the future."
+                    )
+            else:
                 break
 
             starts.append(start)
@@ -592,7 +625,10 @@ class LMCacheEngine:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
-            get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)
+            get_generator = self.storage_manager.layerwise_batched_get(
+                keys_layer_major,
+                location=location,
+            )
 
             assert isinstance(
                 self.gpu_connector,
@@ -1048,7 +1084,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+    ) -> ProcessTokensInternalResult:
         """
         This function is used to get the memory objects from the event manager.
 
@@ -1064,7 +1100,7 @@ class LMCacheEngine:
             assert isinstance(request_configs, dict)
 
         tot_kv_size = 0
-        chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
         memory_objs = future.result()
@@ -1073,22 +1109,24 @@ class LMCacheEngine:
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
-        for idx, (start, end, key) in enumerate(
-            self.token_database.process_tokens(
-                tokens=tokens,
-                mask=mask,
-                request_configs=request_configs,
-            )
+        used_indices = set()
+        for start, end, key in self.token_database.process_tokens(
+            tokens=tokens,
+            mask=mask,
+            request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
+            idx = start // self.config.chunk_size
             memory_obj = memory_objs[idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
+            used_indices.add(idx)
 
         # NOTE: free the memory objects that are not hit.
-        for unused_mem_obj in memory_objs[len(chunks) :]:
-            unused_mem_obj.ref_count_down()
+        for idx, unused_mem_obj in enumerate(memory_objs):
+            if idx not in used_indices:
+                unused_mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 
@@ -1098,7 +1136,7 @@ class LMCacheEngine:
         mask,
         ret_mask,
         **kwargs,
-    ) -> tuple[list[tuple[CacheEngineKey, MemoryObj, int, int]], int]:
+    ) -> ProcessTokensInternalResult:
         """Process tokens and populate the reordered lists.
 
         This function is used to process tokens and populate the reordered lists.
@@ -1116,7 +1154,7 @@ class LMCacheEngine:
             list
         )
 
-        reordered_chunks: list[tuple[CacheEngineKey, MemoryObj, int, int]] = []
+        reordered_chunks: List[ProcessedChunk] = []
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
@@ -1386,7 +1424,7 @@ class LMCacheEngineBuilder:
         instance_id: str,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        gpu_connector: GPUConnectorInterface,
+        gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
     ) -> LMCacheEngine:

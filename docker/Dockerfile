@@ -69,6 +69,8 @@ ENV NVCC_THREADS=$nvcc_threads
 
 ARG VLLM_VERSION=nightly
 
+ENV PATH="/opt/venv/bin:${PATH}"
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
