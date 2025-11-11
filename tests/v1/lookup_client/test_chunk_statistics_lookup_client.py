@@ -111,6 +111,11 @@ class TestChunkStatisticsBasic:
         assert result1 == 256
         assert result2 == 128
 
+        # Wait for async processing to complete
+        assert stats_client.wait_for_async_processing(timeout=2.0), (
+            "Async processing timeout"
+        )
+
         stats = stats_client.get_statistics()
         assert stats["enabled"] is True
         assert stats["total_requests"] == 2

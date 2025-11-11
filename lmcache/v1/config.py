@@ -514,6 +514,26 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "When reached, the system will exit. Default is None (disabled)."
         ),
     },
+    "chunk_statistics_async_enabled": {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable asynchronous statistics recording. "
+            "When enabled, statistics are recorded in a background thread "
+            "to minimize lookup overhead. Default is True."
+        ),
+    },
+    "chunk_statistics_async_queue_capacity": {
+        "type": int,
+        "default": 100000,
+        "env_converter": int,
+        "description": (
+            "Maximum number of chunks that can be queued for async processing. "
+            "When queue is full, lookup will block until space is available. "
+            "Default is 100000 chunks."
+        ),
+    },
 }
 
 

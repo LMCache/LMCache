@@ -3,6 +3,7 @@
 # Standard
 from typing import Optional, Union
 import hashlib
+import queue
 import threading
 import time
 
@@ -62,6 +63,15 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         self.expected_chunks = expected_chunks
         self.false_positive_rate = false_positive_rate
 
+        # Async queue configuration
+        self.async_enabled = config.chunk_statistics_async_enabled
+        self.async_queue_capacity = config.chunk_statistics_async_queue_capacity
+        self.async_queue: Optional[queue.Queue] = None
+        self.async_worker_thread: Optional[threading.Thread] = None
+        self.async_shutdown = False
+        self.queue_full_blocks = 0  # Track how many times queue was full
+        self.queue_max_size = 0  # Track maximum queue size reached
+
         # Auto exit condition tracking
         self.start_time = 0.0
         self.timeout_hours = config.chunk_statistics_auto_exit_timeout_hours
@@ -83,12 +93,16 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             "false_positive_rate=%f, "
             "auto_start_statistics=%s, "
             "auto_exit_timeout_hours=%f, "
-            "auto_exit_target_unique_chunks=%s",
+            "auto_exit_target_unique_chunks=%s, "
+            "async_enabled=%s, "
+            "async_queue_capacity=%d",
             expected_chunks,
             false_positive_rate,
             auto_start_statistics,
             self.timeout_hours,
             self.target_unique_chunks,
+            self.async_enabled,
+            self.async_queue_capacity,
         )
 
     def start_statistics(self) -> None:
@@ -96,16 +110,55 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         with self.lock:
             self.enabled = True
             self.start_time = 0.0  # Initialize start time lazily on first lookup
+
+            # Start async worker if enabled
+            if self.async_enabled and self.async_worker_thread is None:
+                self.async_queue = queue.Queue(maxsize=self.async_queue_capacity)
+                self.async_shutdown = False
+                self.async_worker_thread = threading.Thread(
+                    target=self._async_worker, daemon=True, name="ChunkStatisticsWorker"
+                )
+                self.async_worker_thread.start()
+                logger.info(
+                    "Chunk statistics async worker started with queue capacity=%d",
+                    self.async_queue_capacity,
+                )
+
             logger.info("Chunk statistics collection started")
 
     def stop_statistics(self) -> None:
         """Stop collecting statistics."""
         with self.lock:
             self.enabled = False
+
+            # Stop async worker if running
+            if self.async_worker_thread is not None:
+                self.async_shutdown = True
+                # Put sentinel value to wake up worker
+                if self.async_queue is not None:
+                    try:
+                        self.async_queue.put(None, block=False)
+                    except queue.Full:
+                        pass
+
             logger.info("Chunk statistics collection stopped")
+
+        # Wait for worker thread to finish (outside lock)
+        if self.async_worker_thread is not None:
+            self.async_worker_thread.join(timeout=5.0)
+            if self.async_worker_thread.is_alive():
+                logger.warning("Async worker thread did not stop within timeout")
+            else:
+                logger.info("Async worker thread stopped")
+            self.async_worker_thread = None
+            self.async_queue = None
 
     def reset_statistics(self) -> None:
         """Reset all statistics."""
+        # Wait for async processing to complete before reset
+        if self.async_enabled and self.async_queue is not None:
+            self.wait_for_async_processing(timeout=5.0)
+
         with self.lock:
             self.request_seen.clear()
             self.global_bloom.clear()
@@ -114,7 +167,42 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             self.lookup_time = 0.0
             self.record_time = 0.0
             self.check_exit_time = 0.0
+            self.queue_full_blocks = 0
+            self.queue_max_size = 0
+
+            # Clear async queue if exists
+            if self.async_queue is not None:
+                while not self.async_queue.empty():
+                    try:
+                        self.async_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
             logger.info("Chunk statistics reset")
+
+    def wait_for_async_processing(self, timeout: float = 5.0) -> bool:
+        """
+        Wait for async queue to be processed.
+
+        Args:
+            timeout: Maximum time to wait in seconds
+
+        Returns:
+            True if queue is empty, False if timeout
+        """
+        if not self.async_enabled or self.async_queue is None:
+            return True
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.async_queue.empty():
+                # Give a bit more time for worker to finish processing
+                time.sleep(0.01)
+                if self.async_queue.empty():
+                    return True
+            time.sleep(0.01)
+
+        return self.async_queue.empty()
 
     def get_statistics(self) -> dict:
         """
@@ -128,9 +216,13 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             - unique_chunks: Number of unique chunks (estimated)
             - duplicate_chunks: Number of duplicate chunks (estimated)
             - reuse_rate: Chunk reuse rate (0.0 to 1.0)
-            - bloom_filter: Bloom Filter statistics including memory usage
+            - bloom_filter: Bloom Filter statistics
             - timing: Timing statistics (if enabled)
         """
+        # Wait for async processing to complete before returning statistics
+        if self.async_enabled and self.async_queue is not None:
+            self.wait_for_async_processing(timeout=5.0)
+
         with self.lock:
             duplicate_chunks = self.total_chunks - self.unique_chunks_count
             reuse_rate = (
@@ -142,6 +234,12 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             overhead_percentage = (
                 (overhead_time / total_time * 100.0) if total_time > 0 else 0.0
             )
+
+            # Get async queue metrics
+            queue_size = 0
+            if self.async_queue is not None:
+                queue_size = self.async_queue.qsize()
+                self.queue_max_size = max(self.queue_max_size, queue_size)
 
             return {
                 "enabled": self.enabled,
@@ -158,6 +256,16 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                     "total_time_seconds": total_time,
                     "overhead_time_seconds": overhead_time,
                     "overhead_percentage": overhead_percentage,
+                },
+                "async_queue": {
+                    "enabled": self.async_enabled,
+                    "capacity": self.async_queue_capacity,
+                    "current_size": queue_size,
+                    "max_size_reached": self.queue_max_size,
+                    "full_blocks": self.queue_full_blocks,
+                    "utilization": queue_size / self.async_queue_capacity
+                    if self.async_queue_capacity > 0
+                    else 0.0,
                 },
             }
 
@@ -177,7 +285,10 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         # Record statistics if enabled
         if self.enabled:
             start_time = time.time()
-            self._record_statistics(token_ids, lookup_id)
+            if self.async_enabled:
+                self._record_statistics_async(token_ids, lookup_id)
+            else:
+                self._record_statistics(token_ids, lookup_id)
             end_time = time.time()
             with self.lock:
                 self.record_time += end_time - start_time
@@ -190,12 +301,12 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
 
         return result
 
-    def _record_statistics(
+    def _record_statistics_async(
         self,
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
     ) -> None:
-        """Record statistics for a lookup operation."""
+        """Record statistics asynchronously by queuing the request."""
         # Quick check for preempted request (with lock)
         with self.lock:
             if lookup_id in self.request_seen:
@@ -203,11 +314,74 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                 return
             self.request_seen.add(lookup_id)
 
-        # Convert token_ids to list if needed (outside lock)
+        # Convert token_ids to list if needed
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
 
-        # Calculate all hashes and bloom filter positions outside the lock
+        # Queue the request for async processing
+        if self.async_queue is not None:
+            try:
+                self.async_queue.put((token_ids, lookup_id), block=True, timeout=10.0)
+            except queue.Full:
+                with self.lock:
+                    self.queue_full_blocks += 1
+                logger.warning(
+                    "Async queue full (capacity=%d), blocking until space available",
+                    self.async_queue_capacity,
+                )
+                # Block until space is available
+                self.async_queue.put((token_ids, lookup_id), block=True)
+
+    def _async_worker(self) -> None:
+        """Background worker that processes statistics asynchronously."""
+        logger.info("Async statistics worker started")
+
+        if self.async_queue is None:
+            return
+
+        while not self.async_shutdown:
+            try:
+                # Get item from queue with timeout
+                item = self.async_queue.get(timeout=0.1)
+
+                # Check for sentinel value (shutdown signal)
+                if item is None:
+                    break
+
+                token_ids, lookup_id = item
+
+                # Process the statistics
+                self._process_statistics(token_ids, lookup_id)
+
+                self.async_queue.task_done()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error("Error in async statistics worker: %s", e, exc_info=True)
+
+        # Process remaining items in queue before shutdown
+        while not self.async_queue.empty():
+            try:
+                item = self.async_queue.get_nowait()
+                if item is not None:
+                    token_ids, lookup_id = item
+                    self._process_statistics(token_ids, lookup_id)
+                self.async_queue.task_done()
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.error("Error processing remaining items: %s", e)
+
+        logger.info("Async statistics worker stopped")
+
+    def _process_statistics(
+        self,
+        token_ids: list[int],
+        lookup_id: str,
+    ) -> None:
+        """Process statistics for a lookup operation (called by async worker)."""
+        # Calculate all hashes and bloom filter positions
         token_count = len(token_ids)
         num_chunks = (token_count + self.chunk_size - 1) // self.chunk_size
         chunk_bloom_positions = []
@@ -236,7 +410,6 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             chunk_bloom_positions.append(positions)
 
         # Now acquire lock and update bloom filter and statistics
-        # Optimize: batch check and add to minimize lock operations
         unique_chunks_in_request = 0
         with self.lock:
             bit_array = self.global_bloom.bit_array
@@ -263,8 +436,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             self.total_chunks += num_chunks
             self.unique_chunks_count += unique_chunks_in_request
 
-        # Update observability metrics outside lock (skip for performance)
-        # Only update every N requests to reduce overhead
+        # Update observability metrics (skip for performance)
         if num_chunks > 100 or unique_chunks_in_request > 50:
             self._update_observability_metrics()
 
@@ -274,6 +446,26 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             num_chunks,
             unique_chunks_in_request,
         )
+
+    def _record_statistics(
+        self,
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+    ) -> None:
+        """Record statistics for a lookup operation (synchronous version)."""
+        # Quick check for preempted request (with lock)
+        with self.lock:
+            if lookup_id in self.request_seen:
+                logger.debug("Skipping statistics for preempted request: %s", lookup_id)
+                return
+            self.request_seen.add(lookup_id)
+
+        # Convert token_ids to list if needed
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+
+        # Process statistics synchronously
+        self._process_statistics(token_ids, lookup_id)
 
     def _update_observability_metrics(self) -> None:
         """Update observability metrics with current statistics."""
@@ -307,6 +499,9 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         return self.actual_lookup_client.supports_producer_reuse()
 
     def close(self) -> None:
+        # Stop statistics and wait for async worker to finish
+        if self.enabled:
+            self.stop_statistics()
         self.actual_lookup_client.close()
 
     def _check_exit_conditions(self) -> None:
