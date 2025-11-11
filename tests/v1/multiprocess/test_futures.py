@@ -306,32 +306,110 @@ def test_cuda_messaging_future_wait_no_timeout():
     not torch.cuda.is_available(),
     reason="CUDA is required for CUDAMessagingFuture tests",
 )
-def test_cuda_messaging_future_wait_rejects_timeout():
-    """Test that wait method raises ValueError when timeout is provided."""
+def test_cuda_messaging_future_wait_with_timeout_success():
+    """Test that wait method works correctly with timeout when result is available."""
+    torch.cuda.init()
+
+    # Create CUDA event in a separate process
+    ctx = mp.get_context("spawn")
+    event_queue = ctx.Queue()
+    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process.start()
+
+    # Get event bytes from the process
+    event_bytes = event_queue.get(timeout=5)
+    process.join(timeout=2)
+
     raw_future = MessagingFuture[tuple[bytes, int]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
 
-    # Try to wait with timeout (should raise ValueError)
-    with pytest.raises(
-        ValueError, match="CUDAMessagingFuture.wait does not support timeout"
-    ):
-        cuda_future.wait(timeout=1.0)
+    def set_future_result():
+        time.sleep(0.3)
+        raw_future.set_result((event_bytes, 123))
+
+    thread = threading.Thread(target=set_future_result)
+    thread.start()
+
+    # Wait with timeout should return True when result is available
+    success = cuda_future.wait(timeout=2.0)
+    assert success, "Wait with timeout should return True when result is available"
+    assert cuda_future.result() == 123, "Result should be accessible after wait"
+
+    thread.join()
 
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="CUDA is required for CUDAMessagingFuture tests",
 )
-def test_cuda_messaging_future_result_rejects_timeout():
-    """Test that result method raises ValueError when timeout is provided."""
+def test_cuda_messaging_future_wait_timeout_reached():
+    """Test that wait method returns False when timeout is reached."""
+    torch.cuda.init()
+
     raw_future = MessagingFuture[tuple[bytes, int]]()
     cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
 
-    # Try to get result with timeout (should raise ValueError)
+    # Wait with short timeout (result never set)
+    start_time = time.time()
+    success = cuda_future.wait(timeout=0.2)
+    elapsed = time.time() - start_time
+
+    assert not success, "Wait should return False on timeout"
+    assert not cuda_future.query(), "Future should not be done after timeout"
+    assert 0.15 < elapsed < 0.4, f"Wait should respect timeout, elapsed: {elapsed}"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for CUDAMessagingFuture tests",
+)
+def test_cuda_messaging_future_result_with_timeout_success():
+    """Test that result method works correctly with timeout when result is available."""
+    torch.cuda.init()
+
+    # Create CUDA event in a separate process
+    ctx = mp.get_context("spawn")
+    event_queue = ctx.Queue()
+    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process.start()
+
+    # Get event bytes from the process
+    event_bytes = event_queue.get(timeout=5)
+    process.join(timeout=2)
+
+    raw_future = MessagingFuture[tuple[bytes, int]]()
+    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+
+    def set_future_result():
+        time.sleep(0.3)
+        raw_future.set_result((event_bytes, 456))
+
+    thread = threading.Thread(target=set_future_result)
+    thread.start()
+
+    # Get result with timeout should succeed when result is available
+    result = cuda_future.result(timeout=2.0)
+    assert result == 456, f"Expected result 456, got {result}"
+
+    thread.join()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for CUDAMessagingFuture tests",
+)
+def test_cuda_messaging_future_result_timeout_reached():
+    """Test that result method raises TimeoutError when timeout is reached."""
+    torch.cuda.init()
+
+    raw_future = MessagingFuture[tuple[bytes, int]]()
+    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+
+    # Try to get result with timeout (result never set)
     with pytest.raises(
-        ValueError, match="CUDAMessagingFuture.result does not support timeout"
+        TimeoutError, match="CUDAMessagingFuture result not available within timeout"
     ):
-        cuda_future.result(timeout=1.0)
+        cuda_future.result(timeout=0.2)
 
 
 @pytest.mark.skipif(

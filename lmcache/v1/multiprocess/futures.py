@@ -110,8 +110,10 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         Wait for the future to be done, with the CUDA stream.
 
         Args:
-            timeout (Optional[float]): Maximum time to wait in seconds.
-                This argument is not supported and must be None.
+            timeout (Optional[float]): Maximum time to wait for the UNDERLYING
+                RAW FUTURE in seconds. The exact timeout is not guaranteed
+                when waiting on the CUDA event. (NOTE: this could be improved
+                with careful threading management)
 
         Returns:
             bool: True if the future is done, False if the timeout was reached.
@@ -122,15 +124,13 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         Notes:
             This function does not support waiting for a specific time.
         """
-        if timeout is not None:
-            raise ValueError("CUDAMessagingFuture.wait does not support timeout")
-
         if self.event_:
             self.event_.synchronize()
             return True
 
-        flag = self.raw_future_.wait()
-        assert flag, "CUDAMessagingFuture.wait: underlying future failed to complete"
+        flag = self.raw_future_.wait(timeout)
+        if not flag:
+            return False
 
         self._on_raw_future_complete()
 
@@ -144,19 +144,23 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         Get the result of the future.
 
         Args:
-            timeout (Optional[float]): Maximum time to wait in seconds.
-                This argument is not supported and must be None.
+            timeout (Optional[float]): Maximum time to wait for the UNDERLYING
+                RAW FUTURE in seconds. The exact timeout is not guaranteed
+                when waiting on the CUDA event. (NOTE: this could be improved
+                with careful threading management)
 
         Returns:
             T: The result of the future.
 
         Raises:
-            ValueError: if the timeout is not None.
+            TimeoutError: If the future is not done within the timeout.
         """
-        if timeout is not None:
-            raise ValueError("CUDAMessagingFuture.result does not support timeout")
+        flag = self.wait(timeout)
+        if not flag:
+            raise TimeoutError(
+                "CUDAMessagingFuture result not available within timeout"
+            )
 
-        self.wait()
         assert self.result_ is not None
         return self.result_
 
