@@ -3,7 +3,8 @@ LMCache Controller
 
 Overview
 --------
-The overall architecture of the LMCache Controller is shown in the figure, mainly consisting of two parts: the Controller and LMCache Worker.
+The overall architecture of the LMCache Controller is shown in the figure,
+mainly consisting of two parts: the Controller and LMCache Worker.
 
 The Controller mainly consists of KV Controller, Reg Controller, and Cluster Executor.
 
@@ -37,7 +38,7 @@ Currently, the controller provides the following APIs:
 
 2. Interacts with the LMCache worker.
 
-Currently, The LMCache worker supports the following functions:
+Currently, the LMCache worker supports the following functions:
 
 - register with the controller
 - deregister from the controller
@@ -83,7 +84,7 @@ Expected output:
     lmcache_instance_id: "lmcache_instance_id"
 
     controller_pull_url: ip:pull_port
-    # if controller reply port is None, not need to configure reply url
+    # if controller reply port is None, no need to configure reply url
     controller_reply_url: ip:reply_port
     # the number of ports for LMCache Worker, must equal to the number of ranks
     lmcache_worker_ports: [1, 2, 3]

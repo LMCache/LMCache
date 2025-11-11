@@ -7,7 +7,7 @@ The ``query_worker_info`` interface is defined as the following:
 
 .. code-block:: python
 
-    pin(instance_id: str, worker_ids: List[int]) -> event_id: str, worker_infos: List[WorkerInfo]
+    query_worker_info(instance_id: str, worker_ids: List[int]) -> event_id: str, worker_infos: List[WorkerInfo]
 
 The function get the info of the workers which specified by ``instance_id`` and ``worker_ids``.
 The controller returns an ``event_id`` and the worker infos.
@@ -26,7 +26,7 @@ First, create a yaml file ``example.yaml`` to configure the lmcache instance:
     # cache controller configurations
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
-    controller_url: "localhost:9001"
+    controller_pull_url: "localhost:9001"
     lmcache_worker_ports: 8001
 
     # Peer identifiers
@@ -62,7 +62,7 @@ The controller responds with a message similar to:
 
 .. code-block:: text
 
-    {"event_id": "xxx", "worker_infos": [{"instance_id": "lmcache_default_instance", "worker_id": 0, "ip": 127.0.0.1, "port": 8001, "distributed_url": "127.0.0.1:8200", "registration_time": 123456, "last_heartbeat_time": 456789}]}
+    {"event_id": "xxx", "worker_infos": [{"instance_id": "lmcache_default_instance", "worker_id": 0, "ip": "127.0.0.1", "port": 8001, "distributed_url": "127.0.0.1:8200", "registration_time": 123456, "last_heartbeat_time": 456789}]}
 
-``worker_infos`` is the queried worker infos. The
+``worker_infos`` contains the queried worker information.
 returned ``event_id`` can be used to query the status of the operation.
