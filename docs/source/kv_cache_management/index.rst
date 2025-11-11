@@ -4,21 +4,30 @@ LMCache Controller
 Overview
 --------
 The overall architecture of the LMCache Controller is shown in the figure,
-mainly consisting of two parts: the Controller and LMCache Worker.
+mainly consisting of two parts: the Controller Manager and LMCache Worker.
 
-The Controller mainly consists of KV Controller, Reg Controller, and Cluster Executor.
+The Controller Manager mainly consists of KV Controller, Reg Controller, and Cluster Executor.
 
 - KV Controller: The KV Controller handles the chunk information reported by LMCache Workers, and lookup requests query chunk information from the KV Controller.
-- Reg Controller: The Reg Controller is responsible for handling registration/deregistration requests from LMCache Workers.
-- Cluster Executor: When the Controller receives user requests, such as Clear or Move, it sends the corresponding commands to LMCache Workers through the Cluster Executor.
+- Reg Controller: The Reg Controller is responsible for handling register/deregister/heartbeat requests from LMCache Workers.
+- Cluster Executor: When the Controller Manager receives user requests, such as Clear or Move, it sends the corresponding commands to LMCache Workers through the Cluster Executor.
 
-The LMCache Worker is a thread within a rank, which is responsible for the following tasks:
+The LMCache Worker is a thread within a rank process, which is responsible for the following tasks:
 
-- sends registration, heartbeat, and chunk information to the Controller.
+- sends register, deregister, heartbeat to the Reg Controller.
+- send chunk information to the KV Controller, which include admit and evict message.
 - listens on a port to receive commands from the Cluster Executor and performs corresponding processing.
 
 .. image:: ../../assets/lmcache-controller.png
     :alt: LMCache Controller Architecture Diagram
+
+P2P Related
+^^^^^^^^^^^
+
+If ``enable_p2p`` is enabled, the LMCache Controller must also be enabled. The LMCache Controller serves as the central node
+and stores information for each chunk. The ``P2PBackend`` queries chunk information from the LMCache Controller and performs
+data transmission through NIXL.
+
 
 Key Features
 ------------
@@ -42,8 +51,9 @@ Currently, the LMCache worker supports the following functions:
 
 - register with the controller
 - deregister from the controller
-- report chunk information(Local cpu backend)
 - heartbeat
+- admit or evict chunk information(LocalCPUBackend or LocalDiskBackend)
+
 
 Quick Start
 -----------
@@ -73,8 +83,8 @@ Expected output:
 
 - --host: default is 0.0.0.0
 - --port: default is 9000, the externally exposed port through which interfaces like lookup can be accessed via this port.
-- --monitor-port: default is 9001,  the port through which LMCache Worker communicates with LMCache Controller (deprecated, indicates the pull port in --monitor-ports, reply port is None).
-- --monitor-ports: default is None, if configured, requires a JSON format string input such as {"pull": 8300, "reply": 8400}.
+- --monitor-port: default is 9001,  the port through which LMCache Worker communicates with Controller Manager (deprecated, indicates the pull port in --monitor-ports, reply port is None).
+- --monitor-ports: default is None, if configured, requires a JSON format string input such as ``{"pull": 8300, "reply": 8400}``.
 
 **YAML Configuration**
 
