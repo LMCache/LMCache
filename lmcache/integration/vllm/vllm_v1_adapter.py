@@ -756,42 +756,23 @@ class LMCacheConnectorV1Impl:
             )
             return
 
-        # Set up metrics for scheduler-specific data structures
-        if hasattr(self, "_unfinished_requests"):
-            prometheus_logger.scheduler_unfinished_requests_count.set_function(
-                lambda: len(self._unfinished_requests)
-            )
+        # Set up metrics for scheduler-specific and general data structures
+        metrics_map = {
+            "_unfinished_requests": "scheduler_unfinished_requests_count",
+            "load_specs": "connector_load_specs_count",
+            "_request_trackers": "connector_request_trackers_count",
+            "kv_caches": "connector_kv_caches_count",
+            "layerwise_retrievers": "connector_layerwise_retrievers_count",
+            "_invalid_block_ids": "connector_invalid_block_ids_count",
+            "_requests_priority": "connector_requests_priority_count",
+        }
 
-        # Set up metrics for general data structures
-        if hasattr(self, "load_specs"):
-            prometheus_logger.connector_load_specs_count.set_function(
-                lambda: len(self.load_specs)
-            )
-
-        if hasattr(self, "_request_trackers"):
-            prometheus_logger.connector_request_trackers_count.set_function(
-                lambda: len(self._request_trackers)
-            )
-
-        if hasattr(self, "kv_caches"):
-            prometheus_logger.connector_kv_caches_count.set_function(
-                lambda: len(self.kv_caches)
-            )
-
-        if hasattr(self, "layerwise_retrievers"):
-            prometheus_logger.connector_layerwise_retrievers_count.set_function(
-                lambda: len(self.layerwise_retrievers)
-            )
-
-        if hasattr(self, "_invalid_block_ids"):
-            prometheus_logger.connector_invalid_block_ids_count.set_function(
-                lambda: len(self._invalid_block_ids)
-            )
-
-        if hasattr(self, "_requests_priority"):
-            prometheus_logger.connector_requests_priority_count.set_function(
-                lambda: len(self._requests_priority)
-            )
+        for attr_name, metric_name in metrics_map.items():
+            if hasattr(self, attr_name):
+                metric = getattr(prometheus_logger, metric_name)
+                # Use a default argument in the lambda to capture the current value of `attr_name`
+                # to avoid issues with late binding in closures.
+                metric.set_function(lambda name=attr_name: len(getattr(self, name)))
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
