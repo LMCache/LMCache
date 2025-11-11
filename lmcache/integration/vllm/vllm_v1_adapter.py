@@ -60,6 +60,9 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
+from lmcache.v1.hpu_connector import (
+    VLLMPagedMemHPUConnectorV2,
+)
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
@@ -470,6 +473,7 @@ def _init_lmcache_engine(
     :return: The initialized LMCache engine
     :rtype: LMCacheEngine
     """
+
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
 
@@ -554,15 +558,26 @@ def _init_lmcache_engine(
             )
         tpg = get_tp_group()
     else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
+        if torch.hpu.is_available():
+            vllm_gpu_connector = VLLMPagedMemHPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
+        else:
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+                use_mla=use_mla,
+            )
         tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
@@ -1071,7 +1086,6 @@ class LMCacheConnectorV1Impl:
             **kwargs: additional arguments for the save operation.
         """
         assert self.lmcache_engine is not None
-
         if not self.use_layerwise:
             return
 
@@ -1157,7 +1171,6 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
-
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
@@ -1199,7 +1212,7 @@ class LMCacheConnectorV1Impl:
             slot_mapping = slot_mapping.cuda()
 
             skip_leading_tokens = save_spec.skip_leading_tokens
-            if self.kv_role == "kv_producer":
+            if self.kv_role == "kv_producer" and request.disagg_spec is not None:
                 skip_leading_tokens = min(
                     skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )

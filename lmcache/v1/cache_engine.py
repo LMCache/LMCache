@@ -404,7 +404,6 @@ class LMCacheEngine:
                     SGLangLayerwiseGPUConnector,
                 ),
             )
-
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
                 memory_objs, starts, ends, **kwargs
             )
