@@ -103,6 +103,7 @@ def store_handler(
     )
     # Return success
     return True
+    # return b"\x01" * 64, True
 
 
 # ==============================================================================
@@ -135,6 +136,7 @@ def retrieve_handler(
         f"Expected event_handler to be bytes, got {type(event_handler)}"
     )
     # Return success
+    # return b'\x01'*64, [True for _ in keys]
     return [True for _ in keys]
 
 

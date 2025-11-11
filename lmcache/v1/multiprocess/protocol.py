@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, get_args, get_origin
 import enum
 
 # First Party
@@ -75,6 +75,21 @@ class ProtocolDefinition:
     payload_classes: list[Any]
     response_class: Optional[Any]
     handler_type: HandlerType
+    return_cuda_event: bool = False
+    """ Whether the response includes a CUDA event handle """
+
+    def __post_init__(self):
+        # If return_cuda_event is True, response_class must be
+        # tuple[bytes, Any]
+        if self.return_cuda_event:
+            err_msg = (
+                "If return_cuda_event is True, response_class must "
+                + "be a tuple[bytes, actual_response_class]"
+            )
+            assert get_origin(self.response_class) is tuple, err_msg
+            arg_types = get_args(self.response_class)
+            assert len(arg_types) > 0, err_msg
+            assert get_args(self.response_class)[0] is bytes, err_msg
 
 
 def get_payload_classes(req_type: RequestType) -> list[Any]:
@@ -123,7 +138,7 @@ _PROTOCOL_DEFINTIONS = {
     # - instance_id: int
     # - gpu_block_ids: list[int]
     # - event_ipc_handle: bytes
-    # Returns: bool (success)
+    # Returns: cuda event handle, bool (success)
     RequestType.STORE: ProtocolDefinition(
         payload_classes=[list[KeyType], int, list[int], bytes],
         response_class=bool,
@@ -134,7 +149,7 @@ _PROTOCOL_DEFINTIONS = {
     # - instance_id: int
     # - gpu_block_ids: list[int]
     # - event_ipc_handle: bytes
-    # Returns: list[bool]
+    # Returns: cuda event handle, list[bool]
     # NOTE: no layerwise support for now
     RequestType.RETRIEVE: ProtocolDefinition(
         payload_classes=[list[KeyType], int, list[int], bytes],
