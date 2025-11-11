@@ -506,7 +506,7 @@ class S3Connector(RemoteConnector):
             fut = asyncio.wrap_future(s3_req.finished_future)
             _end = time.perf_counter_ns()
             _duration_ms = (_end - _start)
-            logger.info("%s TCP (Batched)GET completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, key_str, obj_size)
+            logger.info("%s TCP GET completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, key_str, obj_size)
 
             fut.add_done_callback(
                 partial(self.on_get_done, obj_size, memory_obj, shm, recv_path)

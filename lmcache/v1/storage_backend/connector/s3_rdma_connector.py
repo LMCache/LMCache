@@ -7,7 +7,6 @@ from typing import Dict, List, Optional
 # Standard library imports
 import asyncio
 import ctypes
-import ctypes.util
 import os
 import time
 
@@ -18,7 +17,7 @@ import torch
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
-    TensorMemoryObj,
+    TensorMemoryObj
 )
 
 # CRITICAL: Must load HPE's cuFile library BEFORE any code imports hpe_object
@@ -72,6 +71,7 @@ try:
         BufferPutObject,
         ClientConfig,
         S3RdmaClient,
+        AlignedBuffer
     )
     _HPE_OBJECT_AVAILABLE = True
 except ImportError as e:
@@ -150,6 +150,9 @@ class S3RdmaConnector(RemoteConnector):
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
+        logger.info("%s CUDA device being configured: %s",
+                     LOG_PREFIX, self.local_cpu_backend.dst_device)
+
         self._client: Optional[S3RdmaClient] = None
         # self._client_lock = threading.Lock()
         self._boto_client = None
@@ -166,13 +169,11 @@ class S3RdmaConnector(RemoteConnector):
         logger.debug("%s post_init ENTER", LOG_PREFIX)
         super().post_init()
 
-        logger.info(
-            "Initializing S3 RDMA client (endpoint=%s, bucket=%s, prefix=%s, parallelism=%d)",
-            self.settings.endpoint,
-            self.settings.bucket,
-            self._prefixed_bucket_path or "(none)",
-            self._effective_parallelism,
-        )
+        logger.info("%s Initializing S3 RDMA client (endpoint=%s, bucket=%s, "
+                    "prefix=%s, parallelism=%d)",
+                    LOG_PREFIX, self.settings.endpoint, self.settings.bucket,
+                    self._prefixed_bucket_path or "(none)",
+                    self._effective_parallelism,)
 
         client_config = ClientConfig(
             endpoint=self.settings.endpoint,
@@ -241,7 +242,8 @@ class S3RdmaConnector(RemoteConnector):
         """Check if key exists in S3."""
         # logger.debug("%s exists ENTER: key=%s", LOG_PREFIX, key)
         s3_key = self._make_s3_key(key)
-        size = await self.loop.run_in_executor(None, self._get_object_size_sync, s3_key)
+        size = await self.loop.run_in_executor(
+            self._io_executor, self._get_object_size_sync, s3_key)
         result = size is not None
         # logger.debug("%s exists EXIT: result=%s", LOG_PREFIX, result)
         return result
@@ -256,71 +258,57 @@ class S3RdmaConnector(RemoteConnector):
 
     def _get_object_sync(self, s3_key: str, memory_obj: MemoryObj) -> bool:
         """Synchronous RDMA GET operation."""
-        # logger.debug("%s _get_object_sync ENTER: s3_key=%s", LOG_PREFIX, s3_key)
 
         try:
-            # logger.debug("%s Begin RDMA GET to GPU memory: %s", LOG_PREFIX, s3_key)
-            # Get the underlying storage
-            storage = memory_obj.tensor.untyped_storage()
+            # Get data using RDMA into CPU-aligned buffer
+            buffer = AlignedBuffer(memory_obj.get_size(), 4096)
+            mv = memoryview(buffer)
 
-            # Create a ctypes pointer to the storage's data
-            # This allows the HPE RDMA client to write directly to GPU memory
-            storage_ptr = storage.data_ptr()
-            storage_size = storage.nbytes()
-
-            # Create buffer from the storage using ctypes
-            buffer = (ctypes.c_ubyte * storage_size).from_address(storage_ptr)
-
-            # logger.debug("RDMA GET: bucket=%s, key=%s, size=%s", self.settings.bucket, s3_key, storage_size)
-
-            # with self._client_lock:
-            #     self._client.get_object_buffers(
-            #         BufferGetObject(
-            #             bucket=self.settings.bucket,
-            #             key=s3_key,
-            #             buffer=memoryview(buffer)
-            #             )
-            #     )
             _start = time.perf_counter_ns()
             self._client.get_object_buffers(
                 BufferGetObject(
                     bucket=self.settings.bucket,
                     key=s3_key,
-                    buffer=memoryview(buffer)
-                    )
+                    buffer=mv
+                )
             )
             _end = time.perf_counter_ns()
-            _duration_ms = (_end - _start)
-            logger.info("%s RDMA GET completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, s3_key, storage_size)
+            _duration_ms = _end - _start
+            logger.info(
+                "%s RDMA GET completed in %.6f ms: %s. Transfer size: %s",
+                LOG_PREFIX, _duration_ms / 1_000_000, s3_key,
+                memory_obj.get_size())
 
-            # logger.debug("%s End RDMA GET to GPU memory: %s", LOG_PREFIX, s3_key)
-            # logger.debug("%s RDMA transfer complete - data is in GPU memory", LOG_PREFIX)
+            # Copy from CPU buffer to GPU tensor
+            # logger.info(
+            #     "%s Copying from AlignedBuffer to GPU memory for %s",
+            #     LOG_PREFIX, s3_key)
 
-            # The data is now in the GPU tensor's storage
-            # The RemoteBackend will handle deserialization based on the format
-            # logger.debug(
-            #     "%s MemoryObj ready for deserialization: fmt=%s, size=%s",
-            #     LOG_PREFIX, memory_obj.metadata.fmt, memory_obj.metadata.phy_size
-            # )
+            # Create CPU tensor from buffer
+            buffer_bytes = bytes(mv)
+            cpu_buffer_tensor = torch.frombuffer(buffer_bytes, dtype=torch.uint8)
 
-            # logger.debug("%s _get_object_sync EXIT: success=True", LOG_PREFIX)
+            # Copy to GPU tensor storage
+            storage = memory_obj.tensor.untyped_storage()
+            flat_gpu_view = torch.as_tensor(
+                storage, dtype=torch.uint8, device=memory_obj.tensor.device
+            )[:memory_obj.get_size()]
+            flat_gpu_view.copy_(cpu_buffer_tensor)
+
+            # logger.info("%s Copy complete for %s", LOG_PREFIX, s3_key)
             return True
 
         except RuntimeError as e:
-            # hpe_object raises RuntimeError for various errors
             error_str = str(e).lower()
             if "not found" in error_str or "404" in error_str or "nosuchkey" in error_str:
                 logger.debug("Object not found: %s", s3_key)
-                logger.debug("%s _get_object_sync EXIT: success=False (not found)", LOG_PREFIX)
                 return False
             else:
                 logger.error("RDMA GET error for %s: %s", s3_key, e)
-                logger.debug("%s _get_object_sync EXIT: error (RuntimeError)", LOG_PREFIX)
                 raise
 
         except Exception as e:
             logger.error("Unexpected error during RDMA GET %s: %s", s3_key, e)
-            logger.debug("%s _get_object_sync EXIT: error (Exception)", LOG_PREFIX)
             raise
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -329,7 +317,8 @@ class S3RdmaConnector(RemoteConnector):
         # logger.debug("%s get ENTER: key=%s", LOG_PREFIX, s3_key)
 
         try:
-            size = await self.loop.run_in_executor(None, self._get_object_size_sync, s3_key)
+            size = await self.loop.run_in_executor(
+                self._io_executor, self._get_object_size_sync, s3_key)
             if size is None:
                 # logger.debug("%s get EXIT: result=None (not found): %s", LOG_PREFIX, s3_key)
                 return None
@@ -404,7 +393,7 @@ class S3RdmaConnector(RemoteConnector):
             try:
                 async with self._inflight_sema:
                     success = await self.loop.run_in_executor(
-                        None, self._get_object_sync, s3_key, memory_obj
+                        self._io_executor, self._get_object_sync, s3_key, memory_obj
                     )
 
                 # logger.debug("%s get: RDMA completed, success=%s", LOG_PREFIX, success)
@@ -450,43 +439,57 @@ class S3RdmaConnector(RemoteConnector):
 
     def _put_object_sync(self, s3_key: str, memory_obj: MemoryObj) -> None:
         """Synchronous RDMA PUT operation."""
-        # logger.debug("%s _put_object_sync ENTER: s3_key=%s", LOG_PREFIX, s3_key)
         try:
-            buffer_view = memory_obj.byte_array
-            # logger.debug("RDMA PUT: bucket=%s, key=%s, size=%s", self.settings.bucket, s3_key, len(buffer_view))
+            # Copy GPU memory to CPU AlignedBuffer for RDMA transfer
+            # logger.info(
+            #     "%s Copying from GPU memory to AlignedBuffer for %s",
+            #     LOG_PREFIX, s3_key)
 
-            # with self._client_lock:
-            #     self._client.put_object_buffers(
-            #         BufferPutObject(
-            #             bucket=self.settings.bucket,
-            #             key=s3_key,
-            #             buffer=buffer_view
-            #         )
-            #     )
+            # Create CPU-aligned buffer for RDMA
+            buffer = AlignedBuffer(memory_obj.get_size(), 4096)
+            buffer_mv = memoryview(buffer)
+
+            # Create a flat view of the GPU tensor as uint8
+            storage = memory_obj.tensor.untyped_storage()
+            flat_gpu_view = torch.as_tensor(
+                storage, dtype=torch.uint8, device=memory_obj.tensor.device
+            )[:memory_obj.get_size()]
+
+            # Copy GPU tensor to CPU buffer
+            cpu_buffer_tensor = torch.empty(memory_obj.get_size(), dtype=torch.uint8, device='cpu')
+            cpu_buffer_tensor.copy_(flat_gpu_view)
+
+            # Copy CPU tensor to AlignedBuffer
+            buffer_bytes = cpu_buffer_tensor.numpy().tobytes()
+            buffer_mv[:len(buffer_bytes)] = buffer_bytes
+
+            # logger.info(
+            # "%s GPU to CPU copy complete, starting RDMA PUT for %s",
+            # LOG_PREFIX, s3_key)
+
             _start = time.perf_counter_ns()
             self._client.put_object_buffers(
                 BufferPutObject(
                     bucket=self.settings.bucket,
                     key=s3_key,
-                    buffer=buffer_view
+                    buffer=buffer_mv
                 )
             )
             _end = time.perf_counter_ns()
             _duration_ms = (_end - _start)
-            logger.info("%s RDMA PUT completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, s3_key, len(buffer_view))
+            logger.info(
+                "%s RDMA PUT completed in %.6f ms: %s. Transfer size: %s",
+                LOG_PREFIX, _duration_ms / 1_000_000, s3_key,
+                memory_obj.get_size())
 
             # Cache the size
-            self._object_size_cache[s3_key] = len(buffer_view)
-            # logger.debug("RDMA PUT completed: %s", s3_key)
-            # logger.debug("%s _put_object_sync EXIT: success", LOG_PREFIX)
+            self._object_size_cache[s3_key] = memory_obj.get_size()
 
         except RuntimeError as e:
             logger.error("RDMA PUT error for %s: %s", s3_key, e)
-            logger.debug("%s _put_object_sync EXIT: error (RuntimeError)", LOG_PREFIX)
             raise
         except Exception as e:
             logger.error("Unexpected error during RDMA PUT %s: %s", s3_key, e)
-            logger.debug("%s _put_object_sync EXIT: error (Exception)", LOG_PREFIX)
             raise
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
@@ -496,7 +499,7 @@ class S3RdmaConnector(RemoteConnector):
         s3_key = self._make_s3_key(key)
 
         async with self._inflight_sema:
-            await self.loop.run_in_executor(None, self._put_object_sync, s3_key, memory_obj)
+            await self.loop.run_in_executor(self._io_executor, self._put_object_sync, s3_key, memory_obj)
 
         # logger.debug("Stored %s bytes for %s", len(memory_obj.byte_array), key)
         # logger.debug("%s put EXIT: success", LOG_PREFIX)
