@@ -229,7 +229,7 @@ class MPCacheEngine:
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
-    ) -> bool:
+    ) -> tuple[bytes, bool]:
         st = time.perf_counter()
 
         assert instance_id in self.gpu_contexts, (
@@ -241,7 +241,7 @@ class MPCacheEngine:
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event()
+            event = torch.cuda.Event(interprocess=True)
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
             # Wait for vLLM to finish
@@ -285,27 +285,13 @@ class MPCacheEngine:
                 self.hot_buffer[key] = memory_obj
             event.record()
 
-            event.synchronize()
-
         ed = time.perf_counter()
-        total_size = (
-            len(slot_mapping_tensor)
-            * gpu_context.hidden_dim_size
-            * gpu_context.num_layers
-            * gpu_context.dtype.itemsize
-            * 2
-            if not gpu_context.is_mla
-            else 1
-        )
-        logger.info("Total size is: %s", total_size / 1e9)
-        throughput = total_size / (ed - st) / (1024 * 1024 * 1024)
         logger.info(
-            "Stored %d tokens in %.3f seconds (%.3f GB/s)",
+            "Stored %d tokens in %.3f seconds",
             len(slot_mapping_tensor),
             ed - st,
-            throughput,
         )
-        return True
+        return event.ipc_handle(), True
 
     @_lmcache_nvtx_annotate
     def retrieve(
@@ -314,7 +300,7 @@ class MPCacheEngine:
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
-    ) -> list[bool]:
+    ) -> tuple[bytes, list[bool]]:
         st = time.perf_counter()
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -333,7 +319,7 @@ class MPCacheEngine:
             # vllm_event.wait()
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
-            event = torch.cuda.Event()
+            event = torch.cuda.Event(interprocess=True)
 
             skip_remaining = False
             for idx, key in enumerate(keys):
@@ -372,29 +358,15 @@ class MPCacheEngine:
 
             event.record()
 
-            event.synchronize()
-
-        ed = time.perf_counter()
         tokens_retrieved = sum(results) * self.chunk_size
-        total_size = (
-            tokens_retrieved
-            * gpu_context.hidden_dim_size
-            * gpu_context.num_layers
-            * gpu_context.dtype.itemsize
-            * 2
-            if not gpu_context.is_mla
-            else 1
-        )
-        logger.info("Total size is: %s GB", total_size / 1e9)
-        throughput = total_size / (ed - st) / (1024 * 1024 * 1024)
+        ed = time.perf_counter()
         logger.info(
-            "Retrieved %d tokens in %.3f seconds (%.3f GB/s)",
+            "Retrieved %d tokens in %.3f seconds",
             tokens_retrieved,
             ed - st,
-            throughput,
         )
 
-        return results
+        return event.ipc_handle(), results
 
     def get_chunk_size(self) -> int:
         return self.chunk_size

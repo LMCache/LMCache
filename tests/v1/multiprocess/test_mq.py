@@ -429,7 +429,7 @@ def test_mq_store():
     helper.run_test(
         request_type=RequestType.STORE,
         payloads=[keys, gpu_id, gpu_block_ids, test_handle],
-        expected_response=True,
+        expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
 
@@ -461,7 +461,7 @@ def test_mq_retrieve():
     helper.run_test(
         request_type=RequestType.RETRIEVE,
         payloads=[keys, gpu_id, gpu_block_ids, test_handle],
-        expected_response=[True, True, True],
+        expected_response=(b"\x01" * 64, [True, True, True]),
         num_requests=1,
     )
 

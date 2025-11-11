@@ -29,6 +29,7 @@ SERVER_PORT = 5555
 SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
+DEFAULT_TIMEOUT = 2.0
 
 
 def initialize_kv_cache(
@@ -202,7 +203,7 @@ def registered_instance(
         [instance_id, client_context.get_kv_cache()],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
-    result = future.result()
+    result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
 
     yield instance_id
@@ -211,13 +212,13 @@ def registered_instance(
     try:
         client.submit_request(
             RequestType.CLEAR, [], get_response_class(RequestType.CLEAR)
-        ).result()
+        ).result(timeout=DEFAULT_TIMEOUT)
         future = client.submit_request(
             RequestType.UNREGISTER_KV_CACHE,
             [instance_id],
             get_response_class(RequestType.UNREGISTER_KV_CACHE),
         )
-        future.result()
+        future.result(timeout=DEFAULT_TIMEOUT)
     except Exception as e:
         print(f"Error during unregister: {e}")
 
@@ -252,7 +253,7 @@ def test_register_unregister_kv_cache(
         [instance_id, client_context.get_kv_cache()],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
-    result = future.result()
+    result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
     # Unregister
@@ -261,7 +262,7 @@ def test_register_unregister_kv_cache(
         [instance_id],
         get_response_class(RequestType.UNREGISTER_KV_CACHE),
     )
-    result = future.result()
+    result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
 
@@ -289,7 +290,7 @@ def test_store_and_lookup(
         [keys, registered_instance, gpu_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
-    store_result = store_future.result()
+    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
     assert store_result is True, "Store should succeed"
 
     # Lookup - keys that exist
@@ -298,7 +299,7 @@ def test_store_and_lookup(
         [keys, False],
         get_response_class(RequestType.LOOKUP),
     )
-    lookup_result = lookup_future.result()
+    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
     assert len(lookup_result) == num_keys
     assert all(lookup_result), "All stored keys should exist"
 
@@ -309,7 +310,7 @@ def test_store_and_lookup(
         [non_existent_keys, False],
         get_response_class(RequestType.LOOKUP),
     )
-    lookup_result2 = lookup_future2.result()
+    lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
     assert len(lookup_result2) == 5
     assert not any(lookup_result2), "Non-existent keys should not be found"
 
@@ -338,7 +339,7 @@ def test_store_retrieve_verify(
         [keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
-    store_result = store_future.result()
+    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
     assert store_result is True
 
     event = torch.cuda.Event(interprocess=True)
@@ -353,7 +354,7 @@ def test_store_retrieve_verify(
         [keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
-    retrieve_result = retrieve_future.result()
+    retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
 
     assert len(retrieve_result) == num_keys
     assert all(retrieve_result), "All keys should be retrieved successfully"
@@ -401,7 +402,7 @@ def test_retrieve_partial_miss(
         [stored_keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
-    assert store_future.result() is True
+    assert store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT) is True
 
     # Try to retrieve 60 keys (only first 30 exist)
     # Total pages needed: 60 * 16 = 960 (< 1024)
@@ -421,7 +422,7 @@ def test_retrieve_partial_miss(
         [all_keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
-    retrieve_result = retrieve_future.result()
+    retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
 
     assert len(retrieve_result) == num_requested
     # First 30 should succeed
@@ -472,11 +473,15 @@ def test_multiple_retrieve_operations(
         event = torch.cuda.Event(interprocess=True)
         event.record()
 
-        store_result = client.submit_request(
-            RequestType.STORE,
-            [keys, registered_instance, blocks, event.ipc_handle()],
-            get_response_class(RequestType.STORE),
-        ).result()
+        store_result = (
+            client.submit_request(
+                RequestType.STORE,
+                [keys, registered_instance, blocks, event.ipc_handle()],
+                get_response_class(RequestType.STORE),
+            )
+            .to_cuda_future()
+            .result(timeout=DEFAULT_TIMEOUT)
+        )
         assert store_result is True
 
     # Retrieve in batches
@@ -502,10 +507,10 @@ def test_multiple_retrieve_operations(
             [keys, registered_instance, blocks, event.ipc_handle()],
             get_response_class(RequestType.RETRIEVE),
         )
-        retrieve_futures.append(retrieve_future)
+        retrieve_futures.append(retrieve_future.to_cuda_future())
 
     for retrieve_future in retrieve_futures:
-        retrieve_result = retrieve_future.result()
+        retrieve_result = retrieve_future.result(timeout=DEFAULT_TIMEOUT)
         assert len(retrieve_result) == keys_per_batch
         assert all(retrieve_result), "All keys should be retrieved successfully"
 
@@ -541,11 +546,15 @@ def test_multiple_store_operations(
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
-    result1 = client.submit_request(
-        RequestType.STORE,
-        [keys1, registered_instance, blocks1, event.ipc_handle()],
-        get_response_class(RequestType.STORE),
-    ).result()
+    result1 = (
+        client.submit_request(
+            RequestType.STORE,
+            [keys1, registered_instance, blocks1, event.ipc_handle()],
+            get_response_class(RequestType.STORE),
+        )
+        .to_cuda_future()
+        .result(timeout=DEFAULT_TIMEOUT)
+    )
     assert result1 is True
 
     # Store batch 2
@@ -553,11 +562,15 @@ def test_multiple_store_operations(
     blocks2 = list(range(30 * 16, 50 * 16))
 
     # Test with the same event for 2 store requests
-    result2 = client.submit_request(
-        RequestType.STORE,
-        [keys2, registered_instance, blocks2, event.ipc_handle()],
-        get_response_class(RequestType.STORE),
-    ).result()
+    result2 = (
+        client.submit_request(
+            RequestType.STORE,
+            [keys2, registered_instance, blocks2, event.ipc_handle()],
+            get_response_class(RequestType.STORE),
+        )
+        .to_cuda_future()
+        .result(timeout=DEFAULT_TIMEOUT)
+    )
     assert result2 is True
 
     # Verify all keys exist
@@ -566,7 +579,7 @@ def test_multiple_store_operations(
         RequestType.LOOKUP,
         [all_keys, False],
         get_response_class(RequestType.LOOKUP),
-    ).result()
+    ).result(timeout=DEFAULT_TIMEOUT)
 
     assert len(lookup_result) == 50
     assert all(lookup_result), "All stored keys from both batches should exist"
@@ -585,6 +598,6 @@ def test_get_chunk_size(
         RequestType.GET_CHUNK_SIZE,
         [],
         get_response_class(RequestType.GET_CHUNK_SIZE),
-    ).result()
+    ).result(timeout=DEFAULT_TIMEOUT)
 
     assert chunk_size == CHUNK_SIZE, f"Chunk size should be {CHUNK_SIZE}"
