@@ -209,6 +209,9 @@ def registered_instance(
 
     # Unregister KV cache
     try:
+        client.submit_request(
+            RequestType.CLEAR, [], get_response_class(RequestType.CLEAR)
+        ).result()
         future = client.submit_request(
             RequestType.UNREGISTER_KV_CACHE,
             [instance_id],

@@ -45,7 +45,15 @@ class RequestType(enum.Enum):
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
 
-    # For configuration read commands
+    # Controller operations
+    CLEAR = enum.auto()
+    # REMOVE = enum.auto()
+    # PERSIST = enum.auto()
+    # UNPERSIST = enum.auto()
+    # MOVE = enum.auto()
+    # COMPRESS = enum.auto()
+
+    # For configuration read commands (vllm integration)
     GET_CHUNK_SIZE = enum.auto()
 
     # For debug, could be used as heartbeats
@@ -140,6 +148,13 @@ _PROTOCOL_DEFINTIONS = {
     RequestType.LOOKUP: ProtocolDefinition(
         payload_classes=[list[KeyType], Optional[bool]],
         response_class=list[bool],
+        handler_type=HandlerType.BLOCKING,
+    ),
+    # Clear (all caches)
+    # - Returns: None
+    RequestType.CLEAR: ProtocolDefinition(
+        payload_classes=[],
+        response_class=None,
         handler_type=HandlerType.BLOCKING,
     ),
     # Configuration read commands

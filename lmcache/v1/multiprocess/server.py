@@ -281,13 +281,11 @@ class MPCacheEngine:
                     gpu_context.is_mla,
                 )
 
-                # torch.cuda.synchronize()
                 memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
                 self.hot_buffer[key] = memory_obj
             event.record()
 
             event.synchronize()
-            torch.cuda.synchronize()
 
         ed = time.perf_counter()
         total_size = (
@@ -335,7 +333,6 @@ class MPCacheEngine:
             # vllm_event.wait()
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
-            torch.cuda.synchronize()
             event = torch.cuda.Event()
 
             skip_remaining = False
@@ -376,7 +373,6 @@ class MPCacheEngine:
             event.record()
 
             event.synchronize()
-            torch.cuda.synchronize()
 
         ed = time.perf_counter()
         tokens_retrieved = sum(results) * self.chunk_size
@@ -447,8 +443,8 @@ class MPCacheEngine:
 
         return "OK"
 
-    def clear(self) -> str:
-        self.debug()
+    def clear(self) -> None:
+        # self.debug()
         logger.info("Received clear request!")
         self.memory_allocator.memcheck()
         length = len(self.hot_buffer)
@@ -457,7 +453,6 @@ class MPCacheEngine:
         self.hot_buffer.clear()
         logger.info("Cleared %d cached items", length)
         self.memory_allocator.memcheck()
-        return "OK"
 
 
 def add_handler_helper(
@@ -497,8 +492,9 @@ def run_cache_server(
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
-    add_handler_helper(server, RequestType.NOOP, engine.clear)
+    add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
+    add_handler_helper(server, RequestType.NOOP, engine.debug)
 
     # Start the server
     torch.cuda.init()
