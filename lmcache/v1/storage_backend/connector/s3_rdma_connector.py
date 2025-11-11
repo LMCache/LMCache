@@ -9,6 +9,7 @@ import asyncio
 import ctypes
 import ctypes.util
 import os
+import time
 
 # Third Party
 import torch
@@ -280,6 +281,7 @@ class S3RdmaConnector(RemoteConnector):
             #             buffer=memoryview(buffer)
             #             )
             #     )
+            _start = time.perf_counter_ns()
             self._client.get_object_buffers(
                 BufferGetObject(
                     bucket=self.settings.bucket,
@@ -287,6 +289,9 @@ class S3RdmaConnector(RemoteConnector):
                     buffer=memoryview(buffer)
                     )
             )
+            _end = time.perf_counter_ns()
+            _duration_ms = (_end - _start)
+            logger.info("%s RDMA GET completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, s3_key, storage_size)
 
             # logger.debug("%s End RDMA GET to GPU memory: %s", LOG_PREFIX, s3_key)
             # logger.debug("%s RDMA transfer complete - data is in GPU memory", LOG_PREFIX)
@@ -334,6 +339,7 @@ class S3RdmaConnector(RemoteConnector):
             # Allocate GPU memory directly for RDMA transfer
             try:
                 gpu_device = self.local_cpu_backend.dst_device
+                #gpu_device = f"cuda:{torch.cuda.current_device()}"
                 gpu_tensor = torch.empty(size, dtype=torch.uint8, device=gpu_device)
                 # logger.debug(
                 #     "%s get: Allocated GPU tensor on device %s with size %s bytes for key=%s",
@@ -457,6 +463,7 @@ class S3RdmaConnector(RemoteConnector):
             #             buffer=buffer_view
             #         )
             #     )
+            _start = time.perf_counter_ns()
             self._client.put_object_buffers(
                 BufferPutObject(
                     bucket=self.settings.bucket,
@@ -464,6 +471,9 @@ class S3RdmaConnector(RemoteConnector):
                     buffer=buffer_view
                 )
             )
+            _end = time.perf_counter_ns()
+            _duration_ms = (_end - _start)
+            logger.info("%s RDMA PUT completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, s3_key, len(buffer_view))
 
             # Cache the size
             self._object_size_cache[s3_key] = len(buffer_view)

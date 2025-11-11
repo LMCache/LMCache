@@ -9,6 +9,7 @@ import ctypes
 import mmap
 import os
 import tempfile
+import time
 
 # Third Party
 from awscrt import auth, io, s3
@@ -24,6 +25,9 @@ from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
+
+# Unique prefix for easy log filtering
+LOG_PREFIX = "[S3-TCP]"
 
 
 class Priorities(IntEnum):
@@ -398,12 +402,18 @@ class S3Connector(RemoteConnector):
         # We probably need to get the shared memory offset directly from memory object.
         recv_path, shm = self.adhoc_shm_manager.allocate()
 
+        _start = time.perf_counter_ns()
+
         s3_req = self._s3_download(
             key_str=key_str,
             recv_path=recv_path,
         )
 
         await asyncio.wrap_future(s3_req.finished_future)
+
+        _end = time.perf_counter_ns()
+        _duration_ms = (_end - _start)
+        logger.info("%s TCP GET completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, key_str, obj_size)
 
         dst_ptr = memory_obj.data_ptr
         ctypes.memmove(dst_ptr, shm, obj_size)
@@ -487,11 +497,17 @@ class S3Connector(RemoteConnector):
 
             # freeing is done in on_get_done callback
             recv_path, shm = self.adhoc_shm_manager.allocate()
+
+            _start = time.perf_counter_ns()
             s3_req = self._s3_download(
                 key_str=key_str,
                 recv_path=recv_path,
             )
             fut = asyncio.wrap_future(s3_req.finished_future)
+            _end = time.perf_counter_ns()
+            _duration_ms = (_end - _start)
+            logger.info("%s TCP (Batched)GET completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, key_str, obj_size)
+
             fut.add_done_callback(
                 partial(self.on_get_done, obj_size, memory_obj, shm, recv_path)
             )
@@ -555,8 +571,12 @@ class S3Connector(RemoteConnector):
             ctypes.memmove(shm, buffer_ptr, memory_obj.get_physical_size())
             logger.debug("Data copy to S3 buffer completed")
 
+            _start = time.perf_counter_ns()
             s3_req = self._s3_upload(key_str, send_path)
             await asyncio.wrap_future(s3_req.finished_future)
+            _end = time.perf_counter_ns()
+            _duration_ms = (_end - _start)
+            logger.info("%s TCP PUT completed in %.6f ms: %s. Transfer size: %s", LOG_PREFIX, _duration_ms / 1_000_000, key_str, memory_obj.get_physical_size())
 
             self.object_size_cache[key_str] = memory_obj.get_physical_size()
             logger.debug(f"Uploaded {key_str} to S3 successfully")
