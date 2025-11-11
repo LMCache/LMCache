@@ -81,6 +81,16 @@ class LMCacheStats:
     interval_lookup_hit_rates: List[float]
     interval_lookup_0_hit_requests: int
 
+    # Chunk statistics metrics
+    chunk_statistics_enabled: bool
+    chunk_statistics_total_requests: int
+    chunk_statistics_total_chunks: int
+    chunk_statistics_unique_chunks: int
+    chunk_statistics_duplicate_chunks: int
+    chunk_statistics_reuse_rate: float
+    chunk_statistics_bloom_filter_size_mb: float
+    chunk_statistics_bloom_filter_fill_rate: float
+
 
 @dataclass
 class LookupRequestStats:
@@ -207,6 +217,16 @@ class LMCStatsMonitor:
         self.retrieve_request_id = 0
         self.store_request_id = 0
         self.lookup_request_id = 0
+
+        # Chunk statistics metrics
+        self.chunk_statistics_enabled = False
+        self.chunk_statistics_total_requests = 0
+        self.chunk_statistics_total_chunks = 0
+        self.chunk_statistics_unique_chunks = 0
+        self.chunk_statistics_duplicate_chunks = 0
+        self.chunk_statistics_reuse_rate = 0.0
+        self.chunk_statistics_bloom_filter_size_mb = 0.0
+        self.chunk_statistics_bloom_filter_fill_rate = 0.0
 
     @thread_safe
     def on_lookup_request(self, num_tokens: int) -> int:
@@ -384,6 +404,23 @@ class LMCStatsMonitor:
     def update_interval_prompt_tokens(self, delta: int):
         self.interval_prompt_tokens += delta
 
+    @thread_safe
+    def update_chunk_statistics(self, stats: dict):
+        """Update chunk statistics from ChunkStatisticsLookupClient."""
+        self.chunk_statistics_enabled = stats.get("enabled", False)
+        self.chunk_statistics_total_requests = stats.get("total_requests", 0)
+        self.chunk_statistics_total_chunks = stats.get("total_chunks", 0)
+        self.chunk_statistics_unique_chunks = stats.get("unique_chunks", 0)
+        self.chunk_statistics_duplicate_chunks = stats.get("duplicate_chunks", 0)
+        self.chunk_statistics_reuse_rate = stats.get("reuse_rate", 0.0)
+        bloom_filter_stats = stats.get("bloom_filter", {})
+        self.chunk_statistics_bloom_filter_size_mb = bloom_filter_stats.get(
+            "size_mb", 0.0
+        )
+        self.chunk_statistics_bloom_filter_fill_rate = bloom_filter_stats.get(
+            "fill_rate", 0.0
+        )
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -544,6 +581,14 @@ class LMCStatsMonitor:
             interval_lookup_hit_rates=request_lookup_hit_rates,
             interval_prompt_tokens=self.interval_prompt_tokens,
             interval_lookup_0_hit_requests=self.interval_lookup_0_hit_requests,
+            chunk_statistics_enabled=self.chunk_statistics_enabled,
+            chunk_statistics_total_requests=self.chunk_statistics_total_requests,
+            chunk_statistics_total_chunks=self.chunk_statistics_total_chunks,
+            chunk_statistics_unique_chunks=self.chunk_statistics_unique_chunks,
+            chunk_statistics_duplicate_chunks=self.chunk_statistics_duplicate_chunks,
+            chunk_statistics_reuse_rate=self.chunk_statistics_reuse_rate,
+            chunk_statistics_bloom_filter_size_mb=self.chunk_statistics_bloom_filter_size_mb,
+            chunk_statistics_bloom_filter_fill_rate=self.chunk_statistics_bloom_filter_fill_rate,
         )
         self._clear()
         return ret
@@ -1014,6 +1059,57 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
+
+        # Chunk statistics metrics
+        self.gauge_chunk_statistics_enabled = self._gauge_cls(
+            name="lmcache:chunk_statistics_enabled",
+            documentation="Whether chunk statistics collection is enabled",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_total_requests = self._gauge_cls(
+            name="lmcache:chunk_statistics_total_requests",
+            documentation="Total number of requests processed by chunk statistics",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_total_chunks = self._gauge_cls(
+            name="lmcache:chunk_statistics_total_chunks",
+            documentation="Total number of chunks processed",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_unique_chunks = self._gauge_cls(
+            name="lmcache:chunk_statistics_unique_chunks",
+            documentation="Number of unique chunks (estimated)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_duplicate_chunks = self._gauge_cls(
+            name="lmcache:chunk_statistics_duplicate_chunks",
+            documentation="Number of duplicate chunks (estimated)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_reuse_rate = self._gauge_cls(
+            name="lmcache:chunk_statistics_reuse_rate",
+            documentation="Chunk reuse rate (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_bloom_filter_size_mb = self._gauge_cls(
+            name="lmcache:chunk_statistics_bloom_filter_size_mb",
+            documentation="Bloom Filter memory usage in MB",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_bloom_filter_fill_rate = self._gauge_cls(
+            name="lmcache:chunk_statistics_bloom_filter_fill_rate",
+            documentation="Bloom Filter fill rate (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+
         self._dynamic_metrics(labelnames)
 
     def _dynamic_metrics(self, labelnames):
@@ -1195,6 +1291,40 @@ class PrometheusLogger:
         )
         self._log_gauge(
             self.gauge_pinned_memory_objs_count, stats.pinned_memory_objs_count
+        )
+
+        # Log chunk statistics metrics
+        self._log_gauge(
+            self.gauge_chunk_statistics_enabled,
+            1.0 if stats.chunk_statistics_enabled else 0.0,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_total_requests,
+            stats.chunk_statistics_total_requests,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_total_chunks,
+            stats.chunk_statistics_total_chunks,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_unique_chunks,
+            stats.chunk_statistics_unique_chunks,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_duplicate_chunks,
+            stats.chunk_statistics_duplicate_chunks,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_reuse_rate,
+            stats.chunk_statistics_reuse_rate,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_bloom_filter_size_mb,
+            stats.chunk_statistics_bloom_filter_size_mb,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_bloom_filter_fill_rate,
+            stats.chunk_statistics_bloom_filter_fill_rate,
         )
 
     @staticmethod

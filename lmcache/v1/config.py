@@ -455,6 +455,65 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "max_local_cpu_size exceeds this value. Default is 0.0 GB (always enabled)."
         ),
     },
+    # Chunk statistics configurations
+    "enable_chunk_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable chunk statistics tracking using Bloom Filter. "
+            "Tracks chunk reuse patterns with minimal memory overhead."
+        ),
+    },
+    "chunk_statistics_expected_chunks": {
+        "type": int,
+        "default": 10000000,
+        "env_converter": int,
+        "description": (
+            "Expected number of unique chunks for Bloom Filter sizing. "
+            "Larger values use more memory but maintain accuracy. "
+            "Default is 10M chunks."
+        ),
+    },
+    "chunk_statistics_false_positive_rate": {
+        "type": float,
+        "default": 0.01,
+        "env_converter": float,
+        "description": (
+            "False positive rate for Bloom Filter (0.0-1.0). "
+            "Lower values use more memory but provide higher accuracy. "
+            "Default is 0.01 (1%)."
+        ),
+    },
+    "chunk_statistics_auto_start_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Automatically start statistics collection on initialization. "
+            "When enabled, statistics collection begins without manual call to "
+            "start_statistics()."
+        ),
+    },
+    "chunk_statistics_auto_exit_timeout_hours": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+        "description": (
+            "Timeout in hours before automatic statistics stop. "
+            "Default is 0.0 (disabled). Set to positive value to enable "
+            "timeout-based auto stop."
+        ),
+    },
+    "chunk_statistics_auto_exit_target_unique_chunks": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": lambda x: int(x) if x is not None else None,
+        "description": (
+            "Target number of unique chunks before automatic exit. "
+            "When reached, the system will exit. Default is None (disabled)."
+        ),
+    },
 }
 
 
