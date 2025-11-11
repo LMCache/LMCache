@@ -534,6 +534,18 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "Default is 100000 chunks."
         ),
     },
+    "chunk_statistics_async_preprocess_chunks": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Pre-process chunks and compute hashes before queuing (async mode). "
+            "When True, reduces queue memory usage significantly but adds "
+            "hash computation overhead to main thread. "
+            "When False, queues raw token_ids for processing in background. "
+            "Default is True (recommended for most use cases)."
+        ),
+    },
 }
 
 

@@ -2,13 +2,16 @@
 
 # Standard
 from typing import Optional, Union
+import array
 import hashlib
 import queue
+import struct
 import threading
 import time
 
 # Third Party
 import torch
+import xxhash
 
 # First Party
 from lmcache.logging import init_logger
@@ -66,6 +69,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         # Async queue configuration
         self.async_enabled = config.chunk_statistics_async_enabled
         self.async_queue_capacity = config.chunk_statistics_async_queue_capacity
+        self.async_preprocess_chunks = config.chunk_statistics_async_preprocess_chunks
         self.async_queue: Optional[queue.Queue] = None
         self.async_worker_thread: Optional[threading.Thread] = None
         self.async_shutdown = False
@@ -95,7 +99,8 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             "auto_exit_timeout_hours=%f, "
             "auto_exit_target_unique_chunks=%s, "
             "async_enabled=%s, "
-            "async_queue_capacity=%d",
+            "async_queue_capacity=%d, "
+            "async_preprocess_chunks=%s",
             expected_chunks,
             false_positive_rate,
             auto_start_statistics,
@@ -103,6 +108,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             self.target_unique_chunks,
             self.async_enabled,
             self.async_queue_capacity,
+            self.async_preprocess_chunks,
         )
 
     def start_statistics(self) -> None:
@@ -318,7 +324,121 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
 
-        # Queue the request for async processing
+        # Choose queuing strategy based on configuration
+        if self.async_preprocess_chunks:
+            # Strategy 1: Pre-process chunks and compute hashes before queuing
+            # This reduces queue memory usage by chunk_size factor
+            self._queue_preprocessed_chunks(token_ids, lookup_id)
+        else:
+            # Strategy 2: Queue raw token_ids for processing in background
+            # This minimizes main thread overhead but uses more queue memory
+            self._queue_raw_tokens(token_ids, lookup_id)
+
+    def _queue_preprocessed_chunks(
+        self,
+        token_ids: list[int],
+        lookup_id: str,
+    ) -> None:
+        """Pre-process chunks and queue hash positions (memory efficient)."""
+        token_count = len(token_ids)
+        num_chunks = (token_count + self.chunk_size - 1) // self.chunk_size
+        chunk_data_list = []
+
+        # Hybrid hash optimization: try fastest method first
+        # Method 1: Python built-in hash (3.4x faster than sha256, minimal memory)
+        try:
+            prefix_hash = 0
+            # For small chunks, built-in hash is fastest and most memory efficient
+            if self.chunk_size <= 512:
+                for i in range(num_chunks):
+                    start_idx = i * self.chunk_size
+                    end_idx = min((i + 1) * self.chunk_size, token_count)
+                    chunk_slice = token_ids[start_idx:end_idx]
+
+                    # Use built-in hash for maximum speed
+                    chunk_hash = (
+                        hash((prefix_hash, tuple(chunk_slice))) & 0xFFFFFFFFFFFFFFFF
+                    )
+                    prefix_hash = chunk_hash
+                    positions = self.global_bloom._hashes(chunk_hash)
+                    chunk_data_list.append(positions)
+            else:
+                # Fall through to xxhash for large chunks
+                raise ImportError("Chunk too large for built-in hash optimization")
+
+        except (ImportError, TypeError):
+            # Method 2: xxhash for better performance
+            try:
+                prefix_hash_int = 0
+
+                for i in range(num_chunks):
+                    start_idx = i * self.chunk_size
+                    end_idx = min((i + 1) * self.chunk_size, token_count)
+                    chunk_slice = token_ids[start_idx:end_idx]
+
+                    # Use xxhash for faster hashing
+                    h = xxhash.xxh64()
+                    h.update(prefix_hash_int.to_bytes(8, "big", signed=False))
+
+                    # Use array.array for much faster byte conversion
+                    token_array = array.array("i", chunk_slice)
+                    h.update(token_array.tobytes())
+
+                    prefix_hash_int = h.intdigest()
+                    positions = self.global_bloom._hashes(prefix_hash_int)
+                    chunk_data_list.append(positions)
+
+            except ImportError:
+                # Method 3: Fallback to optimized sha256 implementation
+                prefix_hash_bytes = b""
+                # Pre-allocate format string for better performance
+                chunk_format = f">{self.chunk_size}i"
+
+                for i in range(num_chunks):
+                    start_idx = i * self.chunk_size
+                    end_idx = min((i + 1) * self.chunk_size, token_count)
+                    chunk_slice = token_ids[start_idx:end_idx]
+
+                    # Reuse hasher object when possible
+                    h = hashlib.sha256()
+                    h.update(prefix_hash_bytes)
+
+                    # Optimize struct.pack for full chunks
+                    if len(chunk_slice) == self.chunk_size:
+                        h.update(struct.pack(chunk_format, *chunk_slice))
+                    else:
+                        h.update(struct.pack(f">{len(chunk_slice)}i", *chunk_slice))
+
+                    digest = h.digest()
+                    prefix_hash_bytes = digest[:8]
+
+                    prefix_hash = int.from_bytes(prefix_hash_bytes, "big", signed=False)
+                    positions = self.global_bloom._hashes(prefix_hash)
+                    chunk_data_list.append(positions)
+
+        # Queue the pre-processed chunks for async processing
+        if self.async_queue is not None:
+            try:
+                self.async_queue.put(
+                    (chunk_data_list, lookup_id), block=True, timeout=10.0
+                )
+            except queue.Full:
+                with self.lock:
+                    self.queue_full_blocks += 1
+                logger.warning(
+                    "Async queue full (capacity=%d), blocking until space available",
+                    self.async_queue_capacity,
+                )
+                # Block until space is available
+                self.async_queue.put((chunk_data_list, lookup_id), block=True)
+
+    def _queue_raw_tokens(
+        self,
+        token_ids: list[int],
+        lookup_id: str,
+    ) -> None:
+        """Queue raw token_ids for background processing (min main thread overhead)."""
+        # Queue the raw token_ids for async processing
         if self.async_queue is not None:
             try:
                 self.async_queue.put((token_ids, lookup_id), block=True, timeout=10.0)
@@ -348,10 +468,15 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                 if item is None:
                     break
 
-                token_ids, lookup_id = item
-
-                # Process the statistics
-                self._process_statistics(token_ids, lookup_id)
+                # Determine data format based on configuration
+                if self.async_preprocess_chunks:
+                    # Pre-processed chunk data format: (chunk_data_list, lookup_id)
+                    chunk_data_list, lookup_id = item
+                    self._process_chunk_data(chunk_data_list, lookup_id)
+                else:
+                    # Raw token data format: (token_ids, lookup_id)
+                    token_ids, lookup_id = item
+                    self._process_statistics(token_ids, lookup_id)
 
                 self.async_queue.task_done()
 
@@ -365,8 +490,12 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             try:
                 item = self.async_queue.get_nowait()
                 if item is not None:
-                    token_ids, lookup_id = item
-                    self._process_statistics(token_ids, lookup_id)
+                    if self.async_preprocess_chunks:
+                        chunk_data_list, lookup_id = item
+                        self._process_chunk_data(chunk_data_list, lookup_id)
+                    else:
+                        token_ids, lookup_id = item
+                        self._process_statistics(token_ids, lookup_id)
                 self.async_queue.task_done()
             except queue.Empty:
                 break
@@ -374,6 +503,52 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                 logger.error("Error processing remaining items: %s", e)
 
         logger.info("Async statistics worker stopped")
+
+    def _process_chunk_data(
+        self,
+        chunk_data_list: list[list[int]],
+        lookup_id: str,
+    ) -> None:
+        """Process pre-computed chunk data (called by async worker)."""
+        num_chunks = len(chunk_data_list)
+
+        # Acquire lock and update bloom filter and statistics
+        unique_chunks_in_request = 0
+        with self.lock:
+            bit_array = self.global_bloom.bit_array
+            for positions in chunk_data_list:
+                # Inline contains check for better performance
+                is_new = False
+                for pos in positions:
+                    idx = pos >> 5
+                    bit = pos & 31
+                    if not (bit_array[idx] & (1 << bit)):
+                        is_new = True
+                        break
+
+                if is_new:
+                    # Add to bloom filter
+                    for pos in positions:
+                        idx = pos >> 5
+                        bit = pos & 31
+                        bit_array[idx] |= 1 << bit
+                    unique_chunks_in_request += 1
+
+            # Update item count
+            self.global_bloom.item_count += unique_chunks_in_request
+            self.total_chunks += num_chunks
+            self.unique_chunks_count += unique_chunks_in_request
+
+        # Update observability metrics (skip for performance)
+        if num_chunks > 100 or unique_chunks_in_request > 50:
+            self._update_observability_metrics()
+
+        logger.debug(
+            "Request %s: %d chunks, %d unique globally",
+            lookup_id,
+            num_chunks,
+            unique_chunks_in_request,
+        )
 
     def _process_statistics(
         self,
@@ -388,9 +563,6 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         prefix_hash_bytes = b""
 
         # Use struct for faster byte packing
-        # Standard
-        import struct
-
         for i in range(num_chunks):
             start_idx = i * self.chunk_size
             end_idx = min((i + 1) * self.chunk_size, token_count)
@@ -436,9 +608,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             self.total_chunks += num_chunks
             self.unique_chunks_count += unique_chunks_in_request
 
-        # Update observability metrics (skip for performance)
-        if num_chunks > 100 or unique_chunks_in_request > 50:
-            self._update_observability_metrics()
+        self._update_observability_metrics()
 
         logger.debug(
             "Request %s: %d chunks, %d unique globally",
