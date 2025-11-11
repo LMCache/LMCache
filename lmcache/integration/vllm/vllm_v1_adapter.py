@@ -23,10 +23,12 @@ from vllm.sampling_params import SamplingParams
 
 # First Party
 # Use LMCache's own math utilities instead of vllm's
-# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
+# (avoids dependency on vllm internal changes like
+# https://github.com/vllm-project/vllm/pull/27188)
 from lmcache.utils import cdiv
 
-# Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
+# Try to import from old location before merged
+# https://github.com/vllm-project/vllm/pull/26908
 try:
     # Third Party
     from vllm.utils.torch_utils import get_kv_cache_torch_dtype
@@ -770,7 +772,8 @@ class LMCacheConnectorV1Impl:
         for attr_name, metric_name in metrics_map.items():
             if hasattr(self, attr_name):
                 metric = getattr(prometheus_logger, metric_name)
-                # Use a default argument in the lambda to capture the current value of `attr_name`
+                # Use a default argument in the lambda to capture
+                # the current value of `attr_name`
                 # to avoid issues with late binding in closures.
                 metric.set_function(lambda name=attr_name: len(getattr(self, name)))
 
