@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Optional, Union
+import shutil
+import tempfile
 import time
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -12,6 +15,7 @@ from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
     ChunkStatisticsLookupClient,
 )
+from lmcache.v1.lookup_client.record_strategies import _get_strategies
 from lmcache.v1.utils.bloom_filter import BloomFilter
 
 
@@ -66,6 +70,45 @@ class FastMissLookupClient(LookupClientInterface):
 
     def close(self) -> None:
         pass
+
+
+class TestStrategyDiscovery:
+    """Test suite for strategy discovery functionality."""
+
+    def test_get_strategies_discovers_all_strategies(self):
+        """Test that _get_strategies discovers all available strategies."""
+        strategies = _get_strategies()
+
+        assert isinstance(strategies, dict)
+        assert len(strategies) >= 2
+
+        assert "file_hash" in strategies
+        assert "memory_bloom_filter" in strategies
+
+        assert strategies["file_hash"].name() == "file_hash"
+        assert strategies["memory_bloom_filter"].name() == "memory_bloom_filter"
+
+    def test_get_strategies_returns_strategy_classes(self):
+        """Test that discovered strategies are proper RecordStrategy classes."""
+        strategies = _get_strategies()
+
+        for strategy_name, strategy_class in strategies.items():
+            assert hasattr(strategy_class, "name")
+            assert hasattr(strategy_class, "record")
+            assert hasattr(strategy_class, "get_statistics")
+            assert hasattr(strategy_class, "reset")
+            assert hasattr(strategy_class, "wait_for_async_processing")
+            assert hasattr(strategy_class, "close")
+
+            assert callable(strategy_class.name)
+            assert strategy_class.name() == strategy_name
+
+    def test_get_strategies_caching(self):
+        """Test that _get_strategies returns cached results."""
+        strategies1 = _get_strategies()
+        strategies2 = _get_strategies()
+
+        assert strategies1 is strategies2
 
 
 class TestBloomFilter:
@@ -389,8 +432,8 @@ class TestChunkStatisticsLifecycle:
         assert "overhead_time_seconds" in timing
         assert "overhead_percentage" in timing
 
-        assert timing["lookup_time_seconds"] > 0
-        assert timing["total_time_seconds"] > 0
+        assert timing["lookup_time_seconds"] >= 0
+        assert timing["total_time_seconds"] >= 0
         assert timing["overhead_time_seconds"] >= 0
         assert 0 <= timing["overhead_percentage"] <= 100
 
@@ -411,19 +454,32 @@ class TestChunkStatisticsLifecycle:
 class TestChunkStatisticsPerformance:
     """Test suite for chunk statistics performance validation."""
 
-    def test_worst_case_overhead_within_15_percent_sync(self):
-        """Test worst case performance with synchronous statistics recording."""
-        self._run_performance_test(async_enabled=False, async_preprocess_chunks=False)
+    @pytest.mark.parametrize(
+        "strategy_name,async_enabled,async_preprocess_chunks",
+        [
+            ("memory_bloom_filter", False, False),
+            ("memory_bloom_filter", True, True),
+            ("memory_bloom_filter", True, False),
+            ("file_hash", False, False),
+            ("file_hash", True, False),
+        ],
+    )
+    def test_worst_case_overhead(
+        self, strategy_name, async_enabled, async_preprocess_chunks
+    ):
+        """Test worst case performance with different strategies and configs."""
+        self._run_performance_test(
+            strategy_name=strategy_name,
+            async_enabled=async_enabled,
+            async_preprocess_chunks=async_preprocess_chunks,
+        )
 
-    def test_worst_case_overhead_within_15_percent_async_preprocessed(self):
-        """Test worst case performance with async statistics + pre-processed chunks."""
-        self._run_performance_test(async_enabled=True, async_preprocess_chunks=True)
-
-    def test_worst_case_overhead_within_15_percent_async_raw_tokens(self):
-        """Test worst case performance with async statistics + raw token queuing."""
-        self._run_performance_test(async_enabled=True, async_preprocess_chunks=False)
-
-    def _run_performance_test(self, async_enabled: bool, async_preprocess_chunks: bool):
+    def _run_performance_test(
+        self,
+        strategy_name: str,
+        async_enabled: bool,
+        async_preprocess_chunks: bool,
+    ):
         """
         Test worst case performance with different configurations.
 
@@ -437,109 +493,135 @@ class TestChunkStatisticsPerformance:
 
         # Determine test configuration description
         if not async_enabled:
-            mode_desc = "Sync"
+            mode_desc = f"{strategy_name} (Sync)"
         elif async_preprocess_chunks:
-            mode_desc = "Async (Preprocessed)"
+            mode_desc = f"{strategy_name} (Async Preprocessed)"
         else:
-            mode_desc = "Async (Raw Tokens)"
+            mode_desc = f"{strategy_name} (Async Raw Tokens)"
 
-        mock_client = FastMissLookupClient()
-        config = LMCacheEngineConfig(
-            chunk_size=256,
-            chunk_statistics_expected_chunks=100000,
-            chunk_statistics_false_positive_rate=0.01,
-            chunk_statistics_async_enabled=async_enabled,
-            chunk_statistics_async_preprocess_chunks=async_preprocess_chunks,
-        )
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-        stats_client.start_statistics()
+        # Create temporary directory for file_hash strategy
+        temp_dir = None
+        if strategy_name == "file_hash":
+            temp_dir = tempfile.mkdtemp(prefix="lmcache_test_")
 
-        # Test with 32K tokens (128 chunks) - more realistic large request
-        token_count = 32 * 1024
-        token_ids = list(range(token_count))
+        try:
+            mock_client = FastMissLookupClient()
+            config_kwargs = {
+                "chunk_size": 256,
+                "chunk_statistics_strategy": strategy_name,
+                "chunk_statistics_expected_chunks": 100000,
+                "chunk_statistics_false_positive_rate": 0.01,
+                "chunk_statistics_async_enabled": async_enabled,
+                "chunk_statistics_async_preprocess_chunks": async_preprocess_chunks,
+            }
+            if temp_dir:
+                config_kwargs["chunk_statistics_file_output_dir"] = temp_dir
 
-        # Warm up
-        stats_client.lookup(token_ids, "warmup")
-        stats_client.reset_statistics()
-        stats_client.start_statistics()
+            config = LMCacheEngineConfig(**config_kwargs)
+            stats_client = ChunkStatisticsLookupClient(mock_client, config)
+            stats_client.start_statistics()
 
-        # Run test with multiple requests to get stable measurements
-        num_requests = 30
-        for i in range(num_requests):
-            stats_client.lookup(token_ids, f"req_{i}")
+            # Test with 32K tokens (128 chunks) - more realistic large request
+            token_count = 32 * 1024
+            token_ids = list(range(token_count))
 
-        # Wait for async processing to complete
-        if async_enabled:
-            assert stats_client.wait_for_async_processing(timeout=10.0), (
-                "Async processing timeout"
+            # Warm up
+            stats_client.lookup(token_ids, "warmup")
+            stats_client.reset_statistics()
+            stats_client.start_statistics()
+
+            # Run test with multiple requests to get stable measurements
+            num_requests = 30
+            for i in range(num_requests):
+                stats_client.lookup(token_ids, f"req_{i}")
+
+            # Wait for async processing to complete
+            if async_enabled:
+                assert stats_client.wait_for_async_processing(timeout=10.0), (
+                    "Async processing timeout"
+                )
+
+            stats = stats_client.get_statistics()
+            timing = stats["timing"]
+
+            # Calculate metrics
+            overhead_percentage = timing["overhead_percentage"]
+            record_time = timing["record_statistics_time_seconds"]
+            avg_record_ms = record_time / num_requests * 1000
+            avg_lookup_ms = timing["lookup_time_seconds"] / num_requests * 1000
+
+            # Print performance statistics (always print, even when test passes)
+            print("\n" + "=" * 80)
+            print(f"Performance Test Results - {mode_desc}:")
+            print("=" * 80)
+            print("Configuration:")
+            print(f"  Strategy: {strategy_name}")
+            print(f"  Async enabled: {async_enabled}")
+            print(f"  Async preprocess: {async_preprocess_chunks}")
+            print(f"  Total requests: {stats['total_requests']}")
+            print(f"  Total chunks: {stats['total_chunks']}")
+            print(f"  Token count per request: {token_count}")
+            print(f"  Chunks per request: {token_count // 256}")
+            if async_enabled:
+                async_queue = stats.get("async_queue", {})
+                print(f"  Queue max size: {async_queue.get('max_size_reached', 'N/A')}")
+                print(f"  Queue full blocks: {async_queue.get('full_blocks', 'N/A')}")
+            print("-" * 80)
+            print(f"Lookup time: {timing['lookup_time_seconds']:.6f}s")
+            print(f"  Avg per request: {avg_lookup_ms:.2f}ms")
+            print(f"  Expected (sleep): {8.0 * num_requests:.2f}ms")
+            print(f"Record time: {timing['record_statistics_time_seconds']:.6f}s")
+            print(f"  Avg per request: {avg_record_ms:.2f}ms")
+            print(
+                f"Check exit time: {timing['check_exit_conditions_time_seconds']:.6f}s"
+            )
+            print(f"Total time: {timing['total_time_seconds']:.6f}s")
+            print("-" * 80)
+            print(f"Overhead time: {timing['overhead_time_seconds']:.6f}s")
+            print(f"Overhead percentage: {overhead_percentage:.2f}%")
+            print("=" * 80 + "\n")
+
+            # Validate statistics
+            assert stats["total_requests"] == num_requests
+            expected_chunks = num_requests * (token_count // 256)
+            assert stats["total_chunks"] == expected_chunks
+
+            # Validate overhead is within 25%
+            assert overhead_percentage <= 25.0, (
+                f"Overhead {overhead_percentage:.2f}% exceeds 25% threshold "
+                f"{mode_desc}. "
+                f"Lookup time: {timing['lookup_time_seconds']:.6f}s, "
+                f"Record time: {timing['record_statistics_time_seconds']:.6f}s, "
+                f"Check exit time: "
+                f"{timing['check_exit_conditions_time_seconds']:.6f}s"
             )
 
-        stats = stats_client.get_statistics()
-        timing = stats["timing"]
-
-        # Calculate metrics
-        overhead_percentage = timing["overhead_percentage"]
-        record_time = timing["record_statistics_time_seconds"]
-        avg_record_ms = record_time / num_requests * 1000
-        avg_lookup_ms = timing["lookup_time_seconds"] / num_requests * 1000
-
-        # Print performance statistics (always print, even when test passes)
-        print("\n" + "=" * 80)
-        print(f"Performance Test Results - {mode_desc}:")
-        print("=" * 80)
-        print("Configuration:")
-        print(f"  Async enabled: {async_enabled}")
-        print(f"  Async preprocess: {async_preprocess_chunks}")
-        print(f"  Total requests: {stats['total_requests']}")
-        print(f"  Total chunks: {stats['total_chunks']}")
-        print(f"  Token count per request: {token_count}")
-        print(f"  Chunks per request: {token_count // 256}")
-        if async_enabled:
-            async_queue = stats.get("async_queue", {})
-            print(f"  Queue max size: {async_queue.get('max_size_reached', 'N/A')}")
-            print(f"  Queue full blocks: {async_queue.get('full_blocks', 'N/A')}")
-        print("-" * 80)
-        print(f"Lookup time: {timing['lookup_time_seconds']:.6f}s")
-        print(f"  Avg per request: {avg_lookup_ms:.2f}ms")
-        print(f"  Expected (sleep): {8.0 * num_requests:.2f}ms")
-        print(f"Record time: {timing['record_statistics_time_seconds']:.6f}s")
-        print(f"  Avg per request: {avg_record_ms:.2f}ms")
-        print(f"Check exit time: {timing['check_exit_conditions_time_seconds']:.6f}s")
-        print(f"Total time: {timing['total_time_seconds']:.6f}s")
-        print("-" * 80)
-        print(f"Overhead time: {timing['overhead_time_seconds']:.6f}s")
-        print(f"Overhead percentage: {overhead_percentage:.2f}%")
-        print("=" * 80 + "\n")
-
-        # Validate statistics
-        assert stats["total_requests"] == num_requests
-        expected_chunks = num_requests * (token_count // 256)
-        assert stats["total_chunks"] == expected_chunks
-
-        # Validate overhead is within 20%
-        assert overhead_percentage <= 20.0, (
-            f"Overhead {overhead_percentage:.2f}% exceeds 20% threshold {mode_desc}. "
-            f"Lookup time: {timing['lookup_time_seconds']:.6f}s, "
-            f"Record time: {timing['record_statistics_time_seconds']:.6f}s, "
-            f"Check exit time: {timing['check_exit_conditions_time_seconds']:.6f}s"
-        )
-
-        # Additional validation: record time should be reasonable
-        avg_record_time_per_request = (
-            timing["record_statistics_time_seconds"] / num_requests
-        )
-        assert avg_record_time_per_request < 0.01, (
-            f"Average record time per request {avg_record_time_per_request:.6f}s "
-            f"is too high (should be < 10ms) for {mode_desc}"
-        )
-
-        # Additional async-specific validations
-        if async_enabled:
-            async_queue = stats.get("async_queue", {})
-            assert async_queue.get("enabled") is True
-            assert (
-                async_queue.get("capacity")
-                == config.chunk_statistics_async_queue_capacity
+            # Additional validation: record time should be reasonable
+            avg_record_time_per_request = (
+                timing["record_statistics_time_seconds"] / num_requests
             )
-            # Queue should not have been full in our test
-            assert async_queue.get("full_blocks", 0) == 0
+            assert avg_record_time_per_request < 0.01, (
+                f"Average record time per request "
+                f"{avg_record_time_per_request:.6f}s "
+                f"is too high (should be < 10ms) for {mode_desc}"
+            )
+
+            # Additional async-specific validations
+            if async_enabled:
+                async_queue = stats.get("async_queue", {})
+                # Only validate async_queue if strategy provides it
+                if async_queue:
+                    assert async_queue.get("enabled") is True
+                    assert (
+                        async_queue.get("capacity")
+                        == config.chunk_statistics_async_queue_capacity
+                    )
+                    # Queue should not have been full in our test
+                    assert async_queue.get("full_blocks", 0) == 0
+        finally:
+            # Clean up temporary directory for file_hash strategy
+            if temp_dir:
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass

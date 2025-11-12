@@ -508,7 +508,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "chunk_statistics_auto_exit_target_unique_chunks": {
         "type": Optional[int],
         "default": None,
-        "env_converter": lambda x: int(x) if x is not None else None,
+        "env_converter": int,
         "description": (
             "Target number of unique chunks before automatic exit. "
             "When reached, the system will exit. Default is None (disabled)."
@@ -544,6 +544,37 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "hash computation overhead to main thread. "
             "When False, queues raw token_ids for processing in background. "
             "Default is True (recommended for most use cases)."
+        ),
+    },
+    "chunk_statistics_strategy": {
+        "type": str,
+        "default": "memory_bloom_filter",
+        "env_converter": str,
+        "description": (
+            "Strategy for recording chunk statistics. Options: 'memory_bloom_filter' "
+            "(default, uses memory + Bloom Filter), 'file_hash' (writes chunk hashes "
+            "to files for persistence). Default is 'memory_bloom_filter'."
+        ),
+    },
+    "chunk_statistics_file_output_dir": {
+        "type": str,
+        "default": "./chunk_hashes",
+        "env_converter": str,
+        "description": (
+            "Output directory for file-based statistics strategy. "
+            "Only used when chunk_statistics_strategy is 'file_hash'. "
+            "Default is './chunk_hashes'."
+        ),
+    },
+    "chunk_statistics_file_rotation_size": {
+        "type": int,
+        "default": 100 * 1024 * 1024,  # 100MB
+        "env_converter": int,
+        "description": (
+            "File rotation size in bytes for file-based strategy. "
+            "When a file reaches this size, a new file is created. "
+            "Only used when chunk_statistics_strategy is 'file_hash'. "
+            "Default is 100MB."
         ),
     },
 }

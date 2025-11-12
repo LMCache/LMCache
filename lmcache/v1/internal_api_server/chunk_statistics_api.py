@@ -10,7 +10,6 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
     ChunkStatisticsLookupClient,
@@ -109,29 +108,18 @@ async def start_chunk_statistics(request: Request):
             return error_response
 
         assert lookup_client is not None
-        lmcache_adapter = request.app.state.lmcache_adapter
 
         if isinstance(lookup_client, ChunkStatisticsLookupClient):
             lookup_client.start_statistics()
             message = "Chunk statistics collection started"
         else:
-            # TODO(baoloongmao): Dynamic wrapping of lookup client is not
-            # currently supported. This feature needs to be implemented to
-            # allow runtime enabling of statistics collection.
-            config = getattr(lmcache_adapter, "config", None)
-            if not isinstance(config, LMCacheEngineConfig):
-                return _create_json_response(
-                    {
-                        "error": "Configuration error",
-                        "message": "Invalid LMCache configuration.",
-                    },
-                    status_code=500,
-                )
-
-            wrapped_client = ChunkStatisticsLookupClient(lookup_client, config)
-            wrapped_client.start_statistics()
-            lmcache_adapter.lookup_client = wrapped_client
-            message = "Chunk statistics collection started (client wrapped)"
+            return _create_json_response(
+                {
+                    "error": "Chunk statistics not available",
+                    "message": "Current lookup client does not support statistics.",
+                },
+                status_code=400,
+            )
 
         return _create_json_response({"status": "success", "message": message})
     except Exception as e:
@@ -239,23 +227,18 @@ async def get_chunk_statistics_status(request: Request):
             return error_response
 
         assert stats_client is not None
-        lmcache_adapter = request.app.state.lmcache_adapter
+        config = request.app.state.lmcache_adapter.config
         stats = stats_client.get_statistics()
 
         runtime_info = {
             "timestamp": time.time(),
-            "auto_exit_enabled": getattr(
-                lmcache_adapter.config, "enable_auto_exit", False
+            "auto_exit_enabled": (
+                config.chunk_statistics_auto_exit_timeout_hours > 0.0
+                or config.chunk_statistics_auto_exit_target_unique_chunks is not None
             ),
-            "auto_exit_timeout_hours": getattr(
-                lmcache_adapter.config,
-                "chunk_statistics_auto_exit_timeout_hours",
-                24.0,
-            ),
-            "auto_exit_target_unique_chunks": getattr(
-                lmcache_adapter.config,
-                "chunk_statistics_auto_exit_target_unique_chunks",
-                None,
+            "auto_exit_timeout_hours": config.chunk_statistics_auto_exit_timeout_hours,
+            "auto_exit_target_unique_chunks": (
+                config.chunk_statistics_auto_exit_target_unique_chunks
             ),
         }
 

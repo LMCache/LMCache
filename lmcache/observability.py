@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 import os
 import threading
 import time
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 
 # Third Party
 from prometheus_client import REGISTRY
@@ -411,8 +415,22 @@ class LMCStatsMonitor:
         self.chunk_statistics_total_requests = stats.get("total_requests", 0)
         self.chunk_statistics_total_chunks = stats.get("total_chunks", 0)
         self.chunk_statistics_unique_chunks = stats.get("unique_chunks", 0)
-        self.chunk_statistics_duplicate_chunks = stats.get("duplicate_chunks", 0)
-        self.chunk_statistics_reuse_rate = stats.get("reuse_rate", 0.0)
+
+        # Calculate duplicate_chunks and reuse_rate if not provided
+        total_chunks = self.chunk_statistics_total_chunks
+        unique_chunks = self.chunk_statistics_unique_chunks
+        duplicate_chunks = stats.get("duplicate_chunks", 0)
+        reuse_rate = stats.get("reuse_rate", 0.0)
+
+        if duplicate_chunks == 0 and total_chunks > 0:
+            duplicate_chunks = total_chunks - unique_chunks
+        if reuse_rate == 0.0 and total_chunks > 0:
+            reuse_rate = duplicate_chunks / total_chunks
+
+        self.chunk_statistics_duplicate_chunks = duplicate_chunks
+        self.chunk_statistics_reuse_rate = reuse_rate
+
+        # Bloom filter stats (only for memory_bloom_filter strategy)
         bloom_filter_stats = stats.get("bloom_filter", {})
         self.chunk_statistics_bloom_filter_size_mb = bloom_filter_stats.get(
             "size_mb", 0.0
@@ -1368,12 +1386,18 @@ class PrometheusLogger:
 
 
 class LMCacheStatsLogger:
-    def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
+    def __init__(
+        self,
+        metadata: LMCacheEngineMetadata,
+        log_interval: int,
+        lookup_client: Optional["LookupClientInterface"] = None,
+    ):
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
         self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
+        self.lookup_client = lookup_client
         self.is_running = True
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
@@ -1381,6 +1405,23 @@ class LMCacheStatsLogger:
 
     def log_worker(self):
         while self.is_running:
+            # Update chunk statistics if available
+            if self.lookup_client is not None:
+                # First Party
+                from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
+                    ChunkStatisticsLookupClient,
+                )
+
+                if isinstance(self.lookup_client, ChunkStatisticsLookupClient):
+                    try:
+                        chunk_stats = self.lookup_client.get_statistics()
+                        self.monitor.update_chunk_statistics(chunk_stats)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to update chunk statistics: {e}",
+                            exc_info=True,
+                        )
+
             stats = self.monitor.get_stats_and_clear()
             self.prometheus_logger.log_prometheus(stats)
             self.lmc_usage_logger.incr_or_send_stats(stats)
