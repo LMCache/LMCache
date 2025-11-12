@@ -51,6 +51,10 @@ class RemoteBackend(StorageBackendInterface):
         self.connection: Optional[RemoteConnector] = None
         self.min_reconnect_interval = 10
         self.failure_time = -1000000.0
+        self.save_only_first_rank = (
+            self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            and metadata.use_mla
+        )
         self.init_connection()
 
         assert config.remote_serde is not None
@@ -101,6 +105,12 @@ class RemoteBackend(StorageBackendInterface):
         return self.__class__.__name__
 
     def init_connection(self):
+        # If save_only_first_rank is enabled, only the first rank init the connection
+        if self.save_only_first_rank and not self.metadata.is_first_rank():
+            logger.warning(
+                f"Save only first rank is enabled, rank {self.metadata.worker_id} "
+                f"is not the first rank, no need to initialize remote connection")
+            return
         # Initialize connection
         if self.connection is not None:
             return
