@@ -84,6 +84,7 @@ class RemoteBackend(StorageBackendInterface):
         from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
 
         self.remote_monitor = RemoteMonitor(self)
+
         # Start the remote monitor thread (if ping is supported)
         self.remote_monitor.start()
 

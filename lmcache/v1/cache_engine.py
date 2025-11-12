@@ -126,6 +126,10 @@ class LMCacheEngine:
         self.async_loading = config.enable_async_loading
         self.event_manager = EventManager()
 
+        self.use_layerwise = config.use_layerwise
+
+        # TODO: support save_only_first_rank when use layerwise
+        # if use_layerwise is True, all ranks will initialize the storage_manager
         # if save_only_first_rank is False, all ranks will initialize
         # the storage_manager
         # if save_only_first_rank is True, only the first rank and
@@ -135,13 +139,16 @@ class LMCacheEngine:
             metadata.use_mla, metadata.world_size
         )
         if (
-            not self.save_only_first_rank
+            self.lmcache_worker is not None
+            or self.use_layerwise
+            or not self.save_only_first_rank
             or self.metadata.is_first_rank()
             or len(lookup_server_worker_ids) == 0
             or self.metadata.worker_id in lookup_server_worker_ids
         ):
             logger.info(
                 f"Initialize storage manager on rank {self.metadata.worker_id}, "
+                f"use layerwise: {self.use_layerwise},"
                 f"save only first rank: {self.save_only_first_rank}"
             )
             self.storage_manager = StorageManager(
@@ -158,7 +165,6 @@ class LMCacheEngine:
         # at decoder.
         self.remove_after_retrieve = config.enable_pd and config.pd_role == "receiver"
 
-        self.use_layerwise = config.use_layerwise
         self.num_layers = metadata.kv_shape[0]
         self.fmt = None
         if self.use_layerwise:
@@ -236,6 +242,10 @@ class LMCacheEngine:
         if self._is_passive():
             logger.debug(f"rank={self.metadata.worker_id} ignore store")
             return
+
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -361,6 +371,9 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
         )
@@ -590,6 +603,9 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
         )
@@ -736,6 +752,9 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
 
         if tokens is not None:
             lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
@@ -824,6 +843,9 @@ class LMCacheEngine:
         """
         Perform cross-node move of the KV cache.
         """
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
 
         num_tokens = self.lookup(
             tokens,
@@ -896,6 +918,9 @@ class LMCacheEngine:
         (2) sync lookup + async retrieval (e.g., disk)
         (3) async lookup + async retrieval (e.g., p2p)
         """
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
 
         keys: list[CacheEngineKey] = []
         cum_chunk_lengths = [0]
@@ -929,6 +954,9 @@ class LMCacheEngine:
         location: str,
         event_id: str,
     ) -> int:
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
         if method not in ["cachegen"]:
             logger.warning(f"Unsupported compression method: {method}.")
             return 0
@@ -984,6 +1012,9 @@ class LMCacheEngine:
         location: str,
         event_id: str,
     ) -> int:
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
         if method not in ["cachegen"]:
             logger.warning(f"Unsupported decompression method: {method}.")
             return 0
@@ -1035,6 +1066,9 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, lookup_id: str) -> None:
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
         if lookup_id in self.lookup_pins:
             self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
             del self.lookup_pins[lookup_id]
@@ -1061,6 +1095,9 @@ class LMCacheEngine:
         locations: Optional[List[str]] = None,
         request_configs: Optional[dict] = None,
     ) -> int:
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None
         if tokens is None or len(tokens) == 0:
@@ -1085,6 +1122,9 @@ class LMCacheEngine:
         Check the health of the cache engine.
         return: 0 if healthy, otherwise the error code
         """
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
         return 0 if self.storage_manager.memcheck() else -1
 
     def close(self) -> None:
@@ -1093,7 +1133,8 @@ class LMCacheEngine:
         if self.lmcache_worker is not None:
             self.lmcache_worker.close()
 
-        self.storage_manager.close()
+        if self.storage_manager is not None:
+            self.storage_manager.close()
 
         logger.info("LMCacheEngine closed.")
 
@@ -1166,6 +1207,9 @@ class LMCacheEngine:
             ret_mask: Output mask updated with cache hit positions
             **kwargs: Additional keyword arguments
         """
+        assert self.storage_manager is not None, (
+            "storage_manager is not initialized"
+        )
 
         tot_kv_size = 0
         # location -> [(CacheEngineKey, start, end)]
