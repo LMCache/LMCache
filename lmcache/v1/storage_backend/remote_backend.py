@@ -109,7 +109,8 @@ class RemoteBackend(StorageBackendInterface):
         if self.save_only_first_rank and not self.metadata.is_first_rank():
             logger.warning(
                 f"Save only first rank is enabled, rank {self.metadata.worker_id} "
-                f"is not the first rank, no need to initialize remote connection")
+                f"is not the first rank, no need to initialize remote connection"
+            )
             return
         # Initialize connection
         if self.connection is not None:
