@@ -51,10 +51,6 @@ class RemoteBackend(StorageBackendInterface):
         self.connection: Optional[RemoteConnector] = None
         self.min_reconnect_interval = 10
         self.failure_time = -1000000.0
-        self.save_only_first_rank = (
-            self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
-            and metadata.use_mla
-        )
         self.init_connection()
 
         assert config.remote_serde is not None
@@ -82,15 +78,14 @@ class RemoteBackend(StorageBackendInterface):
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
-        if self.save_only_first_rank and self.metadata.is_first_rank():
-            # Create RemoteMonitor instance, which initializes the
-            # connection status and active connector dynamically
-            # First Party
-            from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
+        # Create RemoteMonitor instance, which initializes the
+        # connection status and active connector dynamically
+        # First Party
+        from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
 
-            self.remote_monitor = RemoteMonitor(self)
-            # Start the remote monitor thread (if ping is supported)
-            self.remote_monitor.start()
+        self.remote_monitor = RemoteMonitor(self)
+        # Start the remote monitor thread (if ping is supported)
+        self.remote_monitor.start()
 
         self._setup_metrics()
 
@@ -105,13 +100,6 @@ class RemoteBackend(StorageBackendInterface):
         return self.__class__.__name__
 
     def init_connection(self):
-        # If save_only_first_rank is enabled, only the first rank init the connection
-        if self.save_only_first_rank and not self.metadata.is_first_rank():
-            logger.warning(
-                f"Save only first rank is enabled, rank {self.metadata.worker_id} "
-                f"is not the first rank, no need to initialize remote connection"
-            )
-            return
         # Initialize connection
         if self.connection is not None:
             return
