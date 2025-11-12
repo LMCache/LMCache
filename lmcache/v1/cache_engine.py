@@ -243,9 +243,7 @@ class LMCacheEngine:
             logger.debug(f"rank={self.metadata.worker_id} ignore store")
             return
 
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -371,9 +369,7 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
         )
@@ -553,6 +549,7 @@ class LMCacheEngine:
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
+                assert self.storage_manager is not None
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
@@ -603,9 +600,7 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
         )
@@ -752,9 +747,7 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
 
         if tokens is not None:
             lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
@@ -843,9 +836,7 @@ class LMCacheEngine:
         """
         Perform cross-node move of the KV cache.
         """
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
 
         num_tokens = self.lookup(
             tokens,
@@ -918,9 +909,7 @@ class LMCacheEngine:
         (2) sync lookup + async retrieval (e.g., disk)
         (3) async lookup + async retrieval (e.g., p2p)
         """
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
 
         keys: list[CacheEngineKey] = []
         cum_chunk_lengths = [0]
@@ -954,9 +943,7 @@ class LMCacheEngine:
         location: str,
         event_id: str,
     ) -> int:
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
         if method not in ["cachegen"]:
             logger.warning(f"Unsupported compression method: {method}.")
             return 0
@@ -1012,9 +999,7 @@ class LMCacheEngine:
         location: str,
         event_id: str,
     ) -> int:
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
         if method not in ["cachegen"]:
             logger.warning(f"Unsupported decompression method: {method}.")
             return 0
@@ -1066,9 +1051,7 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, lookup_id: str) -> None:
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
         if lookup_id in self.lookup_pins:
             self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
             del self.lookup_pins[lookup_id]
@@ -1095,9 +1078,7 @@ class LMCacheEngine:
         locations: Optional[List[str]] = None,
         request_configs: Optional[dict] = None,
     ) -> int:
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None
         if tokens is None or len(tokens) == 0:
@@ -1122,9 +1103,7 @@ class LMCacheEngine:
         Check the health of the cache engine.
         return: 0 if healthy, otherwise the error code
         """
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
         return 0 if self.storage_manager.memcheck() else -1
 
     def close(self) -> None:
@@ -1207,9 +1186,7 @@ class LMCacheEngine:
             ret_mask: Output mask updated with cache hit positions
             **kwargs: Additional keyword arguments
         """
-        assert self.storage_manager is not None, (
-            "storage_manager is not initialized"
-        )
+        assert self.storage_manager is not None
 
         tot_kv_size = 0
         # location -> [(CacheEngineKey, start, end)]
