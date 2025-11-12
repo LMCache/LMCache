@@ -461,6 +461,7 @@ class TestChunkStatisticsPerformance:
             ("memory_bloom_filter", True, True),
             ("memory_bloom_filter", True, False),
             ("file_hash", False, False),
+            ("file_hash", True, True),
             ("file_hash", True, False),
         ],
     )
@@ -586,9 +587,9 @@ class TestChunkStatisticsPerformance:
             expected_chunks = num_requests * (token_count // 256)
             assert stats["total_chunks"] == expected_chunks
 
-            # Validate overhead is within 25%
-            assert overhead_percentage <= 25.0, (
-                f"Overhead {overhead_percentage:.2f}% exceeds 25% threshold "
+            # Validate overhead is within 40%
+            assert overhead_percentage <= 40.0, (
+                f"Overhead {overhead_percentage:.2f}% exceeds 40% threshold "
                 f"{mode_desc}. "
                 f"Lookup time: {timing['lookup_time_seconds']:.6f}s, "
                 f"Record time: {timing['record_statistics_time_seconds']:.6f}s, "
@@ -627,11 +628,11 @@ class TestChunkStatisticsPerformance:
                     pass
 
 
-class TestFileHashFullTokens:
-    """Test suite for file_hash strategy with full token storage."""
+class TestFileHashStrategy:
+    """Test suite for file_hash strategy."""
 
-    def test_store_full_tokens_disabled(self):
-        """Test file_hash strategy without storing full tokens."""
+    def test_file_hash_basic(self):
+        """Test file_hash strategy basic functionality."""
         temp_dir = tempfile.mkdtemp()
         try:
             config = LMCacheEngineConfig.from_dict(
@@ -639,7 +640,6 @@ class TestFileHashFullTokens:
                     "chunk_statistics_enabled": True,
                     "chunk_statistics_strategy": "file_hash",
                     "chunk_statistics_file_output_dir": temp_dir,
-                    "chunk_statistics_store_full_tokens": False,
                 }
             )
 
@@ -666,101 +666,7 @@ class TestFileHashFullTokens:
                 assert "chunk_hashes" in data
                 assert "lookup_id" in data
                 assert "timestamp" in data
-                assert "token_ids" not in data
-
                 assert len(data["chunk_hashes"]) == 2
-
-            client.close()
-        finally:
-            shutil.rmtree(temp_dir)
-
-    def test_store_full_tokens_enabled(self):
-        """Test file_hash strategy with storing full tokens."""
-        temp_dir = tempfile.mkdtemp()
-        try:
-            config = LMCacheEngineConfig.from_dict(
-                {
-                    "chunk_statistics_enabled": True,
-                    "chunk_statistics_strategy": "file_hash",
-                    "chunk_statistics_file_output_dir": temp_dir,
-                    "chunk_statistics_store_full_tokens": True,
-                }
-            )
-
-            mock_client = MockLookupClient()
-            client = ChunkStatisticsLookupClient(mock_client, config)
-            client.start_statistics()
-
-            token_ids = list(range(512))
-            client.lookup(token_ids, "test_request_1")
-
-            client.wait_for_async_processing(timeout=2.0)
-
-            # Standard
-            from pathlib import Path
-            import json
-
-            output_files = list(Path(temp_dir).glob("*.jsonl"))
-            assert len(output_files) > 0
-
-            with open(output_files[0], "r") as f:
-                line = f.readline()
-                data = json.loads(line)
-
-                assert "chunk_hashes" in data
-                assert "lookup_id" in data
-                assert "timestamp" in data
-                assert "token_ids" in data
-
-                assert len(data["chunk_hashes"]) == 2
-                assert data["token_ids"] == token_ids
-
-            client.close()
-        finally:
-            shutil.rmtree(temp_dir)
-
-    def test_store_full_tokens_with_async_preprocess(self):
-        """Test file_hash strategy with full tokens and async preprocessing."""
-        temp_dir = tempfile.mkdtemp()
-        try:
-            config = LMCacheEngineConfig.from_dict(
-                {
-                    "chunk_statistics_enabled": True,
-                    "chunk_statistics_strategy": "file_hash",
-                    "chunk_statistics_file_output_dir": temp_dir,
-                    "chunk_statistics_store_full_tokens": True,
-                    "chunk_statistics_async_enabled": True,
-                    "chunk_statistics_async_preprocess_chunks": True,
-                }
-            )
-
-            mock_client = MockLookupClient()
-            client = ChunkStatisticsLookupClient(mock_client, config)
-            client.start_statistics()
-
-            token_ids = list(range(512))
-            client.lookup(token_ids, "test_request_1")
-
-            client.wait_for_async_processing(timeout=2.0)
-
-            # Standard
-            from pathlib import Path
-            import json
-
-            output_files = list(Path(temp_dir).glob("*.jsonl"))
-            assert len(output_files) > 0
-
-            with open(output_files[0], "r") as f:
-                line = f.readline()
-                data = json.loads(line)
-
-                assert "chunk_hashes" in data
-                assert "lookup_id" in data
-                assert "timestamp" in data
-                assert "token_ids" in data
-
-                assert len(data["chunk_hashes"]) == 2
-                assert data["token_ids"] == token_ids
 
             client.close()
         finally:

@@ -38,9 +38,6 @@ class FileHashStrategy(RecordStrategy):
 
         self.file_rotation_size = config.chunk_statistics_file_rotation_size
         self.file_max_count = config.chunk_statistics_file_max_count
-        self.store_full_tokens = getattr(
-            config, "chunk_statistics_store_full_tokens", False
-        )
 
         # Setup output directory
         self.output_dir = Path(config.chunk_statistics_file_output_dir)
@@ -61,29 +58,21 @@ class FileHashStrategy(RecordStrategy):
             self.async_enabled,
         )
 
-    def _record_async(self, token_ids: list[int], lookup_id: str) -> None:
-        """Record statistics asynchronously."""
-        if self.async_preprocess_chunks:
-            chunk_hashes = self._compute_chunk_hashes(token_ids)
-            if self.store_full_tokens:
-                self._queue_item((chunk_hashes, token_ids, lookup_id, True))
-            else:
-                self._queue_item((chunk_hashes, None, lookup_id, True))
-        else:
-            self._queue_item((token_ids, lookup_id, False))
+    def _preprocess_for_async(self, token_ids: list[int]) -> list[str]:
+        """Preprocess token_ids for async recording."""
+        return self._compute_chunk_hashes(token_ids)
 
     def _record_sync(self, token_ids: list[int], lookup_id: str) -> None:
         """Record statistics synchronously."""
         chunk_hashes = self._compute_chunk_hashes(token_ids)
-        self._write_data_to_file(chunk_hashes, token_ids, lookup_id)
+        self._write_data_to_file(chunk_hashes, lookup_id)
 
     def _write_data_to_file(
         self,
         chunk_hashes: list[str],
-        token_ids: Optional[list[int]],
         lookup_id: str,
     ) -> None:
-        """Write chunk hashes and optionally full token ids to file."""
+        """Write chunk hashes to file."""
         with self.lock:
             # Rotate file if needed
             if (
@@ -98,8 +87,6 @@ class FileHashStrategy(RecordStrategy):
                 "lookup_id": lookup_id,
                 "chunk_hashes": chunk_hashes,
             }
-            if self.store_full_tokens and token_ids is not None:
-                data["token_ids"] = token_ids
 
             if self.current_file_handle is not None:
                 file_handle = cast(io.TextIOWrapper, self.current_file_handle)
@@ -142,21 +129,18 @@ class FileHashStrategy(RecordStrategy):
 
     def _process_queue_item(self, item) -> None:
         """Process a single item from the queue."""
-        if len(item) == 4:
-            chunk_hashes, token_ids, lookup_id, is_preprocessed = item
-        elif len(item) == 3:
-            data, lookup_id, is_preprocessed = item
-            if is_preprocessed:
-                chunk_hashes = data
-                token_ids = None
-            else:
-                token_ids = data
-                chunk_hashes = self._compute_chunk_hashes(token_ids)
+        chunk_hashes, lookup_id = item
+        if isinstance(chunk_hashes, list) and all(
+            isinstance(h, str) for h in chunk_hashes
+        ):
+            # Already preprocessed chunk hashes
+            pass
         else:
-            token_ids, lookup_id = item
+            # Raw token_ids, need to compute hashes
+            token_ids = chunk_hashes
             chunk_hashes = self._compute_chunk_hashes(token_ids)
 
-        self._write_data_to_file(chunk_hashes, token_ids, lookup_id)
+        self._write_data_to_file(chunk_hashes, lookup_id)
 
     def _get_strategy_specific_statistics(self) -> dict:
         """Get strategy-specific statistics."""

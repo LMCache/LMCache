@@ -2,7 +2,7 @@
 
 # Standard
 from abc import ABC, abstractmethod
-from typing import Optional, Union
+from typing import Any, Optional, Union
 import hashlib
 import queue
 import struct
@@ -176,30 +176,42 @@ class RecordStrategy(ABC):
 
     def _compute_chunk_hashes(self, token_ids: list[int]) -> list[str]:
         """Compute SHA256 hashes for each chunk."""
-        token_count = len(token_ids)
-        num_chunks = (token_count + self.chunk_size - 1) // self.chunk_size
         chunk_hashes = []
         prefix_hash_bytes = b""
 
-        for i in range(num_chunks):
-            start_idx = i * self.chunk_size
-            end_idx = min((i + 1) * self.chunk_size, token_count)
-            chunk_slice = token_ids[start_idx:end_idx]
-
+        for chunk_slice in self._iterate_chunks(token_ids):
             prefix_hash_bytes = self._compute_chunk_hash(prefix_hash_bytes, chunk_slice)
             chunk_hash = prefix_hash_bytes.hex()
             chunk_hashes.append(chunk_hash)
 
         return chunk_hashes
 
+    def _iterate_chunks(self, token_ids: list[int]):
+        """Iterate through chunks of token_ids."""
+        token_count = len(token_ids)
+        num_chunks = (token_count + self.chunk_size - 1) // self.chunk_size
+
+        for i in range(num_chunks):
+            start_idx = i * self.chunk_size
+            end_idx = min((i + 1) * self.chunk_size, token_count)
+            yield token_ids[start_idx:end_idx]
+
+    @abstractmethod
+    def _preprocess_for_async(self, token_ids: list[int]) -> Any:
+        """Preprocess token_ids for async recording."""
+        pass
+
+    def _record_async(self, token_ids: list[int], lookup_id: str) -> None:
+        """Record statistics asynchronously."""
+        if self.async_preprocess_chunks:
+            processed_data = self._preprocess_for_async(token_ids)
+            self._queue_item((processed_data, lookup_id))
+        else:
+            self._queue_item((token_ids, lookup_id))
+
     @abstractmethod
     def _process_queue_item(self, item) -> None:
         """Process a single item from the queue."""
-        pass
-
-    @abstractmethod
-    def _record_async(self, token_ids: list[int], lookup_id: str) -> None:
-        """Record statistics asynchronously."""
         pass
 
     @abstractmethod

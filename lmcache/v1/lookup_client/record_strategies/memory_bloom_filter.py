@@ -37,13 +37,9 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             config.chunk_statistics_false_positive_rate,
         )
 
-    def _record_async(self, token_ids: list[int], lookup_id: str) -> None:
-        """Record statistics asynchronously."""
-        if self.async_preprocess_chunks:
-            chunk_data_list = self._preprocess_chunks(token_ids)
-            self._queue_item((chunk_data_list, lookup_id))
-        else:
-            self._queue_item((token_ids, lookup_id))
+    def _preprocess_for_async(self, token_ids: list[int]) -> list[list[int]]:
+        """Preprocess token_ids for async recording."""
+        return self._preprocess_chunks(token_ids)
 
     def _record_sync(self, token_ids: list[int], lookup_id: str) -> None:
         """Record statistics synchronously."""
@@ -51,16 +47,10 @@ class MemoryBloomFilterStrategy(RecordStrategy):
 
     def _preprocess_chunks(self, token_ids: list[int]) -> list[list[int]]:
         """Pre-process chunks and return hash positions (memory efficient)."""
-        token_count = len(token_ids)
-        num_chunks = (token_count + self.chunk_size - 1) // self.chunk_size
         chunk_data_list = []
         prefix_hash_bytes = b""
 
-        for i in range(num_chunks):
-            start_idx = i * self.chunk_size
-            end_idx = min((i + 1) * self.chunk_size, token_count)
-            chunk_slice = token_ids[start_idx:end_idx]
-
+        for chunk_slice in self._iterate_chunks(token_ids):
             prefix_hash_bytes = self._compute_chunk_hash(prefix_hash_bytes, chunk_slice)
             prefix_hash = int.from_bytes(prefix_hash_bytes, "big", signed=False)
             positions = self.global_bloom._hashes(prefix_hash)
