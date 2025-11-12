@@ -577,6 +577,28 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "Default is 100MB."
         ),
     },
+    "chunk_statistics_file_max_count": {
+        "type": int,
+        "default": 100,
+        "env_converter": int,
+        "description": (
+            "Maximum number of files to keep for file-based strategy. "
+            "When this limit is reached, the oldest file is deleted. "
+            "Only used when chunk_statistics_strategy is 'file_hash'. "
+            "Default is 100."
+        ),
+    },
+    "chunk_statistics_store_full_tokens": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Store full token IDs in addition to chunk hashes. "
+            "Only used when chunk_statistics_strategy is 'file_hash'. "
+            "When True, stores complete token_ids for each request. "
+            "Default is False."
+        ),
+    },
 }
 
 

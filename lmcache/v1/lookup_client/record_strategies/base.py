@@ -3,7 +3,9 @@
 # Standard
 from abc import ABC, abstractmethod
 from typing import Optional, Union
+import hashlib
 import queue
+import struct
 import threading
 import time
 
@@ -24,6 +26,7 @@ class RecordStrategy(ABC):
         chunk_size: int,
         async_enabled: bool = False,
         async_queue_capacity: int = 10000,
+        async_preprocess_chunks: bool = False,
     ):
         """
         Initialize base strategy with common parameters.
@@ -32,16 +35,23 @@ class RecordStrategy(ABC):
             chunk_size: Size of each chunk
             async_enabled: Whether to enable async processing
             async_queue_capacity: Maximum size of async queue
+            async_preprocess_chunks: Whether to preprocess chunks before queuing
         """
         self.chunk_size = chunk_size
         self.async_enabled = async_enabled
         self.async_queue_capacity = async_queue_capacity
+        self.async_preprocess_chunks = async_preprocess_chunks
 
         # Async processing
         self.async_queue: Optional[queue.Queue] = None
         self.async_worker_thread: Optional[threading.Thread] = None
         self.async_shutdown = False
         self.queue_full_blocks = 0
+        self.queue_max_size = 0
+
+        # Common statistics
+        self.total_chunks = 0
+        self.unique_chunks_count = 0
 
         # Thread safety
         self.lock = threading.RLock()
@@ -77,10 +87,43 @@ class RecordStrategy(ABC):
             self.async_queue_capacity,
         )
 
-    @abstractmethod
     def _async_worker(self) -> None:
         """Background worker that processes items asynchronously."""
-        pass
+        logger.info("%s async worker started", self.__class__.__name__)
+
+        if self.async_queue is None:
+            return
+
+        while not self.async_shutdown:
+            try:
+                item = self.async_queue.get(timeout=0.1)
+                if item is None:
+                    break
+                self._process_queue_item(item)
+                self.async_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(
+                    "Error in %s async worker: %s",
+                    self.__class__.__name__,
+                    e,
+                    exc_info=True,
+                )
+
+        # Process remaining items in queue before shutdown
+        while not self.async_queue.empty():
+            try:
+                item = self.async_queue.get_nowait()
+                if item is not None:
+                    self._process_queue_item(item)
+                self.async_queue.task_done()
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.error("Error processing remaining items: %s", e)
+
+        logger.info("%s async worker stopped", self.__class__.__name__)
 
     def _queue_item(self, item, timeout: float = 10.0) -> None:
         """
@@ -122,6 +165,38 @@ class RecordStrategy(ABC):
         else:
             self._record_sync(token_ids, lookup_id)
 
+    def _compute_chunk_hash(
+        self, prefix_hash_bytes: bytes, chunk_slice: list[int]
+    ) -> bytes:
+        """Compute hash for a single chunk."""
+        h = hashlib.sha256()
+        h.update(prefix_hash_bytes)
+        h.update(struct.pack(f">{len(chunk_slice)}i", *chunk_slice))
+        return h.digest()[:8]
+
+    def _compute_chunk_hashes(self, token_ids: list[int]) -> list[str]:
+        """Compute SHA256 hashes for each chunk."""
+        token_count = len(token_ids)
+        num_chunks = (token_count + self.chunk_size - 1) // self.chunk_size
+        chunk_hashes = []
+        prefix_hash_bytes = b""
+
+        for i in range(num_chunks):
+            start_idx = i * self.chunk_size
+            end_idx = min((i + 1) * self.chunk_size, token_count)
+            chunk_slice = token_ids[start_idx:end_idx]
+
+            prefix_hash_bytes = self._compute_chunk_hash(prefix_hash_bytes, chunk_slice)
+            chunk_hash = prefix_hash_bytes.hex()
+            chunk_hashes.append(chunk_hash)
+
+        return chunk_hashes
+
+    @abstractmethod
+    def _process_queue_item(self, item) -> None:
+        """Process a single item from the queue."""
+        pass
+
     @abstractmethod
     def _record_async(self, token_ids: list[int], lookup_id: str) -> None:
         """Record statistics asynchronously."""
@@ -132,15 +207,57 @@ class RecordStrategy(ABC):
         """Record statistics synchronously."""
         pass
 
-    @abstractmethod
     def get_statistics(self) -> dict:
         """
         Get current statistics from this strategy.
 
         Returns:
+            Dictionary containing common and strategy-specific statistics
+        """
+        with self.lock:
+            duplicate_chunks = self.total_chunks - self.unique_chunks_count
+            reuse_rate = (
+                duplicate_chunks / self.total_chunks if self.total_chunks > 0 else 0.0
+            )
+
+            # Get async queue metrics
+            queue_size = 0
+            if self.async_queue is not None:
+                queue_size = self.async_queue.qsize()
+                self.queue_max_size = max(self.queue_max_size, queue_size)
+
+            base_stats = {
+                "total_chunks": self.total_chunks,
+                "unique_chunks": self.unique_chunks_count,
+                "duplicate_chunks": duplicate_chunks,
+                "reuse_rate": reuse_rate,
+                "async_queue": {
+                    "enabled": self.async_enabled,
+                    "capacity": self.async_queue_capacity,
+                    "current_size": queue_size,
+                    "max_size_reached": self.queue_max_size,
+                    "full_blocks": self.queue_full_blocks,
+                    "utilization": queue_size / self.async_queue_capacity
+                    if self.async_queue_capacity > 0
+                    else 0.0,
+                },
+            }
+
+            # Merge with strategy-specific statistics
+            strategy_stats = self._get_strategy_specific_statistics()
+            base_stats.update(strategy_stats)
+            return base_stats
+
+    def _get_strategy_specific_statistics(self) -> dict:
+        """
+        Get strategy-specific statistics.
+
+        Subclasses should override this method to provide additional statistics.
+
+        Returns:
             Dictionary containing strategy-specific statistics
         """
-        pass
+        return {}
 
     @abstractmethod
     def reset(self) -> None:

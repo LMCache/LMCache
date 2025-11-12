@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-import hashlib
-import queue
-import struct
 
 # First Party
 from lmcache.logging import init_logger
@@ -31,18 +28,14 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             chunk_size=chunk_size,
             async_enabled=config.chunk_statistics_async_enabled,
             async_queue_capacity=config.chunk_statistics_async_queue_capacity,
+            async_preprocess_chunks=config.chunk_statistics_async_preprocess_chunks,
         )
-
-        self.async_preprocess_chunks = config.chunk_statistics_async_preprocess_chunks
 
         # Bloom filter for tracking unique chunks
         self.global_bloom = BloomFilter(
             config.chunk_statistics_expected_chunks,
             config.chunk_statistics_false_positive_rate,
         )
-        self.total_chunks = 0
-        self.unique_chunks_count = 0
-        self.queue_max_size = 0
 
     def _record_async(self, token_ids: list[int], lookup_id: str) -> None:
         """Record statistics asynchronously."""
@@ -55,15 +48,6 @@ class MemoryBloomFilterStrategy(RecordStrategy):
     def _record_sync(self, token_ids: list[int], lookup_id: str) -> None:
         """Record statistics synchronously."""
         self._process_statistics(token_ids, lookup_id)
-
-    def _compute_chunk_hash(
-        self, prefix_hash_bytes: bytes, chunk_slice: list[int]
-    ) -> bytes:
-        """Compute hash for a single chunk."""
-        h = hashlib.sha256()
-        h.update(prefix_hash_bytes)
-        h.update(struct.pack(f">{len(chunk_slice)}i", *chunk_slice))
-        return h.digest()[:8]
 
     def _preprocess_chunks(self, token_ids: list[int]) -> list[list[int]]:
         """Pre-process chunks and return hash positions (memory efficient)."""
@@ -92,39 +76,6 @@ class MemoryBloomFilterStrategy(RecordStrategy):
         else:
             token_ids, lookup_id = item
             self._process_statistics(token_ids, lookup_id)
-
-    def _async_worker(self) -> None:
-        """Background worker that processes statistics asynchronously."""
-        logger.info("Async statistics worker started")
-
-        if self.async_queue is None:
-            return
-
-        while not self.async_shutdown:
-            try:
-                item = self.async_queue.get(timeout=0.1)
-                if item is None:
-                    break
-                self._process_queue_item(item)
-                self.async_queue.task_done()
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error("Error in async statistics worker: %s", e, exc_info=True)
-
-        # Process remaining items in queue before shutdown
-        while not self.async_queue.empty():
-            try:
-                item = self.async_queue.get_nowait()
-                if item is not None:
-                    self._process_queue_item(item)
-                self.async_queue.task_done()
-            except queue.Empty:
-                break
-            except Exception as e:
-                logger.error("Error processing remaining items: %s", e)
-
-        logger.info("Async statistics worker stopped")
 
     def _update_bloom_filter(self, positions_list: list[list[int]]) -> int:
         """Update bloom filter with positions and return unique count."""
@@ -188,37 +139,11 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             unique_chunks_in_request,
         )
 
-    def get_statistics(self) -> dict:
-        """Get current statistics from this strategy."""
-        with self.lock:
-            duplicate_chunks = self.total_chunks - self.unique_chunks_count
-            reuse_rate = (
-                duplicate_chunks / self.total_chunks if self.total_chunks > 0 else 0.0
-            )
-
-            # Get async queue metrics
-            queue_size = 0
-            if self.async_queue is not None:
-                queue_size = self.async_queue.qsize()
-                self.queue_max_size = max(self.queue_max_size, queue_size)
-
-            return {
-                "total_chunks": self.total_chunks,
-                "unique_chunks": self.unique_chunks_count,
-                "duplicate_chunks": duplicate_chunks,
-                "reuse_rate": reuse_rate,
-                "bloom_filter": self.global_bloom.get_statistics(),
-                "async_queue": {
-                    "enabled": self.async_enabled,
-                    "capacity": self.async_queue_capacity,
-                    "current_size": queue_size,
-                    "max_size_reached": self.queue_max_size,
-                    "full_blocks": self.queue_full_blocks,
-                    "utilization": queue_size / self.async_queue_capacity
-                    if self.async_queue_capacity > 0
-                    else 0.0,
-                },
-            }
+    def _get_strategy_specific_statistics(self) -> dict:
+        """Get strategy-specific statistics."""
+        return {
+            "bloom_filter": self.global_bloom.get_statistics(),
+        }
 
     def reset(self) -> None:
         """Reset all statistics."""

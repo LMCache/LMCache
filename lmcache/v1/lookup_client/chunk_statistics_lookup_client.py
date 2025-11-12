@@ -163,7 +163,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                 **{
                     k: v
                     for k, v in strategy_stats.items()
-                    if k in ("bloom_filter", "async_queue")
+                    if k in ("bloom_filter", "async_queue", "file_hash")
                 },
             }
 

@@ -97,3 +97,21 @@ def create_record_strategy(
 def list_record_strategies() -> list[str]:
     """List all available record strategy names."""
     return list(_get_strategies().keys())
+
+
+# Export base class and common imports
+__all__ = [
+    "RecordStrategy",
+    "create_record_strategy",
+    "list_record_strategies",
+]
+
+
+# Lazy import for strategy classes
+def __getattr__(name):
+    """Lazy import strategy classes."""
+    strategies = _get_strategies()
+    for strategy_class in strategies.values():
+        if strategy_class.__name__ == name:
+            return strategy_class
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

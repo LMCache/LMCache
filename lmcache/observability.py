@@ -94,6 +94,9 @@ class LMCacheStats:
     chunk_statistics_reuse_rate: float
     chunk_statistics_bloom_filter_size_mb: float
     chunk_statistics_bloom_filter_fill_rate: float
+    chunk_statistics_file_count: int
+    chunk_statistics_current_file_size: int
+    chunk_statistics_file_max_count: int
 
 
 @dataclass
@@ -231,6 +234,9 @@ class LMCStatsMonitor:
         self.chunk_statistics_reuse_rate = 0.0
         self.chunk_statistics_bloom_filter_size_mb = 0.0
         self.chunk_statistics_bloom_filter_fill_rate = 0.0
+        self.chunk_statistics_file_count = 0
+        self.chunk_statistics_current_file_size = 0
+        self.chunk_statistics_file_max_count = 0
 
     @thread_safe
     def on_lookup_request(self, num_tokens: int) -> int:
@@ -415,20 +421,8 @@ class LMCStatsMonitor:
         self.chunk_statistics_total_requests = stats.get("total_requests", 0)
         self.chunk_statistics_total_chunks = stats.get("total_chunks", 0)
         self.chunk_statistics_unique_chunks = stats.get("unique_chunks", 0)
-
-        # Calculate duplicate_chunks and reuse_rate if not provided
-        total_chunks = self.chunk_statistics_total_chunks
-        unique_chunks = self.chunk_statistics_unique_chunks
-        duplicate_chunks = stats.get("duplicate_chunks", 0)
-        reuse_rate = stats.get("reuse_rate", 0.0)
-
-        if duplicate_chunks == 0 and total_chunks > 0:
-            duplicate_chunks = total_chunks - unique_chunks
-        if reuse_rate == 0.0 and total_chunks > 0:
-            reuse_rate = duplicate_chunks / total_chunks
-
-        self.chunk_statistics_duplicate_chunks = duplicate_chunks
-        self.chunk_statistics_reuse_rate = reuse_rate
+        self.chunk_statistics_duplicate_chunks = stats.get("duplicate_chunks", 0)
+        self.chunk_statistics_reuse_rate = stats.get("reuse_rate", 0.0)
 
         # Bloom filter stats (only for memory_bloom_filter strategy)
         bloom_filter_stats = stats.get("bloom_filter", {})
@@ -438,6 +432,14 @@ class LMCStatsMonitor:
         self.chunk_statistics_bloom_filter_fill_rate = bloom_filter_stats.get(
             "fill_rate", 0.0
         )
+
+        # File hash stats (only for file_hash strategy)
+        file_hash_stats = stats.get("file_hash", {})
+        self.chunk_statistics_file_count = file_hash_stats.get("file_count", 0)
+        self.chunk_statistics_current_file_size = file_hash_stats.get(
+            "current_file_size", 0
+        )
+        self.chunk_statistics_file_max_count = file_hash_stats.get("file_max_count", 0)
 
     def _clear(self):
         """
@@ -607,6 +609,9 @@ class LMCStatsMonitor:
             chunk_statistics_reuse_rate=self.chunk_statistics_reuse_rate,
             chunk_statistics_bloom_filter_size_mb=self.chunk_statistics_bloom_filter_size_mb,
             chunk_statistics_bloom_filter_fill_rate=self.chunk_statistics_bloom_filter_fill_rate,
+            chunk_statistics_file_count=self.chunk_statistics_file_count,
+            chunk_statistics_current_file_size=self.chunk_statistics_current_file_size,
+            chunk_statistics_file_max_count=self.chunk_statistics_file_max_count,
         )
         self._clear()
         return ret
@@ -1127,6 +1132,24 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
+        self.gauge_chunk_statistics_file_count = self._gauge_cls(
+            name="lmcache:chunk_statistics_file_count",
+            documentation="Number of files created for file_hash strategy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_current_file_size = self._gauge_cls(
+            name="lmcache:chunk_statistics_current_file_size",
+            documentation="Current file size in bytes for file_hash strategy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
+        self.gauge_chunk_statistics_file_max_count = self._gauge_cls(
+            name="lmcache:chunk_statistics_file_max_count",
+            documentation="Maximum number of files to keep for file_hash strategy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        )
 
         self._dynamic_metrics(labelnames)
 
@@ -1343,6 +1366,18 @@ class PrometheusLogger:
         self._log_gauge(
             self.gauge_chunk_statistics_bloom_filter_fill_rate,
             stats.chunk_statistics_bloom_filter_fill_rate,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_file_count,
+            stats.chunk_statistics_file_count,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_current_file_size,
+            stats.chunk_statistics_current_file_size,
+        )
+        self._log_gauge(
+            self.gauge_chunk_statistics_file_max_count,
+            stats.chunk_statistics_file_max_count,
         )
 
     @staticmethod
