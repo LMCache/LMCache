@@ -82,15 +82,15 @@ class RemoteBackend(StorageBackendInterface):
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
-        # Create RemoteMonitor instance, which initializes the
-        # connection status and active connector dynamically
-        # First Party
-        from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
+        if self.save_only_first_rank and self.metadata.is_first_rank():
+            # Create RemoteMonitor instance, which initializes the
+            # connection status and active connector dynamically
+            # First Party
+            from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
 
-        self.remote_monitor = RemoteMonitor(self)
-
-        # Start the remote monitor thread (if ping is supported)
-        self.remote_monitor.start()
+            self.remote_monitor = RemoteMonitor(self)
+            # Start the remote monitor thread (if ping is supported)
+            self.remote_monitor.start()
 
         self._setup_metrics()
 
