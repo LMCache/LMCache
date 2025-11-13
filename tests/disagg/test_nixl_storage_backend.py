@@ -71,7 +71,7 @@ def create_test_config(
     config.extra_config = {
         "enable_nixl_storage": True,
         "nixl_backend": backend,
-        "nixl_file_pool_size": 10,
+        "nixl_pool_size": 10,
         "nixl_path": tempfile.mkdtemp(),  # Create a temporary directory for testing
     }
     return config
@@ -106,7 +106,7 @@ def test_nixl_storage_config():
     assert nixl_config.buffer_size == config.nixl_buffer_size
     assert nixl_config.buffer_device == config.nixl_buffer_device
     assert nixl_config.backend == config.extra_config["nixl_backend"]
-    assert nixl_config.file_pool_size == config.extra_config["nixl_file_pool_size"]
+    assert nixl_config.pool_size == config.extra_config["nixl_pool_size"]
     assert nixl_config.path == config.extra_config["nixl_path"]
 
     # Test validation

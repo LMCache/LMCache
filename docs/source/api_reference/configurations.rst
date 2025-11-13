@@ -303,7 +303,7 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
       enable_nixl_storage: true
       nixl_backend: "POSIX"  # Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
       nixl_path: "/path/to/storage/"
-      nixl_file_pool_size: 64
+      nixl_pool_size: 64
 
 .. list-table::
    :header-rows: 1
@@ -317,7 +317,7 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
      - Storage backend type. Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
    * - nixl_path
      - File system path for Nixl storage
-   * - nixl_file_pool_size
+   * - nixl_pool_size
      - Number of files in the storage pool
 
 
