@@ -134,13 +134,20 @@ class LMCacheWorker:
         # Check all port configurations
         port_configs = [
             ("lmcache_worker_ports", self.config.lmcache_worker_ports),
-            ("p2p_init_ports", self.config.p2p_init_ports),
-            ("p2p_lookup_ports", self.config.p2p_lookup_ports),
         ]
+        if self.config.enable_p2p:
+            port_configs.extend(
+                [
+                    ("p2p_init_ports", self.config.p2p_init_ports),
+                    ("p2p_lookup_ports", self.config.p2p_lookup_ports),
+                ]
+            )
 
         errors = []
         for config_name, ports in port_configs:
-            if len(ports) < required_ports:
+            if ports is None:
+                errors.append(f"• {config_name}: is not configured but required.")
+            elif len(ports) < required_ports:
                 errors.append(
                     f"• {config_name}: {len(ports)} port(s) configured, "
                     f"but {required_ports} are required for worker {self.worker_id}"
