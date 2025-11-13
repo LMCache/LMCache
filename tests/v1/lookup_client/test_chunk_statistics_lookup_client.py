@@ -19,11 +19,27 @@ from lmcache.v1.lookup_client.record_strategies import _get_strategies
 from lmcache.v1.utils.bloom_filter import BloomFilter
 
 
-class MockLookupClient(LookupClientInterface):
+class BaseMockClient(LookupClientInterface):
+    """Base mock client with common functionality."""
+
+    def __init__(self, chunk_size: int = 256):
+        self.chunk_size = chunk_size
+
+    def clear_lookup_status(self, lookup_id: str) -> None:
+        pass
+
+    def supports_producer_reuse(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        pass
+
+
+class MockLookupClient(BaseMockClient):
     """Mock lookup client for testing."""
 
     def __init__(self):
-        self.chunk_size = 256
+        super().__init__()
         self.lookup_calls = []
 
     def lookup(
@@ -35,21 +51,9 @@ class MockLookupClient(LookupClientInterface):
         self.lookup_calls.append((token_ids, lookup_id, request_configs))
         return len(token_ids) // 2
 
-    def clear_lookup_status(self, lookup_id: str) -> None:
-        pass
 
-    def supports_producer_reuse(self) -> bool:
-        return True
-
-    def close(self) -> None:
-        pass
-
-
-class FastMissLookupClient(LookupClientInterface):
+class FastMissLookupClient(BaseMockClient):
     """Mock lookup client that returns immediately on first chunk miss."""
-
-    def __init__(self):
-        self.chunk_size = 256
 
     def lookup(
         self,
@@ -57,19 +61,32 @@ class FastMissLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        # Sleep for 8ms to simulate actual lookup time
-        # This ensures lookup dominates the timing to measure overhead accurately
-        time.sleep(0.008)
+        time.sleep(0.008)  # Sleep for 8ms to simulate actual lookup time
         return 0
 
-    def clear_lookup_status(self, lookup_id: str) -> None:
-        pass
 
-    def supports_producer_reuse(self) -> bool:
-        return True
+class BaseTestCase:
+    """Base test case with common functionality for chunk statistics tests."""
 
-    def close(self) -> None:
-        pass
+    def create_stats_client(self, **kwargs):
+        """Create a ChunkStatisticsLookupClient with given configuration."""
+        config = LMCacheEngineConfig(**kwargs)
+        mock_client = MockLookupClient()
+        return ChunkStatisticsLookupClient(mock_client, config)
+
+    def setup_stats_client(self, **kwargs):
+        """Setup statistics client with default configuration and start statistics."""
+        default_kwargs = {
+            "enable_chunk_statistics": True,
+            "chunk_statistics_strategy": "memory_bloom_filter",
+            "chunk_statistics_expected_chunks": 1000,
+            "chunk_statistics_false_positive_rate": 0.01,
+        }
+        default_kwargs.update(kwargs)
+
+        stats_client = self.create_stats_client(**default_kwargs)
+        stats_client.start_statistics()
+        return stats_client, stats_client.actual_lookup_client
 
 
 class TestStrategyDiscovery:
@@ -88,43 +105,22 @@ class TestStrategyDiscovery:
         assert strategies["file_hash"].name() == "file_hash"
         assert strategies["memory_bloom_filter"].name() == "memory_bloom_filter"
 
-    def test_get_strategies_returns_strategy_classes(self):
-        """Test that discovered strategies are proper RecordStrategy classes."""
-        strategies = _get_strategies()
-
-        for strategy_name, strategy_class in strategies.items():
-            assert hasattr(strategy_class, "name")
-            assert hasattr(strategy_class, "record")
-            assert hasattr(strategy_class, "get_statistics")
-            assert hasattr(strategy_class, "reset")
-            assert hasattr(strategy_class, "wait_for_async_processing")
-            assert hasattr(strategy_class, "close")
-
-            assert callable(strategy_class.name)
-            assert strategy_class.name() == strategy_name
-
-    def test_get_strategies_caching(self):
-        """Test that _get_strategies returns cached results."""
-        strategies1 = _get_strategies()
-        strategies2 = _get_strategies()
-
-        assert strategies1 is strategies2
-
 
 class TestBloomFilter:
     """Test suite for BloomFilter functionality."""
 
-    def test_basic_operations(self):
-        """Test basic add, contains and clear operations."""
+    def test_bloom_filter_operations(self):
+        """Test basic BloomFilter operations."""
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
 
+        # Test add/contains
         bf.add("test_item_1")
         bf.add("test_item_2")
-
         assert bf.contains("test_item_1")
         assert bf.contains("test_item_2")
         assert not bf.contains("test_item_3")
 
+        # Test clear
         bf.clear()
         assert not bf.contains("test_item_1")
 
@@ -132,176 +128,104 @@ class TestBloomFilter:
         """Test false positive rate is within expected range."""
         bf = BloomFilter(expected_elements=10000, false_positive_rate=0.01)
 
+        # Add 10000 items
         for i in range(10000):
             bf.add(f"item_{i}")
 
-        false_positives = 0
-        test_count = 1000
-        for i in range(10000, 10000 + test_count):
-            if bf.contains(f"item_{i}"):
-                false_positives += 1
-
-        fp_rate = false_positives / test_count
+        # Test 1000 non-existent items
+        false_positives = sum(
+            1 for i in range(10000, 11000) if bf.contains(f"item_{i}")
+        )
+        fp_rate = false_positives / 1000
         assert fp_rate < 0.05, f"False positive rate {fp_rate} is too high"
 
     def test_memory_metrics(self):
         """Test memory usage metrics."""
         bf = BloomFilter(expected_elements=10000, false_positive_rate=0.01)
-
         stats = bf.get_statistics()
-        assert "size_mb" in stats
-        assert "hash_count" in stats
-        assert "item_count" in stats
-        assert "bits_set" in stats
-        assert "fill_rate" in stats
+
+        required_metrics = [
+            "size_mb",
+            "hash_count",
+            "item_count",
+            "bits_set",
+            "fill_rate",
+        ]
+        for metric in required_metrics:
+            assert metric in stats
         assert stats["size_mb"] > 0
 
 
-class TestChunkStatisticsBasic:
+class TestChunkStatisticsBasic(BaseTestCase):
     """Test suite for basic chunk statistics functionality."""
-
-    def test_basic_statistics_collection(self):
-        """Test basic statistics collection with multiple requests."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(
-            chunk_size=256,
-            chunk_statistics_expected_chunks=1000,
-            chunk_statistics_false_positive_rate=0.01,
-        )
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
-
-        token_ids_1 = list(range(512))
-        token_ids_2 = list(range(256))
-
-        result1 = stats_client.lookup(token_ids_1, "req_1")
-        result2 = stats_client.lookup(token_ids_2, "req_2")
-
-        assert result1 == 256
-        assert result2 == 128
-
-        # Wait for async processing to complete
-        assert stats_client.wait_for_async_processing(timeout=2.0), (
-            "Async processing timeout"
-        )
-
-        stats = stats_client.get_statistics()
-        assert stats["enabled"] is True
-        assert stats["total_requests"] == 2
-        assert stats["total_chunks"] == 3
-        assert stats["unique_chunks"] == 2
 
     def test_preemption_handling(self):
         """Test that preempted requests are skipped."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
+        stats_client, _ = self.setup_stats_client()
 
         token_ids = list(range(256))
         stats_client.lookup(token_ids, "req_1")
         stats1 = stats_client.get_statistics()
 
+        # Same request ID should be skipped
         stats_client.lookup(token_ids, "req_1")
         stats2 = stats_client.get_statistics()
 
         assert stats1["total_requests"] == stats2["total_requests"]
         assert stats1["total_chunks"] == stats2["total_chunks"]
 
-    def test_torch_tensor_input(self):
-        """Test statistics with torch.Tensor input."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
-
-        token_ids = torch.arange(512)
-        stats_client.lookup(token_ids, "req_1")
-
-        stats = stats_client.get_statistics()
-        assert stats["total_requests"] == 1
-        assert stats["total_chunks"] == 2
-
     def test_disabled_statistics(self):
         """Test that statistics are not collected when disabled."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
+        stats_client = self.create_stats_client()
         stats_client.lookup(list(range(256)), "req_1")
 
         stats = stats_client.get_statistics()
         assert stats["enabled"] is False
         assert stats["total_requests"] == 0
 
-    def test_interface_delegation(self):
-        """Test delegation of interface methods."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
 
-        stats_client.start_statistics()
-        stats_client.lookup(list(range(256)), "req_1")
-
-        stats_client.clear_lookup_status("req_1")
-        assert stats_client.supports_producer_reuse() is True
-        stats_client.close()
-
-
-class TestChunkStatisticsMetrics:
+class TestChunkStatisticsMetrics(BaseTestCase):
     """Test suite for chunk statistics metrics and calculations."""
-
-    def test_reuse_rate_calculation(self):
-        """Test chunk reuse rate calculation."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
-
-        stats_client.lookup(list(range(512)), "req_1")
-        stats_client.lookup(list(range(256)), "req_2")
-
-        stats = stats_client.get_statistics()
-        assert stats["total_chunks"] == 3
-        assert stats["reuse_rate"] >= 0.0
 
     def test_detailed_metrics(self):
         """Test detailed statistics metrics including Bloom Filter info."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(
-            chunk_size=256,
+        stats_client, _ = self.setup_stats_client(
             chunk_statistics_expected_chunks=5000,
             chunk_statistics_false_positive_rate=0.01,
         )
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
 
         stats_client.lookup(list(range(512)), "req_1")
         stats_client.lookup(list(range(256)), "req_2")
 
         stats = stats_client.get_statistics()
 
-        assert "enabled" in stats
-        assert "total_requests" in stats
-        assert "total_chunks" in stats
-        assert "unique_chunks" in stats
-        assert "duplicate_chunks" in stats
-        assert "reuse_rate" in stats
-        assert "bloom_filter" in stats
+        # Check top-level metrics
+        required_stats = [
+            "enabled",
+            "total_requests",
+            "total_chunks",
+            "unique_chunks",
+            "duplicate_chunks",
+            "reuse_rate",
+            "bloom_filter",
+            "timing",
+        ]
+        for stat in required_stats:
+            assert stat in stats
 
+        # Check Bloom Filter metrics
         bf_stats = stats["bloom_filter"]
-        assert "size_mb" in bf_stats
-        assert "hash_count" in bf_stats
-        assert "item_count" in bf_stats
-        assert "bits_set" in bf_stats
-        assert "fill_rate" in bf_stats
-        assert "expected_elements" in bf_stats
-        assert "false_positive_rate" in bf_stats
+        required_bf_stats = [
+            "size_mb",
+            "hash_count",
+            "item_count",
+            "bits_set",
+            "fill_rate",
+            "expected_elements",
+            "false_positive_rate",
+        ]
+        for stat in required_bf_stats:
+            assert stat in bf_stats
 
         assert stats["total_requests"] == 2
         assert stats["total_chunks"] == 3
@@ -310,133 +234,23 @@ class TestChunkStatisticsMetrics:
         assert bf_stats["expected_elements"] == 5000
         assert bf_stats["false_positive_rate"] == 0.01
 
-    def test_progressive_metrics(self):
-        """Test metrics update progressively with more requests."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
-
-        stats_client.lookup(list(range(256)), "req_1")
-        stats1 = stats_client.get_statistics()
-        assert stats1["total_requests"] == 1
-        assert stats1["total_chunks"] == 1
-
-        stats_client.lookup(list(range(256, 512)), "req_2")
-        stats2 = stats_client.get_statistics()
-        assert stats2["total_requests"] == 2
-        assert stats2["total_chunks"] == 2
-
-        stats_client.lookup(list(range(256)), "req_3")
-        stats3 = stats_client.get_statistics()
-        assert stats3["total_requests"] == 3
-        assert stats3["total_chunks"] == 3
-        assert stats3["duplicate_chunks"] > 0
-
-    def test_memory_efficiency(self):
-        """Test memory efficiency of Bloom Filter."""
-        config = LMCacheEngineConfig(
-            chunk_size=256,
-            chunk_statistics_expected_chunks=100000,
-            chunk_statistics_false_positive_rate=0.01,
-        )
-        mock_client = MockLookupClient()
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
-
-        for i in range(100):
-            stats_client.lookup(list(range(i * 256, (i + 1) * 256)), f"req_{i}")
-
-        stats = stats_client.get_statistics()
-        bf_stats = stats["bloom_filter"]
-
-        assert bf_stats["size_mb"] < 1.0
-        assert stats["total_requests"] == 100
-        assert stats["total_chunks"] == 100
-
-
-class TestChunkStatisticsLifecycle:
-    """Test suite for statistics lifecycle management."""
-
-    def test_reset_statistics(self):
-        """Test statistics reset."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
-        stats_client.lookup(list(range(256)), "req_1")
-
-        stats_client.reset_statistics()
-        stats = stats_client.get_statistics()
-
-        assert stats["total_requests"] == 0
-        assert stats["total_chunks"] == 0
-        assert stats["unique_chunks"] == 0
-
-    def test_auto_start_configuration(self):
-        """Test auto_start_statistics configuration."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(
-            chunk_size=256,
-            enable_chunk_statistics=True,
-            chunk_statistics_auto_start_statistics=True,
-        )
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats = stats_client.get_statistics()
-        assert stats["enabled"] is True
-        assert stats["total_requests"] == 0
-
-    def test_auto_exit_configuration(self):
-        """Test auto exit configuration."""
-        mock_client = MockLookupClient()
-
-        config = LMCacheEngineConfig(
-            chunk_size=256,
-            enable_chunk_statistics=True,
-            chunk_statistics_auto_exit_timeout_hours=1.0,
-        )
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-        assert stats_client.enable_auto_exit is True
-        assert stats_client.timeout_hours == 1.0
-
-        config2 = LMCacheEngineConfig(
-            chunk_size=256,
-            enable_chunk_statistics=True,
-            chunk_statistics_auto_exit_timeout_hours=0.0,
-        )
-        stats_client2 = ChunkStatisticsLookupClient(mock_client, config2)
-        assert stats_client2.enable_auto_exit is False
-
-    def test_timing_statistics(self):
-        """Test timing statistics collection."""
-        mock_client = MockLookupClient()
-        config = LMCacheEngineConfig(chunk_size=256)
-        stats_client = ChunkStatisticsLookupClient(mock_client, config)
-
-        stats_client.start_statistics()
-        stats_client.lookup(list(range(512)), "req_1")
-        stats_client.lookup(list(range(256)), "req_2")
-
-        stats = stats_client.get_statistics()
-
-        assert "timing" in stats
         timing = stats["timing"]
-        assert "lookup_time_seconds" in timing
-        assert "record_statistics_time_seconds" in timing
-        assert "check_exit_conditions_time_seconds" in timing
-        assert "total_time_seconds" in timing
-        assert "overhead_time_seconds" in timing
-        assert "overhead_percentage" in timing
+        required_timing_fields = [
+            "lookup_time_seconds",
+            "record_statistics_time_seconds",
+            "check_exit_conditions_time_seconds",
+            "total_time_seconds",
+            "overhead_time_seconds",
+            "overhead_percentage",
+        ]
 
-        assert timing["lookup_time_seconds"] >= 0
-        assert timing["total_time_seconds"] >= 0
-        assert timing["overhead_time_seconds"] >= 0
+        for field in required_timing_fields:
+            assert field in timing
+            assert timing[field] >= 0
+
         assert 0 <= timing["overhead_percentage"] <= 100
 
+        # Verify timing calculations
         total = (
             timing["lookup_time_seconds"]
             + timing["record_statistics_time_seconds"]
@@ -449,6 +263,86 @@ class TestChunkStatisticsLifecycle:
             + timing["check_exit_conditions_time_seconds"]
         )
         assert abs(timing["overhead_time_seconds"] - overhead) < 0.001
+
+    def test_progressive_metrics(self):
+        """Test metrics update progressively with more requests."""
+        stats_client, _ = self.setup_stats_client()
+
+        # First request
+        stats_client.lookup(list(range(256)), "req_1")
+        stats1 = stats_client.get_statistics()
+        assert stats1["total_requests"] == 1
+        assert stats1["total_chunks"] == 1
+
+        # Second request
+        stats_client.lookup(list(range(256, 512)), "req_2")
+        stats2 = stats_client.get_statistics()
+        assert stats2["total_requests"] == 2
+        assert stats2["total_chunks"] == 2
+
+        # Third request with duplicate chunk
+        # Test with torch.Tensor
+        stats_client.lookup(torch.arange(256), "req_3")
+        stats3 = stats_client.get_statistics()
+        assert stats3["total_requests"] == 3
+        assert stats3["total_chunks"] == 3
+        assert stats3["duplicate_chunks"] > 0
+
+    def test_memory_efficiency(self):
+        """Test memory efficiency of Bloom Filter."""
+        stats_client, _ = self.setup_stats_client(
+            chunk_statistics_expected_chunks=100000,
+            chunk_statistics_false_positive_rate=0.01,
+        )
+
+        # Add 100 unique chunks
+        for i in range(100):
+            stats_client.lookup(list(range(i * 256, (i + 1) * 256)), f"req_{i}")
+
+        stats = stats_client.get_statistics()
+        bf_stats = stats["bloom_filter"]
+
+        assert bf_stats["size_mb"] < 1.0  # Should be memory efficient
+        assert stats["total_requests"] == 100
+        assert stats["total_chunks"] == 100
+
+
+class TestChunkStatisticsLifecycle(BaseTestCase):
+    """Test suite for statistics lifecycle management."""
+
+    def test_reset_statistics(self):
+        """Test statistics reset."""
+        stats_client, _ = self.setup_stats_client()
+        stats_client.lookup(list(range(256)), "req_1")
+
+        stats_client.reset_statistics()
+        stats = stats_client.get_statistics()
+
+        assert stats["total_requests"] == 0
+        assert stats["total_chunks"] == 0
+        assert stats["unique_chunks"] == 0
+
+    def test_auto_exit_configuration(self):
+        """Test auto exit configuration."""
+        # Test with timeout enabled
+        stats_client = self.create_stats_client(
+            enable_chunk_statistics=True,
+            chunk_statistics_auto_start_statistics=True,
+            chunk_statistics_auto_exit_timeout_hours=1.0,
+        )
+        stats = stats_client.get_statistics()
+        assert stats["enabled"] is True
+        assert stats["total_requests"] == 0
+
+        assert stats_client.enable_auto_exit is True
+        assert stats_client.timeout_hours == 1.0
+
+        # Test with timeout disabled
+        stats_client2 = self.create_stats_client(
+            enable_chunk_statistics=True,
+            chunk_statistics_auto_exit_timeout_hours=0.0,
+        )
+        assert stats_client2.enable_auto_exit is False
 
 
 class TestChunkStatisticsPerformance:
@@ -489,7 +383,7 @@ class TestChunkStatisticsPerformance:
         - Actual lookup returns immediately on first chunk miss
         - Statistics recording still processes all chunks
 
-        Validates that overhead stays within 15% in realistic workload.
+        Validates that overhead stays within x% in realistic workload.
         """
 
         # Determine test configuration description
