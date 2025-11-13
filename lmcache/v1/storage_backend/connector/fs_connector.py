@@ -145,6 +145,7 @@ class FSConnector(RemoteConnector):
     def _get_with_odirect(self, file_path: Path) -> Optional[MemoryObj]:
         """Synchronous direct IO read, executed in a thread."""
         try:
+            fd = -1
             memory_obj = self.local_cpu_backend.allocate(
                 self.meta_shape, self.meta_dtype, self.meta_fmt
             )
@@ -176,6 +177,12 @@ class FSConnector(RemoteConnector):
 
         except Exception as e:
             logger.error(f"Failed to read from file {file_path}: {str(e)}")
+            # Make sure fd is closed on error
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
             return None
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -270,7 +277,7 @@ class FSConnector(RemoteConnector):
             if fd >= 0:
                 try:
                     os.close(fd)
-                except Exception:
+                except OSError:
                     pass
             raise
 
