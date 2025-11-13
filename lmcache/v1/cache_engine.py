@@ -1326,13 +1326,10 @@ class LMCacheEngineBuilder:
                 config.nixl_buffer_size,
                 dtype=torch.uint8,
                 device=corrected_device,
+                pin_memory=True if corrected_device == "cpu" else False
             )
 
-            if corrected_device == "cpu":
-                torch.cuda.cudart().cudaHostRegister(
-                    buffer.data_ptr(), config.nixl_buffer_size, 0
-                )
-            else:
+            if corrected_device != "cpu":
                 logger.info(f"Setting accelerator device to {corrected_device} ")
                 accelerator.set_device(corrected_device)
 
