@@ -170,11 +170,23 @@ class RecordStrategy(ABC):
                     else 0.0,
                 },
             }
-            base_stats.update(self._get_strategy_specific_statistics())
             return base_stats
 
     def _get_strategy_specific_statistics(self) -> dict:
         return {}
+
+    def setup_metrics(self, prometheus_logger) -> None:
+        prometheus_logger.chunk_statistics_total_chunks.set_function(
+            lambda: self.total_chunks
+        )
+        prometheus_logger.chunk_statistics_unique_chunks.set_function(
+            lambda: self.unique_chunks_count
+        )
+        prometheus_logger.chunk_statistics_reuse_rate.set_function(
+            lambda: (self.total_chunks - self.unique_chunks_count) / self.total_chunks
+            if self.total_chunks > 0
+            else 0.0
+        )
 
     @abstractmethod
     def reset(self) -> None:

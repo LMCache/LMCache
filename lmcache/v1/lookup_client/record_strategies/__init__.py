@@ -48,10 +48,10 @@ def _get_strategies() -> Dict[str, Type[RecordStrategy]]:
     return _strategies_cache
 
 
-def create_record_strategy(
-    strategy_name: str, chunk_size: int, config
-) -> RecordStrategy:
+def create_record_strategy(config) -> RecordStrategy:
     strategies = _get_strategies()
+    strategy_name = config.chunk_statistics_strategy
+    chunk_size = config.chunk_size
     if strategy_name not in strategies:
         raise ValueError(
             f"Unknown strategy: {strategy_name}. Available: {list(strategies.keys())}"

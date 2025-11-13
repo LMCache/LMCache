@@ -79,8 +79,23 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             self.total_chunks += len(chunk_bloom_positions)
             self.unique_chunks_count += unique
 
-    def _get_strategy_specific_statistics(self) -> dict:
-        return {"bloom_filter": self.global_bloom.get_statistics()}
+    def get_statistics(self) -> dict:
+        stats = super().get_statistics()
+        stats.update({"bloom_filter": self.global_bloom.get_statistics()})
+        return stats
+
+    def setup_metrics(self, prometheus_logger) -> None:
+        """Setup bloom filter specific metrics."""
+        super().setup_metrics(prometheus_logger)
+        prometheus_logger.chunk_statistics_bloom_filter_size_mb.set_function(
+            lambda: self.global_bloom.get_memory_usage_bytes() / (1024 * 1024)
+        )
+        prometheus_logger.chunk_statistics_bloom_filter_fill_rate.set_function(
+            lambda: sum(bin(val).count("1") for val in self.global_bloom.bit_array)
+            / self.global_bloom.size
+            if self.global_bloom.size > 0
+            else 0.0
+        )
 
     def reset(self) -> None:
         self.wait_for_async_processing(timeout=5.0)

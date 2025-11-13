@@ -660,7 +660,7 @@ class LMCacheConnectorV1Impl:
                 )
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
-                vllm_config, config, self.lmcache_engine, instance_id=ENGINE_NAME
+                vllm_config, config, self.lmcache_engine
             )
             self._unfinished_requests: dict[str, Request] = {}
             self.lmcache_engine = None

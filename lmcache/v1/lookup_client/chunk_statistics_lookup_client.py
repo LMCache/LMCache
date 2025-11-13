@@ -10,7 +10,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger
+from lmcache.observability import PrometheusLogger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.record_strategies import (
@@ -28,8 +28,6 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         self,
         actual_lookup_client: LookupClientInterface,
         config: LMCacheEngineConfig,
-        record_strategy: Optional[RecordStrategy] = None,
-        stats_logger: Optional[LMCacheStatsLogger] = None,
     ):
         self.actual_lookup_client = actual_lookup_client
         self.lock = threading.RLock()
@@ -48,20 +46,10 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             self.timeout_hours > 0.0 or self.target_unique_chunks is not None
         )
         self.record_strategy: RecordStrategy
-        if record_strategy is None:
-            self.record_strategy = create_record_strategy(
-                strategy_name=config.chunk_statistics_strategy,
-                chunk_size=config.chunk_size,
-                config=config,
-            )
-        else:
-            self.record_strategy = record_strategy
+        self.record_strategy = create_record_strategy(config)
+        self._setup_metrics()
         if config.chunk_statistics_auto_start_statistics:
             self.start_statistics()
-
-        self.stats_logger = stats_logger
-        if stats_logger is not None:
-            stats_logger.register_callback(self.get_statistics)
 
     def start_statistics(self) -> None:
         with self.lock:
@@ -148,9 +136,6 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
     def close(self) -> None:
         if self.enabled:
             self.stop_statistics()
-        if self.stats_logger is not None:
-            self.stats_logger.unregister_callback(self.get_statistics)
-
         self.record_strategy.close()
         self.actual_lookup_client.close()
 
@@ -177,3 +162,14 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         logger.warning("Auto-stop: %s", reason)
         if self.enabled:
             self.stop_statistics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.chunk_statistics_enabled.set_function(
+                lambda: 1.0 if self.enabled else 0.0
+            )
+            prometheus_logger.chunk_statistics_total_requests.set_function(
+                lambda: len(self.request_seen)
+            )
+            self.record_strategy.setup_metrics(prometheus_logger)

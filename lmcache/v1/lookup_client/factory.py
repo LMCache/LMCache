@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
@@ -37,7 +37,6 @@ class LookupClientFactory:
         vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
         lmcache_engine: Optional[LMCacheEngine] = None,
-        instance_id: Optional[str] = None,
     ) -> LookupClientInterface:
         """
         Create a lookup client based on the configuration.
@@ -85,13 +84,9 @@ class LookupClientFactory:
 
         # Wrap with ChunkStatisticsLookupClient if enabled
         if config.enable_chunk_statistics:
-            stats_logger = None
-            if instance_id is not None:
-                stats_logger = LMCacheEngineBuilder.get_stats_logger(instance_id)
             client = ChunkStatisticsLookupClient(
                 client,
                 config,
-                stats_logger=stats_logger,
             )
         return client
 

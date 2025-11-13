@@ -93,14 +93,32 @@ class FileHashStrategy(RecordStrategy):
             chunk_hashes = self._compute_chunk_hashes_hex(chunk_hashes)
         self._write_data_to_file(chunk_hashes, lookup_id)
 
-    def _get_strategy_specific_statistics(self) -> dict:
-        return {
-            "file_hash": {
-                "file_count": self.file_count,
-                "current_file_size": self.current_file_size,
-                "output_dir": str(self.output_dir),
+    def get_statistics(self) -> dict:
+        stats = super().get_statistics()
+        stats.update(
+            {
+                "file_hash": {
+                    "file_count": self.file_count,
+                    "current_file_size": self.current_file_size,
+                    "file_max_count": self.file_max_count,
+                    "output_dir": str(self.output_dir),
+                }
             }
-        }
+        )
+        return stats
+
+    def setup_metrics(self, prometheus_logger) -> None:
+        """Setup file hash specific metrics."""
+        super().setup_metrics(prometheus_logger)
+        prometheus_logger.chunk_statistics_file_count.set_function(
+            lambda: self.file_count
+        )
+        prometheus_logger.chunk_statistics_current_file_size.set_function(
+            lambda: self.current_file_size
+        )
+        prometheus_logger.chunk_statistics_file_max_count.set_function(
+            lambda: self.file_max_count
+        )
 
     def reset(self) -> None:
         self.wait_for_async_processing(timeout=5.0)
