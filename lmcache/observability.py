@@ -1014,7 +1014,6 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
-
         self._dynamic_metrics(labelnames)
 
     def _dynamic_metrics(self, labelnames):
@@ -1073,12 +1072,6 @@ class PrometheusLogger:
         self.chunk_statistics_unique_chunks = self._gauge_cls(
             name="lmcache:chunk_statistics_unique_chunks",
             documentation="Number of unique chunks (estimated)",
-            labelnames=labelnames,
-            multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_duplicate_chunks = self._gauge_cls(
-            name="lmcache:chunk_statistics_duplicate_chunks",
-            documentation="Number of duplicate chunks (estimated)",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
@@ -1307,17 +1300,14 @@ class PrometheusLogger:
 
 
 class LMCacheStatsLogger:
-    def __init__(
-        self,
-        metadata: LMCacheEngineMetadata,
-        log_interval: int,
-    ):
+    def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
         self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.is_running = True
+
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
         self.thread.start()
 
