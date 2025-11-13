@@ -13,10 +13,6 @@ logger = init_logger(__name__)
 class MemoryBloomFilterStrategy(RecordStrategy):
     """Memory-based strategy using Bloom Filter."""
 
-    @classmethod
-    def name(cls) -> str:
-        return "memory_bloom_filter"
-
     def __init__(self, config, chunk_size: int):
         super().__init__(
             chunk_size=chunk_size,
@@ -33,9 +29,27 @@ class MemoryBloomFilterStrategy(RecordStrategy):
         return self._preprocess_chunks(token_ids)
 
     def _record_sync(self, token_ids: list[int], lookup_id: str) -> None:
-        self._process_statistics(token_ids, lookup_id)
+        chunk_bloom_positions = self._preprocess_chunks(token_ids)
+        self._process_chunk_data(chunk_bloom_positions)
 
     def _preprocess_chunks(self, token_ids: list[int]) -> list[list[int]]:
+        """Preprocess token IDs into bloom filter hash positions.
+
+        Args:
+            token_ids: List of token IDs to process
+
+        Returns:
+            List of bloom filter hash positions for each chunk, where each inner list
+            contains the hash_count separate hash results for that chunk.
+
+            Example structure:
+            [
+                [hash1_pos1, hash1_pos2, ..., hash1_posN],  # chunk 1 hashes
+                [hash2_pos1, hash2_pos2, ..., hash2_posN],  # chunk 2 hashes
+                ...
+            ]
+            where N is the bloom filter's hash_count
+        """
         chunk_data_list = []
         for prefix_hash in self._compute_chunk_hashes(token_ids):
             if prefix_hash < 0:
@@ -44,38 +58,18 @@ class MemoryBloomFilterStrategy(RecordStrategy):
         return chunk_data_list
 
     def _process_queue_item(self, item) -> None:
+        data, lookup_id = item
         if self.async_preprocess_chunks:
-            self._process_chunk_data(item[0], item[1])
+            chunk_bloom_positions = data
         else:
-            self._process_statistics(item[0], item[1])
+            chunk_bloom_positions = self._preprocess_chunks(data)
+        self._process_chunk_data(chunk_bloom_positions)
 
-    def _update_bloom_filter(self, positions_list: list[list[int]]) -> int:
-        unique_count = 0
-        bit_array = self.global_bloom.bit_array
-        for positions in positions_list:
-            is_new = any(
-                not (bit_array[pos >> 5] & (1 << (pos & 31))) for pos in positions
+    def _process_chunk_data(self, chunk_bloom_positions: list[list[int]]) -> None:
+        with self.lock:
+            unique = self.global_bloom.add_batch_with_hashes_and_check(
+                chunk_bloom_positions
             )
-            if is_new:
-                for pos in positions:
-                    bit_array[pos >> 5] |= 1 << (pos & 31)
-                unique_count += 1
-        return unique_count
-
-    def _process_chunk_data(
-        self, chunk_data_list: list[list[int]], lookup_id: str
-    ) -> None:
-        with self.lock:
-            unique = self._update_bloom_filter(chunk_data_list)
-            self.global_bloom.item_count += unique
-            self.total_chunks += len(chunk_data_list)
-            self.unique_chunks_count += unique
-
-    def _process_statistics(self, token_ids: list[int], lookup_id: str) -> None:
-        chunk_bloom_positions = self._preprocess_chunks(token_ids)
-        with self.lock:
-            unique = self._update_bloom_filter(chunk_bloom_positions)
-            self.global_bloom.item_count += unique
             self.total_chunks += len(chunk_bloom_positions)
             self.unique_chunks_count += unique
 
@@ -89,12 +83,6 @@ class MemoryBloomFilterStrategy(RecordStrategy):
         super().setup_metrics(prometheus_logger)
         prometheus_logger.chunk_statistics_bloom_filter_size_mb.set_function(
             lambda: self.global_bloom.get_memory_usage_bytes() / (1024 * 1024)
-        )
-        prometheus_logger.chunk_statistics_bloom_filter_fill_rate.set_function(
-            lambda: sum(bin(val).count("1") for val in self.global_bloom.bit_array)
-            / self.global_bloom.size
-            if self.global_bloom.size > 0
-            else 0.0
         )
 
     def reset(self) -> None:

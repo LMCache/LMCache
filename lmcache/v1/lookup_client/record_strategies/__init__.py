@@ -24,15 +24,10 @@ def _discover_strategies() -> Dict[str, Type[RecordStrategy]]:
         try:
             module = importlib.import_module(modname)
             for name, obj in inspect.getmembers(module, inspect.isclass):
-                if (
-                    issubclass(obj, RecordStrategy)
-                    and obj is not RecordStrategy
-                    and hasattr(obj, "name")
-                ):
-                    try:
-                        strategies[obj.name()] = obj
-                    except Exception:
-                        continue
+                if issubclass(obj, RecordStrategy) and obj is not RecordStrategy:
+                    # Use module name as strategy name
+                    strategy_name = modname.split(".")[-1]
+                    strategies[strategy_name] = obj
         except Exception:
             continue
     return strategies

@@ -35,6 +35,7 @@ class RecordStrategy(ABC):
         self.async_queue: Optional[queue.Queue] = None
         self.async_worker_thread: Optional[threading.Thread] = None
         self.async_shutdown = False
+        # Number of times the async queue was full and waited timeout
         self.queue_full_blocks = 0
         self.queue_max_size = 0
         self.total_chunks = 0
@@ -46,12 +47,6 @@ class RecordStrategy(ABC):
 
         if self.async_enabled:
             self._start_async_worker()
-
-    @classmethod
-    @abstractmethod
-    def name(cls) -> str:
-        """Return strategy name."""
-        pass
 
     def _start_async_worker(self) -> None:
         self.async_queue = queue.Queue(maxsize=self.async_queue_capacity)
@@ -171,9 +166,6 @@ class RecordStrategy(ABC):
                 },
             }
             return base_stats
-
-    def _get_strategy_specific_statistics(self) -> dict:
-        return {}
 
     def setup_metrics(self, prometheus_logger) -> None:
         prometheus_logger.chunk_statistics_total_chunks.set_function(

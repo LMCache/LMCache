@@ -54,19 +54,30 @@ class BloomFilter:
             self.bit_array[pos >> 5] |= 1 << (pos & 31)
         self.item_count += 1
 
-    def add_with_hashes(self, hash_positions: list[int]) -> None:
-        for pos in hash_positions:
-            self.bit_array[pos >> 5] |= 1 << (pos & 31)
-        self.item_count += 1
+    def add_batch_with_hashes_and_check(self, positions_list: list[list[int]]) -> int:
+        """Add multiple sets of hash positions and return count of new items.
+
+        Args:
+            positions_list: List of lists, where each inner list contains
+            hash positions for one item
+
+        Returns:
+            Number of new items that were actually added
+        """
+        unique_count = 0
+        for positions in positions_list:
+            is_new = any(
+                not (self.bit_array[pos >> 5] & (1 << (pos & 31))) for pos in positions
+            )
+            if is_new:
+                for pos in positions:
+                    self.bit_array[pos >> 5] |= 1 << (pos & 31)
+                unique_count += 1
+        self.item_count += unique_count
+        return unique_count
 
     def contains(self, item: Union[str, int]) -> bool:
         for pos in self._hashes(item):
-            if not (self.bit_array[pos >> 5] & (1 << (pos & 31))):
-                return False
-        return True
-
-    def contains_with_hashes(self, hash_positions: list[int]) -> bool:
-        for pos in hash_positions:
             if not (self.bit_array[pos >> 5] & (1 << (pos & 31))):
                 return False
         return True

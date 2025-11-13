@@ -17,10 +17,6 @@ logger = init_logger(__name__)
 class FileHashStrategy(RecordStrategy):
     """File-based strategy that writes chunk hashes to disk."""
 
-    @classmethod
-    def name(cls) -> str:
-        return "file_hash"
-
     def __init__(self, config, chunk_size: int):
         super().__init__(
             chunk_size=chunk_size,
@@ -85,12 +81,11 @@ class FileHashStrategy(RecordStrategy):
                 logger.error("Failed to delete file %s: %s", oldest_file, e)
 
     def _process_queue_item(self, item) -> None:
-        chunk_hashes, lookup_id = item
-        if not (
-            isinstance(chunk_hashes, list)
-            and all(isinstance(h, str) for h in chunk_hashes)
-        ):
-            chunk_hashes = self._compute_chunk_hashes_hex(chunk_hashes)
+        data, lookup_id = item
+        if self.async_preprocess_chunks:
+            chunk_hashes = data
+        else:
+            chunk_hashes = self._compute_chunk_hashes_hex(data)
         self._write_data_to_file(chunk_hashes, lookup_id)
 
     def get_statistics(self) -> dict:
