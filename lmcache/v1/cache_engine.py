@@ -1051,8 +1051,8 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, lookup_id: str) -> None:
-        assert self.storage_manager is not None
         if lookup_id in self.lookup_pins:
+            assert self.storage_manager is not None
             self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
             del self.lookup_pins[lookup_id]
 
