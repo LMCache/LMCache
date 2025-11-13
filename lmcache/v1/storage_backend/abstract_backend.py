@@ -43,11 +43,15 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
         self.dst_device = dst_device
 
-    def is_using_dma(self) -> bool:
+    def requires_local_cpu_staging(self) -> bool:
         """
-        Indicates whether this backend avoids staging through host (CPU) memory.
+        Indicates whether this backend requires staging through LocalCPUBackend.
+
+        Returns:
+            True if this backend needs LocalCPUBackend for data transfer staging.
+            False if this backend can directly access storage (e.g., via DMA).
         """
-        return False
+        return True
 
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:

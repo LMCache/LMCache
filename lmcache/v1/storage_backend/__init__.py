@@ -132,8 +132,9 @@ def CreateStorageBackends(
         storage_backends["PDBackend"] = PDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
-    # NOTE(Jiayi): The local_cpu backend is always created because
-    # other backends might need it as a buffer.
+    # NOTE(Dongjoo): The local_cpu backend is created when:
+    # 1. config.local_cpu=True (explicitly enabled as hot cache)
+    # 2. Other backends need it as staging buffer
     local_cpu_backend: Optional[LocalCPUBackend] = None
     if metadata.role == "scheduler":
         # For scheduler role, local_cpu_backend is None
@@ -148,6 +149,13 @@ def CreateStorageBackends(
             )
             backend_name = str(local_cpu_backend)
             storage_backends[backend_name] = local_cpu_backend
+        elif config.local_cpu:
+            # User explicitly enabled local_cpu but set size to 0
+            raise ValueError(
+                f"config.local_cpu is True but max_local_cpu_size is "
+                f"{config.max_local_cpu_size}. Please set max_local_cpu_size > 0 "
+                f"or disable local_cpu."
+            )
         else:
             logger.info("No cpu memory is allocated as max_local_cpu_size <= 0")
 
@@ -213,17 +221,32 @@ def CreateStorageBackends(
             storage_backends,
         )
 
-    non_dma_backend_names = [
+    # ========== Backend Configuration Validation ==========
+    # Ensure backends that require CPU staging have LocalCPUBackend available
+    backends_requiring_cpu = [
         name
         for name, backend in storage_backends.items()
-        if name != "LocalCPUBackend" and not backend.is_using_dma()
+        if not isinstance(backend, LocalCPUBackend)
+        and backend.requires_local_cpu_staging()
     ]
 
-    if metadata.role != "scheduler" and non_dma_backend_names:
-        assert config.max_local_cpu_size > 0, (
-            "max_local_cpu_size must be greater than 0 "
-            f"because backends {non_dma_backend_names} require CPU memory"
-        )
+    if metadata.role != "scheduler" and backends_requiring_cpu:
+        if "LocalCPUBackend" not in storage_backends:
+            logger.warning(
+                f"Backends {backends_requiring_cpu} require CPU memory for staging, "
+                f"but LocalCPUBackend is not configured. "
+                f"Auto-adjusting max_local_cpu_size to 5 GB. "
+                f"Please explicitly set max_local_cpu_size > 0 in your configuration."
+            )
+            config.max_local_cpu_size = 5
+            local_cpu_backend = LocalCPUBackend(
+                config,
+                metadata,
+                dst_device,
+                lmcache_worker,
+            )
+            backend_name = str(local_cpu_backend)
+            storage_backends[backend_name] = local_cpu_backend
 
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(

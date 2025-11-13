@@ -226,10 +226,7 @@ class StorageManager:
         self.allocator_backend = None
         if metadata.role != "scheduler":
             self.allocator_backend = self._get_allocator_backend(config)
-        if config.local_cpu and self.local_cpu_backend is None:
-            raise AssertionError(
-                "Local CPU backend is required but missing from storage backends"
-            )
+        # Note: Backend validation is done in CreateStorageBackends
 
         self.manager_lock = threading.Lock()
 
@@ -290,29 +287,43 @@ class StorageManager:
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
     ) -> AllocatorBackendInterface:
+        """
+        Select an allocator backend with priority:
+        1. PDBackend if enabled
+        2. LocalCPUBackend if available and configured
+        3. Any other AllocatorBackendInterface implementation
+        """
         if self.enable_pd:
             backend = self.storage_backends["PDBackend"]
             assert isinstance(backend, AllocatorBackendInterface)
             return backend
 
-        allocator_backend: Optional[AllocatorBackendInterface] = None
-        local_backend = self.local_cpu_backend
-        if (
-            local_backend is not None
-            and config.max_local_cpu_size > 0
-            and isinstance(local_backend, AllocatorBackendInterface)
-        ):
-            allocator_backend = local_backend
-        else:
-            for backend in self.storage_backends.values():
-                if backend is local_backend:
-                    continue
-                if isinstance(backend, AllocatorBackendInterface):
-                    allocator_backend = backend
-                    break
-        if allocator_backend is None:
-            raise AssertionError("No allocator-capable backend available")
-        return allocator_backend
+        # Build priority list of allocator candidates
+        candidates: list[Optional[AllocatorBackendInterface]] = [
+            (
+                self.local_cpu_backend
+                if isinstance(self.local_cpu_backend, AllocatorBackendInterface)
+                else None
+            )
+        ]
+
+        # Add other allocator backends (excluding LocalCPUBackend)
+        for backend in self.storage_backends.values():
+            if backend != self.local_cpu_backend and isinstance(
+                backend, AllocatorBackendInterface
+            ):
+                candidates.append(backend)
+
+        # Return first available allocator
+        for candidate in candidates:
+            if candidate is not None:
+                return candidate
+
+        raise RuntimeError(
+            "No allocator-capable backend available. "
+            "Please configure at least one backend that implements "
+            "AllocatorBackendInterface."
+        )
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -442,11 +453,16 @@ class StorageManager:
             memory_obj = backend.get_blocking(key)
             if memory_obj:
                 local_cpu_backend = self.local_cpu_backend
-                if (
-                    backend_name not in ["LocalCPUBackend", "PDBackend"]
-                    and local_cpu_backend is not None
-                ):
-                    local_cpu_backend.submit_put_task(key, memory_obj)
+                # Write-back to LocalCPUBackend for performance optimization
+                if backend_name not in ["LocalCPUBackend", "PDBackend"]:
+                    if local_cpu_backend is not None:
+                        local_cpu_backend.submit_put_task(key, memory_obj)
+                    elif backend.requires_local_cpu_staging():
+                        logger.warning(
+                            f"Backend {backend_name} requires CPU staging but "
+                            f"LocalCPUBackend is not available. This may indicate "
+                            f"a configuration issue."
+                        )
                 return memory_obj
 
         return None

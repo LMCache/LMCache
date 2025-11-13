@@ -89,7 +89,10 @@ class LocalDiskWorker:
         if self._closed:
             return
         self._closed = True
-        self.executor.shutdown(wait=True)
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            self.executor.shutdown(wait=False)
+        else:
+            self.executor.shutdown(wait=True)
 
 
 class LocalDiskBackend(StorageBackendInterface):

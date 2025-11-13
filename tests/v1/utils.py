@@ -399,5 +399,5 @@ class NonDmaTestBackend(_BaseTestStorageBackend):
 
 
 class DmaTestBackend(_BaseTestStorageBackend):
-    def is_using_dma(self) -> bool:
-        return True
+    def requires_local_cpu_staging(self) -> bool:
+        return False

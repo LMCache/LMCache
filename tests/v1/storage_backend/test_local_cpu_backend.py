@@ -504,6 +504,7 @@ def _build_dynamic_backend_config(
 
 
 def test_create_storage_backends_requires_cpu_for_non_dma():
+    """Test that non-DMA backends auto-adjust CPU memory allocation."""
     config = _build_dynamic_backend_config(
         backend_name="NonDma",
         class_name="NonDmaTestBackend",
@@ -514,15 +515,21 @@ def test_create_storage_backends_requires_cpu_for_non_dma():
     metadata.role = "worker"
     loop = asyncio.new_event_loop()
     try:
-        with pytest.raises(AssertionError) as exc_info:
-            CreateStorageBackends(config, metadata, loop)
-        msg = str(exc_info.value)
-        assert "Local CPU cache is disabled" in msg or "max_local_cpu_size" in msg
+        # Should auto-adjust and succeed (no crash)
+        storage_backends = CreateStorageBackends(config, metadata, loop)
+        # Check that config was adjusted
+        assert config.max_local_cpu_size == 5
+        # Check that LocalCPUBackend was created
+        assert "LocalCPUBackend" in storage_backends
+        # Clean up
+        for backend in storage_backends.values():
+            backend.close()
     finally:
         loop.close()
 
 
 def test_create_storage_backends_all_dma_skip_cpu_backend():
+    """Test that DMA-only backends don't require LocalCPUBackend."""
     config = _build_dynamic_backend_config(
         backend_name="DmaOnly",
         class_name="DmaTestBackend",
@@ -535,6 +542,103 @@ def test_create_storage_backends_all_dma_skip_cpu_backend():
     try:
         storage_backends = CreateStorageBackends(config, metadata, loop)
         assert "LocalCPUBackend" not in storage_backends
-        assert storage_backends["DmaOnly"].is_using_dma()
+        assert not storage_backends["DmaOnly"].requires_local_cpu_staging()
+        # Clean up
+        for backend in storage_backends.values():
+            backend.close()
+    finally:
+        loop.close()
+
+
+def test_create_storage_backends_mixed_dma_and_non_dma():
+    """Test mixed DMA and non-DMA backends together."""
+    config = LMCacheEngineConfig.from_defaults()
+    config.local_cpu = False
+    config.max_local_cpu_size = 0.0
+    config.external_backends = ["DmaBackend", "NonDmaBackend"]
+    config.extra_config = {
+        "external_backend.DmaBackend.module_path": "tests.v1.utils",
+        "external_backend.DmaBackend.class_name": "DmaTestBackend",
+        "external_backend.NonDmaBackend.module_path": "tests.v1.utils",
+        "external_backend.NonDmaBackend.class_name": "NonDmaTestBackend",
+    }
+    metadata = dumb_metadata()
+    metadata.role = "worker"
+    loop = asyncio.new_event_loop()
+    try:
+        # Should auto-create LocalCPUBackend for NonDmaBackend
+        storage_backends = CreateStorageBackends(config, metadata, loop)
+        assert "LocalCPUBackend" in storage_backends
+        assert "DmaBackend" in storage_backends
+        assert "NonDmaBackend" in storage_backends
+        assert config.max_local_cpu_size == 5  # Auto-adjusted
+        # Clean up
+        for backend in storage_backends.values():
+            backend.close()
+    finally:
+        loop.close()
+
+
+def test_create_storage_backends_with_local_disk():
+    """Test LocalDiskBackend requires CPU staging."""
+    config = LMCacheEngineConfig.from_defaults()
+    config.local_cpu = True
+    config.local_disk = True
+    config.max_local_disk_size = 1.0
+    config.max_local_cpu_size = 0.1
+    metadata = dumb_metadata()
+    metadata.role = "worker"
+    loop = asyncio.new_event_loop()
+    try:
+        # LocalDiskBackend requires CPU staging, should auto-create LocalCPUBackend
+        storage_backends = CreateStorageBackends(config, metadata, loop)
+        assert "LocalCPUBackend" in storage_backends
+        assert "LocalDiskBackend" in storage_backends
+        # Verify LocalDiskBackend requires staging
+        assert storage_backends["LocalDiskBackend"].requires_local_cpu_staging()
+        # Clean up
+        for backend in storage_backends.values():
+            backend.close()
+    finally:
+        loop.close()
+
+
+def test_create_storage_backends_scheduler_role():
+    """Test that scheduler role doesn't validate CPU requirements."""
+    config = _build_dynamic_backend_config(
+        backend_name="NonDma",
+        class_name="NonDmaTestBackend",
+        local_cpu=False,
+        max_local_cpu_size=0.0,
+    )
+    metadata = dumb_metadata()
+    metadata.role = "scheduler"  # Scheduler role
+    loop = asyncio.new_event_loop()
+    try:
+        # Should succeed without creating LocalCPUBackend
+        storage_backends = CreateStorageBackends(config, metadata, loop)
+        # Scheduler doesn't need LocalCPUBackend even with non-DMA backends
+        assert config.max_local_cpu_size == 0.0  # Not auto-adjusted
+        # Clean up
+        for backend in storage_backends.values():
+            backend.close()
+    finally:
+        loop.close()
+
+
+def test_create_storage_backends_explicit_local_cpu_zero_size():
+    """Test that explicitly enabling local_cpu with zero size raises error."""
+    config = LMCacheEngineConfig.from_defaults()
+    config.local_cpu = True  # Explicitly enabled
+    config.max_local_cpu_size = 0.0  # But zero size
+    metadata = dumb_metadata()
+    metadata.role = "worker"
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(ValueError) as exc_info:
+            CreateStorageBackends(config, metadata, loop)
+        msg = str(exc_info.value)
+        assert "config.local_cpu is True" in msg
+        assert "max_local_cpu_size" in msg
     finally:
         loop.close()

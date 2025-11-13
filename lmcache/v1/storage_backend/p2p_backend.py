@@ -168,8 +168,8 @@ class P2PBackend(StorageBackendInterface):
     def __str__(self) -> str:
         return "P2PBackend"
 
-    def is_using_dma(self) -> bool:
-        return True
+    def requires_local_cpu_staging(self) -> bool:
+        return False
 
     async def batched_async_contains(
         self,

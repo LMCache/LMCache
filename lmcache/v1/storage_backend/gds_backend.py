@@ -359,8 +359,8 @@ class GdsBackend(AllocatorBackendInterface):
     def __str__(self):
         return self.__class__.__name__
 
-    def is_using_dma(self) -> bool:
-        return True
+    def requires_local_cpu_staging(self) -> bool:
+        return False
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         # TODO: implement pin() semantics

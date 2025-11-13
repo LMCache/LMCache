@@ -169,8 +169,8 @@ class WekaGdsBackend(AllocatorBackendInterface):
         asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
-    def is_using_dma(self) -> bool:
-        return True
+    def requires_local_cpu_staging(self) -> bool:
+        return False
 
     async def _scan_metadata(self):
         # TODO(Serapheim): even though we only run it once on startup,
