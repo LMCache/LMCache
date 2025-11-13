@@ -460,133 +460,79 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
-        "description": (
-            "Enable chunk statistics tracking using Bloom Filter. "
-            "Tracks chunk reuse patterns with minimal memory overhead."
-        ),
+        "description": "Enable chunk statistics tracking.",
     },
     "chunk_statistics_expected_chunks": {
         "type": int,
         "default": 10000000,
         "env_converter": int,
-        "description": (
-            "Expected number of unique chunks for Bloom Filter sizing. "
-            "Larger values use more memory but maintain accuracy. "
-            "Default is 10M chunks."
-        ),
+        "description": "Expected unique chunks for Bloom Filter.",
     },
     "chunk_statistics_false_positive_rate": {
         "type": float,
         "default": 0.01,
         "env_converter": float,
-        "description": (
-            "False positive rate for Bloom Filter (0.0-1.0). "
-            "Lower values use more memory but provide higher accuracy. "
-            "Default is 0.01 (1%)."
-        ),
+        "description": "Bloom Filter false positive rate.",
     },
     "chunk_statistics_auto_start_statistics": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
-        "description": (
-            "Automatically start statistics collection on initialization. "
-            "When enabled, statistics collection begins without manual call to "
-            "start_statistics()."
-        ),
+        "description": "Auto-start statistics on init.",
     },
     "chunk_statistics_auto_exit_timeout_hours": {
         "type": float,
         "default": 0.0,
         "env_converter": float,
-        "description": (
-            "Timeout in hours before automatic statistics stop. "
-            "Default is 0.0 (disabled). Set to positive value to enable "
-            "timeout-based auto stop."
-        ),
+        "description": "Auto-stop timeout in hours (0=disabled).",
     },
     "chunk_statistics_auto_exit_target_unique_chunks": {
         "type": Optional[int],
         "default": None,
         "env_converter": int,
-        "description": (
-            "Target number of unique chunks before automatic exit. "
-            "When reached, the system will exit. Default is None (disabled)."
-        ),
+        "description": "Auto-stop at target unique chunks.",
     },
     "chunk_statistics_async_enabled": {
         "type": bool,
         "default": True,
         "env_converter": _to_bool,
-        "description": (
-            "Enable asynchronous statistics recording. "
-            "When enabled, statistics are recorded in a background thread "
-            "to minimize lookup overhead. Default is True."
-        ),
+        "description": "Enable async statistics recording.",
     },
     "chunk_statistics_async_queue_capacity": {
         "type": int,
         "default": 100000,
         "env_converter": int,
-        "description": (
-            "Maximum number of chunks that can be queued for async processing. "
-            "When queue is full, lookup will block until space is available. "
-            "Default is 100000 chunks."
-        ),
+        "description": "Async queue capacity.",
     },
     "chunk_statistics_async_preprocess_chunks": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
-        "description": (
-            "Pre-process chunks and compute hashes before queuing (async mode). "
-            "When True, reduces queue memory usage significantly but adds "
-            "hash computation overhead to main thread. "
-            "When False, queues raw token_ids for processing in background. "
-            "Default is True (recommended for most use cases)."
-        ),
+        "description": "Preprocess chunks before queuing.",
     },
     "chunk_statistics_strategy": {
         "type": str,
         "default": "memory_bloom_filter",
         "env_converter": str,
-        "description": (
-            "Strategy for recording chunk statistics. Options: 'memory_bloom_filter' "
-            "(default, uses memory + Bloom Filter), 'file_hash' (writes chunk hashes "
-            "to files for persistence). Default is 'memory_bloom_filter'."
-        ),
+        "description": "Recording strategy: memory_bloom_filter or file_hash.",
     },
     "chunk_statistics_file_output_dir": {
         "type": str,
         "default": "./chunk_hashes",
         "env_converter": str,
-        "description": (
-            "Output directory for file-based statistics strategy. "
-            "Only used when chunk_statistics_strategy is 'file_hash'. "
-            "Default is './chunk_hashes'."
-        ),
+        "description": "Output dir for file_hash strategy.",
     },
     "chunk_statistics_file_rotation_size": {
         "type": int,
-        "default": 100 * 1024 * 1024,  # 100MB
+        "default": 100 * 1024 * 1024,
         "env_converter": int,
-        "description": (
-            "File rotation size in bytes for file-based strategy. "
-            "When a file reaches this size, a new file is created. "
-            "Only used when chunk_statistics_strategy is 'file_hash'. "
-            "Default is 100MB."
-        ),
+        "description": "File rotation size in bytes.",
     },
     "chunk_statistics_file_max_count": {
         "type": int,
         "default": 100,
         "env_converter": int,
-        "description": (
-            "Maximum number of files to keep for file-based strategy. "
-            "When this limit is reached, the oldest file is deleted. "
-            "Only used when chunk_statistics_strategy is 'file_hash'. "
-            "Default is 100."
-        ),
+        "description": "Max files to keep.",
     },
 }
 
