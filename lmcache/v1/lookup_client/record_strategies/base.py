@@ -3,9 +3,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
-import hashlib
 import queue
-import struct
 import threading
 import time
 
@@ -14,6 +12,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.token_database import ChunkedTokenDatabase
 
 logger = init_logger(__name__)
 
@@ -41,6 +40,10 @@ class RecordStrategy(ABC):
         self.total_chunks = 0
         self.unique_chunks_count = 0
         self.lock = threading.RLock()
+
+        self._token_db = ChunkedTokenDatabase()
+        self._token_db.chunk_size = chunk_size
+
         if self.async_enabled:
             self._start_async_worker()
 
@@ -100,27 +103,31 @@ class RecordStrategy(ABC):
         else:
             self._record_sync(token_ids, lookup_id)
 
-    def _compute_chunk_hash(
-        self, prefix_hash_bytes: bytes, chunk_slice: list[int]
-    ) -> bytes:
-        h = hashlib.sha256()
-        h.update(prefix_hash_bytes)
-        h.update(struct.pack(f">{len(chunk_slice)}i", *chunk_slice))
-        return h.digest()[:8]
+    def _compute_chunk_hashes(self, token_ids: list[int]) -> list[int]:
+        """Compute prefix hashes for all chunks using ChunkedTokenDatabase.
 
-    def _compute_chunk_hashes(self, token_ids: list[int]) -> list[str]:
+        Returns:
+            List of hash values (integers) for each chunk.
+        """
         chunk_hashes = []
-        prefix_hash_bytes = b""
-        for chunk_slice in self._iterate_chunks(token_ids):
-            prefix_hash_bytes = self._compute_chunk_hash(prefix_hash_bytes, chunk_slice)
-            chunk_hashes.append(prefix_hash_bytes.hex())
+        for _, _, hash_val in self._token_db.process_tokens(
+            tokens=token_ids, make_key=False
+        ):
+            chunk_hashes.append(hash_val)
         return chunk_hashes
 
-    def _iterate_chunks(self, token_ids: list[int]):
-        for i in range((len(token_ids) + self.chunk_size - 1) // self.chunk_size):
-            yield token_ids[
-                i * self.chunk_size : min((i + 1) * self.chunk_size, len(token_ids))
-            ]
+    def _compute_chunk_hashes_hex(self, token_ids: list[int]) -> list[str]:
+        """Compute prefix hashes for all chunks and return as hex strings.
+
+        Returns:
+            List of hash values (hex strings) for each chunk.
+        """
+        chunk_hashes = []
+        for hash_val in self._compute_chunk_hashes(token_ids):
+            if hash_val < 0:
+                hash_val = hash_val & ((1 << 64) - 1)
+            chunk_hashes.append(hex(hash_val))
+        return chunk_hashes
 
     @abstractmethod
     def _preprocess_for_async(self, token_ids: list[int]) -> Any:

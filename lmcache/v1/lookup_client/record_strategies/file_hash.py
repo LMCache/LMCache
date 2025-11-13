@@ -39,10 +39,10 @@ class FileHashStrategy(RecordStrategy):
         self.file_list: list[Path] = []
 
     def _preprocess_for_async(self, token_ids: list[int]) -> list[str]:
-        return self._compute_chunk_hashes(token_ids)
+        return self._compute_chunk_hashes_hex(token_ids)
 
     def _record_sync(self, token_ids: list[int], lookup_id: str) -> None:
-        self._write_data_to_file(self._compute_chunk_hashes(token_ids), lookup_id)
+        self._write_data_to_file(self._compute_chunk_hashes_hex(token_ids), lookup_id)
 
     def _write_data_to_file(self, chunk_hashes: list[str], lookup_id: str) -> None:
         with self.lock:
@@ -90,7 +90,7 @@ class FileHashStrategy(RecordStrategy):
             isinstance(chunk_hashes, list)
             and all(isinstance(h, str) for h in chunk_hashes)
         ):
-            chunk_hashes = self._compute_chunk_hashes(chunk_hashes)
+            chunk_hashes = self._compute_chunk_hashes_hex(chunk_hashes)
         self._write_data_to_file(chunk_hashes, lookup_id)
 
     def _get_strategy_specific_statistics(self) -> dict:

@@ -37,10 +37,9 @@ class MemoryBloomFilterStrategy(RecordStrategy):
 
     def _preprocess_chunks(self, token_ids: list[int]) -> list[list[int]]:
         chunk_data_list = []
-        prefix_hash_bytes = b""
-        for chunk_slice in self._iterate_chunks(token_ids):
-            prefix_hash_bytes = self._compute_chunk_hash(prefix_hash_bytes, chunk_slice)
-            prefix_hash = int.from_bytes(prefix_hash_bytes, "big", signed=False)
+        for prefix_hash in self._compute_chunk_hashes(token_ids):
+            if prefix_hash < 0:
+                prefix_hash = prefix_hash & ((1 << 64) - 1)
             chunk_data_list.append(self.global_bloom._hashes(prefix_hash))
         return chunk_data_list
 
