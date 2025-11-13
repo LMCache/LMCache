@@ -121,8 +121,9 @@ class MooncakestoreConnector(RemoteConnector):
             else:
                 raise ValueError("MOONCAKE_CONFIG_PATH/lmcache_config must be provided")
 
-            if host != "" and port != 0:
-                self.config.master_server_address = host + ":" + str(port)
+            if not self.config.master_server_address:
+                if host != "" and port != 0:
+                    self.config.master_server_address = host + ":" + str(port)
             if dev_name != "":
                 self.config.device_name = dev_name
             logger.info("Mooncake Configuration loaded. config: %s", self.config)

@@ -1,7 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+vLLM compatibility notes:
+- PR#20511: Introduced kv_cache_utils.init_none_hash()
+  https://github.com/vllm-project/vllm/pull/20511
+- PR#23673: Renamed sha256_cbor_64bit to sha256_cbor
+  https://github.com/vllm-project/vllm/pull/23673
+- PR#27151: Moved hash functions to vllm.utils.hashing module
+  https://github.com/vllm-project/vllm/pull/27151
+
+TODO(baoloongmao): Move this to vllm_v1_adapter to decouple from vLLM
+"""
+
 # Standard
 from typing import Any, Iterable, List, Optional, Tuple, Union
 import abc
+import os
 
 # Third Party
 from transformers import AutoTokenizer
@@ -41,41 +54,108 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     ):
         global NONE_HASH
 
-        vllm_is_available = True
-        try:
-            # Third Party
-            from vllm.utils.hashing import sha256, sha256_cbor
-        except ImportError:
-            # sha256, sha256_cbor are available through vLLM only
-            vllm_is_available = False
-
-        hash_algorithm: str
-        if config is not None:
-            hash_algorithm = config.pre_caching_hash_algorithm
-        else:  # Default value
-            hash_algorithm = "builtin"  # fallback to builtin hash
-
-        # Need to support vLLM hashing functions at a minimum
-        self.hash_func = (
-            sha256_cbor
-            if hash_algorithm == "sha256_cbor" and vllm_is_available
-            else sha256
-            if hash_algorithm == "sha256" and vllm_is_available
-            else hash
+        hash_algorithm: str = (
+            config.pre_caching_hash_algorithm if config is not None else "builtin"
         )
 
+        # Get hash function with vLLM version compatibility
+        self.hash_func = self._get_vllm_hash_func(hash_algorithm)
+
+        # Initialize NONE_HASH (vLLM >= PR#20511)
         # NOTE: For centralized cache sharing, ensure PYTHONHASHSEED is
         # set consistently across all processes (e.g., export PYTHONHASHSEED=0).
         try:
             # Third Party
             from vllm.v1.core import kv_cache_utils
 
-            kv_cache_utils.init_none_hash(self.hash_func)
-            NONE_HASH = kv_cache_utils.NONE_HASH
+            if hasattr(kv_cache_utils, "init_none_hash"):
+                kv_cache_utils.init_none_hash(self.hash_func)
+                NONE_HASH = kv_cache_utils.NONE_HASH
+                logger.info(
+                    f"Initialized NONE_HASH={NONE_HASH} from vLLM (>= PR#20511)"
+                )
+            else:
+                NONE_HASH = 0
+                logger.info("Using default NONE_HASH=0 (vLLM < PR#20511)")
         except (ImportError, AttributeError):
             NONE_HASH = 0
+            logger.info("Using default NONE_HASH=0 (vLLM not available)")
 
+        logger.info(f"Using hash algorithm: {hash_algorithm}")
         self.metadata = metadata
+
+    def _get_vllm_hash_func(self, hash_algorithm: str):
+        """Get hash function from vLLM with version compatibility.
+
+        Tries multiple import paths to support different vLLM versions:
+        - vllm.utils.hashing.get_hash_fn_by_name (>= PR#27151)
+        - vllm.utils.get_hash_fn_by_name (< PR#27151)
+        - Direct imports as fallback
+        - sha256_cbor_64bit -> sha256_cbor rename (PR#23673)
+        """
+        # Try get_hash_fn_by_name from both locations (PR#27151)
+        for module_path in ["vllm.utils.hashing", "vllm.utils"]:
+            try:
+                module = __import__(module_path, fromlist=["get_hash_fn_by_name"])
+                get_hash_fn_by_name = module.get_hash_fn_by_name
+                return self._try_get_hash(
+                    get_hash_fn_by_name, hash_algorithm, module_path
+                )
+            except (ImportError, AttributeError, ValueError):
+                continue
+
+        # Try direct imports as fallback (for older vLLM versions)
+        func_names = (
+            ["sha256_cbor", "sha256_cbor_64bit"]
+            if hash_algorithm in ("sha256_cbor", "sha256_cbor_64bit")
+            else [hash_algorithm]
+        )
+        for module_path in ["vllm.utils.hashing", "vllm.utils"]:
+            for func_name in func_names:
+                try:
+                    module = __import__(module_path, fromlist=[func_name])
+                    hash_func = getattr(module, func_name)
+                    logger.info(
+                        f"Loaded '{func_name}' from {module_path} (direct import)"
+                    )
+                    return hash_func
+                except (ImportError, AttributeError):
+                    continue
+
+        # Fallback to builtin hash
+        logger.warning(
+            f"Could not load '{hash_algorithm}' from vLLM. Using builtin hash. "
+            "This may cause inconsistencies in distributed caching."
+        )
+
+        # Check PYTHONHASHSEED when using builtin hash
+        if os.getenv("PYTHONHASHSEED") is None:
+            logger.warning(
+                "Using builtin hash without PYTHONHASHSEED set. "
+                "For production environments (non-testing scenarios), you MUST set "
+                "PYTHONHASHSEED to ensure consistent hashing across processes. "
+                "Example: export PYTHONHASHSEED=0"
+            )
+
+        return hash
+
+    def _try_get_hash(self, get_hash_fn_by_name, hash_algorithm: str, module_name: str):
+        """Try to get hash function, handling sha256_cbor_64bit rename."""
+        # Handle sha256_cbor_64bit -> sha256_cbor rename (PR#23673)
+        names_to_try = (
+            ["sha256_cbor", "sha256_cbor_64bit"]
+            if hash_algorithm in ("sha256_cbor", "sha256_cbor_64bit")
+            else [hash_algorithm]
+        )
+
+        for name in names_to_try:
+            try:
+                hash_func = get_hash_fn_by_name(name)
+                logger.info(f"Loaded '{name}' from {module_name}")
+                return hash_func
+            except ValueError:
+                continue
+        raise ValueError(f"Hash function '{hash_algorithm}' not found in {module_name}")
 
     @abc.abstractmethod
     def process_tokens(
@@ -160,9 +240,6 @@ class ChunkedTokenDatabase(TokenDatabase):
             self.save_unfull_chunk = config.save_unfull_chunk
 
             # Check for cross-process cache sharing setup
-            # Standard
-            import os
-
             if os.getenv("PYTHONHASHSEED") is None:
                 if config.remote_url is not None:
                     logger.warning(

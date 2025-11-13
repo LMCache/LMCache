@@ -18,6 +18,7 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -68,8 +69,6 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG VLLM_VERSION=nightly
-
-ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
