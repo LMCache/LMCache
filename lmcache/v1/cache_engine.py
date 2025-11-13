@@ -950,23 +950,13 @@ class LMCacheEngine:
         """
         assert self.storage_manager is not None
 
-        if tokens is not None:
-            total_length = len(tokens)
-        else:
-            assert offsets is not None
-            total_length = sum(offsets)
-
-        # Skip the number of tokens that are already computed, align to chunk size
-        skip_n_tokens = (
-            min(num_computed_tokens, total_length)
-            // self.config.chunk_size
-            * self.config.chunk_size
-            if num_computed_tokens > 0
-            else 0
-        )
+        # num_computed_tokens is passed in to skip the number of tokens that are
+        # already computed, align to chunk size. However, due to the complexity
+        # skipping is not implemented yet.
+        # TODO: implement skipping in async lookup in the future.
 
         keys: list[CacheEngineKey] = []
-        cum_chunk_lengths = [skip_n_tokens]
+        cum_chunk_lengths = [0]
 
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
@@ -975,9 +965,6 @@ class LMCacheEngine:
             offsets=offsets,
             request_configs=request_configs,
         ):
-            if end <= skip_n_tokens:
-                continue
-            assert not (start < skip_n_tokens < end)
             assert isinstance(key, CacheEngineKey)
             keys.append(key)
             cum_chunk_lengths.append(end)
