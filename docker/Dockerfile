@@ -18,6 +18,7 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
