@@ -149,7 +149,7 @@ class LMCacheWorker:
         if errors:
             error_msg = "Port Configuration Errors:\n\n" + "\n".join(errors)
             raise ValueError(error_msg)
-        
+
     def register(self):
         """
         Register the lmcache worker with the controller.
