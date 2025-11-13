@@ -70,6 +70,7 @@ class LMCacheWorker:
         self.lmcache_engine = lmcache_engine
         self.worker_id = metadata.worker_id
 
+        self._validate_port_configurations()
         self.context = get_zmq_context()
 
         assert config.controller_pull_url is not None
@@ -124,6 +125,31 @@ class LMCacheWorker:
 
         self.register()
 
+    def _validate_port_configurations(self):
+        """Validate that port configurations have enough ports for the worker_id"""
+        required_ports = (
+            self.worker_id + 1
+        )  # worker_id starts from 0, so need worker_id+1 ports
+
+        # Check all port configurations
+        port_configs = [
+            ("lmcache_worker_ports", self.config.lmcache_worker_ports),
+            ("p2p_init_ports", self.config.p2p_init_ports),
+            ("p2p_lookup_ports", self.config.p2p_lookup_ports),
+        ]
+
+        errors = []
+        for config_name, ports in port_configs:
+            if len(ports) < required_ports:
+                errors.append(
+                    f"• {config_name}: {len(ports)} port(s) configured, "
+                    f"but {required_ports} are required for worker {self.worker_id}"
+                )
+
+        if errors:
+            error_msg = "Port Configuration Errors:\n\n" + "\n".join(errors)
+            raise ValueError(error_msg)
+        
     def register(self):
         """
         Register the lmcache worker with the controller.
