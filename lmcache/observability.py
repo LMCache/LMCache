@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Union
 import os
 import threading
 import time
@@ -1434,28 +1434,30 @@ class LMCacheStatsLogger:
         self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.lookup_client = lookup_client
         self.is_running = True
+        self._callbacks: List[Callable[[], Dict]] = []
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
         self.thread.start()
 
+    def register_callback(self, callback: Callable[[], Dict]) -> None:
+        self._callbacks.append(callback)
+
+    def unregister_callback(self, callback: Callable[[], Dict]) -> None:
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
     def log_worker(self):
         while self.is_running:
-            # Update chunk statistics if available
-            if self.lookup_client is not None:
-                # First Party
-                from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
-                    ChunkStatisticsLookupClient,
-                )
-
-                if isinstance(self.lookup_client, ChunkStatisticsLookupClient):
-                    try:
-                        chunk_stats = self.lookup_client.get_statistics()
-                        self.monitor.update_chunk_statistics(chunk_stats)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to update chunk statistics: {e}",
-                            exc_info=True,
-                        )
+            # Invoke all registered statistics callbacks
+            for callback in self._callbacks:
+                try:
+                    stats = callback()
+                    self.monitor.update_chunk_statistics(stats)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to update statistics from callback: {e}",
+                        exc_info=True,
+                    )
 
             stats = self.monitor.get_stats_and_clear()
             self.prometheus_logger.log_prometheus(stats)

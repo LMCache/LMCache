@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.observability import LMCacheStatsLogger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.record_strategies import (
@@ -28,6 +29,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         actual_lookup_client: LookupClientInterface,
         config: LMCacheEngineConfig,
         record_strategy: Optional[RecordStrategy] = None,
+        stats_logger: Optional[LMCacheStatsLogger] = None,
     ):
         self.actual_lookup_client = actual_lookup_client
         self.lock = threading.RLock()
@@ -37,7 +39,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         self.lookup_time = 0.0
         self.record_time = 0.0
         self.check_exit_time = 0.0
-        self.start_time = 0.0
+        self.statistics_start_time = 0.0
         self.timeout_hours = config.chunk_statistics_auto_exit_timeout_hours
         self.target_unique_chunks = (
             config.chunk_statistics_auto_exit_target_unique_chunks
@@ -57,10 +59,15 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         if config.chunk_statistics_auto_start_statistics:
             self.start_statistics()
 
+        self.stats_logger = stats_logger
+        if stats_logger is not None:
+            stats_logger.register_callback(self.get_statistics)
+
     def start_statistics(self) -> None:
         with self.lock:
             self.enabled = True
-            self.start_time = 0.0
+            # Assign the start time while first recording
+            self.statistics_start_time = 0.0
 
     def stop_statistics(self) -> None:
         with self.lock:
@@ -141,17 +148,20 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
     def close(self) -> None:
         if self.enabled:
             self.stop_statistics()
+        if self.stats_logger is not None:
+            self.stats_logger.unregister_callback(self.get_statistics)
+
         self.record_strategy.close()
         self.actual_lookup_client.close()
 
     def _check_exit_conditions(self) -> None:
         if not self.enable_auto_exit:
             return
-        if self.start_time == 0.0:
-            self.start_time = time.time()
+        if self.statistics_start_time == 0.0:
+            self.statistics_start_time = time.time()
         stop_reason = None
         if self.timeout_hours > 0.0:
-            elapsed_hours = (time.time() - self.start_time) / 3600.0
+            elapsed_hours = (time.time() - self.statistics_start_time) / 3600.0
             if elapsed_hours >= self.timeout_hours:
                 stop_reason = (
                     f"Timeout: {elapsed_hours:.2f}h >= {self.timeout_hours:.2f}h"

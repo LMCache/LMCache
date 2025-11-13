@@ -1516,6 +1516,10 @@ class LMCacheEngineBuilder:
         return cls._instances.get(instance_id)
 
     @classmethod
+    def get_stats_logger(cls, instance_id: str) -> Optional[LMCacheStatsLogger]:
+        return cls._stat_loggers.get(instance_id)
+
+    @classmethod
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
