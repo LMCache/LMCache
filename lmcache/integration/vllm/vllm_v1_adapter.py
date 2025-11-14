@@ -23,12 +23,10 @@ from vllm.sampling_params import SamplingParams
 
 # First Party
 # Use LMCache's own math utilities instead of vllm's
-# (avoids dependency on vllm internal changes like
-# https://github.com/vllm-project/vllm/pull/27188)
+# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache.utils import cdiv
 
-# Try to import from old location before merged
-# https://github.com/vllm-project/vllm/pull/26908
+# Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
 try:
     # Third Party
     from vllm.utils.torch_utils import get_kv_cache_torch_dtype
