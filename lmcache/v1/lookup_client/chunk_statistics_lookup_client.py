@@ -43,7 +43,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             config.chunk_statistics_auto_exit_target_unique_chunks
         )
         self.enable_auto_exit = (
-            self.timeout_hours > 0.0 or self.target_unique_chunks is not None
+            self.timeout_hours > 0.0 or self.target_unique_chunks > 0
         )
         self.record_strategy: RecordStrategy
         self.record_strategy = create_record_strategy(config)
@@ -151,8 +151,8 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                 stop_reason = (
                     f"Timeout: {elapsed_hours:.2f}h >= {self.timeout_hours:.2f}h"
                 )
-        if self.target_unique_chunks is not None:
-            unique = self.record_strategy.get_statistics().get("unique_chunks", 0)
+        if self.target_unique_chunks > 0:
+            unique = self.record_strategy.unique_chunks_count
             if unique >= self.target_unique_chunks:
                 stop_reason = f"Target reached: {unique} >= {self.target_unique_chunks}"
         if stop_reason:

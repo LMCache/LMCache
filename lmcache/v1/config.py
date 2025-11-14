@@ -462,18 +462,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
         "description": "Enable chunk statistics tracking.",
     },
-    "chunk_statistics_expected_chunks": {
-        "type": int,
-        "default": 10000000,
-        "env_converter": int,
-        "description": "Expected unique chunks for Bloom Filter.",
-    },
-    "chunk_statistics_false_positive_rate": {
-        "type": float,
-        "default": 0.01,
-        "env_converter": float,
-        "description": "Bloom Filter false positive rate.",
-    },
     "chunk_statistics_auto_start_statistics": {
         "type": bool,
         "default": False,
@@ -487,8 +475,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "description": "Auto-stop timeout in hours (0=disabled).",
     },
     "chunk_statistics_auto_exit_target_unique_chunks": {
-        "type": Optional[int],
-        "default": None,
+        "type": int,
+        "default": 0,
         "env_converter": int,
         "description": "Auto-stop at target unique chunks.",
     },
@@ -515,6 +503,18 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "memory_bloom_filter",
         "env_converter": str,
         "description": "Recording strategy: memory_bloom_filter or file_hash.",
+    },
+    "chunk_statistics_mem_bf_expected_chunks": {
+        "type": int,
+        "default": 20000000,
+        "env_converter": int,
+        "description": "Expected unique chunks for Bloom Filter.",
+    },
+    "chunk_statistics_mem_bf_false_positive_rate": {
+        "type": float,
+        "default": 0.01,
+        "env_converter": float,
+        "description": "Bloom Filter false positive rate.",
     },
     "chunk_statistics_file_output_dir": {
         "type": str,

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Standard
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.lookup_client.record_strategies.base import RecordStrategy
@@ -21,8 +19,8 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             async_preprocess_chunks=config.chunk_statistics_async_preprocess_chunks,
         )
         self.global_bloom = BloomFilter(
-            config.chunk_statistics_expected_chunks,
-            config.chunk_statistics_false_positive_rate,
+            config.chunk_statistics_mem_bf_expected_chunks,
+            config.chunk_statistics_mem_bf_false_positive_rate,
         )
 
     def _preprocess_for_async(self, token_ids: list[int]) -> list[list[int]]:
@@ -83,6 +81,9 @@ class MemoryBloomFilterStrategy(RecordStrategy):
         super().setup_metrics(prometheus_logger)
         prometheus_logger.chunk_statistics_bloom_filter_size_mb.set_function(
             lambda: self.global_bloom.get_memory_usage_bytes() / (1024 * 1024)
+        )
+        prometheus_logger.chunk_statistics_bloom_filter_fill_rate.set_function(
+            lambda: self.global_bloom.get_fill_rate()
         )
 
     def reset(self) -> None:

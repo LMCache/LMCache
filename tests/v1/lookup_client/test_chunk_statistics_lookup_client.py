@@ -69,8 +69,8 @@ class BaseTestCase:
         default_kwargs = {
             "enable_chunk_statistics": True,
             "chunk_statistics_strategy": "memory_bloom_filter",
-            "chunk_statistics_expected_chunks": 1000,
-            "chunk_statistics_false_positive_rate": 0.01,
+            "chunk_statistics_mem_bf_expected_chunks": 1000,
+            "chunk_statistics_mem_bf_false_positive_rate": 0.01,
         }
         default_kwargs.update(kwargs)
         stats_client = self.create_stats_client(**default_kwargs)
@@ -83,8 +83,11 @@ class TestStrategyDiscovery:
         strategies = _get_strategies()
         assert isinstance(strategies, dict) and len(strategies) >= 2
         assert "file_hash" in strategies and "memory_bloom_filter" in strategies
-        assert strategies["file_hash"].name() == "file_hash"
-        assert strategies["memory_bloom_filter"].name() == "memory_bloom_filter"
+        assert strategies["file_hash"].__module__.split(".")[-1] == "file_hash"
+        assert (
+            strategies["memory_bloom_filter"].__module__.split(".")[-1]
+            == "memory_bloom_filter"
+        )
 
 
 class TestBloomFilter:
@@ -133,8 +136,8 @@ class TestChunkStatisticsBasic(BaseTestCase):
 class TestChunkStatisticsMetrics(BaseTestCase):
     def test_detailed_metrics(self):
         stats_client, _ = self.setup_stats_client(
-            chunk_statistics_expected_chunks=5000,
-            chunk_statistics_false_positive_rate=0.01,
+            chunk_statistics_mem_bf_expected_chunks=5000,
+            chunk_statistics_mem_bf_false_positive_rate=0.01,
         )
         stats_client.lookup(list(range(512)), "req_1")
         stats_client.lookup(list(range(256)), "req_2")
@@ -191,8 +194,8 @@ class TestChunkStatisticsMetrics(BaseTestCase):
 
     def test_memory_efficiency(self):
         stats_client, _ = self.setup_stats_client(
-            chunk_statistics_expected_chunks=100000,
-            chunk_statistics_false_positive_rate=0.01,
+            chunk_statistics_mem_bf_expected_chunks=100000,
+            chunk_statistics_mem_bf_false_positive_rate=0.01,
         )
         for i in range(100):
             stats_client.lookup(list(range(i * 256, (i + 1) * 256)), f"req_{i}")
@@ -272,8 +275,8 @@ class TestChunkStatisticsPerformance:
             config_kwargs = {
                 "chunk_size": 256,
                 "chunk_statistics_strategy": strategy_name,
-                "chunk_statistics_expected_chunks": 100000,
-                "chunk_statistics_false_positive_rate": 0.01,
+                "chunk_statistics_mem_bf_expected_chunks": 100000,
+                "chunk_statistics_mem_bf_false_positive_rate": 0.01,
                 "chunk_statistics_async_enabled": async_enabled,
                 "chunk_statistics_async_preprocess_chunks": async_preprocess_chunks,
             }

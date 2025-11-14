@@ -111,9 +111,6 @@ class FileHashStrategy(RecordStrategy):
         prometheus_logger.chunk_statistics_current_file_size.set_function(
             lambda: self.current_file_size
         )
-        prometheus_logger.chunk_statistics_file_max_count.set_function(
-            lambda: self.file_max_count
-        )
 
     def reset(self) -> None:
         self.wait_for_async_processing(timeout=5.0)

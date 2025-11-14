@@ -89,8 +89,15 @@ class BloomFilter:
     def get_memory_usage_bytes(self) -> int:
         return self.size // 8
 
+    def get_bit_set(self) -> int:
+        return sum(val.bit_count() for val in self.bit_array)
+
+    def get_fill_rate(self) -> float:
+        bits_set = self.get_bit_set()
+        return bits_set / self.size if self.size > 0 else 0.0
+
     def get_statistics(self) -> dict:
-        bits_set = sum(bin(val).count("1") for val in self.bit_array)
+        bits_set = self.get_bit_set()
         return {
             "size_mb": self.get_memory_usage_bytes() / 1024 / 1024,
             "hash_count": self.hash_count,

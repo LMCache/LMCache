@@ -1087,6 +1087,12 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
+        self.chunk_statistics_bloom_filter_fill_rate = self._gauge_cls(
+            name="lmcache:chunk_statistics_bloom_filter_fill_rate",
+            documentation="Bloom Filter fill rate (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
         self.chunk_statistics_file_count = self._gauge_cls(
             name="lmcache:chunk_statistics_file_count",
             documentation="Number of files created for file_hash strategy",
@@ -1096,12 +1102,6 @@ class PrometheusLogger:
         self.chunk_statistics_current_file_size = self._gauge_cls(
             name="lmcache:chunk_statistics_current_file_size",
             documentation="Current file size in bytes for file_hash strategy",
-            labelnames=labelnames,
-            multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_file_max_count = self._gauge_cls(
-            name="lmcache:chunk_statistics_file_max_count",
-            documentation="Maximum number of files to keep for file_hash strategy",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
