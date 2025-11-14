@@ -659,7 +659,11 @@ class StorageManager:
         #     cum_chunk_lengths_total[2] = 512 tokens
         cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
+<<<<<<< HEAD
         tier_expected_chunks = []
+=======
+        loading_task_keys: list[list[CacheEngineKey]] = []
+>>>>>>> 4c57cb6 (locate mem obj by key instead of index in async loading)
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
@@ -671,6 +675,9 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
             tier_expected_chunks.append(num_hit_chunks)
 
+            backend_keys = keys[:num_hit_chunks]
+            loading_task_keys.append(backend_keys)
+
             assert self.async_serializer is not None, (
                 "Async serializer must be initialized via post_init before using "
                 "async_lookup_and_prefetch."
@@ -679,7 +686,7 @@ class StorageManager:
             get_coro = self.async_serializer.run(
                 backend.batched_get_non_blocking(
                     lookup_id,
-                    keys[:num_hit_chunks],
+                    backend_keys,
                     {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
                 ),
                 num_hit_chunks,
@@ -707,7 +714,14 @@ class StorageManager:
                 self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
             return
 
-        all_done = asyncio.gather(*loading_tasks)
+        async def gather_with_keys() -> list[list[tuple[CacheEngineKey, MemoryObj]]]:
+            loading_results = await asyncio.gather(*loading_tasks)
+            return [
+                list(zip(keys, results))
+                for keys, results in zip(loading_task_keys, loading_results)
+            ]
+
+        all_done = asyncio.create_task(gather_with_keys())
         # Register the event before adding the callback to avoid race conditions
         self.event_manager.add_event(
             EventType.LOADING,
