@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# First Party
 from lmcache.logging import init_logger
 from lmcache.v1.storage_backend.connector import (
     ConnectorAdapter,
@@ -18,6 +20,7 @@ class EICConnectorAdapter(ConnectorAdapter):
         return url.startswith(self.schema)
 
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        # Local
         from .eic_connector import EICConnector
 
         logger.info(f"Creating EIC connector for URL: {context.url}")

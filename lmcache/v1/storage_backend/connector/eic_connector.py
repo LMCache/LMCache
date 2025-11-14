@@ -1,16 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
 from enum import IntEnum, auto
 from typing import List, Optional, Union, no_type_check
-import os
-import time
-import yaml
-import random
-import string
 import asyncio
 import ctypes
+import os
+import random
+import string
+import time
+
+# Third Party
 import eic
+import yaml
+
+# First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MixedMemoryAllocator, MemoryObj
+from lmcache.v1.memory_management import MemoryObj, MixedMemoryAllocator
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
@@ -61,8 +67,8 @@ class PerformanceTimer:
     def debug_all_elapsed_times(self):
         logger.debug(f"== Perf key:{self.key} =========")
         logger.debug(f"== Perf op {self.op} size {self.size} =========")
-        for op, time in self.elapsed_times.items():
-            logger.debug(f"Step: {op} cost {time:.2f} us")
+        for op, item in self.elapsed_times.items():
+            logger.debug(f"Step: {op} cost {item:.2f} us")
         logger.debug(f"== Perf op {self.op} size {self.size} =========")
 
 
@@ -139,7 +145,6 @@ class EICConnector(RemoteConnector):
         self.cuda_lib.cudaMemcpy.restype = self.cudaError_t
 
         self.enable_compare = False
-        self.tensor_cache_map = {}
 
         config_file = os.getenv("LMCACHE_CONFIG_FILE")
         if config_file is None:
@@ -198,30 +203,35 @@ class EICConnector(RemoteConnector):
         if self.trans_type == eic.TransportType.TRANSPORT_GDR:
             if not isinstance(self.memory_allocator, LocalCPUBackend):
                 raise RuntimeError("memory_allocator must be LocalCPUBackend")
-
-            if not isinstance(
-                self.memory_allocator.memory_allocator, MixedMemoryAllocator
-            ):
+            allocator = self.memory_allocator.memory_allocator
+            if not isinstance(allocator, MixedMemoryAllocator):
                 raise RuntimeError(
                     "memory_allocator.memory_allocator must be MixedMemoryAllocator"
                 )
 
-            mem_pool = self.memory_allocator.memory_allocator.pin_allocator.buffer
-            meminfo = eic.MemoryInfo()
-            meminfo.type = eic.MemoryType.MEMORY_CUDA
-            meminfo.cuda_id = 0
+            if hasattr(allocator, "pin_allocator") and hasattr(
+                allocator.pin_allocator, "buffer"
+            ):
+                mem_pool = allocator.pin_allocator.buffer
+                meminfo = eic.MemoryInfo()
+                meminfo.type = eic.MemoryType.MEMORY_CUDA
+                meminfo.cuda_id = 0
 
-            vals = eic.IOBuffers()
-            vals.append(
-                mem_pool.data_ptr(), mem_pool.numel() * mem_pool.element_size(), True
-            )
+                vals = eic.IOBuffers()
+                vals.append(
+                    mem_pool.data_ptr(),
+                    mem_pool.numel() * mem_pool.element_size(),
+                    True,
+                )
 
-            if self.connection.register_memory(vals, meminfo):
-                logger.info("register mixed memory pin buffer success")
+                if self.connection.register_memory(vals, meminfo):
+                    logger.info("register mixed memory pin buffer success")
+                else:
+                    logger.error("fail to register mixed memory pin buffer")
+                    exit(1)
             else:
-                logger.error("fail to register mixed memory pin buffer")
+                logger.error("mixed memory pin buffer is None")
                 exit(1)
-
         self.prebuilt_connection()
 
     def prebuilt_connection(self) -> None:
@@ -262,7 +272,8 @@ class EICConnector(RemoteConnector):
             logger.debug(f"eic exists {key_str} success")
         else:
             logger.debug(
-                f"eic exists {key_str} failed, status_code {status_code} err_code {err_code}"
+                f"eic exists {key_str} failed, status_code {status_code} "
+                "err_code {err_code}"
             )
         return success
 
@@ -313,11 +324,13 @@ class EICConnector(RemoteConnector):
         if status_code != eic.StatusCode.SUCCESS or err_code != eic.StatusCode.SUCCESS:
             if err_code == eic.StatusCode.KEY_NOT_EXIST:
                 logger.debug(
-                    f"eic mget meta {key_str} failed, status_code {status_code} err_code {err_code}"
+                    f"eic mget meta {key_str} failed, status_code {status_code}"
+                    " err_code {err_code}"
                 )
             else:
                 logger.error(
-                    f"eic mget meta {key_str} failed, status_code {status_code} err_code {err_code}"
+                    f"eic mget meta {key_str} failed, status_code {status_code}"
+                    " err_code {err_code}"
                 )
             return None
         else:
@@ -345,7 +358,8 @@ class EICConnector(RemoteConnector):
         )
         if memory_obj is None:
             logger.error(
-                f"fail to allocate memory during remote receive key {key_str} length {meta.length}"
+                f"fail to allocate memory during remote receive key {key_str} length"
+                " {meta.length}"
             )
             return None
         perf_timer.stop("alloc_obj")
@@ -374,7 +388,8 @@ class EICConnector(RemoteConnector):
         err_code = get_outcome.status_codes[0]
         if status_code != eic.StatusCode.SUCCESS or err_code != eic.StatusCode.SUCCESS:
             logger.error(
-                f"eic mget data {key_str} failed, status_code {status_code} err_code {err_code}"
+                f"eic mget data {key_str} failed, status_code {status_code}"
+                " err_code {err_code}"
             )
             return None
         else:
@@ -432,6 +447,10 @@ class EICConnector(RemoteConnector):
             f"eic put {key_str} data len {len(kv_bytes)} value_size {value_size}"
         )
 
+        if kv_tensor is None:
+            logger.error(f"Memory object tensor is None for key {key_str}")
+            return
+
         perf_timer.start("serialize")
 
         # generate meta bytes
@@ -455,7 +474,8 @@ class EICConnector(RemoteConnector):
         perf_timer.stop("trans_address")
 
         logger.debug(
-            f"eic put {key_str} meta ptr {meta_ptr} len {meta_size} data ptr {data_ptr} len {data_size}"
+            f"eic put {key_str} meta ptr {meta_ptr} len {meta_size} data ptr {data_ptr}"
+            " len {data_size}"
         )
 
         perf_timer.start("eic_mset")
@@ -510,7 +530,7 @@ class EICConnector(RemoteConnector):
         eic_vals = eic.IOBuffers()
         # Keep references to meta_bytes to prevent dangling pointers
         meta_list = []
-        for key, memory_obj in zip(keys, memory_objs):
+        for key, memory_obj in zip(keys, memory_objs, strict=False):
             key_str = key.to_string()
             logger.debug(f"eic batched_put processing {key_str}")
 
@@ -520,6 +540,9 @@ class EICConnector(RemoteConnector):
             kv_shape = memory_obj.get_shape()
             kv_dtype = memory_obj.get_dtype()
             memory_format = memory_obj.get_memory_format()
+            if kv_tensor is None:
+                logger.error(f"Memory object tensor is None for key {key_str}")
+                return
 
             remote_meta = RemoteMetadata(
                 METADATA_BYTES_LEN, kv_shape, kv_dtype, memory_format
@@ -532,7 +555,8 @@ class EICConnector(RemoteConnector):
             data_size = len(kv_bytes)
 
             logger.info(
-                f"eic batched_put {key_str} shape {kv_shape} dtype {kv_dtype} fmt {memory_format}"
+                f"eic batched_put {key_str} shape {kv_shape} dtype {kv_dtype}"
+                " fmt {memory_format}"
             )
 
             # Add meta key & value
@@ -559,8 +583,7 @@ class EICConnector(RemoteConnector):
                 f"eic batched_put mset data failed, status_code {set_status_code}"
             )
             return
-        for i, key in enumerate(keys):
-            key_str = key.to_string()
+        for i, key_str in enumerate(eic_keys):
             meta_key = key_str + "_meta"
 
             outcome_err_code = set_outcome.status_codes[i]
@@ -631,7 +654,8 @@ class EICConnector(RemoteConnector):
             status_code = exist_outcome.status_codes[i]
             if status_code != eic.StatusCode.SUCCESS:
                 logger.debug(
-                    f"eic batched_async_contains {key.to_string()} miss, err_code {status_code}"
+                    f"eic batched_async_contains {key.to_string()} miss,"
+                    " err_code {status_code}"
                 )
                 break
             num_hit_counts += 1

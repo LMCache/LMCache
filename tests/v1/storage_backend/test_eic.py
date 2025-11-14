@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
 import argparse
 import os
 
+# Third Party
 import eic
 import torch
 import yaml
