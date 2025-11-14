@@ -16,7 +16,6 @@ Two ways to configure LMCache Disk Offloading:
 
 **1. Environment Variables:**
 
-
 .. code-block:: bash
 
     # 256 Tokens per KV Chunk
