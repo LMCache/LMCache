@@ -9,7 +9,7 @@ This will use the port 8000 for 1 vllm.
 1. Start the vllm engine at port 8000:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
+CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
   --max-model-len 4096 \
   --gpu-memory-utilization 0.8 \
   --port 8000 \
