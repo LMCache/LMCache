@@ -15,7 +15,6 @@ Two ways to configure LMCache Redis Offloading:
 
 **1. Environment Variables:**
 
-
 .. code-block:: bash
 
     # 256 Tokens per KV Chunk

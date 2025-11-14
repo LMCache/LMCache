@@ -14,7 +14,6 @@ Two ways to configure LMCache CPU Offloading:
 
 **1. Environment Variables:**
 
-
 .. code-block:: bash
 
     # 256 Tokens per KV Chunk
@@ -27,7 +26,6 @@ Two ways to configure LMCache CPU Offloading:
 **2. Configuration File**:
 
 Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
-
 
 Example ``config.yaml``:
 

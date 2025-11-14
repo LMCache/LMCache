@@ -17,7 +17,6 @@ Ways to configure LMCache GDS Backend
 
 **1. Environment Variables:**
 
-
 .. code-block:: bash
 
     # 256 Tokens per KV Chunk
@@ -33,7 +32,6 @@ Ways to configure LMCache GDS Backend
 **2. Configuration File**:
 
 Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
-
 
 Example ``config.yaml``:
 
