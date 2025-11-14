@@ -717,8 +717,10 @@ class StorageManager:
         async def gather_with_keys() -> list[list[tuple[CacheEngineKey, MemoryObj]]]:
             loading_results = await asyncio.gather(*loading_tasks)
             return [
-                list(zip(keys, results))
-                for keys, results in zip(loading_task_keys, loading_results)
+                list(zip(keys, results, strict=False))
+                for keys, results in zip(
+                    loading_task_keys, loading_results, strict=False
+                )
             ]
 
         all_done = asyncio.create_task(gather_with_keys())
