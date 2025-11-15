@@ -172,7 +172,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             elif req_status != -1:
                 return req_status
             self.reqs_status[lookup_id] = None
-        hashes = []
+        hashes: list[int] = []
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False
