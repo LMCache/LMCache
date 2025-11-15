@@ -1249,10 +1249,9 @@ class LMCacheEngine:
             used_keys.add(key)
 
         # NOTE: free the memory objects that are not hit.
-        for backend_results in keyed_memory_objs:
-            for key, unused_mem_obj in backend_results:
-                if key not in used_keys:
-                    unused_mem_obj.ref_count_down()
+        for key, unused_mem_obj in memory_obj_map.items():
+            if key not in used_keys:
+                unused_mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 
