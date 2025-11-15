@@ -14,6 +14,7 @@ from lmcache.v1.memory_management import (
     PagedTensorMemoryAllocator,
     PinMemoryAllocator,
     TensorMemoryAllocator,
+    TensorMemoryObj,
 )
 
 
@@ -324,3 +325,61 @@ def test_memory_obj_metadata_to_and_from_dict():
     assert metadata_from_dict_2.dtype == dtype1
     assert metadata_from_dict_2.shapes == shapes
     assert metadata_from_dict_2.dtypes == dtypes
+
+
+@pytest.mark.parametrize(
+    "alloc_cls,custom_timeout,elapsed_time",
+    [
+        (HostMemoryAllocator, None, 360),
+        (PinMemoryAllocator, None, 360),
+        (GPUMemoryAllocator, None, 360),
+        (MixedMemoryAllocator, None, 360),
+        (HostMemoryAllocator, 60, 90),
+    ],
+)
+def test_pin_timeout(alloc_cls, custom_timeout, elapsed_time):
+    # Standard
+    import time
+
+    # First Party
+    from lmcache.observability import LMCStatsMonitor
+
+    original_timeout = None
+    if custom_timeout is not None:
+        original_timeout = TensorMemoryObj.pin_timeout_seconds
+        TensorMemoryObj.pin_timeout_seconds = custom_timeout
+
+    try:
+        total_size = 1024 * 1024
+        allocator = alloc_cls(total_size)
+
+        # Create a memory object
+        data = allocator.allocate([4096], torch.float)
+        assert data is not None
+
+        # Pin the object
+        data.pin()
+        assert data.metadata.pin_count == 1
+        assert data.metadata.last_pin_time is not None
+
+        # Get initial forced unpin count
+        monitor = LMCStatsMonitor.GetOrCreate()
+        initial_forced_unpin_count = monitor.interval_forced_unpin_count
+
+        # Simulate timeout by manually setting last_pin_time
+        data.meta.last_pin_time = time.time() - elapsed_time
+
+        # Call unpin, which should detect timeout and force unpin to 0
+        data.unpin()
+
+        # Verify that pin_count is now 0
+        assert data.metadata.pin_count == 0
+        assert data.metadata.last_pin_time is None
+
+        # Verify that forced unpin count increased
+        assert monitor.interval_forced_unpin_count == initial_forced_unpin_count + 1
+
+        allocator.close()
+    finally:
+        if original_timeout is not None:
+            TensorMemoryObj.pin_timeout_seconds = original_timeout

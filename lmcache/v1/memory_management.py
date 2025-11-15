@@ -9,6 +9,7 @@ import abc
 import ctypes
 import os
 import threading
+import time
 
 # Third Party
 import sortedcontainers
@@ -105,6 +106,9 @@ class MemoryObjMetadata:
     # lookup pins are temporary
     # cache controller pins are persistent
     pin_count: int = 0
+
+    # Last pin timestamp for timeout detection
+    last_pin_time: Optional[float] = None
 
     # The 'logical' format of the tensor
     fmt: MemoryFormat = MemoryFormat.UNDEFINED
@@ -406,6 +410,7 @@ class TensorMemoryObj(MemoryObj):
     """
 
     monitor = LMCStatsMonitor.GetOrCreate()
+    pin_timeout_seconds = 300  # Default timeout for pin operations
 
     def __init__(
         self,
@@ -501,15 +506,38 @@ class TensorMemoryObj(MemoryObj):
                 TensorMemoryObj.monitor.update_pinned_memory_objs_count(1)
 
             self.meta.pin_count += 1
+            self.meta.last_pin_time = time.time()
             return True
 
     def unpin(self) -> bool:
         with self.lock:
-            self.meta.pin_count -= 1
+            # Check if pin has timed out
+            if (
+                self.meta.last_pin_time is not None
+                and self.meta.pin_count > 0
+                and (time.time() - self.meta.last_pin_time)
+                > TensorMemoryObj.pin_timeout_seconds
+            ):
+                logger.warning(
+                    f"Pin timeout detected for MemoryObj {self.meta.address}. "
+                    f"Pin count: {self.meta.pin_count}, "
+                    f"Last pin time: {self.meta.last_pin_time}, "
+                    f"Elapsed: {time.time() - self.meta.last_pin_time:.2f}s. "
+                    f"Forcing unpin to 0."
+                )
+                TensorMemoryObj.monitor.update_forced_unpin_count(1)
+                # Force unpin to 0
+                if self.meta.pin_count > 0:
+                    TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
+                self.meta.pin_count = 0
+                self.meta.last_pin_time = None
+            else:
+                self.meta.pin_count -= 1
 
             # if pin_count is 0, indicates that the object is unpinned
             if self.meta.pin_count == 0:
                 TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
+                self.meta.last_pin_time = None
 
             if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
                 if self.parent_allocator is None:
@@ -610,6 +638,7 @@ class BytesBufferMemoryObj(MemoryObj):
                 phy_size=0,
                 ref_count=1,
                 pin_count=0,
+                last_pin_time=None,
                 fmt=MemoryFormat.BINARY_BUFFER,
             )
         super().__init__(metadata)
@@ -962,6 +991,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 aligned_size,
                 1,
                 0,
+                None,
                 fmt,
                 shapes=shapes,
                 dtypes=dtypes,
@@ -1046,6 +1076,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                         unit_aligned_size,
                         1,
                         0,
+                        None,
                         fmt,
                         shapes=shapes,
                         dtypes=dtypes,
@@ -1233,6 +1264,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 self.align_bytes,  # 1 page
                 1,  # ref_count=1
                 0,  # pin_count=0
+                None,  # last_pin_time=None
                 self.fmt,
                 shapes=self.shapes,
                 dtypes=self.dtypes,
@@ -1945,6 +1977,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
                 phy_size=0,
                 ref_count=1,
                 pin_count=0,
+                last_pin_time=None,
                 fmt=fmt,
                 shapes=shapes,
                 dtypes=dtypes,

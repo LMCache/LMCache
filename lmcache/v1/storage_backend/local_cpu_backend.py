@@ -23,6 +23,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     MixedMemoryAllocator,
     PagedCpuGpuMemoryAllocator,
+    TensorMemoryObj,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
@@ -348,6 +349,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
         logger.info(f"NUMA mapping {numa_mapping}")
+
+        # Set pin timeout from config
+        TensorMemoryObj.pin_timeout_seconds = config.pin_timeout_seconds
 
         # Calculate effective CPU memory size
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
