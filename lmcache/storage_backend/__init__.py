@@ -21,6 +21,8 @@ from lmcache.storage_backend.remote_backend import LMCRemoteBackend
 
 logger = init_logger(__name__)
 
+logger.info("Importing storage backends...")
+
 
 def CreateStorageBackend(
     config: LMCacheEngineConfig,
