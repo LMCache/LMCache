@@ -48,4 +48,3 @@ class LookupCleanupMsg(AsyncLookupMsg):
 
     def describe(self) -> str:
         return f"Cleanup memory for lookup_id={self.lookup_id}"
-

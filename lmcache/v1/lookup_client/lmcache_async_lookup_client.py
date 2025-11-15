@@ -162,7 +162,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     ) -> Optional[int]:
         # Check if any aborted lookups are finished, send cleanup messages
         self._cleanup_finished_aborted_lookups()
-        
+
         with self.lock:
             # -1 indicates not found; None indicates ongoing.
             req_status = self.reqs_status.get(lookup_id, -1)
@@ -187,10 +187,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             offsets=offsets,
             request_configs=request_configs,
         )
-        
+
         # Serialize message using msgspec
         msg_buf = msgspec.msgpack.encode(msg)
-        
+
         for i in range(self.num_ranks):
             self.push_sockets[i].send(msg_buf, copy=False)
         time.sleep(self.lookup_backoff_time)
@@ -237,11 +237,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 req_status = self.reqs_status.get(lookup_id)
                 if req_status is not None:
                     finished_lookups.append(lookup_id)
-            
+
             # Send cleanup messages for finished lookups
             for lookup_id in finished_lookups:
                 self.aborted_lookups.discard(lookup_id)
-        
+
         # Send cleanup messages outside the lock to avoid blocking
         for lookup_id in finished_lookups:
             self._send_cleanup_message(lookup_id)
@@ -250,7 +250,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         """Send cleanup message to workers to release memory objects."""
         msg = LookupCleanupMsg(lookup_id=lookup_id)
         msg_buf = msgspec.msgpack.encode(msg)
-        
+
         for i in range(self.num_ranks):
             self.push_sockets[i].send(msg_buf, copy=False)
         logger.debug(f"Sent cleanup message for lookup_id={lookup_id}")
@@ -321,13 +321,14 @@ class LMCacheAsyncLookupServer:
                 msg_buf = self.pull_socket.recv(copy=False)
                 # Deserialize message - could be LookupRequestMsg or LookupCleanupMsg
                 # Use a union type for decoding
+                # Standard
                 from typing import Union as UnionType
-                
+
                 msg = msgspec.msgpack.decode(
                     msg_buf,
                     type=UnionType[LookupRequestMsg, LookupCleanupMsg],
                 )
-                
+
                 if isinstance(msg, LookupRequestMsg):
                     # Handle lookup request
                     self.lmcache_engine.async_lookup_and_prefetch(
@@ -337,14 +338,14 @@ class LMCacheAsyncLookupServer:
                         pin=True,
                         request_configs=msg.request_configs,
                     )
-                
+
                 elif isinstance(msg, LookupCleanupMsg):
                     # Handle cleanup request - release memory objects for aborted lookup
                     self.lmcache_engine.cleanup_memory_objs(msg.lookup_id)
-                
+
                 else:
                     logger.warning(f"Unknown message type: {type(msg)}")
-            
+
             except Exception as e:
                 logger.error(f"Error processing request from scheduler: {e}")
 
@@ -354,7 +355,7 @@ class LMCacheAsyncLookupServer:
             lookup_id=lookup_id,
             num_hit_tokens=num_hit_tokens,
         )
-        
+
         # Serialize message using msgspec
         msg_buf = msgspec.msgpack.encode(msg)
         self.push_socket.send(msg_buf, copy=False)

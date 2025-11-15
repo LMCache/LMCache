@@ -935,8 +935,8 @@ class LMCacheEngine:
     def cleanup_memory_objs(self, lookup_id: str) -> None:
         """
         Cleanup memory objects allocated during prefetch for an aborted lookup.
-        
-        Called by the scheduler when it determines that an aborted lookup 
+
+        Called by the scheduler when it determines that an aborted lookup
         has finished its prefetch tasks.
         """
         try:
@@ -945,12 +945,12 @@ class LMCacheEngine:
             if future is None:
                 logger.debug(f"No event found for lookup_id={lookup_id}")
                 return
-            
+
             # Get memory objects from the future result
             memory_objs = future.result()
             # Flatten nested lists (each backend returns a list of chunks)
             memory_objs_flat = [mm for m in memory_objs for mm in m]
-            
+
             # Release each memory object
             for memory_obj in memory_objs_flat:
                 try:
@@ -959,7 +959,9 @@ class LMCacheEngine:
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
         except Exception as e:
-            logger.error(f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}")
+            logger.error(
+                f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
+            )
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
     # In this case, we compress all tokens.
