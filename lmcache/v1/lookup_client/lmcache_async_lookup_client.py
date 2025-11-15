@@ -177,7 +177,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False
         ):
-            hashes.append(hash_val)
+            hashes.append(int(hash_val))
             offsets.append(end - start)
 
         # Create structured message

@@ -60,3 +60,12 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             lookup_id: The lookup ID whose status needs to be cleared.
         """
         return
+
+    def cancel_lookup(self, lookup_id: str) -> None:
+        """
+        Cancel an ongoing lookup and mark it for cleanup.
+
+        Args:
+            lookup_id: The lookup ID to cancel.
+        """
+        return
