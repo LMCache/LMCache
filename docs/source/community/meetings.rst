@@ -4,6 +4,7 @@ Community meetings
 LMCache hosts regular community meetings to discuss updates, address new feature requests, 
 and feedback from the community. If you are interested in contributing to the LMCache projects
 (core LMCache or Production Stack), we encourage you to join the meetings.
+We also host a monthly "Office Hour" on select topics.
 
 Meeting schedule
 -----------------
@@ -37,3 +38,12 @@ Please find the meeting invite link below:
 .. note:: 
     The Zoom meeting link is the same for both LMCache and Production Stack community meetings. 
     Meeting notes are available here: `Meeting notes <https://docs.google.com/document/d/1vX0g2q3j4x5m7J6z8Q9Gk4Z5l7f3K8h0nqYwW1a2c4o/edit?usp=sharing>`_.
+
+LMCache Office Hours
+++++++++++++++++++++
+
+Held monthly on the second Thursday at 2PM ET, 11AM PT.  
+
+- Topic announced on the LMCache #office-hour Slack channel
+- Request a calendar invite via `this form <https://lmcache-officehours.zapier.app/>`_
+
