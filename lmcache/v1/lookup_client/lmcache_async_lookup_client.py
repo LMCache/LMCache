@@ -146,6 +146,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 config.extra_config.get("lookup_backoff_time", self.lookup_backoff_time)
             )
 
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        with self.lock:
+            return self.reqs_status.get(lookup_id, None)
+
     # TODO(Jiayi): Consider batching here
     def lookup(
         self,
