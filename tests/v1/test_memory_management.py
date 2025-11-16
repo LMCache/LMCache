@@ -344,6 +344,11 @@ def test_pin_timeout(alloc_cls, custom_timeout, elapsed_time):
     # First Party
     from lmcache.observability import LMCStatsMonitor
 
+    # Reset the singleton to ensure clean state
+    LMCStatsMonitor.DestroyInstance()
+    # Also reset the class variable to use the new singleton
+    TensorMemoryObj.monitor = LMCStatsMonitor.GetOrCreate()
+
     original_timeout = None
     if custom_timeout is not None:
         original_timeout = TensorMemoryObj.pin_timeout_seconds
