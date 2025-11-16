@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional, Tuple
 import os
 import re
@@ -15,12 +16,16 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+class Role(str, Enum):
+    """Role enumeration for LMCache instances"""
+
+    SCHEDULER = "scheduler"
+    WORKER = "worker"
+
+
 @dataclass
 class LMCacheEngineMetadata:
     """name of the LLM model"""
-
-    ROLE_SCHEDULER = "scheduler"
-    ROLE_WORKER = "worker"
 
     model_name: str
     """ world size when running under a distributed setting """
@@ -37,7 +42,7 @@ class LMCacheEngineMetadata:
     """ whether use MLA"""
     use_mla: bool = False
     """ the role of the current instance (e.g., 'scheduler', 'worker') """
-    role: str = ""
+    role: Optional[Role] = None
     """ the local dp rank """
     dp_rank_local: int = 0
     """ the first rank of the distributed setting """

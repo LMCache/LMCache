@@ -19,7 +19,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata, Role
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
@@ -217,7 +217,7 @@ class StorageManager:
         self.enable_pd = config.enable_pd
 
         self.allocator_backend = None
-        if metadata.role != LMCacheEngineMetadata.ROLE_SCHEDULER:
+        if metadata.role != Role.SCHEDULER:
             self.allocator_backend = self._get_allocator_backend(config)
             if config.local_cpu:
                 self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]

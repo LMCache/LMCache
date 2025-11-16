@@ -20,7 +20,7 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata, Role
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
@@ -124,7 +124,7 @@ class LMCacheEngine:
         from lmcache.v1.cache_controller import LMCacheWorker
 
         self.lmcache_worker: Optional[LMCacheWorker] = None
-        if self.enable_controller and self.metadata.role != "scheduler":
+        if self.enable_controller and self.metadata.role != Role.SCHEDULER:
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
         self.async_loading = config.enable_async_loading
@@ -195,10 +195,7 @@ class LMCacheEngine:
             "force_store_wait", False
         )
 
-        if (
-            metadata.role == LMCacheEngineMetadata.ROLE_SCHEDULER
-            and config.enable_scheduler_bypass_lookup
-        ):
+        if metadata.role == Role.SCHEDULER and config.enable_scheduler_bypass_lookup:
             assert self.save_only_first_rank or config.get_extra_config_value(
                 "remote_enable_mla_worker_id_as0", metadata.use_mla
             ), (
@@ -238,7 +235,7 @@ class LMCacheEngine:
             gc.disable()
 
     def post_init(self, **kwargs) -> None:
-        assert self.metadata.role != LMCacheEngineMetadata.ROLE_SCHEDULER
+        assert self.metadata.role != Role.SCHEDULER
         if "async_lookup_server" in kwargs:
             self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:

@@ -9,7 +9,7 @@ import importlib  # Added for dynamic import
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata, Role
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
@@ -37,10 +37,7 @@ def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
     Returns:
         True if the worker is not a scheduler and CUDA is available.
     """
-    return (
-        metadata.role != LMCacheEngineMetadata.ROLE_SCHEDULER
-        and torch.cuda.is_available()
-    )
+    return metadata.role != Role.SCHEDULER and torch.cuda.is_available()
 
 
 def create_dynamic_backends(
@@ -138,7 +135,7 @@ def CreateStorageBackends(
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
     local_cpu_backend: Optional[LocalCPUBackend] = None
-    if metadata.role == LMCacheEngineMetadata.ROLE_SCHEDULER:
+    if metadata.role == Role.SCHEDULER:
         # For scheduler role, local_cpu_backend is None
         pass
     elif not config.enable_pd or config.local_cpu:

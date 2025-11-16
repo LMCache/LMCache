@@ -41,7 +41,7 @@ import torch
 
 # First Party
 from lmcache import utils
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata, Role
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -495,7 +495,7 @@ class LMCacheConnectorV1Impl:
             self.lmcache_engine = self._init_lmcache_engine(
                 config,
                 vllm_config,
-                role=LMCacheEngineMetadata.ROLE_SCHEDULER,
+                role=Role.SCHEDULER,
             )
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
@@ -507,7 +507,7 @@ class LMCacheConnectorV1Impl:
             self.lmcache_engine = self._init_lmcache_engine(
                 config,
                 vllm_config,
-                role=LMCacheEngineMetadata.ROLE_WORKER,
+                role=Role.WORKER,
             )
 
             self.use_layerwise = config.use_layerwise
@@ -590,7 +590,7 @@ class LMCacheConnectorV1Impl:
         self,
         lmcache_config: LMCacheEngineConfig,
         vllm_config: "VllmConfig",
-        role: str,
+        role: Role,
     ) -> LMCacheEngine:
         """Initialize the LMCache engine by the given model config and parallel
         config. This function will check the environment variable
@@ -667,7 +667,7 @@ class LMCacheConnectorV1Impl:
 
         # When use_mla is True, num_kv_head is 1
         hidden_dim_size = num_kv_head * head_size
-        if role == LMCacheEngineMetadata.ROLE_SCHEDULER:
+        if role == Role.SCHEDULER:
             vllm_gpu_connector = None
             # Create a dummy tpg object with broadcast and broadcast_object methods
             tpg = SimpleNamespace()

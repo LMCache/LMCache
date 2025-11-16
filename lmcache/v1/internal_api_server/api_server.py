@@ -10,10 +10,10 @@ from fastapi import FastAPI
 import uvicorn
 
 # First Party
+from lmcache.config import Role
 from lmcache.logging import init_logger
 
 # Local
-from ...config import LMCacheEngineMetadata
 from .api_registry import APIRegistry
 
 if TYPE_CHECKING:
@@ -34,11 +34,7 @@ class InternalAPIServer:
         # 0 for scheduler, 1 for worker 0, 2 for worker 1, ...
         config = lmcache_engine.config
         metadata = lmcache_engine.metadata
-        port_offset = (
-            0
-            if metadata.role == LMCacheEngineMetadata.ROLE_SCHEDULER
-            else 1 + metadata.worker_id
-        )
+        port_offset = 0 if metadata.role == Role.SCHEDULER else 1 + metadata.worker_id
         self.port = config.internal_api_server_port_start + port_offset
         self.socket_path_prefix = config.internal_api_server_socket_path_prefix
         self.socket_path = (
