@@ -1563,7 +1563,7 @@ class LMCacheConnectorV1Impl:
             request_tracker.update(
                 new_token_ids,
                 new_block_ids,
-                preempted=req_id in scheduler_output.resumed_req_ids,
+                preempted=req_id in cached_reqs.resumed_req_ids,
                 lmcache_cached_tokens=lmcache_cached_tokens,
             )
 
