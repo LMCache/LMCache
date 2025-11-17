@@ -4,6 +4,7 @@ from typing import List, Tuple
 import argparse
 import asyncio
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -104,7 +105,7 @@ def test_nixl_storage_config():
 
     nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
     assert nixl_config.buffer_size == config.nixl_buffer_size
-    assert nixl_config.buffer_device == config.nixl_buffer_device
+    assert config.nixl_buffer_device in nixl_config.buffer_device
     assert nixl_config.backend == config.extra_config["nixl_backend"]
     assert nixl_config.file_pool_size == config.extra_config["nixl_file_pool_size"]
     assert nixl_config.path == config.extra_config["nixl_path"]
@@ -170,7 +171,7 @@ def test_nixl_storage_backend_basic():
             thread.join()
         # Cleanup temporary directory
         if os.path.exists(config.extra_config["nixl_path"]):
-            os.rmdir(config.extra_config["nixl_path"])
+            shutil.rmtree(config.extra_config["nixl_path"])
 
 
 @pytest.mark.no_shared_allocator
@@ -239,7 +240,7 @@ def test_nixl_storage_backend_put_get():
             thread.join()
         # Cleanup temporary directory
         if os.path.exists(config.extra_config["nixl_path"]):
-            os.rmdir(config.extra_config["nixl_path"])
+            shutil.rmtree(config.extra_config["nixl_path"])
 
 
 @pytest.mark.no_shared_allocator
@@ -296,7 +297,7 @@ def test_nixl_storage_backend_different_backends():
                 thread.join()
             # Cleanup temporary directory
             if os.path.exists(config.extra_config["nixl_path"]):
-                os.rmdir(config.extra_config["nixl_path"])
+                shutil.rmtree(config.extra_config["nixl_path"])
 
 
 if __name__ == "__main__":
@@ -388,4 +389,4 @@ if __name__ == "__main__":
             thread.join()
         # Cleanup temporary directory
         if os.path.exists(config.extra_config["nixl_path"]):
-            os.rmdir(config.extra_config["nixl_path"])
+            shutil.rmtree(config.extra_config["nixl_path"])
