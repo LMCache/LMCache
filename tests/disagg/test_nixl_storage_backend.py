@@ -88,7 +88,7 @@ def create_test_metadata() -> LMCacheEngineMetadata:
         fmt="test",
         kv_dtype=torch.bfloat16,
         kv_shape=(
-            32,
+            2,
             2,
             256,
             1024,
