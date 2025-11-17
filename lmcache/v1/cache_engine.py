@@ -941,10 +941,10 @@ class LMCacheEngine:
         """
         try:
             # Get the completed future from event_manager
-            future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
-            if future is None:
-                logger.debug(f"No event found for lookup_id={lookup_id}")
+            if self.event_manager.get_event_status(EventType.LOADING, lookup_id) != EventStatus.DONE:
+                logger.debug(f"No completed event found for lookup_id={lookup_id} to clean up.")
                 return
+            future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
 
             # Get memory objects from the future result
             memory_objs = future.result()
