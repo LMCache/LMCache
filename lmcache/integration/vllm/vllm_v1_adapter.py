@@ -252,12 +252,10 @@ class RequestTracker:
             self.allocated_block_ids = new_block_ids
             # reset the number of saved tokens
             self.num_saved_tokens = lmcache_cached_tokens
-
-            self.token_ids = []
+            # we don't need to extend the token ids in the preempted case
         else:
             self.allocated_block_ids.extend(new_block_ids)
-
-        self.token_ids.extend(new_token_ids)
+            self.token_ids.extend(new_token_ids)
 
         # When a request is scheduled again, and the number of new tokens
         # is 1 (excluding chunked prefill), the request is in decode phase.
@@ -1544,7 +1542,7 @@ class LMCacheConnectorV1Impl:
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             # TODO: this is a dangerous reference to the request object inside vllm
             if request := self._unfinished_requests.get(req_id):
-                num_current_tokens = len(request_tracker.token_ids)
+                num_current_tokens = request.num_computed_tokens
                 new_token_ids = request.all_token_ids[
                     num_current_tokens : num_current_tokens + num_new_tokens
                 ]
