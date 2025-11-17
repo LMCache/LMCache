@@ -130,15 +130,22 @@ class LMCacheConnector:
         v_pool: List[torch.Tensor],
     ):
         kv_dtype = k_pool[0].dtype
+
+        if len(k_pool) > 0 and k_pool[0].is_cuda and k_pool[0].device.index is not None:
+            local_rank = k_pool[0].device.index
+        else:
+            # Fallback for CPU / odd cases
+            local_rank = rank
+
         self.lmcache_engine = init_lmcache_engine(
             sgl_config,
             tp_size,
-            rank,
+            local_rank,
             kv_dtype,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
-        self.rank = rank
+        self.rank = local_rank
         self.kvcaches = k_pool + v_pool
         self.num_layer = sgl_config.num_hidden_layers
 
