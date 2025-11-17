@@ -130,7 +130,7 @@ class LMCacheConnector:
         v_pool: List[torch.Tensor],
     ):
         if not k_pool:
-            raise ValueError("k_pool cannot be empty for LMCacheConnector initialization.")
+            raise ValueError("k_pool cannot be empty during initialization.")
         kv_dtype = k_pool[0].dtype
         if k_pool[0].is_cuda and k_pool[0].device.index is not None:
             local_rank = k_pool[0].device.index
