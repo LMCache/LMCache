@@ -129,9 +129,10 @@ class LMCacheConnector:
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
     ):
+        if not k_pool:
+            raise ValueError("k_pool cannot be empty for LMCacheConnector initialization.")
         kv_dtype = k_pool[0].dtype
-
-        if len(k_pool) > 0 and k_pool[0].is_cuda and k_pool[0].device.index is not None:
+        if k_pool[0].is_cuda and k_pool[0].device.index is not None:
             local_rank = k_pool[0].device.index
         else:
             # Fallback for CPU / odd cases
