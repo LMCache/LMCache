@@ -79,6 +79,47 @@ Basic cache settings that control the core functionality of LMCache.
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
      - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}
+
+Lazy Memory Allocator Configurations
+------------------------------------
+
+Settings for the lazy memory allocator that enables gradual memory allocation to reduce startup time and initial memory footprint.
+
+.. note::
+
+    The lazy memory allocator is designed for scenarios with large CPU memory configurations. It starts with a small initial allocation and gradually expands as needed, reducing startup wait time and avoiding unnecessary memory consumption when the full capacity is not required.
+    
+    **Key characteristics:**
+    
+    - **One-time expansion**: Memory expands until target size is reached, then stops
+    - **No shrinking**: Once allocated, memory is never released back to the system
+    - **Automatic activation**: Only activates when ``max_local_cpu_size`` exceeds ``lazy_memory_safe_size``
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - YAML Config Name
+     - Environment Variable
+     - Description
+   * - enable_lazy_memory_allocator
+     - LMCACHE_ENABLE_LAZY_MEMORY_ALLOCATOR
+     - Whether to enable lazy memory allocator. Values: true/false. Default: false
+   * - lazy_memory_initial_ratio
+     - LMCACHE_LAZY_MEMORY_INITIAL_RATIO
+     - Initial memory allocation ratio (0.0-1.0). Determines the fraction of max_local_cpu_size to allocate at startup. Default: 0.2 (20%)
+   * - lazy_memory_expand_trigger_ratio
+     - LMCACHE_LAZY_MEMORY_EXPAND_TRIGGER_RATIO
+     - Memory usage ratio (0.0-1.0) that triggers expansion. When used memory exceeds this ratio of current capacity, expansion begins. Default: 0.5 (50%)
+   * - lazy_memory_step_ratio
+     - LMCACHE_LAZY_MEMORY_STEP_RATIO
+     - Memory expansion step ratio (0.0-1.0). Each expansion adds this fraction of max_local_cpu_size. Default: 0.1 (10%)
+   * - lazy_memory_safe_size
+     - LMCACHE_LAZY_MEMORY_SAFE_SIZE
+     - Threshold in GB above which lazy allocator activates. If max_local_cpu_size ≤ this value, lazy allocator is disabled regardless of enable_lazy_memory_allocator setting. Default: 0.0
+   * - reserve_local_cpu_size
+     - LMCACHE_RESERVE_LOCAL_CPU_SIZE
+     - Reserved system memory in GB that should not be allocated by LMCache. Used to prevent out-of-memory conditions. Default: 0.0
      
 Cache Blending Configurations
 -----------------------------

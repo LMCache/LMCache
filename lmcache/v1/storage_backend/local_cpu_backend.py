@@ -15,6 +15,7 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -335,6 +336,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
 
         if config.enable_p2p:
+            # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
+            # For now, keep the original P2P implementation
             assert metadata is not None
             meta_shape = torch.Size(metadata.kv_shape)
             # TODO(Jiayi): remove this hardcode
@@ -356,10 +359,42 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             return paged_mem_allocator
         else:
-            return MixedMemoryAllocator(
-                int(cpu_size * 1024**3),
-                numa_mapping=numa_mapping,
+            # Check if lazy memory allocator should be enabled
+            use_lazy = (
+                config.enable_lazy_memory_allocator
+                and cpu_size > config.lazy_memory_safe_size
             )
+
+            if use_lazy:
+                logger.info(
+                    f"Using LazyMixedMemoryAllocator with "
+                    f"initial_ratio={config.lazy_memory_initial_ratio}, "
+                    f"expand_trigger_ratio="
+                    f"{config.lazy_memory_expand_trigger_ratio}, "
+                    f"step_ratio={config.lazy_memory_step_ratio}"
+                )
+                return LazyMixedMemoryAllocator(
+                    int(cpu_size * 1024**3),
+                    config=config,
+                    numa_mapping=numa_mapping,
+                    memory_limit_callback=lambda: int(
+                        self._calculate_effective_cpu_size(cpu_size, config, metadata)
+                        * 1024**3
+                    ),
+                )
+            else:
+                if config.enable_lazy_memory_allocator:
+                    logger.info(
+                        f"LazyMixedMemoryAllocator is disabled because "
+                        f"cpu_size ({cpu_size:.2f} GB) does not exceed "
+                        f"lazy_memory_safe_size "
+                        f"({config.lazy_memory_safe_size:.2f} GB). "
+                        f"Using MixedMemoryAllocator instead."
+                    )
+                return MixedMemoryAllocator(
+                    int(cpu_size * 1024**3),
+                    numa_mapping=numa_mapping,
+                )
 
     @_lmcache_nvtx_annotate
     def allocate(

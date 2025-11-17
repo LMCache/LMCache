@@ -302,25 +302,20 @@ class SageMakerHyperPodConnector(RemoteConnector):
             lease_id: The lease ID to release
 
         Returns:
-            True if release successful or lease already gone, False on error
+            True if release successful, False on error
         """
         key_str = self._key_to_string(key)
-        url = f"{self.base_url}/v1/kv/{self.bucket_name}/{key_str}/leases/{lease_id}"
+        url = f"{self.base_url}/v1/leases/{lease_id}/release"
 
         try:
             result = await self._http_request(
-                "DELETE",
+                "POST",
                 url,
                 timeout=5.0,
                 gate=self.control_inflight,
             )
 
-            # Accept 200/204 (success) and 404 (already expired/released)
-            if result and result["status"] in (
-                HTTP_OK,
-                HTTP_NO_CONTENT,
-                HTTP_NOT_FOUND,
-            ):
+            if result and result["status"] == HTTP_OK:
                 self.stats["lease_released"] += 1
                 logger.debug(f"Lease released: key={key_str}, lease_id={lease_id}")
                 return True

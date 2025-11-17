@@ -310,7 +310,7 @@ class LMCacheClusterExecutor:
                         f"Src worker {src_worker_id} not registered for "
                         f"instance {src_instance_id} or "
                         f"dst worker {dst_worker_id} not registered for "
-                        f"instance {dst_instance_id}"
+                        f"instance {dst_instance_id} or P2P is not enabled."
                     )
                 )
             sockets.append(socket)

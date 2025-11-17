@@ -41,7 +41,8 @@ class RegisterMsg(WorkerMsg):
     worker_id: int
     ip: str
     port: int
-    distributed_url: str  # URL for actual KV cache transfer
+    # URL for actual KV cache transfer, only useful when p2p is enabled
+    distributed_url: Optional[str]
 
     def describe(self) -> str:
         return (
