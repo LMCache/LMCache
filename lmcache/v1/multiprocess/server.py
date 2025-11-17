@@ -328,6 +328,7 @@ class MPCacheEngine:
                         gpu_context.block_size * gpu_context.num_blocks,
                         True,
                         gpu_context.is_mla,
+                        getattr(memory_obj, "transpose", False),
                     )
 
                     assert memory_obj.tensor is not None
@@ -407,6 +408,7 @@ class MPCacheEngine:
                         gpu_context.block_size * gpu_context.num_blocks,
                         False,
                         gpu_context.is_mla,
+                        getattr(memory_obj, "transpose", False),
                     )
 
         with (

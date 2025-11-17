@@ -155,7 +155,7 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def get_shape(self, num_tokens: int) -> torch.Size:
+    def get_shape(self, num_tokens: int, transpose: bool = False) -> torch.Size:
         """Get the shape of the data given the number of tokens."""
         raise NotImplementedError
 
@@ -309,9 +309,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     " order to be processed by VLLMPagedMemGPUConnector"
                 )
         else:
-            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+            if not self._is_valid_multilayer_fmt(memory_obj.metadata.fmt):
                 raise ValueError(
-                    "The memory object should be in KV_2LTD format in"
+                    "The memory object should be in KV_2LTD or KV_DT2L format in"
                     " order to be processed by VLLMPagedMemGPUConnector"
                 )
 
@@ -330,6 +330,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.page_buffer_size,
             False,
             self.use_mla,
+            getattr(memory_obj, "transpose", False),
         )
 
     @_lmcache_nvtx_annotate
@@ -375,7 +376,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    getattr(memory_obj, "transpose", False),
                 )
+
             else:
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
@@ -388,6 +391,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    getattr(memory_obj, "transpose", False),
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -412,9 +416,18 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
 
-    def get_shape(self, num_tokens: int) -> torch.Size:
+    def get_shape(self, num_tokens: int, transpose: bool = False) -> torch.Size:
         kv_size = 1 if self.use_mla else 2
+        if transpose:
+            assert kv_size == 2, "Transpose is only supported for KV_2LTD format."
+            return torch.Size([self.hidden_dim_size, num_tokens, 2, self.num_layers])
         return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    def _is_valid_multilayer_fmt(self, fmt: MemoryFormat) -> bool:
+        if self.use_mla:
+            return fmt == MemoryFormat.KV_MLA_FMT
+        else:
+            return fmt in [MemoryFormat.KV_2LTD, MemoryFormat.KV_DT2L]
 
 
 class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
@@ -522,6 +535,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 self.page_buffer_size,
                 False,
                 self.use_mla,
+                getattr(memory_obj, "transpose", False),
             )
 
     @_lmcache_nvtx_annotate
@@ -550,6 +564,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.page_buffer_size,
                         True,
                         self.use_mla,
+                        getattr(memory_obj, "transpose", False),
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -566,6 +581,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.page_buffer_size,
                         True,
                         self.use_mla,
+                        getattr(memory_obj, "transpose", False),
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
@@ -590,7 +606,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
 
-    def get_shape(self, num_tokens: int) -> torch.Size:
+    def get_shape(self, num_tokens: int, transpose: bool = False) -> torch.Size:
         raise NotImplementedError
 
 
@@ -997,7 +1013,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         tmp_gpu_buffer_obj.ref_count_down()
         yield
 
-    def get_shape(self, num_tokens: int) -> torch.Size:
+    def get_shape(self, num_tokens: int, transpose: bool = False) -> torch.Size:
         return torch.Size([2, num_tokens, self.hidden_dim_size])
 
 
@@ -1373,7 +1389,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         yield
 
-    def get_shape(self, num_tokens: int) -> torch.Size:
+    def get_shape(self, num_tokens: int, transpose: bool = False) -> torch.Size:
         if self.use_mla:
             # MLA format: [num_tokens, hidden_dim_size]
             return torch.Size([num_tokens, self.hidden_dim_size])
@@ -1566,7 +1582,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
-    def get_shape(self, num_tokens: int) -> torch.Size:
+    def get_shape(self, num_tokens: int, transpose: bool = False) -> torch.Size:
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
 
     # TODO(Jiayi): need to optimize to enable real batching
@@ -1861,5 +1877,5 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             tmp_gpu_buffer_obj.ref_count_down()
         yield
 
-    def get_shape(self, num_tokens: int) -> torch.Size:
+    def get_shape(self, num_tokens: int, transpose: bool = False) -> torch.Size:
         return torch.Size([num_tokens, 2, self.hidden_dim_size])

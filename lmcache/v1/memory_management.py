@@ -55,27 +55,30 @@ def synchronized(lock_attr_name):
 
 class MemoryFormat(Enum):
     UNDEFINED = 0
-    """[2, num_layers, num_tokens, hidden_dim]
-    """
+
     # KV_BLOB = 1
     KV_2LTD = auto()
-    """[num_tokens, 2, hidden_dim]
+    """[2, num_layers, num_tokens, hidden_dim]
     """
     # LAYER_KV_BLOB = 2
     KV_T2D = auto()
+    """[num_tokens, 2, hidden_dim]
+    """
+    KV_2TD = auto()
     """[2, num_tokens, hidden_dim]
     """
 
-    KV_2TD = auto()
+    BINARY = auto()
     """Compressed binary array format
     """
-    BINARY = auto()
-
     BINARY_BUFFER = auto()
 
     KV_MLA_FMT = auto()
     """[1, num_layers, num_tokens, aligned_head_size]
     """
+
+    KV_DT2L = auto()
+    """[hidden_dim, num_tokens, 2, num_layers]"""
 
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
@@ -90,7 +93,22 @@ class MemoryFormat(Enum):
             return 0
         elif self == MemoryFormat.KV_MLA_FMT:
             return 2
+        elif self == MemoryFormat.KV_DT2L:
+            return 1
         return 0
+
+    def hidden_dim(self) -> int:
+        if self == MemoryFormat.KV_2LTD:
+            return 3
+        elif self == MemoryFormat.KV_T2D:
+            return 2
+        elif self == MemoryFormat.KV_2TD:
+            return 2
+        elif self == MemoryFormat.KV_MLA_FMT:
+            return 3
+        elif self == MemoryFormat.KV_DT2L:
+            return 0
+        raise ValueError(f"hidden_dim not defined for format {self}")
 
 
 @dataclass
@@ -440,6 +458,7 @@ class TensorMemoryObj(MemoryObj):
         raw_data: torch.Tensor,
         metadata: MemoryObjMetadata,
         parent_allocator: Optional["MemoryAllocatorInterface"],
+        transpose: Optional[bool] = False,
     ):
         assert metadata.dtype is not None, "dtype must be specified for TensorMemoryObj"
         super().__init__(metadata)
@@ -458,6 +477,7 @@ class TensorMemoryObj(MemoryObj):
                 self.group_prefix_sum.append(size_in_bytes)
         else:
             self.group_prefix_sum.append(self.meta.get_size())
+        self.transpose = transpose
 
     def invalidate(self):
         self.valid = False
@@ -642,6 +662,10 @@ class TensorMemoryObj(MemoryObj):
     def parent(self) -> Optional["MemoryAllocatorInterface"]:
         return self.parent_allocator
 
+    def __str__(self):
+        return f"""addr: {self.meta.address},ref_count: {self.meta.ref_count}"
+                ,pin_count: {self.meta.pin_count}, shape: {self.meta.shape}"""
+
 
 class BytesBufferMemoryObj(MemoryObj):
     """
@@ -767,6 +791,13 @@ class BytesBufferMemoryObj(MemoryObj):
         # NOTE: BytesBufferMemoryObj may not be allocated by any allocator,
         # so just return None here
         return None
+
+
+@dataclass
+class AllocatorMetadataBase:
+    shape: torch.Size
+    dtype: Optional[torch.dtype]
+    fmt: MemoryFormat
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -1383,6 +1414,13 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return "TensorMemoryAllocator"
 
 
+@dataclass
+class PagedTensorMemoryMetadata(AllocatorMetadataBase):
+    align_bytes: int
+    buffer_ptr: int
+    buffer_size: int
+
+
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
     Implements a paged memory allocator.
@@ -1474,6 +1512,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             )
             return None
 
+        free_block.transpose = self._is_transpose(fmt)
+        shapes, fmt = self._update_shape_fmt(fmt, shapes)
+
         # TODO (Jiayi): This is a bit redundant.
         free_block.meta.shape = shapes[0]
         free_block.meta.dtype = dtypes[0]
@@ -1527,10 +1568,12 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
             # FIXME: think about whether pareant_allocator
             # should be updated here.
-            free_block.meta.shape = shapes[0]
-            free_block.meta.dtype = dtypes[0]
+            free_block.transpose = self._is_transpose(fmt)
+            shapes, fmt = self._update_shape_fmt(fmt, shapes)
             free_block.meta.shapes = shapes
             free_block.meta.dtypes = dtypes
+            free_block.meta.shape = shapes[0]
+            free_block.meta.dtype = dtypes[0]
             free_block.meta.fmt = fmt
             free_block.meta.ref_count = 1
 
@@ -1639,6 +1682,42 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self):
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
+
+    def _is_transpose(self, fmt: MemoryFormat):
+        if fmt == self.fmt:
+            return False
+
+        assert fmt == MemoryFormat.KV_DT2L, (
+            "Now Only KV_DT2L is supported when the paged memory format is different."
+        )
+        return True
+
+    def _update_shape_fmt(self, fmt: MemoryFormat, shapes: list[torch.Size]):
+        # TODO(novahow): this is not a clean call for token_dim
+        # since self.shape may be [KV_2LTHD] while fmt is [KV_2LTD].
+        # TODO(novahow): is fmt unified across all shapes?
+        # NOTE(novahow): we always allocate the full chunk size for proper
+        # sharding in asymmetric TP.
+        if not self._is_transpose(fmt):
+            return shapes, fmt
+
+        transposed_shapes = []
+        for shape_idx, shape in enumerate(shapes):
+            shape = list(shape)
+            shape[fmt.token_dim()] = self.shapes[shape_idx][self.fmt.token_dim()]
+            transposed_shapes.append(torch.Size(shape))
+        return transposed_shapes, fmt
+
+    @property
+    def metadata(self):
+        return PagedTensorMemoryMetadata(
+            shape=self.shapes,
+            dtype=self.dtypes,
+            fmt=self.fmt,
+            align_bytes=self.align_bytes,
+            buffer_ptr=self.buffer_ptr,
+            buffer_size=self.buffer_size,
+        )
 
 
 class BufferAllocator(MemoryAllocatorInterface):

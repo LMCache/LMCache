@@ -54,6 +54,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     MemoryObj,
     MemoryObjMetadata,
     MixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
@@ -65,6 +66,7 @@ from lmcache.v1.token_database import (
     SegmentTokenDatabase,
     TokenDatabase,
 )
+from lmcache.v1.transfer_channel.transfer_utils import maybe_transpose
 
 logger = init_logger(__name__)
 
@@ -406,6 +408,19 @@ class LMCacheEngine:
             assert isinstance(request_configs, dict)
 
         prev_key = 0
+        transfer_spec = kwargs.get("transfer_spec", None)
+        transpose = maybe_transpose(transfer_spec) and self.config.enable_pd
+        fmt = self.fmt
+        if transpose:
+            assert self.storage_manager.allocator_backend is not None, (
+                "allocator_backend is required when using transpose"
+            )
+            assert isinstance(
+                self.storage_manager.allocator_backend.get_memory_allocator(),
+                PagedCpuGpuMemoryAllocator,
+            ), "Transpose is only supported when using PagedCpuGpuMemoryAllocator"
+            fmt = MemoryFormat.KV_DT2L
+
         for start, end, key in self.token_database.process_tokens(
             tokens,
             hashes,
@@ -416,7 +431,7 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
-            kv_shapes = self.metadata.get_shapes(num_tokens)
+            kv_shapes = self.metadata.get_shapes(num_tokens, transpose=transpose)
             kv_dtypes = self.metadata.get_dtypes()
 
             # TODO (Jiayi): should be batched in the future
@@ -424,7 +439,7 @@ class LMCacheEngine:
                 kv_shapes,
                 kv_dtypes,
                 busy_loop=self.force_store_wait,
-                fmt=self.fmt,
+                fmt=fmt,
             )
             if memory_obj is None:
                 logger.warning(
