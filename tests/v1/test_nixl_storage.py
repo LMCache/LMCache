@@ -194,7 +194,7 @@ def test_nixl_gds_mt_cuda_backend():
     dtype = torch.bfloat16
     shape = [2048, 2048]
 
-    config.nixl_buffer_device = "cuda:0"  # Use explicit device
+    config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = True
 
@@ -225,7 +225,7 @@ def test_nixl_gds_cuda_backend():
     dtype = torch.bfloat16
     shape = [2048, 2048]
 
-    config.nixl_buffer_device = "cuda:0"  # Use explicit device
+    config.nixl_buffer_device = "cuda"
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = True
 

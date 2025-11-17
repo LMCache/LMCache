@@ -142,6 +142,7 @@ class NixlFilePool(NixlDescPool):
         self.fds: List[int] = []
 
         assert path is not None
+        os.makedirs(path, exist_ok=True)
 
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
