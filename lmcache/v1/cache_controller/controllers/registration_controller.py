@@ -164,7 +164,7 @@ class RegistrationController:
         if (instance_id, worker_id) in self.socket_mapping:
             socket = self.socket_mapping.pop((instance_id, worker_id))
             close_zmq_socket(socket)
-            self.kv_controller.deregister(instance_id, worker_id)
+            await self.kv_controller.deregister(instance_id, worker_id)
             logger.info(f"Deregistered instance-worker {(instance_id, worker_id)}")
         else:
             logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
