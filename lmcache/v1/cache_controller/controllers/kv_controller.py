@@ -219,6 +219,7 @@ class KVController:
                 peer_init_url = self.reg_controller.get_distributed_url(
                     instance_id, worker_id
                 )
+                assert peer_init_url is not None
             num_hit_chunks += 1
 
         return BatchedP2PLookupRetMsg(

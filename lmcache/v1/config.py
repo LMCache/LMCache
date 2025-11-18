@@ -406,6 +406,55 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_str_list,
     },
+    # Lazy memory allocator configurations
+    "enable_lazy_memory_allocator": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable lazy memory allocator to reduce initial memory footprint. "
+            "Memory is allocated on-demand and expanded automatically when needed."
+        ),
+    },
+    "lazy_memory_initial_ratio": {
+        "type": float,
+        "default": 0.2,
+        "env_converter": float,
+        "description": (
+            "Initial memory allocation ratio (0.0-1.0). "
+            "Determines the percentage of target memory size to allocate at startup. "
+            "Default is 0.2 (20%)."
+        ),
+    },
+    "lazy_memory_expand_trigger_ratio": {
+        "type": float,
+        "default": 0.5,
+        "env_converter": float,
+        "description": (
+            "Memory usage ratio (0.0-1.0) that triggers automatic expansion. "
+            "When memory usage exceeds this threshold, expansion is triggered. "
+            "Default is 0.5 (50%)."
+        ),
+    },
+    "lazy_memory_step_ratio": {
+        "type": float,
+        "default": 0.1,
+        "env_converter": float,
+        "description": (
+            "Memory expansion step ratio (0.0-1.0). "
+            "Determines the percentage of target memory size to add in each expansion. "
+            "Default is 0.1 (10%)."
+        ),
+    },
+    "lazy_memory_safe_size": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+        "description": (
+            "Safe threshold size in GB. Lazy allocator is only enabled when "
+            "max_local_cpu_size exceeds this value. Default is 0.0 GB (always enabled)."
+        ),
+    },
 }
 
 

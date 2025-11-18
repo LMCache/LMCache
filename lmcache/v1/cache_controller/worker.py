@@ -99,9 +99,11 @@ class LMCacheWorker:
         self.lmcache_worker_ip = get_ip()
         self.lmcache_worker_port = lmcache_worker_port
 
-        self.p2p_host = config.p2p_host
-        self.p2p_init_port = config.p2p_init_ports[self.worker_id]
-        self.p2p_init_url = f"{self.p2p_host}:{self.p2p_init_port}"
+        self.p2p_init_url = None
+        if config.enable_p2p:
+            self.p2p_host = config.p2p_host
+            self.p2p_init_port = config.p2p_init_ports[self.worker_id]
+            self.p2p_init_url = f"{self.p2p_host}:{self.p2p_init_port}"
 
         self.reply_socket = get_zmq_socket(
             self.context,
