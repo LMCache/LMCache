@@ -151,7 +151,7 @@ Instance 2 configuration (``p2p_example2.yaml``):
     enable_async_loading: True
 
     # P2P configurations
-    enable_p2p: True
+    enable_p2p: true
     p2p_host: "localhost"
     p2p_init_ports: 8202
     p2p_lookup_ports: 8203
