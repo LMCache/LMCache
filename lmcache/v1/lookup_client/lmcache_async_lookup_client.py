@@ -191,27 +191,31 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
     def process_responses_from_workers(self):
         while self.running:
-            msg_buf = self.pull_socket.recv(copy=False)
-            # Deserialize message using msgspec
-            msg = msgspec.msgpack.decode(msg_buf, type=LookupResponseMsg)
-            lookup_id = msg.lookup_id
-            res = msg.num_hit_tokens
+            try:
+                msg_buf = self.pull_socket.recv(copy=False)
+                # Deserialize message using msgspec
+                msg = msgspec.msgpack.decode(msg_buf, type=LookupResponseMsg)
+                lookup_id = msg.lookup_id
+                res = msg.num_hit_tokens
 
-            with self.lock:
-                if lookup_id not in self.res_for_each_worker:
-                    self.res_for_each_worker[lookup_id] = [res]
-                else:
-                    self.res_for_each_worker[lookup_id].append(res)
-                all_res = self.res_for_each_worker[lookup_id]
+                with self.lock:
+                    if lookup_id not in self.res_for_each_worker:
+                        self.res_for_each_worker[lookup_id] = [res]
+                    else:
+                        self.res_for_each_worker[lookup_id].append(res)
+                    all_res = self.res_for_each_worker[lookup_id]
 
-                if len(all_res) == self.num_ranks:
-                    self.res_for_each_worker.pop(lookup_id)
+                    if len(all_res) == self.num_ranks:
+                        self.res_for_each_worker.pop(lookup_id)
 
-                    # NOTE: it is possible that the number of hit
-                    # tokens is different across (TP and PP) ranks, so we
-                    # can use the minimum value as the number of
-                    # hit tokens.
-                    self.reqs_status[lookup_id] = min(all_res)
+                        # NOTE: it is possible that the number of hit
+                        # tokens is different across (TP and PP) ranks, so we
+                        # can use the minimum value as the number of
+                        # hit tokens.
+                        self.reqs_status[lookup_id] = min(all_res)
+
+            except Exception as e:
+                logger.error(f"Error processing response from worker: {e}")
 
     def clear_lookup_status(self, lookup_id: str) -> None:
         with self.lock:
@@ -281,14 +285,9 @@ class LMCacheAsyncLookupServer:
         while self.running:
             try:
                 msg_buf = self.pull_socket.recv(copy=False)
-                # Deserialize message - could be LookupRequestMsg
-                # Use a union type for decoding
-                # Standard
-                from typing import Union as UnionType
-
                 msg = msgspec.msgpack.decode(
                     msg_buf,
-                    type=UnionType[LookupRequestMsg],
+                    type=Union[LookupRequestMsg],
                 )
 
                 if isinstance(msg, LookupRequestMsg):
