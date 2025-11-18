@@ -1050,6 +1050,26 @@ class PrometheusLogger:
             ).labels(**self.labels)
             setattr(self, metric_name, gauge)
 
+        # Connector metrics
+        connector_metrics = [
+            "scheduler_unfinished_requests_count",
+            "connector_load_specs_count",
+            "connector_request_trackers_count",
+            "connector_kv_caches_count",
+            "connector_layerwise_retrievers_count",
+            "connector_invalid_block_ids_count",
+            "connector_requests_priority_count",
+        ]
+
+        for metric_name in connector_metrics:
+            gauge = self._gauge_cls(
+                name=f"lmcache:{metric_name}",
+                documentation=f"The count of {metric_name.replace('_', ' ')}",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, metric_name, gauge)
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -1182,6 +1202,7 @@ class PrometheusLogger:
         return {
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
+            "role": metadata.role,
         }
 
     _instance = None

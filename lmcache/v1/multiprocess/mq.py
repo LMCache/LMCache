@@ -2,7 +2,8 @@
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
+import inspect
 import queue
 import threading
 import uuid
@@ -17,6 +18,9 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     get_customized_decoder,
     get_customized_encoder,
+)
+from lmcache.v1.multiprocess.futures import (
+    MessagingFuture,
 )
 from lmcache.v1.multiprocess.protocol import (
     HandlerType,
@@ -84,57 +88,6 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
 
 
 # Main classes
-class MessagingFuture(Generic[T]):
-    def __init__(self):
-        self.is_done_ = threading.Event()
-        self.result_ = None
-
-    def query(self) -> bool:
-        """
-        Check if the future is done.
-
-        Returns:
-            bool: True if the future is done, False otherwise.
-        """
-        return self.is_done_.is_set()
-
-    def wait(self, timeout: Optional[float] = None) -> bool:
-        """
-        Wait for the future to be done.
-
-        Args:
-            timeout (Optional[float]): Maximum time to wait in seconds.
-                If None, wait indefinitely.
-
-        Returns:
-            bool: True if the future is done, False if the timeout was reached.
-        """
-        return self.is_done_.wait(timeout)
-
-    def result(self, timeout: Optional[float] = None) -> T:
-        """
-        Get the result of the future.
-
-        Args:
-            timeout (Optional[float]): Maximum time to wait in seconds.
-                If None, wait indefinitely.
-
-        Returns:
-            T: The result of the future.
-
-        Raises:
-            TimeoutError: If the future is not done within the timeout.
-        """
-        flag = self.wait(timeout)
-        if not flag:
-            raise TimeoutError("Future result not available within timeout")
-        return self.result_
-
-    def set_result(self, result: T) -> None:
-        self.result_ = result
-        self.is_done_.set()
-
-
 class MessageQueueClient:
     @dataclass
     class WrappedRequest:
@@ -443,6 +396,10 @@ class MessageQueueServer:
             except Exception as e:
                 logger.error("Error in blocking handler: %s", e)
 
+        # TODO: HERE'S A BUG: WE CANNOT SEND RESPONSE IN THE FUTURE THREAD
+        # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
+        # WE SHOULD USE A ZMQ SOCKET TO NOTIFY THE MAIN THREAD TO SEND THE
+        # RESPONSE AND USE THE THREAD-QUEUE TO PASS THE RESPONSE DATA
         future.add_done_callback(_send_response)
 
     def _call_handler(
@@ -491,6 +448,72 @@ class MessageQueueServer:
                     )
                     logger.error("Available handlers: %s", list(self.handlers.keys()))
 
+    def _inspect_handler_signature(self, request_type: RequestType, handler) -> bool:
+        """Inspect the handler signature to ensure it matches the expected
+        payload classes.
+
+        Args:
+            handler (callable): The handler function.
+
+        Returns:
+            bool: True if the signature matches, False otherwise.
+        """
+
+        def same_type(a, b) -> bool:
+            if a is None:
+                a = type(None)
+            if b is None:
+                b = type(None)
+            return a == b
+
+        sig = inspect.signature(handler)
+        hints = get_type_hints(handler)
+        params = [
+            p
+            for p in sig.parameters.values()
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+
+        payload_clss = get_payload_classes(request_type)
+        if len(params) != len(payload_clss):
+            logger.error(
+                "Handler for %s expects %d arguments, but got %d",
+                request_type,
+                len(payload_clss),
+                len(params),
+            )
+            return False
+
+        for i, (param, expected_cls) in enumerate(
+            zip(params, payload_clss, strict=False)
+        ):
+            ann = hints.get(param.name, param.annotation)
+            if not same_type(ann, expected_cls):
+                logger.error(
+                    "Handler for %s argument %d expects type %s, but got %s",
+                    request_type,
+                    i,
+                    expected_cls,
+                    ann,
+                )
+                return False
+
+        return_ann = hints.get("return", sig.return_annotation)
+        expected_return_cls = get_response_class(request_type)
+        if not same_type(return_ann, expected_return_cls):
+            logger.error(
+                "Handler for %s expects return type %s, but got %s",
+                request_type,
+                expected_return_cls,
+                return_ann,
+            )
+            return False
+        return True
+
     def add_handler(
         self,
         request_type: RequestType,
@@ -507,6 +530,11 @@ class MessageQueueServer:
             handler (callable): The handler function that takes the payloads
                 as arguments.
         """
+        if not self._inspect_handler_signature(request_type, handler):
+            raise ValueError(
+                f"Handler signature does not match for request type: {request_type}"
+            )
+
         match handler_type:
             case HandlerType.SYNC:
                 self.add_sync_handler(request_type, payload_clss, handler)
@@ -516,7 +544,6 @@ class MessageQueueServer:
                 raise NotImplementedError("Non-blocking handler is not supported yet")
             case _:
                 raise ValueError(f"Unknown handler type: {handler_type}")
-        # self.handlers[request_type] = self.HandlerEntry(payload_clss, handler)
 
     def add_sync_handler(
         self, request_type: RequestType, payload_clss: list[Any], handler

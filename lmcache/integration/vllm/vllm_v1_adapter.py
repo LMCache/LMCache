@@ -51,7 +51,7 @@ from lmcache.integration.vllm.utils import (
     mla_enabled,
 )
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
@@ -512,8 +512,11 @@ def _init_lmcache_engine(
     use_gpu = need_gpu_interm_buffer(lmcache_config)
     vllm_gpu_connector: Optional[GPUConnectorInterface]
 
-    if use_mla and lmcache_config.use_layerwise:
-        raise ValueError("layerwise MLA connector is not supported yet")
+    # Validate MLA with layerwise configurations
+    if use_mla and lmcache_config.use_layerwise and lmcache_config.enable_blending:
+        raise ValueError(
+            "We haven't supported MLA with Cacheblend yet. Please disable blending."
+        )
 
     # When use_mla is True, num_kv_head is 1
     hidden_dim_size = num_kv_head * head_size
@@ -542,6 +545,7 @@ def _init_lmcache_engine(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
+                use_mla=use_mla,
             )
         tpg = get_tp_group()
     else:
@@ -736,12 +740,45 @@ class LMCacheConnectorV1Impl:
         else:
             self.api_server = None  # type: ignore[assignment]
             self.plugin_launcher = None  # type: ignore[assignment]
+
+        # Setup metrics for monitoring data structures
+        self._setup_metrics()
+
         logger.info(
             f"LMCache initialized for role {role} with version {utils.get_version()}, "
             f"vllm version {VLLM_VERSION}, "
             "lmcache cache_engine metadata: "
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
+
+    def _setup_metrics(self):
+        """Setup metrics for monitoring data structures in the connector."""
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is None:
+            logger.warning(
+                "PrometheusLogger is not initialized, "
+                "connector metrics will not be collected"
+            )
+            return
+
+        # Set up metrics for scheduler-specific and general data structures
+        metrics_map = {
+            "_unfinished_requests": "scheduler_unfinished_requests_count",
+            "load_specs": "connector_load_specs_count",
+            "_request_trackers": "connector_request_trackers_count",
+            "kv_caches": "connector_kv_caches_count",
+            "layerwise_retrievers": "connector_layerwise_retrievers_count",
+            "_invalid_block_ids": "connector_invalid_block_ids_count",
+            "_requests_priority": "connector_requests_priority_count",
+        }
+
+        for attr_name, metric_name in metrics_map.items():
+            if hasattr(self, attr_name):
+                metric = getattr(prometheus_logger, metric_name)
+                # Use a default argument in the lambda to capture
+                # the current value of `attr_name`
+                # to avoid issues with late binding in closures.
+                metric.set_function(lambda name=attr_name: len(getattr(self, name)))
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
