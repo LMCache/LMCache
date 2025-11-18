@@ -350,8 +350,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 ]
             )
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-            chunk_size_bytes = new_shape.numel() * torch.tensor([], dtype=metadata.kv_dtype).element_size()
-            cpu_size_bytes = int(cpu_size * 1024 ** 3) // chunk_size_bytes * chunk_size_bytes
+            chunk_size_bytes = (
+                new_shape.numel()
+                * torch.tensor([], dtype=metadata.kv_dtype).element_size()
+            )
+            cpu_size_bytes = (
+                int(cpu_size * 1024 ** 3) // chunk_size_bytes * chunk_size_bytes
+            )
             paged_mem_allocator.init_cpu_memory_allocator(
                 cpu_size_bytes,
                 shape=new_shape,
