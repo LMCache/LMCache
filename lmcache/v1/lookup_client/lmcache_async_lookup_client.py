@@ -50,6 +50,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     ):
         metadata, config = create_lmcache_metadata(vllm_config)
 
+        # lookup_id -> first lookup time
+        # this helps us support timeout semantics
+        self.first_lookup_time: dict[str, float] = {}
+        self.timeout_ms = config.lookup_timeout_ms
+
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -158,10 +163,22 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             req_status = self.reqs_status.get(lookup_id, -1)
             if req_status is None:
                 time.sleep(self.lookup_backoff_time)
+                if time.time() - self.first_lookup_time[lookup_id] > self.timeout_ms:
+                    logger.warning(
+                        "Request %s is still waiting for async lookup",
+                        "after %d seconds, returning 0 lmcache cached tokens",
+                        "so vllm can recompute",
+                        lookup_id,
+                        self.timeout_ms,
+                    )
+                    self.first_lookup_time.pop(lookup_id, None)
+                    return 0
+
                 return None
             elif req_status != -1:
                 return req_status
             self.reqs_status[lookup_id] = None
+            self.first_lookup_time[lookup_id] = time.time()
         hashes = []
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
@@ -218,6 +235,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     def clear_lookup_status(self, lookup_id: str) -> None:
         with self.lock:
             self.reqs_status.pop(lookup_id, None)
+            self.first_lookup_time.pop(lookup_id, None)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""

@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
-import time
 
 # Third Party
 from vllm.config import (
@@ -637,7 +636,6 @@ class LMCacheConnectorV1Impl:
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine
             )
-            self.first_async_lookup: dict[str, float] = {}
             self._unfinished_requests: dict[str, Request] = {}
             self.lmcache_engine = None
         else:
@@ -1308,20 +1306,6 @@ class LMCacheConnectorV1Impl:
         )
 
         if num_external_hit_tokens is None:
-            if request.request_id not in self.first_async_lookup:
-                self.first_async_lookup[request.request_id] = time.time()
-            else:
-                if (
-                    time.time() - self.first_async_lookup[request.request_id]
-                    > self.config.blocking_timeout_secs
-                ):
-                    logger.warning(
-                        "Request %s is still waiting for async lookup result after"
-                        "%d seconds, returning 0 cached tokens so vllm can recompute.",
-                        request.request_id,
-                        self.config.blocking_timeout_secs,
-                    )
-                    return 0
             logger.debug(
                 "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
                 request.request_id,
