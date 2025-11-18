@@ -148,7 +148,7 @@ class KVController:
                 if not (m.instance_id == instance_id and m.worker_id == worker_id)
             ]
             # Mark key for deletion if list becomes empty
-            if not metadata_list:
+            if not filtered_metadata_list:
                 keys_to_delete.append(key)
 
         # Delete empty keys (safe after iteration)
