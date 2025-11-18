@@ -544,11 +544,19 @@ class StorageManager:
         #             |---|  <--- stored in Tier2, tier_expected_chunks[2]==2
         #
         # Case 1: All chunks retrieved successfully
+        #   [0 1 2 3 4 5 6]
+        #   |-----|          <--- Tier0: retrieved 3 chunks (obj0, obj1, obj2)
+        #         |---|      <--- Tier1: retrieved 2 chunks (obj3, obj4)
+        #             |---|  <--- Tier2: retrieved 2 chunks (obj5, obj6)
         #   res = [[obj0, obj1, obj2], [obj3, obj4], [obj5, obj6]]
         #   total_retrieved_chunks = 7
         #   retrieved_length = cum_chunk_lengths_total[7] = 1792
         #
         # Case 2: Tier 1 only got 1 chunk (eviction), Tier 2 got all 2 chunks
+        #   [0 1 2 3 4 5 6]
+        #   |-----|          <--- Tier0: retrieved 3 chunks (obj0, obj1, obj2)
+        #         |-|X|      <--- Tier1: retrieved 1 chunk (obj3), missing obj4
+        #             |---|  <--- Tier2: retrieved 2 chunks (obj5, obj6) - IGNORED
         #   res = [[obj0, obj1, obj2], [obj3], [obj5, obj6]]
         #   total_retrieved_chunks = 4 (stop at tier 1, tier 2 chunks ignored)
         #   retrieved_length = cum_chunk_lengths_total[4] = 1024
@@ -556,6 +564,10 @@ class StorageManager:
         #   not counted because tier 1 has a gap, breaking prefix continuity.
         #
         # Case 3: Tier 0 only got 2 chunks (eviction), other tiers got all
+        #   [0 1 2 3 4 5 6]
+        #   |---|X|          <--- Tier0: retrieved 2 chunks (obj0, obj1), missing obj2
+        #         |---|      <--- Tier1: retrieved 2 chunks (obj3, obj4) - IGNORED
+        #             |---|  <--- Tier2: retrieved 2 chunks (obj5, obj6) - IGNORED
         #   res = [[obj0, obj1], [obj3, obj4], [obj5, obj6]]
         #   total_retrieved_chunks = 2 (stop at tier 0, all subsequent ignored)
         #   retrieved_length = cum_chunk_lengths_total[2] = 512
