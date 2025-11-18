@@ -76,6 +76,24 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
     )
 
 
+class SafeLocalCPUBackend(LocalCPUBackend):
+    """
+    A safe stub for LocalCPUBackend that can be used when local_cpu_backend is None.
+    """
+
+    def __init__(self, config: LMCacheEngineConfig):
+        pass
+
+    def allocate(self, *args, **kwargs):
+        raise RuntimeError(
+            "SafeLocalCPUBackend.allocate() should never be called. "
+            "This indicates a bug where scheduler role is trying to allocate memory."
+        )
+
+    def __str__(self):
+        return "SafeLocalCPUBackend(dummy)"
+
+
 class ConnectorContext:
     """
     Context for creating a connector.
@@ -84,6 +102,7 @@ class ConnectorContext:
         url: The remote URL
         loop: The asyncio event loop
         local_cpu_backend: The local CPU backend
+            (wrapped as SafeLocalCPUBackend if None)
         config: Optional LMCache engine configuration
         parsed_url: Parsed representation of the URL
     """
@@ -92,13 +111,19 @@ class ConnectorContext:
         self,
         url: str,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig],
         metadata: Optional[LMCacheEngineMetadata],
     ):
         self.url = url
         self.loop = loop
-        self.local_cpu_backend = local_cpu_backend
+        # Wrap None as SafeLocalCPUBackend to satisfy type requirements
+        # The SafeLocalCPUBackend will raise an error if allocate() is called
+        self.local_cpu_backend: LocalCPUBackend = (
+            local_cpu_backend
+            if local_cpu_backend is not None
+            else SafeLocalCPUBackend(config)
+        )
         self.config = config
         self.metadata = metadata
 
@@ -132,7 +157,7 @@ class ConnectorManager:
         self,
         url: str,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
     ) -> None:
@@ -197,7 +222,7 @@ class ConnectorManager:
 def CreateConnector(
     url: str,
     loop: asyncio.AbstractEventLoop,
-    local_cpu_backend: LocalCPUBackend,
+    local_cpu_backend: Optional[LocalCPUBackend],
     config: Optional[LMCacheEngineConfig] = None,
     metadata: Optional[LMCacheEngineMetadata] = None,
 ) -> InstrumentedRemoteConnector:
@@ -238,7 +263,7 @@ def CreateConnector(
     Args:
         url: The remote URL
         loop: The asyncio event loop
-        local_cpu_backend: The local CPU backend
+        local_cpu_backend: The local CPU backend (can be None for scheduler role)
         config: Optional LMCache engine configuration
         metadata: Optional LMCache engine metadata
 

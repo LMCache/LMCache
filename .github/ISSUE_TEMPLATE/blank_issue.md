@@ -6,7 +6,7 @@ labels: ''
 assignees: ''
 ---
 **Label**
-Please label your issue so that it can easily be easily categorized under [LMCache Onboarding](https://github.com/LMCache/LMCache/issues/627)
+Please label your issue so that it can easily be easily categorized under [LMCache Onboarding](https://github.com/LMCache/LMCache/issues/1882)
 
 **Summary**
 A concise overview of the issue you want to raise.

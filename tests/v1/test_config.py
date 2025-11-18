@@ -3,6 +3,9 @@
 from pathlib import Path
 import os
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -108,3 +111,28 @@ def test_update_config_from_env_error_handling():
     del os.environ["LMCACHE_CHUNK_SIZE"]
     del os.environ["LMCACHE_EXTRA_CONFIG"]
     del os.environ["LMCACHE_CONTROLLER_PULL_URL"]
+
+
+@pytest.mark.parametrize("use_mla", [True, False])
+def test_get_lookup_server_worker_ids(use_mla):
+    config = LMCacheEngineConfig.from_defaults()
+    lookup_server_worker_ids = config.get_lookup_server_worker_ids(use_mla, 8)
+    # test default value
+    if use_mla:
+        assert lookup_server_worker_ids == [0]
+    else:
+        assert lookup_server_worker_ids == []
+
+    # test different config
+    # TODO: not support format "[]" or "[0, 3, 6]
+    os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"] = "1"
+    config.update_config_from_env()
+    lookup_server_worker_ids = config.get_lookup_server_worker_ids(use_mla, 8)
+    assert lookup_server_worker_ids == [1]
+
+    os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"] = "0, 3, 6"
+    config.update_config_from_env()
+    lookup_server_worker_ids = config.get_lookup_server_worker_ids(use_mla, 8)
+    assert lookup_server_worker_ids == [0, 3, 6]
+
+    del os.environ["LMCACHE_LOOKUP_SERVER_WORKER_IDS"]

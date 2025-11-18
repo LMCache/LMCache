@@ -562,7 +562,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                         if self.cache_positions and layer_id == 0:
                             old_positions_full[
                                 start - buf_offset : end - buf_offset
-                            ] = memory_obj.metadata.old_positions
+                            ] = memory_obj.metadata.cached_positions
 
             elif layer_id == self.num_layers:
                 yield
@@ -686,7 +686,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                         non_blocking=True,
                     )
                     if self.cache_positions:
-                        memory_obj.metadata.old_positions = old_positions
+                        memory_obj.metadata.cached_positions = old_positions
 
             yield
             self.store_stream.synchronize()

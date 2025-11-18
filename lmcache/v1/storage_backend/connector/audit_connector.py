@@ -1,27 +1,196 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, Optional
+import abc
 import asyncio
+import functools
 import hashlib
+import logging
 import time
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
-logger = init_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
-class AuditConnector(RemoteConnector):
-    """Audit wrapper for RemoteConnector that verifies data integrity
-    and logs operations.
+class AuditConnectorMeta(abc.ABCMeta):
+    """Metaclass that dynamically generates wrapper methods for all
+    RemoteConnector methods
+    """
+
+    def __new__(mcs, name, bases, namespace):
+        # Get all methods from RemoteConnector including abstract methods
+        # We need to check both the class dict and inherited methods
+        all_methods = {}
+
+        # Collect methods from RemoteConnector and its bases
+        for base in RemoteConnector.__mro__:
+            for method_name, method_obj in base.__dict__.items():
+                if method_name not in all_methods and callable(method_obj):
+                    all_methods[method_name] = method_obj
+
+        for method_name, method in all_methods.items():
+            # Skip private methods and methods already defined in namespace
+            if method_name.startswith("_") or method_name in namespace:
+                continue
+
+            # Skip class methods, static methods, and properties
+            if isinstance(method, (classmethod, staticmethod, property)):
+                continue
+
+            # Check if method is marked with @NotAudit
+            is_not_audit = getattr(method, "_not_audit", False)
+
+            # Determine if method is async
+            is_async = asyncio.iscoroutinefunction(method)
+
+            # Create appropriate wrapper and add to namespace
+            if is_not_audit:
+                if is_async:
+                    namespace[method_name] = mcs._create_passthrough_async_method(
+                        method_name, method
+                    )
+                else:
+                    namespace[method_name] = mcs._create_passthrough_sync_method(
+                        method_name, method
+                    )
+            else:
+                if is_async:
+                    namespace[method_name] = mcs._create_audit_async_method(
+                        method_name, method
+                    )
+                else:
+                    namespace[method_name] = mcs._create_audit_sync_method(
+                        method_name, method
+                    )
+
+        # Create the class with all methods in namespace
+        cls = super().__new__(mcs, name, bases, namespace)
+
+        # Clear abstract methods since we've implemented them all via wrappers
+        # The wrappers delegate to real_connector which has the actual implementations
+        if hasattr(cls, "__abstractmethods__"):
+            cls.__abstractmethods__ = frozenset()
+
+        return cls
+
+    @staticmethod
+    def _create_passthrough_async_method(method_name: str, original_method):
+        """Create a pass-through async method without logging"""
+
+        @functools.wraps(original_method)
+        async def wrapper(self, *args, **kwargs):
+            real_method = getattr(self.real_connector, method_name)
+            return await real_method(*args, **kwargs)
+
+        wrapper.__name__ = method_name
+        wrapper.__qualname__ = f"AuditConnector.{method_name}"
+        return wrapper
+
+    @staticmethod
+    def _create_passthrough_sync_method(method_name: str, original_method):
+        """Create a pass-through sync method without logging"""
+
+        @functools.wraps(original_method)
+        def wrapper(self, *args, **kwargs):
+            real_method = getattr(self.real_connector, method_name)
+            return real_method(*args, **kwargs)
+
+        wrapper.__name__ = method_name
+        wrapper.__qualname__ = f"AuditConnector.{method_name}"
+        return wrapper
+
+    @staticmethod
+    def _create_audit_async_method(method_name: str, original_method):
+        """Create an audit async method with logging"""
+
+        @functools.wraps(original_method)
+        async def wrapper(self, *args, **kwargs):
+            # Special handling for put/get methods with checksum
+            if method_name == "put":
+                return await self._audit_put(*args, **kwargs)
+            elif method_name == "get":
+                return await self._audit_get(*args, **kwargs)
+
+            # Check if method is in excluded commands
+            if hasattr(self, "excluded_cmds") and method_name in self.excluded_cmds:
+                real_method = getattr(self.real_connector, method_name)
+                return await real_method(*args, **kwargs)
+
+            # Generic audit logging
+            self.logger.debug(
+                f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|START"
+            )
+            t1 = time.perf_counter()
+            try:
+                real_method = getattr(self.real_connector, method_name)
+                result = await real_method(*args, **kwargs)
+                t2 = time.perf_counter()
+                cost = (t2 - t1) * 1000
+                self.logger.info(
+                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
+                    f"SUCCESS|Cost:{cost:.6f}ms"
+                )
+                return result
+            except Exception as e:
+                self.logger.error(
+                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
+                    f"FAILED|Error: {str(e)}"
+                )
+                raise
+
+        wrapper.__name__ = method_name
+        wrapper.__qualname__ = f"AuditConnector.{method_name}"
+        return wrapper
+
+    @staticmethod
+    def _create_audit_sync_method(method_name: str, original_method):
+        """Create an audit sync method with logging"""
+
+        @functools.wraps(original_method)
+        def wrapper(self, *args, **kwargs):
+            # Check if method is in excluded commands
+            if hasattr(self, "excluded_cmds") and method_name in self.excluded_cmds:
+                real_method = getattr(self.real_connector, method_name)
+                return real_method(*args, **kwargs)
+
+            self.logger.debug(
+                f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|START"
+            )
+            t1 = time.perf_counter()
+            try:
+                real_method = getattr(self.real_connector, method_name)
+                result = real_method(*args, **kwargs)
+                t2 = time.perf_counter()
+                cost = (t2 - t1) * 1000
+                self.logger.info(
+                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
+                    f"SUCCESS|Cost:{cost:.6f}ms"
+                )
+                return result
+            except Exception as e:
+                self.logger.error(
+                    f"[REMOTE_AUDIT][{self.real_connector}]:{method_name.upper()}|"
+                    f"FAILED|Error: {str(e)}"
+                )
+                raise
+
+        wrapper.__name__ = method_name
+        wrapper.__qualname__ = f"AuditConnector.{method_name}"
+        return wrapper
+
+
+class AuditConnector(RemoteConnector, metaclass=AuditConnectorMeta):
+    """Audit wrapper for RemoteConnector that dynamically wraps all methods.
 
     Features:
-    - Wraps any RemoteConnector implementation
+    - Automatically wraps all RemoteConnector methods
+    - Methods marked with @NotAudit are forwarded without logging
     - Configurable checksum verification via URL parameter
     - Logs all operations with timestamps
     - Optional checksum validation for put/get operations
@@ -56,9 +225,6 @@ class AuditConnector(RemoteConnector):
 
         self.logger = logger.getChild("audit")
 
-        # Dynamically replace excluded methods
-        self._replace_excluded_methods()
-
         logger.info(
             f"[REMOTE_AUDIT][{self.real_connector}]:INITIALIZED|"
             f"Calc Checksum:{self.calc_checksum}｜"
@@ -66,37 +232,11 @@ class AuditConnector(RemoteConnector):
             f"Excluded Cmds: {self.excluded_cmds}"
         )
 
-    def _replace_excluded_methods(self):
-        """Dynamically replace methods that should be excluded from auditing"""
-        for method_name in self.excluded_cmds:
-            if hasattr(self.real_connector, method_name):
-                # Create a direct pass-through method
-                real_method = getattr(self.real_connector, method_name)
-
-                if asyncio.iscoroutinefunction(real_method):
-
-                    def create_async_wrapper(rm):
-                        async def async_wrapper(*args, **kwargs):
-                            return await rm(*args, **kwargs)
-
-                        return async_wrapper
-
-                    setattr(self, method_name, create_async_wrapper(real_method))
-                else:
-
-                    def create_sync_wrapper(rm):
-                        def sync_wrapper(*args, **kwargs):
-                            return rm(*args, **kwargs)
-
-                        return sync_wrapper
-
-                    setattr(self, method_name, create_sync_wrapper(real_method))
-
     def _calculate_checksum(self, data: bytes) -> str:
         """Calculate SHA-256 checksum for data validation"""
         return hashlib.sha256(data).hexdigest()
 
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def _audit_put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data with optional checksum tracking"""
         data = memory_obj.byte_array
         checksum = self._calculate_checksum(data) if self.calc_checksum else "N/A"
@@ -127,7 +267,7 @@ class AuditConnector(RemoteConnector):
             )
             raise
 
-    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def _audit_get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Retrieve data with optional integrity check"""
         self.logger.debug(
             f"[REMOTE_AUDIT][{self.real_connector}]:GET|START|"
@@ -178,99 +318,3 @@ class AuditConnector(RemoteConnector):
                 f"FAILED|Key:{key}|Error: {str(e)}"
             )
             raise
-
-    async def exists(self, key: CacheEngineKey) -> bool:
-        """Check key existence with audit log"""
-        self.logger.debug(
-            f"[REMOTE_AUDIT][{self.real_connector}]:EXISTS|START|Key:{key}"
-        )
-        t1 = time.perf_counter()
-        result = await self.real_connector.exists(key)
-        t2 = time.perf_counter()
-        cost = (t2 - t1) * 1000
-        self.logger.info(
-            f"[REMOTE_AUDIT][{self.real_connector}]:EXISTS|{result}|"
-            f"Cost:{cost:.6f}ms|"
-            f"Key:{key}"
-        )
-        return result
-
-    def exists_sync(self, key: CacheEngineKey) -> bool:
-        """Check key existence with audit log synchronized"""
-        self.logger.debug(f"[REMOTE_AUDIT]EXISTS_SYNC|START|Key:{key}")
-        result = self.real_connector.exists_sync(key)
-        self.logger.info(f"[REMOTE_AUDIT]EXISTS_SYNC|{result}|Key: {key}")
-        return result
-
-    async def list(self) -> List[str]:
-        """List keys with audit log"""
-        self.logger.debug("[REMOTE_AUDIT][{self.real_connector}]:LIST|START")
-        t1 = time.perf_counter()
-        result = await self.real_connector.list()
-        t2 = time.perf_counter()
-        cost = (t2 - t1) * 1000
-        self.logger.info(
-            f"[REMOTE_AUDIT][{self.real_connector}]:LIST|SUCCESS|"
-            f"Count:{len(result)}|Cost:{cost:.6f}ms"
-        )
-        return result
-
-    async def close(self):
-        """Cleanup resources with audit log"""
-        self.logger.debug(f"[REMOTE_AUDIT][{self.real_connector}]:CLOSE|START")
-        await self.real_connector.close()
-        self.logger.info(f"[REMOTE_AUDIT][{self.real_connector}]:CLOSE|SUCCESS")
-
-    def support_ping(self) -> bool:
-        self.logger.debug(f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_PING|START")
-        support = self.real_connector.support_ping()
-        self.logger.info(
-            f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_PING|{support}"
-        )
-        return support
-
-    async def ping(self) -> int:
-        self.logger.debug(f"[REMOTE_AUDIT][{self.real_connector}]:PING|START")
-        t1 = time.perf_counter()
-        error_code = await self.real_connector.ping()
-        t2 = time.perf_counter()
-        cost = (t2 - t1) * 1000
-        self.logger.debug(
-            f"[REMOTE_AUDIT][{self.real_connector}]:PING|{error_code}｜"
-            f"Cost:{cost:.6f}ms"
-        )
-        return error_code
-
-    def remove_sync(self, key: CacheEngineKey) -> bool:
-        """Remove key audit log synchronized"""
-        self.logger.debug(f"[REMOTE_AUDIT]REMOVE_SYNC|START|Key:{key}")
-        result = self.real_connector.remove_sync(key)
-        self.logger.info(f"[REMOTE_AUDIT]REMOVE_SYNC|{result}|Key: {key}")
-        return result
-
-    def batched_contains(
-        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
-    ) -> List[bool]:
-        self.logger.debug(
-            f"[REMOTE_AUDIT][{self.real_connector}]:BATCHED_CONTAINS|START"
-        )
-        t1 = time.perf_counter()
-        result = self.real_connector.batched_contains(keys, stop_after_first_not_exits)
-        t2 = time.perf_counter()
-        cost = (t2 - t1) * 1000
-        self.logger.info(
-            f"[REMOTE_AUDIT][{self.real_connector}]:BATCHED_CONTAINS|SUCCESS|"
-            f"Count:{len(result)}|Cost:{cost:.6f}ms"
-        )
-        return result
-
-    def support_batched_contains(self) -> bool:
-        self.logger.debug(
-            f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_BATCHED_CONTAINS|START"
-        )
-        result = self.real_connector.support_batched_contains()
-        self.logger.info(
-            f"[REMOTE_AUDIT][{self.real_connector}]:SUPPORT_BATCHED_CONTAINS|"
-            f"SUCCESS|result: {result}"
-        )
-        return result
