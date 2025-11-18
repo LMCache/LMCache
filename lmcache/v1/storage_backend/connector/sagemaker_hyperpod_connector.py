@@ -6,6 +6,7 @@ from multiprocessing import shared_memory
 from typing import AsyncIterator, List, Optional, Tuple
 import asyncio
 import json
+import time
 import urllib.parse
 
 # Third Party
@@ -14,6 +15,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
@@ -134,6 +136,9 @@ class SageMakerHyperPodConnector(RemoteConnector):
         # Shared memory (lazy initialized)
         self.shared_memory_obj: Optional[shared_memory.SharedMemory] = None
         self.shared_memory_map: Optional[memoryview] = None
+
+        # Observability
+        self._stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         # Statistics for monitoring
         self.stats = {
@@ -657,12 +662,13 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
-        Retrieve KV cache data for the given key.
+        Retrieve KV cache data for the given key with metrics reporting.
 
         Flow:
         1. Acquire a new lease
         2. Read from shared memory using lease offsets
         3. Release lease immediately (in finally block)
+        4. Report metrics
 
         Args:
             key: The cache key to retrieve
@@ -670,6 +676,8 @@ class SageMakerHyperPodConnector(RemoteConnector):
         Returns:
             MemoryObj containing the KV cache data, or None if not found
         """
+        begin = time.perf_counter()
+
         lease_info = await self._executor_submit_lease_acquisition(key)
 
         if lease_info is None:
@@ -681,10 +689,20 @@ class SageMakerHyperPodConnector(RemoteConnector):
             memory_obj = self._read_from_shared_memory(key, lease_info)
 
             if memory_obj is not None:
+                end = time.perf_counter()
+                obj_size = memory_obj.get_size()
+
+                # Report metrics for successful get
+                self._stats_monitor.update_interval_remote_time_to_get(
+                    (end - begin) * 1000
+                )
+                self._stats_monitor.update_interval_remote_read_metrics(obj_size)
+
                 self.stats["get_success"] += 1
                 logger.debug(
                     f"GET success: key={key.to_string()}, "
-                    f"shape={memory_obj.get_shape()}"
+                    f"shape={memory_obj.get_shape()}, "
+                    f"size={obj_size / 1e6:.3f} MBytes in {(end - begin) * 1000:.3f}ms"
                 )
             else:
                 self.stats["get_failure"] += 1
@@ -706,7 +724,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
-        """Get multiple keys in parallel."""
+        """Get multiple keys in parallel. Metrics reported per individual get."""
         tasks = [self.get(key) for key in keys]
         return await asyncio.gather(*tasks)
 
@@ -717,7 +735,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
     async def batched_put(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
     ):
-        """Store multiple objects in parallel."""
+        """Store multiple objects in parallel. Metrics reported per individual put."""
         await asyncio.gather(
             *(self.put(key, mem) for key, mem in zip(keys, memory_objs, strict=True))
         )
@@ -735,6 +753,8 @@ class SageMakerHyperPodConnector(RemoteConnector):
         """Internal PUT operation - sends data via HTTP streaming."""
         key_str = self._key_to_string(key)
         url = f"{self.base_url}/v1/kv/{self.bucket_name}/{key_str}"
+
+        begin = time.perf_counter()
 
         try:
             # Build streaming payload (header + data)
@@ -755,14 +775,31 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 gate=self.put_inflight,
             )
 
+            end = time.perf_counter()
+
             if result and result["status"] == HTTP_OK:
                 self.stats["put_success"] += 1
+
+                # Report metrics for successful put
+                self._stats_monitor.update_interval_remote_time_to_put(
+                    (end - begin) * 1000
+                )
+                self._stats_monitor.update_interval_remote_write_metrics(payload_len)
+
                 logger.info(
-                    f"PUT success: key={key_str}, size={payload_len / 1024:.2f} KB"
+                    f"PUT success: key={key_str}, size={payload_len / 1024:.2f} KB "
+                    f"in {(end - begin) * 1000:.3f}ms"
                 )
             elif result and result["status"] == HTTP_CONFLICT:
                 # 409 Conflict = key already exists (not an error)
                 self.stats["put_success"] += 1
+
+                # Still report metrics for conflict case
+                self._stats_monitor.update_interval_remote_time_to_put(
+                    (end - begin) * 1000
+                )
+                self._stats_monitor.update_interval_remote_write_metrics(payload_len)
+
                 logger.debug(f"PUT skipped (already exists): key={key_str}")
             else:
                 status = result["status"] if result else "TIMEOUT"
