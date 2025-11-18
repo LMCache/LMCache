@@ -132,7 +132,7 @@ Instance 1 configuration (``p2p_example1.yaml``):
     transfer_channel: "nixl"
 
     # Controller configurations
-    enable_controller: True
+    enable_controller: true
     lmcache_instance_id: "lmcache_instance_1"
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
