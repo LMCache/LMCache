@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=0 LMCACHE_USE_EXPERIMENTAL=True LMCACHE_CONFIG_FILE=example
 
 3. Send a request to vllm engine with `lmcache.skip_save: false` to store the KV cache:  
 ```bash
-curl POST http://localhost:8000/v1/completions \
+curl -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
