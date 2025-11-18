@@ -256,9 +256,6 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def support_batched_contains(self) -> bool:
-        return False
-
     def batched_contains(
         self,
         keys: List[CacheEngineKey],
@@ -279,7 +276,16 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
         :return: Return a bool list, True if the key exists, False otherwise.
         """
-        raise NotImplementedError
+        results = []
+        for key in keys:
+            if self.contains(key, pin):
+                results.append(True)
+            else:
+                if stop_after_first_not_exits:
+                    results.extend([False] * (len(keys) - len(results)))
+                    break
+                results.append(False)
+        return results
 
 
 class AllocatorBackendInterface(StorageBackendInterface):
