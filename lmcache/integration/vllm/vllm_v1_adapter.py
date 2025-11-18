@@ -661,6 +661,9 @@ class LMCacheConnectorV1Impl:
             else:
                 self.lmcache_engine = None
                 # Create a dummy metadata for create prometheus logger
+                # kv_dtype kv_shape and use_mla are dummy data
+                # TODO(baoloongmao): PrometheusLogger should be initialized without
+                #  having to create some dummy data in the future
                 metadata = LMCacheEngineMetadata(
                     model_name=vllm_config.model_config.model,
                     world_size=vllm_config.parallel_config.world_size,
