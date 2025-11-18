@@ -27,7 +27,7 @@ First, create a yaml file ``example.yaml`` to configure the lmcache instance:
     # cache controller configurations
     enable_controller: True
     lmcache_instance_id: "lmcache_default_instance"
-    controller_url: "localhost:9001"
+    controller_pull_url: "localhost:9001"
     lmcache_worker_ports: 8001
 
     # Peer identifiers

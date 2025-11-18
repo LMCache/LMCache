@@ -168,7 +168,9 @@ class LMCacheEngine:
         self.num_layers = metadata.kv_shape[0]
         self.fmt = None
         if self.use_layerwise:
-            if config.enable_blending:
+            if metadata.use_mla:
+                self.fmt = MemoryFormat.KV_MLA_FMT
+            elif config.enable_blending:
                 self.fmt = MemoryFormat.KV_2TD
             else:
                 self.fmt = MemoryFormat.KV_T2D
