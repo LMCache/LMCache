@@ -40,7 +40,7 @@ You should be able to see logs indicating the KV cache is stored:
 
 4. Send request to vllm engine with `lmcache.skip_save: true` to skip storing the KV cache:
 ```bash
-curl POST http://localhost:8000/v1/completions \
+curl -X POST http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
