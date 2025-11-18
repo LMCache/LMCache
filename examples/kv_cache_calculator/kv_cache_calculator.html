@@ -181,8 +181,8 @@
             // Check for Qwen3 models (fuzzy matching)
             const isQwen3Model = model.toLowerCase().includes("qwen/qwen3-");
 
-            // Check for GLM4.5 and GLM4.6 models (exact matching)
-            const isGLM4Model = model === "zai-org/GLM-4.5" || model === "zai-org/GLM-4.6";
+            // Check for GLM4 models (prefix matching)
+            const isGLM4Model = model.startsWith("zai-org/GLM-4.");
 
             if (isDeepSeekModel) {
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
