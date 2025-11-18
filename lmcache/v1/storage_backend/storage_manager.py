@@ -659,11 +659,8 @@ class StorageManager:
         #     cum_chunk_lengths_total[2] = 512 tokens
         cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
-<<<<<<< HEAD
         tier_expected_chunks = []
-=======
         loading_task_keys: list[list[CacheEngineKey]] = []
->>>>>>> 4c57cb6 (locate mem obj by key instead of index in async loading)
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
