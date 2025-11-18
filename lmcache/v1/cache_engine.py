@@ -1049,7 +1049,7 @@ class LMCacheEngine:
                     keys.append(chunk_info[2])
                 # hit chunks by prefix matching
                 hit_chunks, block_mapping = self.storage_manager.batched_contains(
-                    keys, search_range, pin
+                    keys, search_range, pin, lookup_id
                 )
                 if pin and block_mapping:
                     assert lookup_id is not None, (
@@ -1509,6 +1509,7 @@ class LMCacheEngine:
 
         tot_kv_size = 0
         reordered_chunks: List[ProcessedChunk] = []
+        lookup_id = kwargs["req_id"] if "req_id" in kwargs else None
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
@@ -1538,14 +1539,23 @@ class LMCacheEngine:
             location = self.storage_manager.non_allocator_backends[0]
             block_mapping = {location: chunk_infos}
         else:
-            block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
+            block_mapping = self.storage_manager.get_block_mapping(
+                chunk_infos, lookup_id
+            )
 
         last_failed_block_start = None
         for location, blocks in block_mapping.items():
-            keys = [key for key, _, _ in blocks]
+            keys = []
+            cum_chunk_lengths = [blocks[0][1]]
+            for key, start, end in blocks:
+                keys.append(key)
+                cum_chunk_lengths.append(end)
+            transfer_spec = {"cum_chunk_lengths": cum_chunk_lengths}
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
                 location=location,
+                lookup_id=lookup_id,
+                transfer_spec=transfer_spec,
             )
             assert memory_objs is not None, (
                 "Failed to get memory objects from storage backend"

@@ -475,13 +475,17 @@ class StorageManager:
         self,
         keys: List[CacheEngineKey],
         location: Optional[str] = None,
+        lookup_id: Optional[str] = None,
+        transfer_spec: Any = None,
     ) -> Optional[List[Optional[MemoryObj]]]:
         """
         Blocking function to get the memory objects from the storages.
         """
         # TODO (ApostaC): remove the nested optional here
         for backend_name, storage_backend in self.get_active_storage_backends(location):
-            memory_objs = storage_backend.batched_get_blocking(keys)
+            memory_objs = storage_backend.batched_get_blocking(
+                keys, lookup_id, transfer_spec
+            )
             if memory_objs:
                 # Align with single-key `get()` logic:
                 # auto-write remote data to local CPU cache
@@ -860,6 +864,7 @@ class StorageManager:
         keys: List[CacheEngineKey],
         search_range: Optional[List[str]] = None,
         pin: bool = False,
+        lookup_id: Optional[str] = None,
     ) -> tuple[int, dict]:
         """
         Check whether the key exists in the storage backend.
@@ -873,9 +878,13 @@ class StorageManager:
 
         :param bool pin: Whether to pin the key.
 
+        :param Optional[str] lookup_id: The lookup id.
+
         return: Return hit chunks and block mapping by prefix match.
         """
         total_keys = len(keys)
+        if total_keys == 0:
+            return 0, {}
         total_hit_chunks = 0
         block_mapping = {}
         for backend_name, backend in self.get_active_storage_backends(
@@ -884,7 +893,7 @@ class StorageManager:
             # NOTE(Jiayi): We do not pin for PDBackend
             pin_in_backend = pin if backend_name != "PDBackend" else False
 
-            hit_chunks = backend.batched_contains(keys, pin_in_backend)
+            hit_chunks = backend.batched_contains(keys, pin_in_backend, lookup_id)
             if hit_chunks == 0:
                 continue
             block_mapping[backend_name] = keys[:hit_chunks]
@@ -896,7 +905,9 @@ class StorageManager:
         return total_hit_chunks, block_mapping
 
     def get_block_mapping(
-        self, chunk_infos: List[Tuple[CacheEngineKey, int, int]]
+        self,
+        chunk_infos: List[Tuple[CacheEngineKey, int, int]],
+        lookup_id: Optional[str] = None,
     ) -> Dict[str, List[Tuple[CacheEngineKey, int, int]]]:
         """
         Get block mapping for the given chunk infos, works by prefix match.
@@ -904,16 +915,20 @@ class StorageManager:
         :param List[Tuple[CacheEngineKey, int, int]] chunk_infos:
         List of chunk infos, each tuple contains (key, begin, end)
 
+        :param Optional[str] lookup_id: The lookup id.
+
         :return: Dict[str, List[Tuple[CacheEngineKey, int, int]]]:
         Block mapping for the given chunk infos, each key is the backend name,
         each value is a list of chunk infos in the backend.
         """
         keys = [chunk_info[0] for chunk_info in chunk_infos]
         total_keys = len(keys)
-        block_mapping = {}
+        block_mapping: Dict[str, List[Tuple[CacheEngineKey, int, int]]] = {}
+        if total_keys == 0:
+            return block_mapping
         total_hit_chunks = 0
         for backend_name, backend in self.get_active_storage_backends():
-            hit_chunks = backend.batched_contains(keys)
+            hit_chunks = backend.batched_contains(keys, lookup_id=lookup_id)
             if hit_chunks == 0:
                 continue
             block_mapping[backend_name] = chunk_infos[

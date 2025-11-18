@@ -97,6 +97,21 @@ class BatchedLookupAndPutRetMsg(P2PMsgBase):
     num_read_chunks: int
 
 
+class BatchedP2PPinMsg(P2PMsgBase):
+    """P2P pin message"""
+
+    lookup_id: str
+    # CacheEngineKey in string form
+    keys: list[str]
+
+
+class BatchedP2PPinRetMsg(P2PMsgBase):
+    """P2P pin return message"""
+
+    # Number of pin chunks
+    pin_count: int
+
+
 class P2PErrorCode(enum.Enum):
     """P2P error codes enumeration"""
 
@@ -108,11 +123,6 @@ class P2PErrorCode(enum.Enum):
 class P2PErrorMsg(P2PMsgBase):
     """
     Error message, return error code to client.
-
-    -1 represents unknown msg type;
-    -2 represents remote xfer handler not initialized,
-        call `_ensure_peer_connection` first;
-    -3 represents p2p peer_request_handler error;
     """
 
     error_code: P2PErrorCode
@@ -123,6 +133,8 @@ P2PMsg = Union[
     BatchedLookupAndGetRetMsg,
     BatchedLookupAndPutMsg,
     BatchedLookupAndPutRetMsg,
+    BatchedP2PPinMsg,
+    BatchedP2PPinRetMsg,
     P2PErrorMsg,
 ]
 
@@ -206,6 +218,15 @@ class P2PBackend(StorageBackendInterface):
         # A lookup_id -> (peer_init_url, location)
         # TODO(chunxiaozheng): location is not used for now
         self.lookup_id_to_peer_mapping: dict[str, tuple[str, str]] = {}
+
+        self.enable_async_loading = config.enable_async_loading
+        # TODO: if lookup cache implemented, we can remove this.
+        # A `lookup_id -> number of hit chunks` for sync loading.
+        # In sync loading, `batched_contains` will be called twice, the first is
+        # lookup, and the second is retrieve(get chunk location). We have pinned
+        # when first lookup, so we can use the cache result directly to reduce one rpc.
+        self.batched_contains_cache: dict[str, int] = {}
+        self.pin_keys: dict[str, list[CacheEngineKey]] = {}
 
         # TODO(Jiayi): support gpu and local storage p2p as well.
         self.local_cpu_backend = local_cpu_backend
@@ -321,6 +342,20 @@ class P2PBackend(StorageBackendInterface):
                     target_peer_init_url,
                     location,
                 )
+                # pin for sync loading
+                if pin and not self.enable_async_loading:
+                    pin_count = await self._pin_remote_chunk(
+                        keys[:num_hit_chunks], lookup_id, target_peer_init_url
+                    )
+                    if num_hit_chunks != pin_count:
+                        logger.info(
+                            "lookup id: %s, lookup result from "
+                            "controller is %s, while pin count is %s",
+                            lookup_id,
+                            num_hit_chunks,
+                            pin_count,
+                        )
+                        num_hit_chunks = pin_count
             except Exception as e:
                 logger.error(
                     "Failed to ensure peer connection for lookup_id %s: %s",
@@ -337,6 +372,44 @@ class P2PBackend(StorageBackendInterface):
         # in function `batched_get_non_blocking`.
 
         return num_hit_chunks
+
+    async def _pin_remote_chunk(
+        self,
+        keys: list[CacheEngineKey],
+        lookup_id: str,
+        target_peer_init_url: str,
+    ) -> int:
+        peer_info = self.target_peer_info_mapping[target_peer_init_url]
+        lookup_lock = peer_info.lookup_lock
+
+        msg = BatchedP2PPinMsg(
+            lookup_id=lookup_id, keys=[key.to_string() for key in keys]
+        )
+
+        async with lookup_lock:
+            lookup_socket = peer_info.lookup_socket
+            try:
+                await lookup_socket.send(msgspec.msgpack.encode(msg))
+                ret_msg_bytes = await lookup_socket.recv()
+                ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
+                assert isinstance(ret_msg, BatchedP2PPinRetMsg)
+                return ret_msg.pin_count
+            except zmq.ZMQError as e:
+                logger.error(
+                    "ZMQ error for lookup_id %s, error: %s",
+                    lookup_id,
+                    e,
+                )
+                await self._ensure_peer_connection(target_peer_init_url, True)
+                return 0
+            except Exception as e:
+                logger.error(
+                    "Error during P2P get operation for lookup_id %s: %s",
+                    lookup_id,
+                    e,
+                    exc_info=True,
+                )
+                return 0
 
     async def _handle_peer_requests(self):
         """
@@ -361,13 +434,19 @@ class P2PBackend(StorageBackendInterface):
             msg_bytes = await self.async_peer_socket.recv()
             msg = msgspec.msgpack.decode(msg_bytes, type=P2PMsg)
 
-            num_tokens = len(msg.mem_indexes) * self.chunk_size
+            num_tokens = (
+                (len(msg.mem_indexes) * self.chunk_size)
+                if hasattr(msg, "mem_indexes")
+                else 0
+            )
             monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
 
             if isinstance(msg, BatchedLookupAndGetMsg):
                 ret_msg = await self._handle_batched_lookup_and_get(msg)
             elif isinstance(msg, BatchedLookupAndPutMsg):
                 ret_msg = await self._handle_batched_lookup_and_put(msg)
+            elif isinstance(msg, BatchedP2PPinMsg):
+                ret_msg = await self._handle_batched_pin(msg)
             else:
                 logger.error("Unknown message type: %s", type(msg))
                 ret_msg = P2PErrorMsg(error_code=P2PErrorCode.UNKNOWN_MSG_TYPE)
@@ -396,26 +475,50 @@ class P2PBackend(StorageBackendInterface):
                     error_code=P2PErrorCode.REMOTE_XFER_HANDLER_NOT_INITIALIZED
                 )
 
-            remote_mem_indexes = msg.mem_indexes
-            keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+            if self.enable_async_loading:
+                keys = [CacheEngineKey.from_string(key) for key in msg.keys]
 
-            # TODO(Jiayi): Optimally, there's no need to use async call
-            # for some backends (e.g., local cpu) as there's overhead for
-            # async function call.
-            num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
-                lookup_id=lookup_id,
-                keys=keys,
-                pin=True,
-            )
+                # TODO(Jiayi): Optimally, there's no need to use async call
+                # for some backends (e.g., local cpu) as there's overhead for
+                # async function call.
+                num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
+                    lookup_id=lookup_id,
+                    keys=keys,
+                    pin=True,
+                )
+                keys = keys[:num_hit_chunks]
+                remote_mem_indexes = msg.mem_indexes[:num_hit_chunks]
+            else:
+                keys = self.pin_keys.pop(lookup_id)
+                remote_mem_indexes = msg.mem_indexes
+                pinned_keys_length = len(keys)
+                num_hit_chunks = len(remote_mem_indexes)
+                # In sync loading, the number of hit chunks should be equal
+                # to the number of pinned keys, but when hit_miss_ratio is set,
+                # num_hit_chunks = pinned_keys_length * (1 - hit_miss_ratio).
+                # So we need to unpin the extra keys.
+                if num_hit_chunks < pinned_keys_length:
+                    for key in keys[num_hit_chunks:]:
+                        self.local_cpu_backend.unpin(key)
+                    keys = keys[:num_hit_chunks]
+                elif num_hit_chunks > pinned_keys_length:
+                    logger.error(
+                        "Number of hit chunks %s is greater than pinned keys %s",
+                        num_hit_chunks,
+                        pinned_keys_length,
+                    )
+                    for key in keys:
+                        self.local_cpu_backend.unpin(key)
+                    raise ValueError("Number of hit chunks is greater than pinned keys")
 
             mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
                 lookup_id=lookup_id,
-                keys=keys[:num_hit_chunks],
+                keys=keys,
             )
 
             channel_transfer_spec = {
                 "receiver_id": receiver_id,
-                "remote_indexes": remote_mem_indexes[:num_hit_chunks],
+                "remote_indexes": remote_mem_indexes,
             }
             await self.transfer_channel.async_batched_write(
                 objects=mem_objs,
@@ -489,6 +592,17 @@ class P2PBackend(StorageBackendInterface):
                 exc_info=True,
             )
             return BatchedLookupAndPutRetMsg(num_read_chunks=0)
+
+    async def _handle_batched_pin(self, msg: BatchedP2PPinMsg) -> BatchedP2PPinRetMsg:
+        logger.info("Received P2P batched pin msg")
+        pin_keys = []
+        for key_str in msg.keys:
+            key = CacheEngineKey.from_string(key_str)
+            if not self.local_cpu_backend.contains(key, True):
+                break
+            pin_keys.append(key)
+        self.pin_keys[msg.lookup_id] = pin_keys
+        return BatchedP2PPinRetMsg(pin_count=len(pin_keys))
 
     async def _ensure_peer_connection(
         self,
@@ -568,7 +682,9 @@ class P2PBackend(StorageBackendInterface):
                 )
             mem_obj = self.local_cpu_backend.allocate(shapes, self.dtypes, self.fmt)
             mem_objs.append(mem_obj)
-            str_keys.append(key.to_string())
+            # sync loading do not need key_strs, only async loading needs it
+            if self.enable_async_loading:
+                str_keys.append(key.to_string())
 
         local_indexes = self.transfer_channel.get_local_mem_indices(mem_objs)
 
@@ -700,6 +816,49 @@ class P2PBackend(StorageBackendInterface):
                 mem_obj.ref_count_down()
             except Exception as e:
                 logger.error("Error cleaning up memory object: %s", e)
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+        lookup_id: Optional[str] = None,
+    ) -> int:
+        assert lookup_id is not None
+        if lookup_id in self.batched_contains_cache:
+            hit_chunks = self.batched_contains_cache.pop(lookup_id)
+            return hit_chunks
+        future = asyncio.run_coroutine_threadsafe(
+            self.batched_async_contains(lookup_id, keys, pin), self.loop
+        )
+        try:
+            hit_chunks = future.result()
+        except Exception as e:
+            logger.warning(f"Error in batched contains: {e}")
+            hit_chunks = 0
+
+        # cache the result
+        if hit_chunks > 0:
+            self.batched_contains_cache[lookup_id] = hit_chunks
+        return hit_chunks
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+        lookup_id: Optional[str] = None,
+        transfer_spec: Any = None,
+    ) -> List[Optional[MemoryObj]]:
+        assert lookup_id is not None
+        future = asyncio.run_coroutine_threadsafe(
+            self.batched_get_non_blocking(lookup_id, keys, transfer_spec), self.loop
+        )
+        try:
+            memory_objs = future.result()
+            if not memory_objs:
+                raise ValueError("No memory objects returned")
+        except Exception as e:
+            logger.warning(f"Error in batched get blocking: {e}")
+            memory_objs = [None] * len(keys)  # type: ignore[list-item]
+        return memory_objs  # type: ignore[return-value]
 
     def close(
         self,

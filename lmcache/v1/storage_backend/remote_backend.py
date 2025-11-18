@@ -162,13 +162,14 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
         pin: bool = False,
+        lookup_id: Optional[str] = None,
     ) -> int:
         if self.connection is None:
             logger.warning("Connection is None in batched_contains, returning 0")
             return 0
 
         if not self.connection.support_batched_contains():
-            return super().batched_contains(keys, pin)
+            return super().batched_contains(keys, pin, lookup_id)
 
         if self._mla_worker_id_as0_mode:
             keys = [key.with_new_worker_id(0) for key in keys]
@@ -323,6 +324,8 @@ class RemoteBackend(StorageBackendInterface):
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
+        lookup_id: Optional[str] = None,
+        transfer_spec: Any = None,
     ) -> List[Optional[MemoryObj]]:
         # Check if local_cpu_backend is available (required for memory allocation)
         if self.local_cpu_backend is None:

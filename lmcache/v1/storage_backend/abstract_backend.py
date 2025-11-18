@@ -165,11 +165,17 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
+        lookup_id: Optional[str] = None,
+        transfer_spec: Any = None,
     ) -> List[Optional[MemoryObj]]:
         """
         A blocking function to get the kv cache from the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+
+        :param Optional[str] lookup_id: The lookup id of the request.
+
+        :param Any transfer_spec: The transfer spec of the request.
 
         :return: a list of memory objects.
         """
@@ -260,6 +266,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         self,
         keys: List[CacheEngineKey],
         pin: bool = False,
+        lookup_id: Optional[str] = None,
     ) -> int:
         """
         Check whether the keys are in the storage backend.
@@ -269,6 +276,8 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :param bool pin: Whether to pin the key.
             If True, the corresponding KV cache will be
             pinned in the storage backend.
+
+        :param Optional[str] lookup_id: The lookup id.
 
         :return: Return hit chunks by prefix match.
         """

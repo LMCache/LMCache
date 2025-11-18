@@ -652,6 +652,8 @@ class GdsBackend(AllocatorBackendInterface):
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
+        lookup_id: Optional[str] = None,
+        transfer_spec: Any = None,
     ) -> List[Optional[MemoryObj]]:
         if self.use_thread_pool:
             logger.info("Using batched_get_blocking with thread pool implementation")
