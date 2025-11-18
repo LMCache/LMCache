@@ -142,7 +142,7 @@ class KVController:
         keys_to_delete = []
         for key, metadata_list in self.kv_pool.items():
             # Filter in-place by modifying the list
-            metadata_list[:] = [
+            filtered_metadata_list = [
                 m
                 for m in metadata_list
                 if not (m.instance_id == instance_id and m.worker_id == worker_id)
