@@ -39,7 +39,7 @@ def main():
             config_data["qk_rope_head_dim"] = getattr(config, "qk_rope_head_dim", None)
 
         # Check for Qwen3 models (fuzzy matching) or GLM4 models
-        if "qwen/qwen3-" in args.model.lower() or "zai-org/GLM-4." in args.model:
+        if "qwen/qwen3-" in args.model.lower() or "zai-org/glm-4." in args.model.lower():
             config_data["head_dim"] = getattr(config, "head_dim", None)
 
         # Convert to JSON and print
