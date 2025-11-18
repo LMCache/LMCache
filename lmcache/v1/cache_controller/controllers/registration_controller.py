@@ -16,6 +16,8 @@ from lmcache.v1.cache_controller.message import (
     HeartbeatMsg,
     QueryInstMsg,
     QueryInstRetMsg,
+    QueryWorkerInfoMsg,
+    QueryWorkerInfoRetMsg,
     RegisterMsg,
 )
 from lmcache.v1.cache_controller.utils import WorkerInfo
@@ -34,8 +36,9 @@ class RegistrationController:
         self.worker_mapping: dict[str, list[int]] = {}
 
         # Mapping from `(instance_id, worker_id)` -> `distributed_url`
-        # NOTE(Jiayi): `distributed_url` is used for actual KV cache transfer.
-        # It's not the lmcache_worker_url
+        # NOTE(Jiayi): `distributed_url` is used for actual KV cache transfer(p2p),
+        # It's not the lmcache_worker_url.
+        # if p2p is not used, distributed_url is None and not registered.
         self.distributed_url_mapping: dict[tuple[str, int], str] = {}
 
         # Mapping from `(instance_id, worker_id)` -> `socket`
@@ -71,7 +74,10 @@ class RegistrationController:
         """
         url = self.distributed_url_mapping.get((instance_id, worker_id))
         if url is None:
-            logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
+            logger.warning(
+                f"Instance-worker {(instance_id, worker_id)} not registered "
+                f"or P2P is not used"
+            )
         return url
 
     def get_workers(self, instance_id: str) -> list[int]:
@@ -102,7 +108,13 @@ class RegistrationController:
         port = msg.port
         url = f"{ip}:{port}"
         distributed_url = msg.distributed_url
-        self.distributed_url_mapping[(instance_id, worker_id)] = distributed_url
+        if distributed_url is not None:
+            self.distributed_url_mapping[(instance_id, worker_id)] = distributed_url
+        else:
+            logger.info(
+                f"distributed url of {(instance_id, worker_id)} is None, "
+                f"only register when p2p is used."
+            )
 
         self.instance_mapping[ip] = instance_id
 
@@ -188,3 +200,24 @@ class RegistrationController:
         else:
             # update worker info
             self.worker_info_mapping[worker_key].last_heartbeat_time = time.time()
+
+    async def query_worker_info(self, msg: QueryWorkerInfoMsg) -> QueryWorkerInfoRetMsg:
+        """
+        Query worker info.
+        """
+        event_id = msg.event_id
+        worker_infos = []
+        if msg.instance_id not in self.worker_mapping:
+            logger.warning(f"instance {msg.instance_id} not registered.")
+        else:
+            worker_ids = msg.worker_ids
+            if worker_ids is None or len(worker_ids) == 0:
+                worker_ids = self.worker_mapping[msg.instance_id]
+            for worker_id in worker_ids:
+                worker_key = (msg.instance_id, worker_id)
+                if worker_key in self.worker_info_mapping:
+                    worker_infos.append(self.worker_info_mapping[worker_key])
+                else:
+                    logger.warning(f"worker {worker_key} not registered.")
+
+        return QueryWorkerInfoRetMsg(event_id=event_id, worker_infos=worker_infos)

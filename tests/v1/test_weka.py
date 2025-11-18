@@ -28,6 +28,7 @@ def test_weka_backend_sanity():
         world_size=8,
         worker_id=0,
         chunk_hash="e3229141e680fb413d2c5d3ebb416c4ad300d381e309fc9e417757b91406c157",
+        dtype=torch.uint8,
     )
     BACKEND_NAME = "WekaGdsBackend"
 

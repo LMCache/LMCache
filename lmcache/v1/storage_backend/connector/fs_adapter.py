@@ -23,4 +23,7 @@ class FsConnectorAdapter(ConnectorAdapter):
 
         logger.info(f"Creating FS connector for URL: {context.url}")
         parse_url = parse_remote_url(context.url)
-        return FSConnector(parse_url.path, context.loop, context.local_cpu_backend)
+
+        return FSConnector(
+            parse_url.path, context.loop, context.local_cpu_backend, context.config
+        )

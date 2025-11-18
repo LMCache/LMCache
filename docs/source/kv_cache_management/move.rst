@@ -15,6 +15,9 @@ The function moves the KV cache chunks identified by ``tokens`` from
 ``(instance_id, location)``. Setting ``copy`` to ``True`` copies the
 KV cache instead of moving it.
 
+Note that NIXL is required to  be installed for P2P transfer. 
+We'll support other transports later such as Python socket and Mooncake.
+
 Example usage:
 ---------------------------------------
 
@@ -28,11 +31,20 @@ configure two lmcache instances:
     local_cpu: True
     max_local_cpu_size: 5
 
+    # cache controller configurations
     enable_controller: True
     lmcache_instance_id: "lmcache_instance_1"
-    controller_url: "localhost:9001"
-    lmcache_worker_port: 8002
-    distributed_url: "localhost:8004"
+    controller_pull_url: "localhost:8300"
+    controller_reply_url: "localhost:8400"
+    lmcache_worker_ports: 8500
+
+    # P2P configurations
+    enable_p2p: True
+    p2p_host: "localhost"
+    p2p_init_ports: 8200
+    p2p_lookup_ports: 8201
+    transfer_channel: "nixl"
+
 
 .. code-block:: yaml
 
@@ -41,29 +53,37 @@ configure two lmcache instances:
     local_cpu: True
     max_local_cpu_size: 5
 
+    # cache controller configurations
     enable_controller: True
-    lmcache_instance_id: "lmcache_instance_2"
-    controller_url: "localhost:9001"
-    lmcache_worker_port: 8003
-    distributed_url: "localhost:8005"
+    lmcache_instance_id: "lmcache_instance_1"
+    controller_pull_url: "localhost:8300"
+    controller_reply_url: "localhost:8400"
+    lmcache_worker_ports: 8501
+
+    # P2P configurations
+    enable_p2p: True
+    p2p_host: "localhost"
+    p2p_init_ports: 8202
+    p2p_lookup_ports: 8203
+    transfer_channel: "nixl"
 
 Start two vllm engines:
 
 .. code-block:: bash
 
-    CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=instance1.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096 \
+    PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=instance1.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096 \
       --gpu-memory-utilization 0.8 --port 8000 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
 .. code-block:: bash
 
-    CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=instance2.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096 \
+    PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=instance2.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 4096 \
       --gpu-memory-utilization 0.8 --port 8001 --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
 Start the lmcache controller at port 9000 and the monitor at port 9001:
 
 .. code-block:: bash
 
-    lmcache_controller --host localhost --port 9000 --monitor-port 9001
+    PYTHONHASHSEED=123 lmcache_controller --host localhost --port 9000 --monitor-ports '{"pull": 8300, "reply": 8400}'
 
 Send a request to vllm engine 1:
 

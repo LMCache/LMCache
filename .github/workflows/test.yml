@@ -1,0 +1,83 @@
+name: Test
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - 'requirements/**.txt'
+      - '.github/workflows/test.yml' # This workflow
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - 'requirements/**.txt'
+      - '.github/workflows/test.yml' # This workflow
+
+env:
+  LC_ALL: en_US.UTF-8
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: "test: ${{ matrix.python }} on ${{ matrix.platform }}"
+    runs-on: "${{ matrix.platform }}"
+    strategy:
+      matrix:
+        python:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+        platform:
+          - "ubuntu-latest"
+
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # https://github.com/actions/checkout/issues/249
+          fetch-depth: 0
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+  
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install vllm
+          python -m pip install -r requirements/test.txt
+          python -m pip install -r requirements/common.txt
+
+      - name: "Run non-CUDA unit tests"
+        run: |
+          pytest --ignore=tests/disagg --ignore=tests/v1/test_nixl_storage.py --ignore=tests/v1/multiprocess/test_cache_server.py
+

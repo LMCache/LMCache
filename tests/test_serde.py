@@ -37,6 +37,10 @@ def to_blob(kv_tuples):
 
 
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
+)
 def test_cachegen_encoder(chunk_size):
     fmt = "vllm"
     fmt2 = "huggingface"
@@ -73,6 +77,10 @@ def test_cachegen_encoder(chunk_size):
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
+)
 def test_cachegen_decoder(fmt, chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
     metadata = LMCacheEngineMetadata(
@@ -95,6 +103,10 @@ def test_cachegen_decoder(fmt, chunk_size):
 
 
 @pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
+)
 def test_cachegen_unmatched_size(fmt):
     chunk_size = 256
     fmt = "vllm"

@@ -95,6 +95,7 @@ class LMCBlender:
 
             # TODO(Jiayi): remove `[0]` hardcode
             topk_num = int(total_len * self.common_metadata.recomp_ratios[0])
+            topk_num = max(topk_num, 1)
 
             top_indices = torch.topk(diff_k, k=topk_num).indices
             top_indices, _ = torch.sort(top_indices)

@@ -13,6 +13,7 @@ import prometheus_client
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
 
 logger = init_logger(__name__)
@@ -27,9 +28,11 @@ class LMCacheStats:
     interval_lookup_requests: int
     interval_requested_tokens: int
     interval_hit_tokens: int
+    interval_stored_tokens: int
     interval_lookup_tokens: int
     interval_lookup_hits: int
     interval_vllm_hit_tokens: int
+    interval_prompt_tokens: int
 
     interval_remote_read_requests: int
     interval_remote_read_bytes: int
@@ -66,11 +69,29 @@ class LMCacheStats:
     retrieve_speed: List[float]  # Tokens per second
     store_speed: List[float]  # Tokens per second
 
+    # P2P transfer metrics
+    interval_p2p_requests: int
+    interval_p2p_transferred_tokens: int
+    p2p_time_to_transfer: List[float]
+    p2p_transfer_speed: List[float]  # Tokens per second
+
+    # request lookup hit rates
+    # use bucket of interval_lookup_hit_rates to represents non-0 hit requests
+    # use interval_lookup_0_hit_requests to represents 0 hit requests
+    interval_lookup_hit_rates: List[float]
+    interval_lookup_0_hit_requests: int
+
 
 @dataclass
 class LookupRequestStats:
     num_tokens: int
     hit_tokens: int
+    is_finished: bool
+
+    def hit_rate(self):
+        if self.num_tokens == 0:
+            return 0
+        return self.hit_tokens / self.num_tokens
 
 
 @dataclass
@@ -111,6 +132,23 @@ class StoreRequestStats:
         return self.num_tokens / self.time_to_store()
 
 
+@dataclass
+class P2PTransferRequestStats:
+    num_tokens: int
+    start_time: float
+    end_time: float
+
+    def time_to_transfer(self):
+        if self.end_time == 0:
+            return 0
+        return self.end_time - self.start_time
+
+    def transfer_speed(self):
+        if self.time_to_transfer() == 0:
+            return 0
+        return self.num_tokens / self.time_to_transfer()
+
+
 class LMCStatsMonitor:
     def __init__(self):
         # Interval metrics that will be reset after each log
@@ -120,9 +158,18 @@ class LMCStatsMonitor:
         self.interval_lookup_requests = 0
         self.interval_requested_tokens = 0  # total requested tokens retrieve
         self.interval_hit_tokens = 0  # total hit tokens retrieve
+        self.interval_stored_tokens = 0  # total tokens tored in LMCache
         self.interval_lookup_tokens = 0  # total requested tokens lookup
         self.interval_lookup_hits = 0  # total hit tokens lookup
         self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
+        self.interval_prompt_tokens = 0  # total prompt tokens
+        self.interval_lookup_0_hit_requests = 0
+
+        # P2P transfer metrics
+        self.interval_p2p_requests = 0
+        self.interval_p2p_transferred_tokens = 0
+        self.p2p_requests: Dict[int, P2PTransferRequestStats] = {}
+        self.p2p_request_id = 0
 
         # remote backends read/write metrics
         self.interval_remote_read_requests = 0
@@ -155,26 +202,42 @@ class LMCStatsMonitor:
 
         self.retrieve_requests: Dict[int, RetrieveRequestStats] = {}
         self.store_requests: Dict[int, StoreRequestStats] = {}
+        self.lookup_requests: Dict[int, LookupRequestStats] = {}
 
         self.retrieve_request_id = 0
         self.store_request_id = 0
+        self.lookup_request_id = 0
 
     @thread_safe
-    def on_lookup_request(self, num_tokens: int):
+    def on_lookup_request(self, num_tokens: int) -> int:
         """
         This function is called when a lookup request is sent to the cache.
         It will record the number of tokens requested.
         """
+        lookup_stats = LookupRequestStats(
+            num_tokens=num_tokens,
+            hit_tokens=0,
+            is_finished=False,
+        )
         self.interval_lookup_requests += 1
         self.interval_lookup_tokens += num_tokens
+        self.lookup_requests[self.lookup_request_id] = lookup_stats
+        self.lookup_request_id += 1
+        return self.lookup_request_id - 1
 
     @thread_safe
-    def on_lookup_finished(self, num_hit_tokens: int):
+    def on_lookup_finished(self, request_id: int, num_hit_tokens: int):
         """
         This function is called when a lookup request is finished.
         It will record the number of tokens hit.
         """
+        assert request_id in self.lookup_requests
+        lookup_stats = self.lookup_requests[request_id]
+        lookup_stats.hit_tokens = num_hit_tokens
+        lookup_stats.is_finished = True
         self.interval_lookup_hits += num_hit_tokens
+        if num_hit_tokens == 0:
+            self.interval_lookup_0_hit_requests += 1
 
     @thread_safe
     def on_retrieve_request(self, num_tokens: int) -> int:
@@ -215,6 +278,7 @@ class LMCStatsMonitor:
             num_tokens=num_tokens, start_time=curr_time, end_time=0
         )
         self.interval_store_requests += 1
+        self.interval_stored_tokens += num_tokens
         self.store_requests[self.store_request_id] = store_stats
         self.store_request_id += 1
         return self.store_request_id - 1
@@ -227,6 +291,26 @@ class LMCStatsMonitor:
         store_stats.end_time = curr_time
         if num_tokens >= 0:
             store_stats.num_tokens = num_tokens
+
+    @thread_safe
+    def on_p2p_transfer_request(self, num_tokens: int) -> int:
+        curr_time = time.time()
+        self.interval_p2p_requests += 1
+        self.p2p_requests[self.p2p_request_id] = P2PTransferRequestStats(
+            num_tokens=num_tokens,
+            start_time=curr_time,
+            end_time=0,
+        )
+        self.p2p_request_id += 1
+        return self.p2p_request_id - 1
+
+    @thread_safe
+    def on_p2p_transfer_finished(self, request_id: int):
+        curr_time = time.time()
+        assert request_id in self.p2p_requests
+        p2p_stats = self.p2p_requests[request_id]
+        self.interval_p2p_transferred_tokens += p2p_stats.num_tokens
+        p2p_stats.end_time = curr_time
 
     @thread_safe
     def update_local_cache_usage(self, usage: int):
@@ -296,6 +380,10 @@ class LMCStatsMonitor:
     def update_interval_vllm_hit_tokens(self, delta: int):
         self.interval_vllm_hit_tokens += delta
 
+    @thread_safe
+    def update_interval_prompt_tokens(self, delta: int):
+        self.interval_prompt_tokens += delta
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -306,9 +394,11 @@ class LMCStatsMonitor:
 
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+        self.interval_stored_tokens = 0
         self.interval_lookup_tokens = 0
         self.interval_lookup_hits = 0
         self.interval_vllm_hit_tokens = 0
+        self.interval_prompt_tokens = 0
 
         self.interval_remote_read_requests = 0
         self.interval_remote_read_bytes = 0
@@ -328,6 +418,11 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
 
+        self.interval_p2p_requests = 0
+        self.interval_p2p_transferred_tokens = 0
+
+        self.interval_lookup_0_hit_requests = 0
+
         new_retrieve_requests = {}
         for request_id, retrieve_stats in self.retrieve_requests.items():
             if retrieve_stats.end_time == 0:
@@ -339,6 +434,18 @@ class LMCStatsMonitor:
             if store_stats.end_time == 0:
                 new_store_requests[request_id] = store_stats
         self.store_requests = new_store_requests
+
+        new_p2p_requests = {}
+        for request_id, p2p_stats in self.p2p_requests.items():
+            if p2p_stats.end_time == 0:
+                new_p2p_requests[request_id] = p2p_stats
+        self.p2p_requests = new_p2p_requests
+
+        new_lookup_requests = {}
+        for request_id, lookup_stats in self.lookup_requests.items():
+            if not lookup_stats.is_finished:
+                new_lookup_requests[request_id] = lookup_stats
+        self.lookup_requests = new_lookup_requests
 
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
@@ -360,23 +467,39 @@ class LMCStatsMonitor:
             else self.interval_lookup_hits / self.interval_lookup_tokens
         )
 
-        def filter_out_invalid(stats: List[float]):
+        def filter_out_zeros(stats: List[float]):
             return [x for x in stats if x != 0]
 
-        time_to_retrieve = filter_out_invalid(
+        time_to_retrieve = filter_out_zeros(
             [stats.time_to_retrieve() for stats in self.retrieve_requests.values()]
         )
 
-        time_to_store = filter_out_invalid(
+        time_to_store = filter_out_zeros(
             [stats.time_to_store() for stats in self.store_requests.values()]
         )
 
-        retrieve_speed = filter_out_invalid(
+        retrieve_speed = filter_out_zeros(
             [stats.retrieve_speed() for stats in self.retrieve_requests.values()]
         )
 
-        store_speed = filter_out_invalid(
+        store_speed = filter_out_zeros(
             [stats.store_speed() for stats in self.store_requests.values()]
+        )
+
+        p2p_time_to_transfer = filter_out_zeros(
+            [stats.time_to_transfer() for stats in self.p2p_requests.values()]
+        )
+
+        p2p_transfer_speed = filter_out_zeros(
+            [stats.transfer_speed() for stats in self.p2p_requests.values()]
+        )
+
+        request_lookup_hit_rates = filter_out_zeros(
+            [
+                stats.hit_rate()
+                for stats in self.lookup_requests.values()
+                if stats.is_finished
+            ]
         )
 
         ret = LMCacheStats(
@@ -385,6 +508,7 @@ class LMCStatsMonitor:
             interval_lookup_requests=self.interval_lookup_requests,
             interval_requested_tokens=self.interval_requested_tokens,
             interval_hit_tokens=self.interval_hit_tokens,
+            interval_stored_tokens=self.interval_stored_tokens,
             interval_lookup_tokens=self.interval_lookup_tokens,
             interval_lookup_hits=self.interval_lookup_hits,
             interval_remote_read_requests=self.interval_remote_read_requests,
@@ -413,6 +537,13 @@ class LMCStatsMonitor:
             retrieve_speed=retrieve_speed,
             store_speed=store_speed,
             interval_vllm_hit_tokens=self.interval_vllm_hit_tokens,
+            interval_p2p_requests=self.interval_p2p_requests,
+            interval_p2p_transferred_tokens=self.interval_p2p_transferred_tokens,
+            p2p_time_to_transfer=p2p_time_to_transfer,
+            p2p_transfer_speed=p2p_transfer_speed,
+            interval_lookup_hit_rates=request_lookup_hit_rates,
+            interval_prompt_tokens=self.interval_prompt_tokens,
+            interval_lookup_0_hit_requests=self.interval_lookup_0_hit_requests,
         )
         self._clear()
         return ret
@@ -487,6 +618,14 @@ class PrometheusLogger:
             labelnames=labelnames,
         )
 
+        self.counter_num_stored_tokens = self._counter_cls(
+            name="lmcache:num_stored_tokens",
+            documentation=(
+                "Total number of tokens stored in lmcache including evicted ones"
+            ),
+            labelnames=labelnames,
+        )
+
         self.counter_num_lookup_tokens = self._counter_cls(
             name="lmcache:num_lookup_tokens",
             documentation="Total number of tokens requested in lookup from lmcache",
@@ -502,6 +641,12 @@ class PrometheusLogger:
         self.counter_num_vllm_hit_tokens = self._counter_cls(
             name="lmcache:num_vllm_hit_tokens",
             documentation="Number of hit tokens in vllm",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_prompt_tokens = self._counter_cls(
+            name="lmcache:num_prompt_tokens",
+            documentation="Number of prompt tokens in lmcache",
             labelnames=labelnames,
         )
 
@@ -546,6 +691,12 @@ class PrometheusLogger:
         self.counter_local_cpu_evict_failed_count = self._counter_cls(
             name="lmcache:local_cpu_evict_failed_count",
             documentation="Total number of failed eviction in local cpu backend",
+            labelnames=labelnames,
+        )
+
+        self.counter_lookup_0_hit_requests = self._counter_cls(
+            name="lmcache:lookup_0_hit_requests",
+            documentation="Total number of 0 hit lookup requests",
             labelnames=labelnames,
         )
 
@@ -696,6 +847,56 @@ class PrometheusLogger:
             buckets=store_speed_buckets,
         )
 
+        # P2P transfer metrics
+        p2p_time_buckets = [
+            0.001,  # 1ms
+            0.005,  # 5ms
+            0.01,  # 10ms
+            0.02,  # 20ms
+            0.04,  # 40ms
+            0.06,  # 60ms
+            0.08,  # 80ms
+            0.1,  # 100ms
+            0.25,  # 250ms
+            0.5,  # 500ms
+            0.75,  # 750ms
+            1.0,  # 1s
+            2.5,  # 2.5s
+            5.0,  # 5s
+            7.5,  # 7.5s
+            10.0,  # 10s
+        ]
+        self.histogram_p2p_time_to_transfer = self._histogram_cls(
+            name="lmcache:p2p_time_to_transfer",
+            documentation="Time to transfer via P2P (seconds)",
+            labelnames=labelnames,
+            buckets=p2p_time_buckets,
+        )
+
+        p2p_speed_buckets = [
+            1,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768,
+            65536,
+        ]
+        self.histogram_p2p_transfer_speed = self._histogram_cls(
+            name="lmcache:p2p_transfer_speed",
+            documentation="P2P transfer speed (tokens per second)",
+            labelnames=labelnames,
+            buckets=p2p_speed_buckets,
+        )
+
         remote_time_to_get = [
             1,
             5,
@@ -771,6 +972,25 @@ class PrometheusLogger:
             buckets=remote_time_to_get_sync,
         )
 
+        request_cache_hit_rate = [
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            1.0,
+        ]
+        self.histogram_request_cache_hit_rate = self._histogram_cls(
+            name="lmcache:request_cache_hit_rate",
+            documentation="Request cache hit rate",
+            labelnames=labelnames,
+            buckets=request_cache_hit_rate,
+        )
+
         # Ping latency metrics: use a gauge to record the latest ping latency
         self.gauge_remote_ping_latency = self._gauge_cls(
             name="lmcache:remote_ping_latency",
@@ -812,6 +1032,43 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
+        self.remote_put_task_num = self._gauge_cls(
+            name="lmcache:remote_put_task_num",
+            documentation="The number of remote put tasks",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
+        event_statuses = ["ongoing", "done", "not_found"]
+        for status in event_statuses:
+            metric_name = f"storage_events_{status}_count"
+            gauge = self._gauge_cls(
+                name=f"lmcache:{metric_name}",
+                documentation=f"The number of {status.replace('_', ' ')} events",
+                labelnames=labelnames,
+                multiprocess_mode="sum",
+            ).labels(**self.labels)
+            setattr(self, metric_name, gauge)
+
+        # Connector metrics
+        connector_metrics = [
+            "scheduler_unfinished_requests_count",
+            "connector_load_specs_count",
+            "connector_request_trackers_count",
+            "connector_kv_caches_count",
+            "connector_layerwise_retrievers_count",
+            "connector_invalid_block_ids_count",
+            "connector_requests_priority_count",
+        ]
+
+        for metric_name in connector_metrics:
+            gauge = self._gauge_cls(
+                name=f"lmcache:{metric_name}",
+                documentation=f"The count of {metric_name.replace('_', ' ')}",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, metric_name, gauge)
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -844,8 +1101,10 @@ class PrometheusLogger:
             self.counter_num_requested_tokens, stats.interval_requested_tokens
         )
         self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
+        self._log_counter(self.counter_num_stored_tokens, stats.interval_stored_tokens)
         self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
         self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
+        self._log_counter(self.counter_num_prompt_tokens, stats.interval_prompt_tokens)
         self._log_counter(
             self.counter_num_vllm_hit_tokens, stats.interval_vllm_hit_tokens
         )
@@ -877,6 +1136,10 @@ class PrometheusLogger:
             self.counter_local_cpu_evict_failed_count,
             stats.interval_local_cpu_evict_failed_count,
         )
+        self._log_counter(
+            self.counter_lookup_0_hit_requests,
+            stats.interval_lookup_0_hit_requests,
+        )
 
         self._log_gauge(self.gauge_retrieve_hit_rate, stats.retrieve_hit_rate)
 
@@ -897,6 +1160,12 @@ class PrometheusLogger:
         self._log_histogram(self.histogram_store_speed, stats.store_speed)
 
         self._log_histogram(
+            self.histogram_p2p_time_to_transfer, stats.p2p_time_to_transfer
+        )
+
+        self._log_histogram(self.histogram_p2p_transfer_speed, stats.p2p_transfer_speed)
+
+        self._log_histogram(
             self.histogram_remote_time_to_get, stats.interval_remote_time_to_get
         )
         self._log_histogram(
@@ -905,6 +1174,9 @@ class PrometheusLogger:
         self._log_histogram(
             self.histogram_remote_time_to_get_sync,
             stats.interval_remote_time_to_get_sync,
+        )
+        self._log_histogram(
+            self.histogram_request_cache_hit_rate, stats.interval_lookup_hit_rates
         )
         self._log_gauge(
             self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
@@ -930,6 +1202,7 @@ class PrometheusLogger:
         return {
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
+            "role": metadata.role,
         }
 
     _instance = None
@@ -970,6 +1243,7 @@ class LMCacheStatsLogger:
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
+        self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.is_running = True
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
@@ -979,6 +1253,7 @@ class LMCacheStatsLogger:
         while self.is_running:
             stats = self.monitor.get_stats_and_clear()
             self.prometheus_logger.log_prometheus(stats)
+            self.lmc_usage_logger.incr_or_send_stats(stats)
             time.sleep(self.log_interval)
 
     def shutdown(self):

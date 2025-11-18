@@ -13,6 +13,8 @@ from lmcache.blend.retriever import SPTBlendRetriever
 from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
+DEVICE_TYPE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
@@ -21,7 +23,7 @@ def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
 
 def dumb_cfg():
     return LMCacheEngineConfig.from_defaults(
-        local_device="cuda",
+        local_device=DEVICE_TYPE,
         remote_url=None,
         remote_serde=None,
         enable_blending=True,
@@ -183,7 +185,7 @@ def test_spt_full_hit(fmt, autorelease):
 
     chunk_lengths = [1000, 2000, 1500, 3000]
     kvs = [
-        generate_kv_cache(length, fmt, "cuda", fill=None)
+        generate_kv_cache(length, fmt, DEVICE_TYPE, fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
     tokens = [generate_text(length) for length in chunk_lengths]
@@ -236,7 +238,7 @@ def test_spt_hit_miss(fmt, autorelease):
     chunk_lengths = [1000, 2000, 1500, 3000]
     has_insterted = [True, False, True, False]
     kvs = [
-        generate_kv_cache(length, fmt, "cuda", fill=None)
+        generate_kv_cache(length, fmt, DEVICE_TYPE, fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
     tokens = [generate_text(length) for length in chunk_lengths]
@@ -312,7 +314,7 @@ def test_spt_all_miss(fmt, autorelease):
     chunk_lengths = [1000, 2000, 1500, 3000]
     has_insterted = [False, False, False, False]
     kvs = [
-        generate_kv_cache(length, fmt, "cuda", fill=None)
+        generate_kv_cache(length, fmt, DEVICE_TYPE, fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
     tokens = [generate_text(length) for length in chunk_lengths]
@@ -360,7 +362,7 @@ def test_spt_partial_hit(fmt, autorelease):
     chunk_lengths = [1000, 2000, 1500, 3000]
     inserted_length = [500, 1000, 800, 1250]
     kvs = [
-        generate_kv_cache(length, fmt, "cuda", fill=None)
+        generate_kv_cache(length, fmt, DEVICE_TYPE, fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
     tokens = [generate_text(length) for length in chunk_lengths]
@@ -446,7 +448,7 @@ def test_spt_multi_query(fmt, autorelease):
 
     chunk_lengths = [1000, 2000, 1500, 3000]
     kvs = [
-        generate_kv_cache(length, fmt, "cuda", fill=None)
+        generate_kv_cache(length, fmt, DEVICE_TYPE, fill=None)
         for idx, length in enumerate(chunk_lengths)
     ]
     tokens = [generate_text(length) for length in chunk_lengths]
@@ -508,7 +510,7 @@ def test_spt_multi_query(fmt, autorelease):
 def test_cacheblend_executor_single_query():
     # Case 1: all valid
     dtype = torch.bfloat16
-    device = "cuda"
+    device = DEVICE_TYPE
     prefix_len = 10
     query_len = 10
     q_shape = (query_len, 4096)
@@ -539,9 +541,11 @@ def test_cacheblend_executor_single_query():
     rv_1 = torch.full(kv_shape, 1, dtype=dtype, device=device)
     valid = torch.full((query_len,), 1, dtype=torch.long, device="cpu")
     positions = torch.arange(
-        prefix_len, prefix_len + query_len, dtype=torch.int32, device="cuda"
+        prefix_len, prefix_len + query_len, dtype=torch.int32, device=DEVICE_TYPE
     )
-    query_start_loc = torch.tensor([0, query_len], dtype=torch.int32, device="cuda")
+    query_start_loc = torch.tensor(
+        [0, query_len], dtype=torch.int32, device=DEVICE_TYPE
+    )
     original_positions = torch.arange(query_len)
 
     # First layer should do nothing!

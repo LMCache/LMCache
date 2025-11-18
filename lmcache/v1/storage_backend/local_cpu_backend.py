@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence
 import threading
 import time
 
@@ -15,15 +15,17 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
-from lmcache.v1.system_detection import NUMADetector
+from lmcache.v1.system_detection import NUMADetector, SystemMemoryDetector
 
 if TYPE_CHECKING:
     # First Party
@@ -47,7 +49,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
     ):
-        super().__init__(dst_device)
+        if torch.cuda.is_available():
+            super().__init__(dst_device)
+        else:
+            super().__init__("cpu")
+
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.hot_cache = self.cache_policy.init_mutable_mapping()
 
@@ -65,12 +71,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
-        self.stream = torch.cuda.Stream()
-
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         self.layerwise = config.use_layerwise
         self.enable_blending = config.enable_blending
+
+        # Store config and metadata for chunk budget calculation
+        self.config = config
+        self.metadata = metadata
 
         # to help maintain suffix -> prefix order in the dict
         # assumption: only one request is looked up at a time
@@ -144,7 +152,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
-        transfer_spec=None,
+        transfer_spec: Any = None,
     ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
@@ -174,6 +182,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         mem_objs = []
         with self.cpu_lock:
@@ -242,32 +251,150 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # other backends might still (temporarily) hold the memory object.
         return True
 
-    def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> MixedMemoryAllocator:
-        cpu_size = config.max_local_cpu_size
-        # save_only_first_rank only works when use mla
+    def _calculate_effective_cpu_size(
+        self,
+        configured_cpu_size: float,
+        config: LMCacheEngineConfig,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ) -> float:
+        """
+        Calculate the effective CPU memory size based on system available memory
+        and reserve memory configuration.
+
+        Args:
+            configured_cpu_size: The configured CPU memory size in GB
+            config: The LMCache engine configuration
+            metadata: Optional metadata for first rank handling
+
+        Returns:
+            The effective CPU memory size in GB
+        """
+
         save_only_first_rank = (
-            config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            metadata is not None
+            and config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
+        if not save_only_first_rank:
+            # Do not adjust cpu_size if save_only_first_rank is False for now
+            return configured_cpu_size
 
-        if save_only_first_rank and metadata.is_first_rank():
-            # Only the first rank will save the cache,
-            # so we need to set it lager than other ranks
-            cpu_size = (
-                config.extra_config.get("first_rank_max_local_cpu_size", cpu_size)
-                if config.extra_config
-                else cpu_size
+        # Get the system available memory and calculate effective cpu_size
+        system_available_memory_gb = SystemMemoryDetector.get_available_memory_gb()
+        # Get reserve memory size from config
+        reserve_cpu_size = config.reserve_local_cpu_size
+
+        # TODO(baoloongmao): For disable save_only_first_rank case,
+        #  we need to avoid multi-rank race condition in future.
+        #  But for enable save_only_first_rank case,
+        #  we can handle reserve memory simply since non-first ranks
+        #  do not allocate memory.
+        # Effective memory: min(configured_size, available_memory - reserve_size)
+        if system_available_memory_gb > 0:
+            max_usable_memory = max(0, system_available_memory_gb - reserve_cpu_size)
+            effective_cpu_size = min(configured_cpu_size, max_usable_memory)
+            logger.info(
+                f"Adjusted CPU memory size from {configured_cpu_size:.2f} GB "
+                f"to {effective_cpu_size:.2f} GB "
+                f"(system available: {system_available_memory_gb:.2f} GB, "
+                f"reserve: {reserve_cpu_size:.2f} GB)"
             )
+            assert effective_cpu_size > 0
+            return effective_cpu_size
+        else:
+            logger.warning(
+                "Could not determine system available memory, using configured cpu_size"
+            )
+            return configured_cpu_size
+
+    def initialize_allocator(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: Optional[LMCacheEngineMetadata] = None,
+    ) -> MemoryAllocatorInterface:
+        cpu_size = config.max_local_cpu_size
+
+        if metadata is not None:
+            # save_only_first_rank only works when use mla
+            save_only_first_rank = (
+                config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+                and metadata.use_mla
+            )
+
+            if save_only_first_rank and metadata.is_first_rank():
+                # Only the first rank will save the cache,
+                # so we need to set it larger than other ranks
+                cpu_size = config.get_extra_config_value(
+                    "first_rank_max_local_cpu_size", cpu_size
+                )
 
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
         logger.info(f"NUMA mapping {numa_mapping}")
-        return MixedMemoryAllocator(
-            int(cpu_size * 1024**3),
-            numa_mapping=numa_mapping,
-        )
+
+        # Calculate effective CPU memory size
+        cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
+
+        if config.enable_p2p:
+            # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
+            # For now, keep the original P2P implementation
+            assert metadata is not None
+            meta_shape = torch.Size(metadata.kv_shape)
+            # TODO(Jiayi): remove this hardcode
+            new_shape = torch.Size(
+                [
+                    meta_shape[1],
+                    meta_shape[0],
+                    meta_shape[2],
+                    meta_shape[3] * meta_shape[4],
+                ]
+            )
+            paged_mem_allocator = PagedCpuGpuMemoryAllocator()
+            paged_mem_allocator.init_cpu_memory_allocator(
+                int(cpu_size * 1024**3),
+                shape=new_shape,
+                dtype=metadata.kv_dtype,
+                fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
+                numa_mapping=numa_mapping,
+            )
+            return paged_mem_allocator
+        else:
+            # Check if lazy memory allocator should be enabled
+            use_lazy = (
+                config.enable_lazy_memory_allocator
+                and cpu_size > config.lazy_memory_safe_size
+            )
+
+            if use_lazy:
+                logger.info(
+                    f"Using LazyMixedMemoryAllocator with "
+                    f"initial_ratio={config.lazy_memory_initial_ratio}, "
+                    f"expand_trigger_ratio="
+                    f"{config.lazy_memory_expand_trigger_ratio}, "
+                    f"step_ratio={config.lazy_memory_step_ratio}"
+                )
+                return LazyMixedMemoryAllocator(
+                    int(cpu_size * 1024**3),
+                    config=config,
+                    numa_mapping=numa_mapping,
+                    memory_limit_callback=lambda: int(
+                        self._calculate_effective_cpu_size(cpu_size, config, metadata)
+                        * 1024**3
+                    ),
+                )
+            else:
+                if config.enable_lazy_memory_allocator:
+                    logger.info(
+                        f"LazyMixedMemoryAllocator is disabled because "
+                        f"cpu_size ({cpu_size:.2f} GB) does not exceed "
+                        f"lazy_memory_safe_size "
+                        f"({config.lazy_memory_safe_size:.2f} GB). "
+                        f"Using MixedMemoryAllocator instead."
+                    )
+                return MixedMemoryAllocator(
+                    int(cpu_size * 1024**3),
+                    numa_mapping=numa_mapping,
+                )
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -300,8 +427,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_obj is not None or not eviction:
             return memory_obj
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
-
         evict_keys_count = 0
         num_attempts = 0
         while True:
@@ -330,8 +455,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
-                if evict_keys:
-                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -444,8 +567,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
-                if evict_keys:
-                    super()._on_evict(evict_keys)
 
             if wait_other_requests:
                 if not busy_loop:
@@ -479,6 +600,56 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the maximum number of chunks that can be allocated concurrently
+        without causing memory deadlocks in the async loading system.
+
+        Returns:
+            int: The estimated chunk budget for concurrent allocations
+        """
+        logger.debug("Attempting to calculate chunk budget for async loading")
+        assert self.metadata is not None, (
+            "metadata required for chunk budget calculation"
+        )
+
+        total_memory = int(self.config.max_local_cpu_size * 1024**3)
+        chunk_tokens = self.config.chunk_size
+        # already accounted for parallelism
+        kv_shape = (
+            self.metadata.kv_shape
+        )  # [num_layers, kv_size, chunk_size, num_heads, head_size]
+        num_layers = kv_shape[0]
+        kv_size = kv_shape[1]  # 1 for MLA, 2 for regular
+        num_heads = kv_shape[3]
+        head_size = kv_shape[4]
+        hidden_dim = num_heads * head_size
+        dtype_size = self.metadata.kv_dtype.itemsize
+
+        if self.layerwise:
+            # layerwise: [chunk_tokens, kv_size, hidden_dim]
+            chunk_bytes = chunk_tokens * kv_size * hidden_dim * dtype_size
+        else:
+            # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
+            chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
+        logger.debug(
+            f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
+            f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
+            f"dtype_size={dtype_size}, "
+            f"hidden_dim={hidden_dim}"
+        )
+        logger.debug(f"Calculated bytes per chunk per rank: {chunk_bytes}")
+        # add alignment overhead
+        # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
+        assert hasattr(self.memory_allocator, "align_bytes")
+        alignment = self.memory_allocator.align_bytes
+        aligned_chunk_bytes = ((chunk_bytes + alignment - 1) // alignment) * alignment
+
+        # calculate budget with safety margin
+        max_chunks = total_memory // aligned_chunk_bytes
+
+        return max_chunks
+
     def get_keys(self) -> List[CacheEngineKey]:
         """
         array ordering of keys from LRU to MRU
@@ -497,7 +668,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         with self.cpu_lock:
             for key in self.hot_cache:
                 memory_obj = self.hot_cache[key]
-                if memory_obj.can_evict:
+                if not memory_obj.can_evict:
                     continue
                 clear_keys.append(key)
                 num_cleared_tokens += memory_obj.get_num_tokens()
@@ -505,8 +676,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # TODO(Jiayi): might not be accurate if we don't calculate
         # `num_cleared_token` and remove the keys in an atomic way.
         self.batched_remove(clear_keys)
-        if clear_keys:
-            super()._on_evict(clear_keys)
 
         return num_cleared_tokens
 

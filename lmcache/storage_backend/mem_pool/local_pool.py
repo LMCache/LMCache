@@ -75,7 +75,7 @@ class LocalCPUPool(LocalPool):
         self.chunk_size = metadata.kv_shape[2]
         self.size_per_chunk = prod(metadata.kv_shape) * metadata.kv_dtype.itemsize
         self.max_chunk_num = self.init_max_chunk_num(metadata)
-        use_pinned_memory = True
+        use_pinned_memory = True if torch.cuda.is_available() else False
         kv_dtype = metadata.kv_dtype
 
         logger.info(
