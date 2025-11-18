@@ -146,7 +146,7 @@ Instance 2 configuration (``p2p_example2.yaml``):
 .. code-block:: yaml
 
     chunk_size: 256
-    local_cpu: True
+    local_cpu: true
     max_local_cpu_size: 5
     enable_async_loading: True
 
