@@ -139,14 +139,21 @@ class KVController:
         """
         Deregister all kv chunks of an instance-worker.
         """
-        for key in self.kv_pool:
-            self.kv_pool[key] = [
+        keys_to_delete = []
+        for key, metadata_list in self.kv_pool.items():
+            # Filter in-place by modifying the list
+            metadata_list[:] = [
                 m
-                for m in self.kv_pool[key]
+                for m in metadata_list
                 if not (m.instance_id == instance_id and m.worker_id == worker_id)
             ]
-            if not self.kv_pool[key]:
-                del self.kv_pool[key]
+            # Mark key for deletion if list becomes empty
+            if not metadata_list:
+                keys_to_delete.append(key)
+
+        # Delete empty keys (safe after iteration)
+        for key in keys_to_delete:
+            del self.kv_pool[key]
 
     # TODO(Jiayi): The current implementation does not handle
     # the case where the prefix chunks are evicted while the
