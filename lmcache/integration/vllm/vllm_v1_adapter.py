@@ -60,9 +60,8 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.hpu_connector import (
-    VLLMPagedMemHPUConnectorV2,
-)
+if hasattr(torch, "hpu") and torch.hpu.is_available():
+    from lmcache.v1.hpu_connector import VLLMPagedMemHPUConnectorV2
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
@@ -473,7 +472,6 @@ def _init_lmcache_engine(
     :return: The initialized LMCache engine
     :rtype: LMCacheEngine
     """
-
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
 
@@ -507,10 +505,13 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.cuda.device_count()
-    local_rank = parallel_config.rank % num_gpus
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    if hasattr(torch, "hpu") and torch.hpu.is_available():
+        device = torch.device(f"hpu:{parallel_config.rank}")
+    else:
+        num_gpus = torch.cuda.device_count()
+        local_rank = parallel_config.rank % num_gpus
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
@@ -558,7 +559,7 @@ def _init_lmcache_engine(
             )
         tpg = get_tp_group()
     else:
-        if torch.hpu.is_available():
+        if hasattr(torch, "hpu") and torch.hpu.is_available():
             vllm_gpu_connector = VLLMPagedMemHPUConnectorV2(
                 hidden_dim_size,
                 num_layer,

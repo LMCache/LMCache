@@ -139,7 +139,6 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-
         if lmc_ops is None:
             if self.gpu_buffer is not None:
                 assert self.gpu_buffer.device == self.kvcaches[0][0].device
@@ -172,7 +171,6 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-
         assert memory_obj.tensor is not None
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
@@ -209,6 +207,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                 )
 
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
