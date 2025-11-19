@@ -1191,13 +1191,7 @@ class LMCacheEngine:
         assert self.storage_manager is not None
 
         tot_kv_size = 0
-        # location -> [(CacheEngineKey, start, end)]
-        block_mapping: dict[str, list[tuple[CacheEngineKey, int, int]]] = defaultdict(
-            list
-        )
-
         reordered_chunks: List[ProcessedChunk] = []
-
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
@@ -1210,43 +1204,28 @@ class LMCacheEngine:
         skip_contains_check = (
             kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
         )
-        for start, end, key in self.token_database.process_tokens(
+        chunk_infos = []
+        for chunk_info in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
-            assert isinstance(key, CacheEngineKey)
+            assert isinstance(chunk_info[2], CacheEngineKey)
+            chunk_infos.append(chunk_info)
 
-            location = None
-            if key in self.lookup_cache:
-                # TODO(Jiayi): we can reduce the number of `contains` calls
-                # by checking the lookup cache first (should be updated in `lookup`)
-                pass
-            else:
-                # NOTE: key should always be in the lookup cache once we support it.
-                # TODO: use lookup_cache to skip the contains
-                if (
-                    skip_contains_check
-                    and len(self.storage_manager.non_allocator_backends) == 1
-                ):
-                    location = self.storage_manager.non_allocator_backends[0]
-                else:
-                    location = self.storage_manager.contains(key)
-                if location is None:
-                    break
-
-                # NOTE: Here we make the assumption that the underlying
-                # storage backend support pin operation, and the memory
-                # object is already pinned in the storage backend.
-                ret_mask[start:end] = True
-
-            assert location is not None
-
-            block_mapping[location].append((key, start, end))
+        # block_mapping: location -> [(start, end, CacheEngineKey)]
+        if (
+            skip_contains_check
+            and len(self.storage_manager.non_allocator_backends) == 1
+        ):
+            location = self.storage_manager.non_allocator_backends[0]
+            block_mapping = {location: chunk_infos}
+        else:
+            block_mapping = self.storage_manager.get_chunk_locations(chunk_infos)
 
         last_failed_block_start = None
         for location, blocks in block_mapping.items():
-            keys = [key for key, _, _ in blocks]
+            keys = [key for _, _, key in blocks]
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
                 location=location,
@@ -1255,7 +1234,7 @@ class LMCacheEngine:
                 "Failed to get memory objects from storage backend"
             )
 
-            for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
+            for (start, end, key), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
                         "The cache block is in the storage, but it can't be retrieved"
@@ -1268,6 +1247,7 @@ class LMCacheEngine:
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
+                ret_mask[start:end] = True
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
