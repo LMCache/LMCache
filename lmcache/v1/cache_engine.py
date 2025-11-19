@@ -1205,15 +1205,15 @@ class LMCacheEngine:
             kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
         )
         chunk_infos = []
-        for chunk_info in self.token_database.process_tokens(
+        for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
-            assert isinstance(chunk_info[2], CacheEngineKey)
-            chunk_infos.append(chunk_info)
+            assert isinstance(key, CacheEngineKey)
+            chunk_infos.append((key, start, end))
 
-        # block_mapping: location -> [(start, end, CacheEngineKey)]
+        # block_mapping: location -> [(CacheEngineKey, start, end)]
         if (
             skip_contains_check
             and len(self.storage_manager.non_allocator_backends) == 1
@@ -1221,11 +1221,11 @@ class LMCacheEngine:
             location = self.storage_manager.non_allocator_backends[0]
             block_mapping = {location: chunk_infos}
         else:
-            block_mapping = self.storage_manager.get_chunk_locations(chunk_infos)
+            block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
 
         last_failed_block_start = None
         for location, blocks in block_mapping.items():
-            keys = [key for _, _, key in blocks]
+            keys = [key for key, _, _ in blocks]
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
                 location=location,
@@ -1234,7 +1234,7 @@ class LMCacheEngine:
                 "Failed to get memory objects from storage backend"
             )
 
-            for (start, end, key), memory_obj in zip(blocks, memory_objs, strict=False):
+            for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
                         "The cache block is in the storage, but it can't be retrieved"

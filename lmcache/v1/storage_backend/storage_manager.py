@@ -801,8 +801,8 @@ class StorageManager:
 
         return [True] * total_hit_chunks + [False] * (total_keys - total_hit_chunks)
 
-    def get_chunk_locations(self, chunk_infos: List[Tuple[int, int, CacheEngineKey]]):
-        keys = [chunk_info[2] for chunk_info in chunk_infos]
+    def get_block_mapping(self, chunk_infos: List[Tuple[CacheEngineKey, int, int]]):
+        keys = [chunk_info[0] for chunk_info in chunk_infos]
         total_keys = len(keys)
         block_mapping = {}
         total_hit_chunks = 0
@@ -814,12 +814,16 @@ class StorageManager:
                 hit_chunks = len(results)
             if hit_chunks == 0:
                 continue
-            block_mapping[backend_name] = chunk_infos[total_hit_chunks : total_hit_chunks + hit_chunks]
+            block_mapping[backend_name] = chunk_infos[
+                total_hit_chunks : total_hit_chunks + hit_chunks
+            ]
             total_hit_chunks += hit_chunks
             if total_hit_chunks == total_keys:
                 break
             keys = keys[hit_chunks:]
-        assert total_hit_chunks == total_keys, f"Expected {total_keys} hit chunks, got {total_hit_chunks}"
+        assert total_hit_chunks == total_keys, (
+            f"Expected {total_keys} hit chunks, got {total_hit_chunks}"
+        )
         return block_mapping
 
     def touch_cache(self):
