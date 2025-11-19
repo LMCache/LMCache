@@ -219,5 +219,6 @@ def extract_mm_features(
     else:
         return ([], [])
 
+
 def get_chunk_size_bytes(shape: torch.Size, kv_dtype: torch.dtype):
     return shape.numel() * kv_dtype.itemsize
