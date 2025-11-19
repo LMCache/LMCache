@@ -287,7 +287,7 @@ class LMCacheAsyncLookupServer:
                 msg_buf = self.pull_socket.recv(copy=False)
                 msg = msgspec.msgpack.decode(
                     msg_buf,
-                    type=Union[LookupRequestMsg],
+                    type=LookupRequestMsg,
                 )
 
                 if isinstance(msg, LookupRequestMsg):
