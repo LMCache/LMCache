@@ -766,6 +766,12 @@ class StorageManager:
 
         return: True if the key exists in the specified storage backends else False.
         """
+        if not stop_after_first_not_exits:
+            # The new optimized logic only works for prefix-based lookups.
+            # For the general case where we don't stop at the first miss,
+            # we must check each key across all specified backends.
+            return [self.contains(key, search_range, pin) is not None for key in keys]
+
         if len(self.non_allocator_backends) == 1 and (
             search_range is None or self.non_allocator_backends[0] in search_range
         ):
