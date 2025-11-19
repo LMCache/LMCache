@@ -748,8 +748,7 @@ class StorageManager:
         keys: List[CacheEngineKey],
         search_range: Optional[List[str]] = None,
         pin: bool = False,
-        stop_after_first_not_exits: bool = True,
-    ) -> List[bool]:
+    ) -> int:
         """
         Check whether the key exists in the storage backend.
 
@@ -762,36 +761,15 @@ class StorageManager:
 
         :param bool pin: Whether to pin the key.
 
-        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
-        all subsequent results will return False directly.
-
-        return: True if the key exists in the specified storage backends else False.
+        return: Return hit chunks by prefix match.
         """
-        if not stop_after_first_not_exits:
-            # The new optimized logic only works for prefix-based lookups.
-            # For the general case where we don't stop at the first miss,
-            # we must check each key across all specified backends.
-            return [self.contains(key, search_range, pin) is not None for key in keys]
-
-        if len(self.non_allocator_backends) == 1 and (
-            search_range is None or self.non_allocator_backends[0] in search_range
-        ):
-            backend_name = self.non_allocator_backends[0]
-            return self.storage_backends[backend_name].batched_contains(
-                keys, pin, stop_after_first_not_exits
-            )
-
         total_keys = len(keys)
         total_hit_chunks = 0
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
 
-            results = backend.batched_contains(keys, pin, stop_after_first_not_exits)
-            try:
-                hit_chunks = results.index(False)
-            except ValueError:
-                hit_chunks = len(results)
+            hit_chunks = backend.batched_contains(keys, pin)
             if hit_chunks == 0:
                 continue
             total_hit_chunks += hit_chunks
@@ -799,7 +777,7 @@ class StorageManager:
                 break
             keys = keys[hit_chunks:]
 
-        return [True] * total_hit_chunks + [False] * (total_keys - total_hit_chunks)
+        return total_hit_chunks
 
     def get_block_mapping(self, chunk_infos: List[Tuple[CacheEngineKey, int, int]]):
         keys = [chunk_info[0] for chunk_info in chunk_infos]
@@ -807,11 +785,7 @@ class StorageManager:
         block_mapping = {}
         total_hit_chunks = 0
         for backend_name, backend in self.storage_backends.items():
-            results = backend.batched_contains(keys)
-            try:
-                hit_chunks = results.index(False)
-            except ValueError:
-                hit_chunks = len(results)
+            hit_chunks = backend.batched_contains(keys)
             if hit_chunks == 0:
                 continue
             block_mapping[backend_name] = chunk_infos[

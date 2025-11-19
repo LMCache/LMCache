@@ -158,25 +158,24 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
         pin: bool = False,
-        stop_after_first_not_exits: bool = True,
-    ) -> List[bool]:
+    ) -> int:
         if self.connection is None:
             logger.warning(
-                "Connection is None in batched_contains, returning all False"
+                "Connection is None in batched_contains, returning 0"
             )
-            return [False] * len(keys)
+            return 0
 
         if not self.connection.support_batched_contains():
-            return super().batched_contains(keys, pin, stop_after_first_not_exits)
+            return super().batched_contains(keys, pin)
 
         if self._mla_worker_id_as0_mode:
             keys = [key.with_new_worker_id(0) for key in keys]
 
         try:
-            return self.connection.batched_contains(keys, stop_after_first_not_exits)
+            return self.connection.batched_contains(keys)
         except Exception as e:
             logger.warning(f"Remote connection failed in batched_contains: {e}")
-            return [False] * len(keys)
+            return 0
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:

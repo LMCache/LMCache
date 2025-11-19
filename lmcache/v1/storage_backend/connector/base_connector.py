@@ -334,18 +334,13 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def batched_contains(
-        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
-    ) -> List[bool]:
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
         """
         Batched contains.
 
         :param List[CacheEngineKey] keys: The keys to check.
 
-        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
-        all subsequent results will return False directly.
-
-        :return: Return a bool list, True if the key exists, False otherwise.
+        :return: Return hit chunks by prefix match.
         """
         raise NotImplementedError
 

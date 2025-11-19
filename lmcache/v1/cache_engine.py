@@ -801,14 +801,12 @@ class LMCacheEngine:
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
 
-                batched_contains_res = self.storage_manager.batched_contains(
-                    keys, search_range, pin, True
+                # hit chunks by prefix matching
+                hit_chunks = self.storage_manager.batched_contains(
+                    keys, search_range, pin
                 )
-                assert len(batched_contains_res) == len(chunk_info_list)
-                for (start, end, key), exists in zip(
-                    chunk_info_list, batched_contains_res, strict=False
-                ):
-                    if exists:
+                for idx, (start, end, key) in enumerate(chunk_info_list):
+                    if idx < hit_chunks:
                         if pin:
                             assert lookup_id is not None, (
                                 "lookup_id is required when pin is True"
