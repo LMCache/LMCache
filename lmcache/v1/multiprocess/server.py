@@ -267,6 +267,9 @@ class MPCacheEngine:
                     if key in self.hot_buffer:
                         # Already stored, free the pre-allocated memory
                         memory_obj.ref_count_down()
+                        logger.debug(
+                            "Key %s already in cache, skipping store", str(key)
+                        )
                         continue
 
                 start = idx * self.chunk_size
