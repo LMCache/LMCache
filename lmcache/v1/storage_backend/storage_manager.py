@@ -766,9 +766,13 @@ class StorageManager:
 
         return: True if the key exists in the specified storage backends else False.
         """
-        if len(self.non_allocator_backends) == 1 and (search_range is None or self.non_allocator_backends[0] in search_range):
+        if len(self.non_allocator_backends) == 1 and (
+            search_range is None or self.non_allocator_backends[0] in search_range
+        ):
             backend_name = self.non_allocator_backends[0]
-            return self.storage_backends[backend_name].batched_contains(keys, pin, stop_after_first_not_exits)
+            return self.storage_backends[backend_name].batched_contains(
+                keys, pin, stop_after_first_not_exits
+            )
 
         total_keys = len(keys)
         total_hit_chunks = 0
