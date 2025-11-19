@@ -31,13 +31,11 @@ logger = init_logger(__name__)
 
 
 def generate_test_data(
-    num_objs: int, shape: torch.Size, dtype: torch.dtype = torch.bfloat16
+    backend: NixlStorageBackend, num_objs: int, dtype: torch.dtype = torch.bfloat16
 ) -> Tuple[List[CacheEngineKey], List[MemoryObj]]:
     keys = []
     objs = []
-    allocator = AdHocMemoryAllocator(
-        device="cuda" if accelerator.name == "cuda" else "cpu",
-    )
+
     for i in range(num_objs):
         keys.append(
             CacheEngineKey(
@@ -48,7 +46,8 @@ def generate_test_data(
                 chunk_hash=i,
             )
         )
-        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
+        obj = backend.allocate(backend.memory_allocator.shape, dtype, fmt=MemoryFormat.KV_2LTD)
+        assert obj, "OOM due to the 'num_objs' variable is assigned a too big value!"
         obj.tensor.fill_((i + 1) / num_objs)  # Fill with some test data
         objs.append(obj)
     return keys, objs
@@ -196,7 +195,7 @@ def test_nixl_storage_backend_put_get():
         )
 
         # Generate test data
-        keys, objs = generate_test_data(10, torch.Size([32, 2, 256, 1024]))
+        keys, objs = generate_test_data(backend, 5)
 
         # Test contains before put
         for key in keys:
@@ -321,7 +320,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-objs",
         type=int,
-        default=100,
+        default=2,
         help="Number of objects to test with",
     )
     args = parser.parse_args()
@@ -346,7 +345,7 @@ if __name__ == "__main__":
         )
 
         # Generate and test with data
-        keys, objs = generate_test_data(args.num_objs, torch.Size([32, 2, 256, 1024]))
+        keys, objs = generate_test_data(backend, args.num_objs)
         total_size = sum(obj.get_size() for obj in objs)
         logger.info(
             "Generated %d objects with total size %.2f MB",

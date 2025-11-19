@@ -507,9 +507,10 @@ class NixlStorageBackend(AllocatorBackendInterface):
             for key in keys:
                 self.progress_set.add(key)
 
-        asyncio.run_coroutine_threadsafe(
-            self.mem_to_storage(keys, memory_objs), self.loop
-        )
+        future = asyncio.run_coroutine_threadsafe(
+                     self.mem_to_storage(keys, memory_objs), self.loop
+                 )
+        future.result()
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """

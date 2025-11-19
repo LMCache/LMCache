@@ -43,9 +43,7 @@ class MockConnector(RemoteConnector):
         return []
 
 
-# Mock the entire accelerator.Stream class
-@mock.patch("accelerator.Stream")
-def test_remote_mla_worker_id_as0(mock_stream):
+def test_remote_mla_worker_id_as0():
     # Create configuration
     config = LMCacheEngineConfig(
         chunk_size=256,
