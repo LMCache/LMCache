@@ -92,7 +92,13 @@ class FSConnector(RemoteConnector):
     def post_init(self):
         self.os_disk_bs = 0
         if self.use_odirect:
-            # check save_chunk_meta
+            # save_chunk_meta is useful if save_unfull_chunk is True, since partial
+            # chunk will be saved. When loading partial chunk, we need to know
+            # data size and shape. However, chunk meta is short (28 bytes) which
+            # is not aligned to disk block size (512 or 4096).
+            # Therefore, we disable O_DIRECT if save_chunk_meta is True.
+            # TODO: support O_DIRECT for save_chunk_meta by
+            # padding meta data to 4096.
             if self.save_chunk_meta:
                 logger.warning("Cannot use O_DIRECT if save_chunk_meta enabled.")
                 self.use_odirect = False
