@@ -821,9 +821,6 @@ class StorageManager:
             if total_hit_chunks == total_keys:
                 break
             keys = keys[hit_chunks:]
-        assert total_hit_chunks == total_keys, (
-            f"Expected {total_keys} hit chunks, got {total_hit_chunks}"
-        )
         return block_mapping
 
     def touch_cache(self):
