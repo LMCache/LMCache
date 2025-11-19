@@ -160,9 +160,7 @@ class RemoteBackend(StorageBackendInterface):
         pin: bool = False,
     ) -> int:
         if self.connection is None:
-            logger.warning(
-                "Connection is None in batched_contains, returning 0"
-            )
+            logger.warning("Connection is None in batched_contains, returning 0")
             return 0
 
         if not self.connection.support_batched_contains():
