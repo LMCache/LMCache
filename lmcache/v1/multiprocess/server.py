@@ -15,6 +15,7 @@
 # Standard
 import argparse
 import array
+import threading
 import time
 
 # Third Party
@@ -205,6 +206,9 @@ class MPCacheEngine:
         # Temp CPU buffer for debug
         self.hot_buffer: dict[IPCCacheEngineKey, MemoryObj] = {}
 
+        # Temp thread lock for allocator and hot buffer
+        self.lock = threading.Lock()
+
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         gpu_context = GPUCacheContext(kv_caches)
         self.gpu_contexts[instance_id] = gpu_context
@@ -250,23 +254,24 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            num_tokens = self.chunk_size
+            cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
+            with self.lock:
+                memory_objects = self.memory_allocator.batched_allocate(
+                    cpu_shape, dtype=gpu_context.dtype, batch_size=len(keys)
+                )
+
             for idx, key in enumerate(keys):
-                if key in self.hot_buffer:
-                    # Already stored
-                    continue
+                memory_obj = memory_objects.pop()
+                with self.lock:
+                    if key in self.hot_buffer:
+                        # Already stored, free the pre-allocated memory
+                        memory_obj.ref_count_down()
+                        continue
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
                 slot_mapping = slot_mapping_tensor[start:end]
-
-                # cpu shape
-                num_tokens = len(slot_mapping)
-                cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-
-                # Allocate pinned memory
-                memory_obj = self.memory_allocator.allocate(
-                    cpu_shape, dtype=gpu_context.dtype
-                )
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
@@ -282,9 +287,11 @@ class MPCacheEngine:
                 )
 
                 memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
-                self.hot_buffer[key] = memory_obj
+                with self.lock:
+                    self.hot_buffer[key] = memory_obj
             event.record()
 
+        assert len(memory_objects) == 0, "Some memory objects were not used!"
         ed = time.perf_counter()
         logger.info(
             "Stored %d tokens in %.3f seconds",
@@ -313,10 +320,6 @@ class MPCacheEngine:
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
-            # vllm_event = torch.cuda.Event.from_ipc_handle(
-            #    gpu_context.device, event_ipc_handle
-            # )
-            # vllm_event.wait()
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
             event = torch.cuda.Event(interprocess=True)
@@ -327,10 +330,11 @@ class MPCacheEngine:
                     results.append(False)
                     continue
 
-                if key not in self.hot_buffer:
-                    results.append(False)
-                    skip_remaining = True
-                    continue
+                with self.lock:
+                    if key not in self.hot_buffer:
+                        results.append(False)
+                        skip_remaining = True
+                        continue
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
@@ -378,9 +382,10 @@ class MPCacheEngine:
         lock: bool | None = None,
     ) -> list[bool]:
         results = []
-        for key in keys:
-            exists = key in self.hot_buffer
-            results.append(exists)
+        with self.lock:
+            for key in keys:
+                exists = key in self.hot_buffer
+                results.append(exists)
         return results
 
     def debug(self) -> str:
@@ -417,14 +422,15 @@ class MPCacheEngine:
 
     def clear(self) -> None:
         # self.debug()
-        logger.info("Received clear request!")
-        self.memory_allocator.memcheck()
-        length = len(self.hot_buffer)
-        for obj in self.hot_buffer.values():
-            obj.ref_count_down()
-        self.hot_buffer.clear()
-        logger.info("Cleared %d cached items", length)
-        self.memory_allocator.memcheck()
+        with self.lock:
+            logger.info("Received clear request!")
+            self.memory_allocator.memcheck()
+            length = len(self.hot_buffer)
+            for obj in self.hot_buffer.values():
+                obj.ref_count_down()
+            self.hot_buffer.clear()
+            logger.info("Cleared %d cached items", length)
+            self.memory_allocator.memcheck()
 
 
 def add_handler_helper(
