@@ -1219,7 +1219,9 @@ class LMCacheEngine:
         chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
-        try:
+        # As mentioned in async_lookup_and_prefetch(), the future.result()
+        # is key data pair for each chunk in each tier. So extract the key
+        # and memory object pairs to memory_obj_map        try:
             keyed_memory_objs = future.result()
             memory_obj_map: dict[CacheEngineKey, MemoryObj] = {}
         except Exception as e:
@@ -1249,9 +1251,9 @@ class LMCacheEngine:
             used_keys.add(key)
 
         # NOTE: free the memory objects that are not hit.
-        for key, unused_mem_obj in memory_obj_map.items():
+        for key, mem_obj in memory_obj_map.items():
             if key not in used_keys:
-                unused_mem_obj.ref_count_down()
+                mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 
