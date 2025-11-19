@@ -501,6 +501,17 @@ class CacheEngineKey:
         if isinstance(self.chunk_hash, bytes):
             return self.chunk_hash.hex()
         return f"{self.chunk_hash:x}"
+    def with_new_world_size(self, world_size: int):
+        # Reconstruct the cache engine key with new world size
+        return CacheEngineKey(
+            self.fmt,
+            self.model_name,
+            world_size,
+            self.worker_id,
+            self.chunk_hash,
+            self.dtype,
+            self.request_configs,
+        )
 
 
 @dataclass(slots=True)

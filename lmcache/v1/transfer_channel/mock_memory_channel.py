@@ -154,3 +154,13 @@ class MockMemoryChannel(PySocketChannel):
 
         await asyncio.sleep(0.001)
         return len(buffers)
+
+    ############################################################
+    # Data plane: Prepare transfer (no-op for mock channel)
+    ############################################################
+    def prepare_transfer(
+        self,
+        transfer_spec: Optional[dict] = None,
+    ) -> None:
+        """No preparation needed for mock memory channel."""
+        pass

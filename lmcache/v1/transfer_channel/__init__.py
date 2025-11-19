@@ -1,18 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import Literal, Optional, overload
+
 # First Party
+from lmcache.v1.memory_management import PagedTensorMemoryMetadata
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+from lmcache.v1.transfer_channel.nixl_channel import NixlChannel, TPWorkerInfo
+from lmcache.v1.transfer_channel.transfer_utils import TransferRole
 
 
 # TODO(Jiayi): Refactor this function when we support more channels.
+@overload
+def CreateTransferChannel(
+    channel_type: Literal["nixl"],
+    async_mode: bool,
+    role: TransferRole,
+    allocator_meta: PagedTensorMemoryMetadata,
+    tp_rank: int,
+    peer_init_url: str,
+    tp_size: Optional[int] = None,
+    **kwargs,
+) -> NixlChannel: ...
+
+
+@overload
 def CreateTransferChannel(
     channel_type: str,
     async_mode: bool,
-    role: str,
-    buffer_ptr: int,
-    buffer_size: int,
-    align_bytes: int,
+    role: TransferRole,
+    allocator_meta: PagedTensorMemoryMetadata,
     tp_rank: int,
     peer_init_url: str,
+    tp_size: Optional[int] = None,
+    **kwargs,
+) -> BaseTransferChannel: ...
+
+
+def CreateTransferChannel(
+    channel_type: str,
+    async_mode: bool,
+    role: TransferRole,
+    allocator_meta: PagedTensorMemoryMetadata,
+    tp_rank: int,
+    peer_init_url: str,
+    tp_size: Optional[int] = None,
     **kwargs,
 ) -> BaseTransferChannel:
     """
@@ -48,10 +79,8 @@ def CreateTransferChannel(
         transfer_channel = NixlChannel(
             async_mode=async_mode,
             role=role,
-            buffer_ptr=buffer_ptr,
-            buffer_size=buffer_size,
-            align_bytes=align_bytes,
-            tp_rank=tp_rank,
+            allocator_meta=allocator_meta,
+            tp_info=TPWorkerInfo(tp_rank=tp_rank, tp_size=tp_size),
             peer_init_url=peer_init_url,
             **kwargs,
         )
@@ -66,9 +95,7 @@ def CreateTransferChannel(
         mock_memory_channel: BaseTransferChannel = MockMemoryChannel(
             async_mode=async_mode,
             role=role,
-            buffer_ptr=buffer_ptr,
-            buffer_size=buffer_size,
-            align_bytes=align_bytes,
+            allocator_meta=allocator_meta,
             tp_rank=tp_rank,
             peer_init_url=peer_init_url,
             **kwargs,

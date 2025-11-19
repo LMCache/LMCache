@@ -39,6 +39,7 @@ from lmcache.v1.transfer_channel import CreateTransferChannel
 from lmcache.v1.transfer_channel.transfer_utils import (
     P2PInitSideMsg,
     P2PInitSideRetMsg,
+    TransferRole,
 )
 
 if TYPE_CHECKING:
@@ -222,10 +223,8 @@ class P2PBackend(StorageBackendInterface):
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
             async_mode=True,
-            role="both",
-            buffer_ptr=self.memory_allocator.cpu_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.cpu_allocator.buffer_size,
-            align_bytes=self.memory_allocator.cpu_allocator.align_bytes,
+            role=TransferRole.BOTH,
+            allocator_meta=self.memory_allocator.cpu_allocator.metadata,
             tp_rank=self.tp_rank,
             peer_init_url=self.peer_init_url,
             peer_lookup_url=self.peer_lookup_url,

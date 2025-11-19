@@ -127,7 +127,7 @@ def CreateStorageBackends(
         # First Party
         from lmcache.v1.storage_backend.pd_backend import PDBackend
 
-        storage_backends["PDBackend"] = PDBackend(config, metadata)
+        storage_backends["PDBackend"] = PDBackend(config, metadata, loop)
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
