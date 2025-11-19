@@ -167,10 +167,7 @@ class GPUCacheContext:
         """
         Returns the temporary GPU buffer for transfers
         """
-        if self.is_mla_:
-            return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
-        else:
-            return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
+        return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
 
     @_lmcache_nvtx_annotate
     def get_slot_mapping_tensor(self, gpu_block_ids: list[int]) -> torch.Tensor:
