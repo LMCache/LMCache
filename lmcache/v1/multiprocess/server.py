@@ -185,7 +185,7 @@ class GPUCacheContext:
         Returns the shape of the KV buffer for the given number of tokens
         """
         if self.is_mla_:
-            return torch.Size((self.num_layers_, num_tokens, self.hidden_dim_size_))
+            return torch.Size((1, self.num_layers_, num_tokens, self.hidden_dim_size_))
         else:
             return torch.Size((2, self.num_layers_, num_tokens, self.hidden_dim_size_))
 
