@@ -10,9 +10,10 @@ This script reads chunk hash files and provides statistics about chunk reuse pat
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 import argparse
 import json
+import sys
 
 
 def load_chunk_hashes(input_dir: Path) -> List[Dict]:
@@ -239,7 +240,7 @@ def export_results(
     analysis: Dict,
     output_file: Path,
     include_time_series: bool = False,
-    records: List[Dict] | None = None,
+    records: Optional[List[Dict]] = None,
 ) -> None:
     """Export analysis results to a JSON file.
 
@@ -419,4 +420,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())
