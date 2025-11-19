@@ -110,21 +110,30 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
     ) -> Optional[int]:
         start_time = time.time()
         result = self.actual_lookup_client.lookup(token_ids, lookup_id, request_configs)
+        lookup_elapsed = time.time() - start_time
         with self.lock:
-            self.lookup_time += time.time() - start_time
-        if self.enabled:
-            start_time = time.time()
-            with self.lock:
-                if lookup_id in self.request_seen:
-                    return result
-                self.request_seen.add(lookup_id)
-            self.record_strategy.record(token_ids, lookup_id)
-            with self.lock:
-                self.record_time += time.time() - start_time
-            start_time = time.time()
-            self._check_exit_conditions()
-            with self.lock:
-                self.check_exit_time += time.time() - start_time
+            self.lookup_time += lookup_elapsed
+
+        if not self.enabled:
+            return result
+
+        with self.lock:
+            if lookup_id in self.request_seen:
+                return result
+            self.request_seen.add(lookup_id)
+
+        start_time = time.time()
+        self.record_strategy.record(token_ids, lookup_id)
+        record_elapsed = time.time() - start_time
+        with self.lock:
+            self.record_time += record_elapsed
+
+        start_time = time.time()
+        self._check_exit_conditions()
+        check_elapsed = time.time() - start_time
+        with self.lock:
+            self.check_exit_time += check_elapsed
+
         return result
 
     def clear_lookup_status(self, lookup_id: str) -> None:

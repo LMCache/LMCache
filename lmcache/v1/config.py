@@ -486,53 +486,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
         "description": "Enable async statistics recording.",
     },
-    "chunk_statistics_async_queue_capacity": {
-        "type": int,
-        "default": 100000,
-        "env_converter": int,
-        "description": "Async queue capacity.",
-    },
-    "chunk_statistics_async_preprocess_chunks": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-        "description": "Preprocess chunks before queuing.",
-    },
     "chunk_statistics_strategy": {
         "type": str,
         "default": "memory_bloom_filter",
         "env_converter": str,
         "description": "Recording strategy: memory_bloom_filter or file_hash.",
-    },
-    "chunk_statistics_mem_bf_expected_chunks": {
-        "type": int,
-        "default": 20000000,
-        "env_converter": int,
-        "description": "Expected unique chunks for Bloom Filter.",
-    },
-    "chunk_statistics_mem_bf_false_positive_rate": {
-        "type": float,
-        "default": 0.01,
-        "env_converter": float,
-        "description": "Bloom Filter false positive rate.",
-    },
-    "chunk_statistics_file_output_dir": {
-        "type": str,
-        "default": "./chunk_hashes",
-        "env_converter": str,
-        "description": "Output dir for file_hash strategy.",
-    },
-    "chunk_statistics_file_rotation_size": {
-        "type": int,
-        "default": 100 * 1024 * 1024,
-        "env_converter": int,
-        "description": "File rotation size in bytes.",
-    },
-    "chunk_statistics_file_max_count": {
-        "type": int,
-        "default": 100,
-        "env_converter": int,
-        "description": "Max files to keep.",
     },
 }
 

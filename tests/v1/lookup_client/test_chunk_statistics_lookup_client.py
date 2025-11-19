@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
+from typing import Any, Optional, Union
 import shutil
 import tempfile
 import time
@@ -69,9 +69,13 @@ class BaseTestCase:
         default_kwargs = {
             "enable_chunk_statistics": True,
             "chunk_statistics_strategy": "memory_bloom_filter",
-            "chunk_statistics_mem_bf_expected_chunks": 1000,
-            "chunk_statistics_mem_bf_false_positive_rate": 0.01,
+            "extra_config": {
+                "chunk_statistics_mem_bf_expected_chunks": 1000,
+                "chunk_statistics_mem_bf_false_positive_rate": 0.01,
+            },
         }
+        if "extra_config" in kwargs:
+            default_kwargs["extra_config"].update(kwargs.pop("extra_config"))
         default_kwargs.update(kwargs)
         stats_client = self.create_stats_client(**default_kwargs)
         stats_client.start_statistics()
@@ -136,8 +140,10 @@ class TestChunkStatisticsBasic(BaseTestCase):
 class TestChunkStatisticsMetrics(BaseTestCase):
     def test_detailed_metrics(self):
         stats_client, _ = self.setup_stats_client(
-            chunk_statistics_mem_bf_expected_chunks=5000,
-            chunk_statistics_mem_bf_false_positive_rate=0.01,
+            extra_config={
+                "chunk_statistics_mem_bf_expected_chunks": 5000,
+                "chunk_statistics_mem_bf_false_positive_rate": 0.01,
+            }
         )
         stats_client.lookup(list(range(512)), "req_1")
         stats_client.lookup(list(range(256)), "req_2")
@@ -194,8 +200,10 @@ class TestChunkStatisticsMetrics(BaseTestCase):
 
     def test_memory_efficiency(self):
         stats_client, _ = self.setup_stats_client(
-            chunk_statistics_mem_bf_expected_chunks=100000,
-            chunk_statistics_mem_bf_false_positive_rate=0.01,
+            extra_config={
+                "chunk_statistics_mem_bf_expected_chunks": 100000,
+                "chunk_statistics_mem_bf_false_positive_rate": 0.01,
+            }
         )
         for i in range(100):
             stats_client.lookup(list(range(i * 256, (i + 1) * 256)), f"req_{i}")
@@ -266,22 +274,25 @@ class TestChunkStatisticsPerformance:
             mode_desc = f"{strategy_name} (Async Preprocessed)"
         else:
             mode_desc = f"{strategy_name} (Async Raw Tokens)"
-        temp_dir = (
+        temp_dir: Optional[str] = (
             tempfile.mkdtemp(prefix="lmcache_test_")
             if strategy_name == "file_hash"
             else None
         )
         try:
-            config_kwargs = {
-                "chunk_size": 256,
-                "chunk_statistics_strategy": strategy_name,
+            extra_config: dict[str, Any] = {
                 "chunk_statistics_mem_bf_expected_chunks": 100000,
                 "chunk_statistics_mem_bf_false_positive_rate": 0.01,
-                "chunk_statistics_async_enabled": async_enabled,
                 "chunk_statistics_async_preprocess_chunks": async_preprocess_chunks,
             }
             if temp_dir:
-                config_kwargs["chunk_statistics_file_output_dir"] = temp_dir
+                extra_config["chunk_statistics_file_output_dir"] = temp_dir
+            config_kwargs = {
+                "chunk_size": 256,
+                "chunk_statistics_async_enabled": async_enabled,
+                "chunk_statistics_strategy": strategy_name,
+                "extra_config": extra_config,
+            }
             config = LMCacheEngineConfig(**config_kwargs)
             stats_client = ChunkStatisticsLookupClient(FastMissLookupClient(), config)
             stats_client.start_statistics()
@@ -313,9 +324,8 @@ class TestChunkStatisticsPerformance:
                 async_queue = stats.get("async_queue", {})
                 if async_queue:
                     assert async_queue.get("enabled") is True
-                    assert (
-                        async_queue.get("capacity")
-                        == config.chunk_statistics_async_queue_capacity
+                    assert async_queue.get("capacity") == config.get_extra_config_value(
+                        "chunk_statistics_async_queue_capacity", 100000
                     )
                     assert async_queue.get("full_blocks", 0) == 0
         finally:
@@ -338,7 +348,9 @@ class TestFileHashStrategy:
                 {
                     "chunk_statistics_enabled": True,
                     "chunk_statistics_strategy": "file_hash",
-                    "chunk_statistics_file_output_dir": temp_dir,
+                    "extra_config": {
+                        "chunk_statistics_file_output_dir": temp_dir,
+                    },
                 }
             )
             client = ChunkStatisticsLookupClient(MockLookupClient(), config)

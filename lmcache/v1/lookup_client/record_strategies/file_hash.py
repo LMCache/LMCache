@@ -21,12 +21,29 @@ class FileHashStrategy(RecordStrategy):
         super().__init__(
             chunk_size=chunk_size,
             async_enabled=config.chunk_statistics_async_enabled,
-            async_queue_capacity=config.chunk_statistics_async_queue_capacity,
-            async_preprocess_chunks=config.chunk_statistics_async_preprocess_chunks,
+            # Maximum number of items in async processing queue
+            async_queue_capacity=config.get_extra_config_value(
+                "chunk_statistics_async_queue_capacity", 100000
+            ),
+            # Whether to preprocess chunks before adding to async queue
+            async_preprocess_chunks=config.get_extra_config_value(
+                "chunk_statistics_async_preprocess_chunks", False
+            ),
         )
-        self.file_rotation_size = config.chunk_statistics_file_rotation_size
-        self.file_max_count = config.chunk_statistics_file_max_count
-        self.output_dir = Path(config.chunk_statistics_file_output_dir)
+        # File size threshold in bytes for rotation (default: 100MB)
+        self.file_rotation_size = config.get_extra_config_value(
+            "chunk_statistics_file_rotation_size", 100 * 1024 * 1024
+        )
+        # Maximum number of files to keep before deleting oldest
+        self.file_max_count = config.get_extra_config_value(
+            "chunk_statistics_file_max_count", 100
+        )
+        # Directory path for storing chunk hash files
+        self.output_dir = Path(
+            config.get_extra_config_value(
+                "chunk_statistics_file_output_dir", "./chunk_hashes"
+            )
+        )
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.file_count = 0
         self.current_file_size = 0

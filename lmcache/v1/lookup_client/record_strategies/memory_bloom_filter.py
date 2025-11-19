@@ -15,12 +15,24 @@ class MemoryBloomFilterStrategy(RecordStrategy):
         super().__init__(
             chunk_size=chunk_size,
             async_enabled=config.chunk_statistics_async_enabled,
-            async_queue_capacity=config.chunk_statistics_async_queue_capacity,
-            async_preprocess_chunks=config.chunk_statistics_async_preprocess_chunks,
+            # Maximum number of items in async processing queue
+            async_queue_capacity=config.get_extra_config_value(
+                "chunk_statistics_async_queue_capacity", 100000
+            ),
+            # Whether to preprocess chunks before adding to async queue
+            async_preprocess_chunks=config.get_extra_config_value(
+                "chunk_statistics_async_preprocess_chunks", False
+            ),
         )
         self.global_bloom = BloomFilter(
-            config.chunk_statistics_mem_bf_expected_chunks,
-            config.chunk_statistics_mem_bf_false_positive_rate,
+            # Expected number of chunks for bloom filter capacity planning
+            config.get_extra_config_value(
+                "chunk_statistics_mem_bf_expected_chunks", 20000000
+            ),
+            # Target false positive rate for bloom filter
+            config.get_extra_config_value(
+                "chunk_statistics_mem_bf_false_positive_rate", 0.01
+            ),
         )
 
     def _preprocess_for_async(self, token_ids: list[int]) -> list[list[int]]:
