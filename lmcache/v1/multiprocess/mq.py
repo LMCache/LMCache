@@ -139,20 +139,6 @@ class MessageQueueClient:
         self.request_counter = 0
         self.pending_futures: dict[int, MessagingFuture[Any]] = {}
 
-    def _prepare_task_sockets(self) -> tuple[zmq.Socket, zmq.Socket]:
-        """Create 2 inproc socket pair for the zmq-poller compatible task
-        queue
-
-        Returns:
-            tuple[zmq.Socket, zmq.Socket]: The (push_socket, pull_socket)
-        """
-        inproc_url = "inproc://mq_client_task_queue/" + str(uuid.uuid4())
-        push_socket = self.ctx.socket(zmq.PUSH)
-        pull_socket = self.ctx.socket(zmq.PULL)
-        pull_socket.bind(inproc_url)
-        push_socket.connect(inproc_url)
-        return push_socket, pull_socket
-
     def _process_outbound_task(self):
         try:
             while wrapped_request := self.input_queue.get_nowait():
