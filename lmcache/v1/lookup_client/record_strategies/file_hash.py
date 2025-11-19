@@ -18,18 +18,7 @@ class FileHashStrategy(RecordStrategy):
     """File-based strategy that writes chunk hashes to disk."""
 
     def __init__(self, config, chunk_size: int):
-        super().__init__(
-            chunk_size=chunk_size,
-            async_enabled=config.chunk_statistics_async_enabled,
-            # Maximum number of items in async processing queue
-            async_queue_capacity=config.get_extra_config_value(
-                "chunk_statistics_async_queue_capacity", 100000
-            ),
-            # Whether to preprocess chunks before adding to async queue
-            async_preprocess_chunks=config.get_extra_config_value(
-                "chunk_statistics_async_preprocess_chunks", False
-            ),
-        )
+        super().__init__(chunk_size=chunk_size)
         # File size threshold in bytes for rotation (default: 100MB)
         self.file_rotation_size = config.get_extra_config_value(
             "chunk_statistics_file_rotation_size", 100 * 1024 * 1024
@@ -51,13 +40,12 @@ class FileHashStrategy(RecordStrategy):
         self.current_file_handle: Optional[io.TextIOWrapper] = None
         self.file_list: list[Path] = []
 
-    def _preprocess_for_async(self, token_ids: list[int]) -> list[str]:
+    def preprocess(self, token_ids: list[int]) -> list[str]:
+        """Preprocess token IDs into hex hash strings."""
         return self._compute_chunk_hashes_hex(token_ids)
 
-    def _record_sync(self, token_ids: list[int], lookup_id: str) -> None:
-        self._write_data_to_file(self._compute_chunk_hashes_hex(token_ids), lookup_id)
-
-    def _write_data_to_file(self, chunk_hashes: list[str], lookup_id: str) -> None:
+    def record(self, chunk_hashes: list[str], lookup_id: str) -> None:
+        """Record chunk hashes to file."""
         with self.lock:
             if (
                 self.current_file is None
@@ -97,14 +85,6 @@ class FileHashStrategy(RecordStrategy):
             except Exception as e:
                 logger.error("Failed to delete file %s: %s", oldest_file, e)
 
-    def _process_queue_item(self, item) -> None:
-        data, lookup_id = item
-        if self.async_preprocess_chunks:
-            chunk_hashes = data
-        else:
-            chunk_hashes = self._compute_chunk_hashes_hex(data)
-        self._write_data_to_file(chunk_hashes, lookup_id)
-
     def get_statistics(self) -> dict:
         stats = super().get_statistics()
         stats.update(
@@ -130,7 +110,7 @@ class FileHashStrategy(RecordStrategy):
         )
 
     def reset(self) -> None:
-        self.wait_for_async_processing(timeout=5.0)
+        """Reset file writer and statistics."""
         with self.lock:
             if self.current_file_handle is not None:
                 cast(io.TextIOWrapper, self.current_file_handle).close()
@@ -141,10 +121,9 @@ class FileHashStrategy(RecordStrategy):
             self.file_count = 0
             self.current_file_size = 0
             self.file_list.clear()
-            self._clear_async_queue()
 
     def close(self) -> None:
-        super().close()
+        """Close file handles."""
         if self.current_file_handle is not None:
             cast(io.TextIOWrapper, self.current_file_handle).close()
             self.current_file_handle = None

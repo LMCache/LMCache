@@ -8,7 +8,10 @@ import pkgutil
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.lookup_client.record_strategies.base import RecordStrategy
+from lmcache.v1.lookup_client.record_strategies.base import (
+    AsyncRecorder,
+    RecordStrategy,
+)
 
 logger = init_logger(__name__)
 
@@ -51,14 +54,19 @@ def create_record_strategy(config) -> RecordStrategy:
         raise ValueError(
             f"Unknown strategy: {strategy_name}. Available: {list(strategies.keys())}"
         )
-    return strategies[strategy_name](config, chunk_size)  # type: ignore[arg-type]
+    return strategies[strategy_name](config, chunk_size)  # type: ignore[call-arg]
 
 
 def list_record_strategies() -> list[str]:
     return list(_get_strategies().keys())
 
 
-__all__ = ["RecordStrategy", "create_record_strategy", "list_record_strategies"]
+__all__ = [
+    "AsyncRecorder",
+    "RecordStrategy",
+    "create_record_strategy",
+    "list_record_strategies",
+]
 
 
 def __getattr__(name):

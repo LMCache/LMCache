@@ -245,32 +245,23 @@ class TestChunkStatisticsPerformance:
     """Test suite for chunk statistics performance validation."""
 
     @pytest.mark.parametrize(
-        "strategy_name,async_enabled,async_preprocess_chunks",
+        "strategy_name,async_preprocess_chunks",
         [
-            ("memory_bloom_filter", False, False),
-            ("memory_bloom_filter", True, True),
-            ("memory_bloom_filter", True, False),
-            ("file_hash", False, False),
-            ("file_hash", True, True),
-            ("file_hash", True, False),
+            ("memory_bloom_filter", True),
+            ("memory_bloom_filter", False),
+            ("file_hash", True),
+            ("file_hash", False),
         ],
     )
-    def test_worst_case_overhead(
-        self, strategy_name, async_enabled, async_preprocess_chunks
-    ):
+    def test_worst_case_overhead(self, strategy_name, async_preprocess_chunks):
         """Test worst case performance with different strategies and configs."""
         self._run_performance_test(
             strategy_name=strategy_name,
-            async_enabled=async_enabled,
             async_preprocess_chunks=async_preprocess_chunks,
         )
 
-    def _run_performance_test(
-        self, strategy_name: str, async_enabled: bool, async_preprocess_chunks: bool
-    ):
-        if not async_enabled:
-            mode_desc = f"{strategy_name} (Sync)"
-        elif async_preprocess_chunks:
+    def _run_performance_test(self, strategy_name: str, async_preprocess_chunks: bool):
+        if async_preprocess_chunks:
             mode_desc = f"{strategy_name} (Async Preprocessed)"
         else:
             mode_desc = f"{strategy_name} (Async Raw Tokens)"
@@ -289,7 +280,6 @@ class TestChunkStatisticsPerformance:
                 extra_config["chunk_statistics_file_output_dir"] = temp_dir
             config_kwargs = {
                 "chunk_size": 256,
-                "chunk_statistics_async_enabled": async_enabled,
                 "chunk_statistics_strategy": strategy_name,
                 "extra_config": extra_config,
             }
@@ -303,10 +293,7 @@ class TestChunkStatisticsPerformance:
             stats_client.start_statistics()
             for i in range(num_requests):
                 stats_client.lookup(token_ids, f"req_{i}")
-            if async_enabled:
-                assert stats_client.wait_for_async_processing(timeout=10.0), (
-                    "Async timeout"
-                )
+            assert stats_client.wait_for_async_processing(timeout=10.0), "Async timeout"
             stats = stats_client.get_statistics()
             timing = stats["timing"]
 
@@ -320,14 +307,12 @@ class TestChunkStatisticsPerformance:
             assert timing["record_statistics_time_seconds"] / num_requests < 0.01, (
                 "Avg record time > 10ms"
             )
-            if async_enabled:
-                async_queue = stats.get("async_queue", {})
-                if async_queue:
-                    assert async_queue.get("enabled") is True
-                    assert async_queue.get("capacity") == config.get_extra_config_value(
-                        "chunk_statistics_async_queue_capacity", 100000
-                    )
-                    assert async_queue.get("full_blocks", 0) == 0
+            async_queue = stats.get("async_queue", {})
+            if async_queue:
+                assert async_queue.get("capacity") == config.get_extra_config_value(
+                    "chunk_statistics_async_queue_capacity", 100000
+                )
+                assert async_queue.get("full_blocks", 0) == 0
         finally:
             if temp_dir:
                 try:

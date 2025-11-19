@@ -14,6 +14,7 @@ from lmcache.observability import PrometheusLogger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.record_strategies import (
+    AsyncRecorder,
     RecordStrategy,
     create_record_strategy,
 )
@@ -45,8 +46,16 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         self.enable_auto_exit = (
             self.timeout_hours > 0.0 or self.target_unique_chunks > 0
         )
-        self.record_strategy: RecordStrategy
-        self.record_strategy = create_record_strategy(config)
+        strategy: RecordStrategy = create_record_strategy(config)
+        self.recorder = AsyncRecorder(
+            strategy=strategy,
+            queue_capacity=config.get_extra_config_value(
+                "chunk_statistics_async_queue_capacity", 100000
+            ),
+            preprocess_in_caller=config.get_extra_config_value(
+                "chunk_statistics_async_preprocess_chunks", False
+            ),
+        )
         self._setup_metrics()
         if config.chunk_statistics_auto_start_statistics:
             self.start_statistics()
@@ -62,15 +71,15 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             self.enabled = False
 
     def reset_statistics(self) -> None:
-        self.record_strategy.wait_for_async_processing(timeout=5.0)
+        self.recorder.wait_for_completion(timeout=5.0)
         with self.lock:
             self.request_seen.clear()
-            self.record_strategy.reset()
+            self.recorder.reset()
 
     def get_statistics(self) -> dict:
-        self.record_strategy.wait_for_async_processing(timeout=5.0)
+        self.recorder.wait_for_completion(timeout=5.0)
         with self.lock:
-            strategy_stats = self.record_strategy.get_statistics()
+            strategy_stats = self.recorder.get_statistics()
             total_time = self.lookup_time + self.record_time + self.check_exit_time
             overhead_time = self.record_time + self.check_exit_time
             overhead_pct = (
@@ -100,7 +109,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             return result
 
     def wait_for_async_processing(self, timeout: float = 5.0) -> bool:
-        return self.record_strategy.wait_for_async_processing(timeout)
+        return self.recorder.wait_for_completion(timeout)
 
     def lookup(
         self,
@@ -123,7 +132,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             self.request_seen.add(lookup_id)
 
         start_time = time.time()
-        self.record_strategy.record(token_ids, lookup_id)
+        self.recorder.record_async(token_ids, lookup_id)
         record_elapsed = time.time() - start_time
         with self.lock:
             self.record_time += record_elapsed
@@ -145,7 +154,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
     def close(self) -> None:
         if self.enabled:
             self.stop_statistics()
-        self.record_strategy.close()
+        self.recorder.close()
         self.actual_lookup_client.close()
 
     def _check_exit_conditions(self) -> None:
@@ -161,7 +170,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                     f"Timeout: {elapsed_hours:.2f}h >= {self.timeout_hours:.2f}h"
                 )
         if self.target_unique_chunks > 0:
-            unique = self.record_strategy.unique_chunks_count
+            unique = self.recorder.strategy.unique_chunks_count
             if unique >= self.target_unique_chunks:
                 stop_reason = f"Target reached: {unique} >= {self.target_unique_chunks}"
         if stop_reason:
@@ -181,4 +190,4 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             prometheus_logger.chunk_statistics_total_requests.set_function(
                 lambda: len(self.request_seen)
             )
-            self.record_strategy.setup_metrics(prometheus_logger)
+            self.recorder.strategy.setup_metrics(prometheus_logger)

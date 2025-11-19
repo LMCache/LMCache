@@ -12,18 +12,7 @@ class MemoryBloomFilterStrategy(RecordStrategy):
     """Memory-based strategy using Bloom Filter."""
 
     def __init__(self, config, chunk_size: int):
-        super().__init__(
-            chunk_size=chunk_size,
-            async_enabled=config.chunk_statistics_async_enabled,
-            # Maximum number of items in async processing queue
-            async_queue_capacity=config.get_extra_config_value(
-                "chunk_statistics_async_queue_capacity", 100000
-            ),
-            # Whether to preprocess chunks before adding to async queue
-            async_preprocess_chunks=config.get_extra_config_value(
-                "chunk_statistics_async_preprocess_chunks", False
-            ),
-        )
+        super().__init__(chunk_size=chunk_size)
         self.global_bloom = BloomFilter(
             # Expected number of chunks for bloom filter capacity planning
             config.get_extra_config_value(
@@ -35,14 +24,7 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             ),
         )
 
-    def _preprocess_for_async(self, token_ids: list[int]) -> list[list[int]]:
-        return self._preprocess_chunks(token_ids)
-
-    def _record_sync(self, token_ids: list[int], lookup_id: str) -> None:
-        chunk_bloom_positions = self._preprocess_chunks(token_ids)
-        self._process_chunk_data(chunk_bloom_positions)
-
-    def _preprocess_chunks(self, token_ids: list[int]) -> list[list[int]]:
+    def preprocess(self, token_ids: list[int]) -> list[list[int]]:
         """Preprocess token IDs into bloom filter hash positions.
 
         Args:
@@ -67,15 +49,8 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             chunk_data_list.append(self.global_bloom._hashes(prefix_hash))
         return chunk_data_list
 
-    def _process_queue_item(self, item) -> None:
-        data, lookup_id = item
-        if self.async_preprocess_chunks:
-            chunk_bloom_positions = data
-        else:
-            chunk_bloom_positions = self._preprocess_chunks(data)
-        self._process_chunk_data(chunk_bloom_positions)
-
-    def _process_chunk_data(self, chunk_bloom_positions: list[list[int]]) -> None:
+    def record(self, chunk_bloom_positions: list[list[int]], lookup_id: str) -> None:
+        """Record chunk bloom filter positions and update statistics."""
         with self.lock:
             unique = self.global_bloom.add_batch_with_hashes_and_check(
                 chunk_bloom_positions
@@ -99,11 +74,8 @@ class MemoryBloomFilterStrategy(RecordStrategy):
         )
 
     def reset(self) -> None:
-        self.wait_for_async_processing(timeout=5.0)
+        """Reset bloom filter and statistics."""
         with self.lock:
             self.global_bloom.clear()
             self.total_chunks = 0
             self.unique_chunks_count = 0
-            self.queue_full_blocks = 0
-            self.queue_max_size = 0
-            self._clear_async_queue()

@@ -480,12 +480,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": int,
         "description": "Auto-stop at target unique chunks.",
     },
-    "chunk_statistics_async_enabled": {
-        "type": bool,
-        "default": True,
-        "env_converter": _to_bool,
-        "description": "Enable async statistics recording.",
-    },
     "chunk_statistics_strategy": {
         "type": str,
         "default": "memory_bloom_filter",
