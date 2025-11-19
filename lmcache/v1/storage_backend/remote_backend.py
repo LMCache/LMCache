@@ -154,11 +154,6 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Returning False")
             return False
 
-    def support_batched_contains(self) -> bool:
-        return (
-            self.connection is not None and self.connection.support_batched_contains()
-        )
-
     def batched_contains(
         self,
         keys: List[CacheEngineKey],
@@ -170,6 +165,9 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in batched_contains, returning all False"
             )
             return [False] * len(keys)
+
+        if not self.connection.support_batched_contains():
+            return super().batched_contains(keys, pin, stop_after_first_not_exits)
 
         if self._mla_worker_id_as0_mode:
             keys = [key.with_new_worker_id(0) for key in keys]
