@@ -168,7 +168,7 @@ class GPUCacheContext:
         Returns the temporary GPU buffer for transfers
         """
         if self.is_mla_:
-            return self.tmp_gpu_buffer_[:, :num_tokens, :]
+            return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
         else:
             return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
 
