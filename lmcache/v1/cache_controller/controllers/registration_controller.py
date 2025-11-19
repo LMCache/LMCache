@@ -150,9 +150,7 @@ class RegistrationController:
         self.worker_mapping[instance_id].append(worker_id)
         self.worker_mapping[instance_id].sort()
 
-        logger.info(
-            f"Registered instance-worker {key} with URL {url}"
-        )
+        logger.info(f"Registered instance-worker {key} with URL {url}")
 
     async def deregister(self, msg: DeRegisterMsg) -> None:
         """
