@@ -43,16 +43,17 @@ cleanup() {
         local cid="${!cid_var:-}"
         echo "  - Killing and removing container: $cid" >&2
         if [[ -n "$cid" ]]; then
-            docker kill "$cid" >&2 || echo "    [debug] docker kill exited with $?" >&2
-            docker rm "$cid" >&2 || echo "    [debug] docker rm exited with $?" >&2
+            docker kill "$cid" >&2
+            docker rm "$cid" >&2
         fi
     done
 
     # Clean up ports if defined
     for port_var in PORT PORT1 PORT2; do
         local port="${!port_var:-}"
+        echo "  - Killing and removing port: $port" >&2
         if [[ -n "$port" ]]; then
-            fuser -k "${port}/tcp" &>/dev/null || true
+            fuser -k "${port}/tcp" >&2
         fi
     done
 }
