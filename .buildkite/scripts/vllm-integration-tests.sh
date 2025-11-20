@@ -21,7 +21,6 @@
 # Note: L4 CI runners cannot use Flash Infer
 
 set -e
-
 trap 'cleanup $?' EXIT INT TERM
 
 CID=
@@ -532,8 +531,8 @@ echo "Using port $PORT to send or receive requests."
 # Need to run from docker directory
 cd docker/
 
-# # Create the container image
-# build_lmcache_vllmopenai_image
+# Create the container image
+build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
