@@ -58,7 +58,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # this helps us support timeout semantics
         self.first_lookup_time: dict[str, float] = {}
         self.timeout_ms = config.lookup_timeout_ms
-        
+
         self.ctx = get_zmq_context(use_asyncio=False)
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
@@ -182,7 +182,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 return req_status
             self.reqs_status[lookup_id] = None
             self.first_lookup_time[lookup_id] = time.time()
-            
+
         hashes: list[int] = []
 
         offsets = []
