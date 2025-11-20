@@ -772,9 +772,7 @@ class LMCacheEngine:
 
         # Skip the number of tokens that are already computed, align to chunk size
         skip_n_tokens = (
-            num_computed_tokens
-            // self.config.chunk_size
-            * self.config.chunk_size
+            num_computed_tokens // self.config.chunk_size * self.config.chunk_size
         )
 
         res = skip_n_tokens
@@ -856,7 +854,7 @@ class LMCacheEngine:
             # It is possible that res = skip_n_tokens and no lookup is performed.
             # In this case, using res as the number of hit tokens will overcount
             # the number of hit tokens.
-            # TODO deprecate this metric and use retreive metrics instead.
+            # TODO deprecate this metric and use retrieve metrics instead.
             self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
