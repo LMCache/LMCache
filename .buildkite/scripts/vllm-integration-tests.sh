@@ -42,8 +42,8 @@ cleanup() {
         local cid="${!cid_var:-}"
         echo "  - Killing and removing container: $cid" >&2
         if [[ -n "$cid" ]]; then
-            docker kill "$cid" >&2
-            docker rm "$cid" >&2
+            docker kill "$cid" >&2 || true
+            docker rm "$cid" >&2 || true
         fi
     done
 
@@ -52,7 +52,7 @@ cleanup() {
         local port="${!port_var:-}"
         echo "  - Killing and removing port: $port" >&2
         if [[ -n "$port" ]]; then
-            fuser -k "${port}/tcp" >&2
+            fuser -k "${port}/tcp" >&2 || true
         fi
     done
 }
@@ -531,8 +531,8 @@ echo "Using port $PORT to send or receive requests."
 # Need to run from docker directory
 cd docker/
 
-# Create the container image
-build_lmcache_vllmopenai_image
+# # Create the container image
+# build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
