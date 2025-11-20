@@ -252,6 +252,35 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
      - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
 
+P2P Backend Configurations
+--------------------------
+
+Settings for P2P (peer-to-peer) backend timeout behavior. These configurations are specified through ``extra_config``.
+
+.. code-block:: yaml
+
+    extra_config:
+      p2p_socket_recv_timeout_ms: 30000
+      p2p_socket_send_timeout_ms: 10000
+      p2p_peer_connection_timeout_ms: 60000
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Configuration Key
+     - Default
+     - Description
+   * - p2p_socket_recv_timeout_ms
+     - 30000
+     - Timeout in milliseconds for socket receive operations
+   * - p2p_socket_send_timeout_ms
+     - 10000
+     - Timeout in milliseconds for socket send operations
+   * - p2p_peer_connection_timeout_ms
+     - 60000
+     - Timeout in milliseconds for establishing peer connections
+
 Nixl (as a storage backend) Configurations
 ------------------------------------------
 

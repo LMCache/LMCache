@@ -154,6 +154,7 @@ def CreateStorageBackends(
 
     if config.enable_p2p:
         assert local_cpu_backend is not None
+        assert lmcache_worker is not None
         p2p_backend = P2PBackend(
             config,
             metadata,
