@@ -781,8 +781,7 @@ class StorageManager:
         return total_hit_chunks
 
     def get_block_mapping(
-        self,
-        chunk_infos: List[Tuple[CacheEngineKey, int, int]]
+        self, chunk_infos: List[Tuple[CacheEngineKey, int, int]]
     ) -> Dict[str, List[Tuple[CacheEngineKey, int, int]]]:
         """
         Get block mapping for the given chunk infos, works by prefix match.
