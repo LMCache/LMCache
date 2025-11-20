@@ -50,11 +50,9 @@ docker run --runtime nvidia --gpus all \
     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
     -v ~/.cache/huggingface:/home/ubuntu/.cache/huggingface \
     --network host \
-    --entrypoint "/usr/local/bin/vllm" \
     lmcache/vllm-openai:latest \
-    serve mistralai/Mistral-7B-Instruct-v0.2 --port 8001 --kv-transfer-config \
-    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-    --enable-chunked-prefill false
+    mistralai/Mistral-7B-Instruct-v0.2 --port 8001 --kv-transfer-config \
+    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
 
   Then run the following command to query vLLM to populate the LMCache:

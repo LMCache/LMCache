@@ -142,8 +142,9 @@ class P2PBackend(StorageBackendInterface):
 
         self.dtype = metadata.kv_dtype
         self.full_size_shape = list(self.memory_allocator.cpu_allocator.shape)
-        # TODO(Jiayi): remove this hardcode
-        self.fmt: MemoryFormat = MemoryFormat.KV_2LTD
+        self.fmt: MemoryFormat = (
+            MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
+        )
         self.chunk_size = config.chunk_size
 
         self.transfer_channel = CreateTransferChannel(

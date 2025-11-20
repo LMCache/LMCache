@@ -35,6 +35,7 @@ except ImportError:
     from vllm.utils import get_kv_cache_torch_dtype
 
 # Third Party
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 import torch
@@ -50,7 +51,7 @@ from lmcache.integration.vllm.utils import (
     mla_enabled,
 )
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
@@ -68,6 +69,7 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
+from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
 
 if TYPE_CHECKING:
     # Third Party
@@ -502,10 +504,21 @@ def _init_lmcache_engine(
     )
 
     # Change current device.
-    num_gpus = torch.cuda.device_count()
+    if current_platform.is_cuda_alike():
+        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
+        torch_dev = torch.cuda
+        dev_name = "cuda"
+    elif current_platform.is_xpu():
+        logger.info("XPU device is available. Using XPU for LMCache engine.")
+        torch_dev = torch.xpu
+        dev_name = "xpu"
+    else:
+        raise RuntimeError("Unsupported device platform for LMCache engine.")
+
+    num_gpus = torch_dev.device_count()
     local_rank = parallel_config.rank % num_gpus
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    torch_dev.set_device(local_rank)
+    device = torch.device(f"{dev_name}:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
@@ -520,8 +533,11 @@ def _init_lmcache_engine(
     use_gpu = need_gpu_interm_buffer(lmcache_config)
     vllm_gpu_connector: Optional[GPUConnectorInterface]
 
-    if use_mla and lmcache_config.use_layerwise:
-        raise ValueError("layerwise MLA connector is not supported yet")
+    # Validate MLA with layerwise configurations
+    if use_mla and lmcache_config.use_layerwise and lmcache_config.enable_blending:
+        raise ValueError(
+            "We haven't supported MLA with Cacheblend yet. Please disable blending."
+        )
 
     # When use_mla is True, num_kv_head is 1
     hidden_dim_size = num_kv_head * head_size
@@ -550,10 +566,18 @@ def _init_lmcache_engine(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
+                use_mla=use_mla,
             )
         tpg = get_tp_group()
     else:
-        vllm_gpu_connector = VLLMPagedMemGPUConnectorV2(
+        if current_platform.is_cuda_alike():
+            connector_cls = VLLMPagedMemGPUConnectorV2
+        elif current_platform.is_xpu():
+            connector_cls = VLLMPagedMemXPUConnectorV2
+        else:
+            raise RuntimeError("No supported connector found for the current platform.")
+
+        vllm_gpu_connector = connector_cls(
             hidden_dim_size,
             num_layer,
             use_gpu=use_gpu,
@@ -604,6 +628,7 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self._vllm_config = vllm_config
+        self.device = vllm_config.device_config.device
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
         config = lmcache_get_or_create_config()
@@ -642,12 +667,28 @@ class LMCacheConnectorV1Impl:
                     vllm_config,
                     role="scheduler",
                 )
+            else:
+                self.lmcache_engine = None
+                # Create a dummy metadata for create prometheus logger
+                # kv_dtype kv_shape and use_mla are dummy data
+                # TODO(baoloongmao): PrometheusLogger should be initialized without
+                #  having to create some dummy data in the future
+                metadata = LMCacheEngineMetadata(
+                    model_name=vllm_config.model_config.model,
+                    world_size=vllm_config.parallel_config.world_size,
+                    worker_id=0,
+                    fmt="vllm",
+                    kv_dtype=torch.bfloat16,
+                    kv_shape=(1, 1, 1, 1, 1),
+                    use_mla=False,
+                    role="scheduler",
+                )
+                PrometheusLogger.GetOrCreate(metadata)
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine
             )
             self._unfinished_requests: dict[str, Request] = {}
-            self.lmcache_engine = None
         else:
             self.lmcache_engine = _init_lmcache_engine(
                 config,
@@ -744,12 +785,45 @@ class LMCacheConnectorV1Impl:
         else:
             self.api_server = None  # type: ignore[assignment]
             self.plugin_launcher = None  # type: ignore[assignment]
+
+        # Setup metrics for monitoring data structures
+        self._setup_metrics()
+
         logger.info(
             f"LMCache initialized for role {role} with version {utils.get_version()}, "
             f"vllm version {VLLM_VERSION}, "
             "lmcache cache_engine metadata: "
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
         )
+
+    def _setup_metrics(self):
+        """Setup metrics for monitoring data structures in the connector."""
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is None:
+            logger.warning(
+                "PrometheusLogger is not initialized, "
+                "connector metrics will not be collected"
+            )
+            return
+
+        # Set up metrics for scheduler-specific and general data structures
+        metrics_map = {
+            "_unfinished_requests": "scheduler_unfinished_requests_count",
+            "load_specs": "connector_load_specs_count",
+            "_request_trackers": "connector_request_trackers_count",
+            "kv_caches": "connector_kv_caches_count",
+            "layerwise_retrievers": "connector_layerwise_retrievers_count",
+            "_invalid_block_ids": "connector_invalid_block_ids_count",
+            "_requests_priority": "connector_requests_priority_count",
+        }
+
+        for attr_name, metric_name in metrics_map.items():
+            if hasattr(self, attr_name):
+                metric = getattr(prometheus_logger, metric_name)
+                # Use a default argument in the lambda to capture
+                # the current value of `attr_name`
+                # to avoid issues with late binding in closures.
+                metric.set_function(lambda name=attr_name: len(getattr(self, name)))
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
@@ -873,7 +947,7 @@ class LMCacheConnectorV1Impl:
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = request.slot_mapping.cuda()
+            slot_mapping = request.slot_mapping.to(self.device)
             assert len(tokens) == len(slot_mapping)
 
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
@@ -1106,7 +1180,7 @@ class LMCacheConnectorV1Impl:
                 assert len(slot_mapping) == len(token_ids)
 
                 # TODO: have a pre-allocated buffer to hold the slot_mappings
-                slot_mapping = slot_mapping.cuda()
+                slot_mapping = slot_mapping.to(self.device)
 
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
@@ -1195,7 +1269,7 @@ class LMCacheConnectorV1Impl:
             assert len(slot_mapping) == len(token_ids)
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = slot_mapping.cuda()
+            slot_mapping = slot_mapping.to(self.device)
 
             skip_leading_tokens = save_spec.skip_leading_tokens
             if self.kv_role == "kv_producer":

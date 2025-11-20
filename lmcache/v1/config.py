@@ -455,6 +455,37 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "max_local_cpu_size exceeds this value. Default is 0.0 GB (always enabled)."
         ),
     },
+    # Chunk statistics configurations
+    "enable_chunk_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Enable chunk statistics tracking.",
+    },
+    "chunk_statistics_auto_start_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Auto-start statistics on init.",
+    },
+    "chunk_statistics_auto_exit_timeout_hours": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+        "description": "Auto-stop timeout in hours (0=disabled).",
+    },
+    "chunk_statistics_auto_exit_target_unique_chunks": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": "Auto-stop at target unique chunks.",
+    },
+    "chunk_statistics_strategy": {
+        "type": str,
+        "default": "memory_bloom_filter",
+        "env_converter": str,
+        "description": "Recording strategy: memory_bloom_filter or file_hash.",
+    },
 }
 
 
