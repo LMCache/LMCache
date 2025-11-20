@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import asyncio
+import inspect
 import random
 import string
 import threading
@@ -295,6 +296,116 @@ def check_kv_cache_device(kvs, device):
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+
+
+def get_all_methods_from_base(base_class):
+    """
+    Get all public methods defined in the base class (excluding inherited from object).
+    """
+    methods = set()
+    for name in dir(base_class):
+        # Skip private and special methods
+        if name.startswith("_"):
+            continue
+        attr = getattr(base_class, name)
+        if callable(attr):
+            methods.add(name)
+    return methods
+
+
+def get_methods_implemented_in_class(cls, base_class=None):
+    """
+    Get methods that are actually implemented in the class itself.
+    Args:
+        cls: The class to inspect
+        base_class: Optional base class to stop at. If None, stops at
+            abstract base classes.
+    """
+    implemented = set()
+
+    # Check the class's own __dict__ for methods
+    for name in cls.__dict__:
+        if name.startswith("_"):
+            continue
+        attr = cls.__dict__[name]
+        # Check if it's callable (function, method, etc.)
+        if callable(attr):
+            implemented.add(name)
+
+    # Also check using getattr to catch any dynamically added methods
+    for name in dir(cls):
+        if name.startswith("_"):
+            continue
+        if name in implemented:
+            continue  # Already found
+        try:
+            attr = getattr(cls, name)
+            if callable(attr):
+                # Verify it's not inherited from base class
+                # by checking if it exists in the class's MRO
+                for base in cls.__mro__:
+                    # Stop when we hit the specified base class
+                    if base_class is not None and base is base_class:
+                        break
+                    # Or stop when we hit an abstract base class
+                    if base_class is None and inspect.isabstract(base):
+                        break
+                    if name in base.__dict__:
+                        implemented.add(name)
+                        break
+        except AttributeError:
+            pass
+
+    return implemented
+
+
+def get_abstract_methods(cls):
+    """
+    Get all abstract methods from a class.
+    """
+    abstract_methods = set()
+    for name, method in inspect.getmembers(cls, predicate=inspect.isfunction):
+        if getattr(method, "__isabstractmethod__", False):
+            abstract_methods.add(name)
+    return abstract_methods
+
+
+def check_method_signatures(base_class, impl_class):
+    """
+    Check if method signatures in implementation class match the base class.
+    Returns a list of mismatches.
+    """
+    base_methods = get_all_methods_from_base(base_class)
+    signature_mismatches = []
+
+    for method_name in base_methods:
+        base_method = getattr(base_class, method_name)
+        impl_method = getattr(impl_class, method_name, None)
+
+        if impl_method is None:
+            continue
+
+        try:
+            base_sig = inspect.signature(base_method)
+            impl_sig = inspect.signature(impl_method)
+
+            # Compare parameter names (excluding 'self')
+            base_params = [p for p in base_sig.parameters.keys() if p != "self"]
+            impl_params = [p for p in impl_sig.parameters.keys() if p != "self"]
+
+            if base_params != impl_params:
+                signature_mismatches.append(
+                    {
+                        "method": method_name,
+                        "base_params": base_params,
+                        "impl_params": impl_params,
+                    }
+                )
+        except (ValueError, TypeError):
+            # Some methods might not have inspectable signatures
+            pass
+
+    return signature_mismatches
 
 
 class DummyLMCacheAsyncLookupServer:
