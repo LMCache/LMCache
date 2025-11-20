@@ -38,7 +38,7 @@ cleanup() {
     echo "→ Cleaning up Docker containers and ports..."
 
     # Clean up container IDs if defined
-    for cid_var in CID PREFILLER_CID DECODER_CID; do
+    for cid_var in CID PREFILLER_CID DECODER_CID CID1 CID2; do
         local cid="${!cid_var:-}"
         if [[ -n "$cid" ]]; then
             docker kill "$cid" &>/dev/null || true
