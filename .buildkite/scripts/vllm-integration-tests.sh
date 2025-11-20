@@ -39,8 +39,8 @@ cleanup() {
 
     # Clean up container IDs if defined
     for cid_var in CID PREFILLER_CID DECODER_CID CID1 CID2; do
-        echo "  - Killing and removing container: $cid_var"
         local cid="${!cid_var:-}"
+        echo "  - Killing and removing container: $cid"
         if [[ -n "$cid" ]]; then
             docker kill "$cid" &>/dev/null || true
             docker rm "$cid" &>/dev/null || true
