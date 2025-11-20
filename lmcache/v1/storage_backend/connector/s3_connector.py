@@ -39,9 +39,7 @@ class Priorities(IntEnum):
 # `/dev/shm` in `S3Connector`
 # (2) Need to hack amazon python s3 crt library to enable `offset`
 # to achieve zero-copy.
-# (3) Need a job manager so that we can do sth like
-# write priority, read priority, etc.
-# (4) Potentially can drop the semaphore to reduce the complexity.
+# (3) Potentially can drop the semaphore to reduce the complexity.
 # Let crt handle the scheduling.
 
 
@@ -106,13 +104,15 @@ class S3Connector(RemoteConnector):
         s3_endpoint: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        full_chunk_size: int,
         s3_part_size: Optional[int],
         s3_file_prefix: Optional[str],
-        s3_max_io_concurrency: int,
+        s3_num_io_threads: int,
         s3_max_inflight_reqs: int,
         s3_prefer_http2: bool,
         s3_region: str,
         s3_enable_s3express: bool,
+        disable_tls: bool,
     ):
         if not s3_endpoint.startswith("s3://"):
             raise ValueError("S3 url must start with 's3://'")
@@ -121,21 +121,23 @@ class S3Connector(RemoteConnector):
         self.s3_prefix = s3_file_prefix
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
+        self.full_chunk_size = full_chunk_size
 
         self.s3_part_size = s3_part_size
 
         # TODO(Jiayi): Now we only assume S3 part size = chunk size
+        logger.info(f"S3 part size is set to {self.s3_part_size} bytes")
         assert self.s3_part_size == self.full_chunk_size, (
             "S3 part size must be equal to chunk size in S3Connector"
         )
 
-        self.s3_max_io_concurrency = s3_max_io_concurrency
+        self.s3_num_io_threads = s3_num_io_threads
         self.s3_max_inflight_reqs = s3_max_inflight_reqs
         self.s3_prefer_http2 = s3_prefer_http2
         self.s3_region = s3_region
         self.s3_enable_s3express = s3_enable_s3express
 
-        event_loop_group = io.EventLoopGroup(s3_max_io_concurrency)
+        event_loop_group = io.EventLoopGroup(s3_num_io_threads)
         host_resolver = io.DefaultHostResolver(event_loop_group)
         client_bootstrap = io.ClientBootstrap(event_loop_group, host_resolver)
         self.credentials_provider = auth.AwsCredentialsProvider.new_default_chain(
@@ -143,6 +145,7 @@ class S3Connector(RemoteConnector):
         )
 
         tls_opts = None
+
         if self.s3_prefer_http2:
             # Use HTTP/2 multiplexing if possible.
             tls_ctx = ClientTlsContext(TlsContextOptions())
@@ -152,14 +155,28 @@ class S3Connector(RemoteConnector):
             except Exception:
                 tls_opts = None
 
+        signing_config = None
+        if self.s3_enable_s3express:
+            signing_config = auth.AwsSigningConfig(
+                algorithm=auth.AwsSigningAlgorithm.V4_S3EXPRESS,
+                region=self.s3_region,
+                service="s3",
+                credentials_provider=self.credentials_provider,
+            )
+
+        # turn off TLS for non-AWS services
+        # regular and directory/express buckets both use TLS by default
+        turn_off_tls = (
+            s3.S3RequestTlsMode.DISABLED if disable_tls else s3.S3RequestTlsMode.ENABLED
+        )
         logger.info("Initializing S3 client")
         self.s3_client = s3.S3Client(
             bootstrap=client_bootstrap,
             region=s3_region,
-            credential_provider=self.credentials_provider,
-            enable_s3express=False,  # enable for s3express
+            enable_s3express=s3_enable_s3express,
             tls_connection_options=tls_opts,
-            tls_mode=s3.S3RequestTlsMode.DISABLED,  # only for non-AWS services
+            tls_mode=turn_off_tls,
+            signing_config=signing_config,
         )
 
         # TODO(Jiayi): We need to handle cache consistency issues in a systematic way
@@ -182,13 +199,15 @@ class S3Connector(RemoteConnector):
             "S3 part size must be equal to chunk size in S3Connector"
         )
 
+        # TODO: if two machines on the same node (with the same PYTHONHASHSEED)
+        # are both using the S3 Connector, there may be R/W contention on /dev/shm.
         shm_name_prefix = "my_shm"
         shms = []
         shm_names = []
         mmaps = []
         for i in range(self.s3_max_inflight_reqs):
             shm_name = f"{shm_name_prefix}_{i}"
-
+            # /dev/shm avoids disk (~fs is the page cache)
             shm = tempfile.NamedTemporaryFile(
                 prefix=shm_name, suffix=".part", dir="/dev/shm", delete=False
             )
@@ -196,6 +215,7 @@ class S3Connector(RemoteConnector):
             os.ftruncate(shm.fileno(), self.full_chunk_size)
 
             with open(shm.name, "r+b") as f:
+                # mmap directly maps user space to the /dev/shm
                 mm = mmap.mmap(f.fileno(), self.full_chunk_size)
                 # create a char buffer view over the mmap
                 buf = ctypes.c_char.from_buffer(mm)
