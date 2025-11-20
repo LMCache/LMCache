@@ -658,12 +658,28 @@ class LMCacheConnectorV1Impl:
                     vllm_config,
                     role="scheduler",
                 )
+            else:
+                self.lmcache_engine = None
+                # Create a dummy metadata for create prometheus logger
+                # kv_dtype kv_shape and use_mla are dummy data
+                # TODO(baoloongmao): PrometheusLogger should be initialized without
+                #  having to create some dummy data in the future
+                metadata = LMCacheEngineMetadata(
+                    model_name=vllm_config.model_config.model,
+                    world_size=vllm_config.parallel_config.world_size,
+                    worker_id=0,
+                    fmt="vllm",
+                    kv_dtype=torch.bfloat16,
+                    kv_shape=(1, 1, 1, 1, 1),
+                    use_mla=False,
+                    role="scheduler",
+                )
+                PrometheusLogger.GetOrCreate(metadata)
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine
             )
             self._unfinished_requests: dict[str, Request] = {}
-            self.lmcache_engine = None
         else:
             self.lmcache_engine = _init_lmcache_engine(
                 config,
