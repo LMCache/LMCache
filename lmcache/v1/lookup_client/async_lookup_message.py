@@ -39,3 +39,12 @@ class LookupResponseMsg(AsyncLookupMsg):
             f"Async lookup response for lookup_id={self.lookup_id} "
             f"with {self.num_hit_tokens} hit tokens"
         )
+
+
+class LookupCleanupMsg(AsyncLookupMsg):
+    """Cleanup message from scheduler to worker to release memory objects"""
+
+    lookup_id: str
+
+    def describe(self) -> str:
+        return f"Cleanup memory for lookup_id={self.lookup_id}"
