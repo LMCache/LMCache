@@ -60,6 +60,7 @@ Commandline arguments:
 from dataclasses import dataclass
 import argparse
 import asyncio
+import os
 import random
 import sys
 import time
@@ -417,9 +418,10 @@ async def main(args):
 
     # Create the OpenAI client
     # No timeout: some benchmarks can take 4-5 minutes per request
+    api_key = os.getenv("OPENAI_API_KEY", "sk-dummy")
     client = AsyncOpenAI(
         base_url=f"http://localhost:{args.port}/v1",
-        api_key="sk-dummy",
+        api_key=api_key,
         timeout=None,
     )
     model = args.model
