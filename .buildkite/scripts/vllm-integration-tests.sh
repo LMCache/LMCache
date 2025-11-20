@@ -21,10 +21,7 @@
 # Note: L4 CI runners cannot use Flash Infer
 
 set -e
-trap '{
-    ( setsid bash -c "cleanup $?" ) &
-    disown
-}' EXIT INT TERM
+trap 'cleanup $?' EXIT
 
 CID=
 HF_TOKEN=
