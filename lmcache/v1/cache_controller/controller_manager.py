@@ -220,7 +220,7 @@ class LMCacheControllerManager:
 
     async def health_check(self):
         while True:
-            await asyncio.sleep(self.health_check_interval)
+            time.sleep(self.health_check_interval)
             worker_infos = list(self.reg_controller.worker_info_mapping.values())
             for worker_info in worker_infos:
                 if (
