@@ -269,6 +269,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         ]
         if finished_lookups:
             self.aborted_lookups.difference_update(finished_lookups)
+            with self.lock:
+                for lookup_id in finished_lookups:
+                    self.reqs_status.pop(lookup_id, None)
 
         for lookup_id in finished_lookups:
             self._send_cleanup_message(lookup_id)
