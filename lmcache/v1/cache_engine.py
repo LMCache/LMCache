@@ -123,6 +123,7 @@ class LMCacheEngine:
         lmcache_worker_ids = config.get_lmcache_worker_ids(
             metadata.use_mla, metadata.world_size
         )
+        # lmcache_worker_ids is empty means start on all workers
         if (
             self.enable_controller
             and self.metadata.role != "scheduler"
