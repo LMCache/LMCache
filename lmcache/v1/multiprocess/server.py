@@ -15,6 +15,7 @@
 # Standard
 import argparse
 import array
+import functools
 import threading
 import time
 
@@ -48,6 +49,25 @@ def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
 
 def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
     return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(device)
+
+
+def synchronized(method):
+    """Decorator to synchronize instance methods using self.lock"""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        # Retrieve the instance’s lock
+        lock = getattr(self, "lock", None)
+        if lock is None:
+            raise AttributeError(
+                f"{self.__class__.__name__} has no attribute 'lock' "
+                "required by @synchronized"
+            )
+
+        with lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class GPUCacheContext:
@@ -293,6 +313,7 @@ class MPCacheEngine:
                 with self.lock:
                     self.hot_buffer[key] = memory_obj
             event.record()
+            event.record()
 
         assert len(memory_objects) == 0, "Some memory objects were not used!"
         ed = time.perf_counter()
@@ -338,6 +359,8 @@ class MPCacheEngine:
                         results.append(False)
                         skip_remaining = True
                         continue
+                    else:
+                        memory_obj = self.hot_buffer[key]
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
@@ -347,7 +370,6 @@ class MPCacheEngine:
                 num_tokens = len(slot_mapping)
 
                 # Copy from CPU to GPU
-                memory_obj = self.hot_buffer[key]
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(num_tokens)
                 tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
 
@@ -378,6 +400,7 @@ class MPCacheEngine:
     def get_chunk_size(self) -> int:
         return self.chunk_size
 
+    @synchronized
     @_lmcache_nvtx_annotate
     def lookup(
         self,
@@ -385,10 +408,9 @@ class MPCacheEngine:
         lock: bool | None = None,
     ) -> list[bool]:
         results = []
-        with self.lock:
-            for key in keys:
-                exists = key in self.hot_buffer
-                results.append(exists)
+        for key in keys:
+            exists = key in self.hot_buffer
+            results.append(exists)
         return results
 
     def debug(self) -> str:
@@ -423,17 +445,17 @@ class MPCacheEngine:
 
         return "OK"
 
+    @synchronized
     def clear(self) -> None:
         # self.debug()
-        with self.lock:
-            logger.info("Received clear request!")
-            self.memory_allocator.memcheck()
-            length = len(self.hot_buffer)
-            for obj in self.hot_buffer.values():
-                obj.ref_count_down()
-            self.hot_buffer.clear()
-            logger.info("Cleared %d cached items", length)
-            self.memory_allocator.memcheck()
+        logger.info("Received clear request!")
+        self.memory_allocator.memcheck()
+        length = len(self.hot_buffer)
+        for obj in self.hot_buffer.values():
+            obj.ref_count_down()
+        self.hot_buffer.clear()
+        logger.info("Cleared %d cached items", length)
+        self.memory_allocator.memcheck()
 
 
 def add_handler_helper(
