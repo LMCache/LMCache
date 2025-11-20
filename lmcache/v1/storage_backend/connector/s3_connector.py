@@ -2,7 +2,7 @@
 # Standard
 from enum import IntEnum, auto
 from functools import partial
-from typing import List, Optional
+from typing import List, Optional, Union
 from urllib.parse import quote as url_quote
 import asyncio
 import ctypes
@@ -33,16 +33,11 @@ class Priorities(IntEnum):
     PUT = auto()
 
 
-# TODO(Jiayi): Some pending problems.
-# (1) We might need a filesystem-like allocator.
-# This could be useful for local disk `LocalDiskBackend` and
-# `/dev/shm` in `S3Connector`
-# (2) Need to hack amazon python s3 crt library to enable `offset`
-# to achieve zero-copy.
-# (3) Potentially can drop the semaphore to reduce the complexity.
-# Let crt handle the scheduling.
-
-
+# TODO: for true zero-copy, we need to register the local
+# cpu backend with /dev/shm as well as cudaHostRegister
+# ctrl + f for `ctypes.memmove`
+# to find where the memcpy is happening right now
+# after that optimization, we can remove this adhoc manager
 class AdhocSharedMemoryManager:
     """
     A shared memory manager that allocates shared memory buffers
@@ -380,7 +375,6 @@ class S3Connector(RemoteConnector):
             client=self.s3_client,
             type=s3.S3RequestType.GET_OBJECT,
             request=req,
-            operation_name="GetObject",
             recv_filepath=recv_path,
             credential_provider=self.credentials_provider,
             region=self.s3_region,
@@ -408,7 +402,6 @@ class S3Connector(RemoteConnector):
             self.meta_dtype,
             self.meta_fmt,
         )
-
         # TODO(Jiayi): Please support this
         assert obj_size == memory_obj.get_size(), (
             "Saving unfull chunk is not supported in S3Connector."
@@ -423,38 +416,44 @@ class S3Connector(RemoteConnector):
             recv_path=recv_path,
         )
 
-        await asyncio.wrap_future(s3_req.finished_future)
+        try:
+            # use blocking_timeout_sec in config to control the timeout
+            await asyncio.wrap_future(s3_req.finished_future)
 
-        dst_ptr = memory_obj.data_ptr
-        ctypes.memmove(dst_ptr, shm, obj_size)
-
-        self.adhoc_shm_manager.free(recv_path, shm)
-
-        self.inflight_sema.release()
-
-        return memory_obj
+            dst_ptr = memory_obj.data_ptr
+            # TODO: optimize this
+            ctypes.memmove(dst_ptr, shm, obj_size)
+            return memory_obj
+        except Exception as e:
+            logger.error(f"Failed to download {key_str} from S3: {e}")
+            self.adhoc_shm_manager.free(recv_path, shm)
+            return None
+        finally:
+            self.inflight_sema.release()
+            self.adhoc_shm_manager.free(recv_path, shm)
 
     # this callback allows us to safely have multiple calls to batched_get
     # since we release the semaphores 1-by-1
     def on_get_done(
         self,
         obj_size: int,
-        memory_obj: MemoryObj,
-        shm: int,
+        memory_obj: Union[MemoryObj, None],
+        shm: Union[int, None],
         recv_path: str,
-        fut: asyncio.Future,
+        _: asyncio.Future,
     ):
         try:
             if memory_obj is None or shm is None:
                 return None
 
             dst_ptr = memory_obj.data_ptr
+            # TODO: optimize this
             ctypes.memmove(dst_ptr, shm, obj_size)
 
-            self.adhoc_shm_manager.free(recv_path, shm)
         except Exception as e:
             logger.error(f"on_get_done failed for {recv_path}: {e}")
         finally:
+            self.adhoc_shm_manager.free(recv_path, shm)
             self.inflight_sema.release()
 
     async def batched_get(
@@ -505,7 +504,7 @@ class S3Connector(RemoteConnector):
                 "Saving unfull chunk is not supported in S3Connector."
             )
 
-            # freeing is done in on_get_done callback
+            # sema release and freeing is done in on_get_done callback
             recv_path, shm = self.adhoc_shm_manager.allocate()
             s3_req = self._s3_download(
                 key_str=key_str,
@@ -546,7 +545,6 @@ class S3Connector(RemoteConnector):
             client=self.s3_client,
             type=s3.S3RequestType.PUT_OBJECT,
             request=req,
-            operation_name="PutObject",
             send_filepath=send_path,
             credential_provider=self.credentials_provider,
             region=self.s3_region,
@@ -572,6 +570,7 @@ class S3Connector(RemoteConnector):
 
         try:
             buffer_ptr = memory_obj.data_ptr
+            # TODO: optimize this
             ctypes.memmove(shm, buffer_ptr, memory_obj.get_physical_size())
             logger.debug("Data copy to S3 buffer completed")
 
@@ -582,7 +581,6 @@ class S3Connector(RemoteConnector):
             logger.debug(f"Uploaded {key_str} to S3 successfully")
         except Exception as e:
             logger.error(f"Failed to upload {key_str} to S3: {e}")
-            raise
         finally:
             self.inflight_sema.release()
             self.adhoc_shm_manager.free(send_path, shm)
