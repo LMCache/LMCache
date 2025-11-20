@@ -35,7 +35,6 @@ PORT=
 cleanup() {
     local code="${1:-0}"
 
-
     echo "→ Cleaning up Docker containers and ports..." >&2
 
     # Clean up container IDs if defined
