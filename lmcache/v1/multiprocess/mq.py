@@ -409,10 +409,6 @@ class MessageQueueServer:
                 self.output_queue.put(frames_to_send)
                 self.output_notifier.send(b"1")
 
-                # if response is not None:
-                #    self.socket.send_multipart(prefix_frames + [b_response])
-                # else:
-                #    self.socket.send_multipart(prefix_frames)
             except Exception as e:
                 logger.error("Error in blocking handler: %s", e)
 
