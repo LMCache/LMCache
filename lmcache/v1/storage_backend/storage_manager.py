@@ -6,6 +6,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Coroutine,
+    Dict,
     Generator,
     List,
     Optional,
@@ -779,7 +780,20 @@ class StorageManager:
 
         return total_hit_chunks
 
-    def get_block_mapping(self, chunk_infos: List[Tuple[CacheEngineKey, int, int]]):
+    def get_block_mapping(
+        self,
+        chunk_infos: List[Tuple[CacheEngineKey, int, int]]
+    ) -> Dict[str, List[Tuple[CacheEngineKey, int, int]]]:
+        """
+        Get block mapping for the given chunk infos, works by prefix match.
+
+        :param List[Tuple[CacheEngineKey, int, int]] chunk_infos:
+        List of chunk infos, each tuple contains (key, begin, end)
+
+        :return: Dict[str, List[Tuple[CacheEngineKey, int, int]]]:
+        Block mapping for the given chunk infos, each key is the backend name,
+        each value is a list of chunk infos in the backend.
+        """
         keys = [chunk_info[0] for chunk_info in chunk_infos]
         total_keys = len(keys)
         block_mapping = {}
