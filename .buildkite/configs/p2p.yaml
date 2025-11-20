@@ -1,7 +1,7 @@
 workload:
   type: long_doc_qa
   num-documents: 20
-  max-inflight-requests: 2
+  max-inflight-requests: 1
   repeat-count: 1
   expected-latency: 4
 
