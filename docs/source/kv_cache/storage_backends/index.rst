@@ -20,3 +20,4 @@ Supported Backends
    weka
    nixl
    external_backend
+   eic
