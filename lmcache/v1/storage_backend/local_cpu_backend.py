@@ -10,7 +10,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import get_chunk_size_bytes
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
@@ -351,7 +351,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 ]
             )
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-            chunk_size_bytes = get_chunk_size_bytes(new_shape, metadata.kv_dtype)
+            chunk_size_bytes = get_size_bytes(new_shape, metadata.kv_dtype)
             origin_cpu_size_bytes = int(cpu_size * 1024**3)
             align_cpu_size_bytes = (
                 origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes

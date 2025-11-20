@@ -15,7 +15,7 @@ import sortedcontainers
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import get_chunk_size_bytes
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -1051,7 +1051,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.fmt = fmt
 
         # full chunk size bytes
-        self.align_bytes = get_chunk_size_bytes(shape, dtype)
+        self.align_bytes = get_size_bytes(shape, dtype)
 
         assert self.buffer_size % self.align_bytes == 0, (
             f"Buffer size {self.buffer_size} must be a"
@@ -1126,7 +1126,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         free_block.meta.ref_count = 1
 
         if shape != self.shape:
-            size_in_bytes = get_chunk_size_bytes(shape, dtype)
+            size_in_bytes = get_size_bytes(shape, dtype)
             free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
         # TODO (Jiayi): need a flag to drop these debug ops
@@ -1178,7 +1178,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.ref_count = 1
 
             if shape != self.shape:
-                size_in_bytes = get_chunk_size_bytes(shape, dtype)
+                size_in_bytes = get_size_bytes(shape, dtype)
                 free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
             allocated_blocks.append(free_block)
