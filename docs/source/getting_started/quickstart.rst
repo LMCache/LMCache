@@ -29,6 +29,17 @@ Start vLLM with LMCache using a single command:
 .. note::
    If you want to customize configurations further, you can create a configuration file. See the :doc:`../api_reference/configurations` page to learn about all available options.
 
+Alternatively, you can start LMCache with vLLM using a simpler command:
+
+.. code-block:: bash
+
+   vllm serve <MODEL NAME> \
+       --kv-offloading-backend lmcache \
+       --kv-offloading-size <SIZE IN GB> \
+       --disable-hybrid-kv-cache-manager
+
+The ``--disable-hybrid-kv-cache-manager`` flag is mandatory. All configuration options from the :doc:`../api_reference/configurations` page still apply.
+
 (Terminal 2) Test LMCache in Action
 -----------------------------------
 
