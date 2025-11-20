@@ -24,9 +24,15 @@ set -e
 trap 'cleanup $?' EXIT INT TERM
 
 CID=
+PREFILLER_CID=
+DECODER_CID=
+CID1=
+CID2=
 HF_TOKEN=
 SERVER_WAIT_TIMEOUT=180
 PORT=
+PORT1=
+PORT2=
 
 #############
 # UTILITIES #
@@ -44,6 +50,7 @@ cleanup() {
             echo "  - Killing and removing container: $cid" >&2
             docker kill "$cid" >&2 || true
             docker rm "$cid" >&2 || true
+            printf -v "$cid_var" ''
         fi
     done
 
@@ -53,6 +60,7 @@ cleanup() {
         if [[ -n "$port" ]]; then
             echo "  - Killing and removing port: $port" >&2
             fuser -k "${port}/tcp" >&2 || true
+            printf -v "$port_var" ''
         fi
     done
 }
@@ -531,8 +539,8 @@ echo "Using port $PORT to send or receive requests."
 # Need to run from docker directory
 cd docker/
 
-# Create the container image
-build_lmcache_vllmopenai_image
+# # Create the container image
+# build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
