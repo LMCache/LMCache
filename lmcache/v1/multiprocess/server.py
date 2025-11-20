@@ -6,10 +6,8 @@
 #   - Thread safe (Read/Write lock)
 #   - Eviction policy
 # - Double buffer for store/retrieve (5% optimization)
-# - Integrate with vLLM
 # - Refactor and reuse the existing LMCache classes
 # - Lock and unlock
-# - BUG of memory allocation
 ###
 
 # Standard
@@ -285,9 +283,17 @@ class MPCacheEngine:
                         # Already stored, free the pre-allocated memory
                         memory_obj.ref_count_down()
                         logger.debug(
-                            "Key %s already in cache, skipping store", str(key)
+                            "Key %s already in cache, skipping store", key.chunk_hash
                         )
                         continue
+                    else:
+                        # NOTE: here we will have RAW hazard there is an immediate
+                        # retrieve before the store CUDA kernel finishes. To fix
+                        # this, either we add some extra cuda synchronization here, or
+                        # we need to use cudaLaunchHostFunc to `commit` the write
+                        # operation
+                        # This will be fixed in later versions.
+                        self.hot_buffer[key] = memory_obj
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
@@ -307,9 +313,7 @@ class MPCacheEngine:
                 )
 
                 memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
-                with self.lock:
-                    self.hot_buffer[key] = memory_obj
-            event.record()
+
             event.record()
 
         assert len(memory_objects) == 0, "Some memory objects were not used!"

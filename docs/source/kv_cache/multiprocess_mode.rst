@@ -124,3 +124,13 @@ On the vLLM side, you can specify the host and port of the LMCache server throug
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+
+Future Work
+-----------
+
+- Thread-safe memory allocator and storage manager.
+- Eviction policy.
+- Plugin the current storage backends.
+- Potential performance improvements (double buffering, new kernels, etc.).
+- Lock and unlock semantics in new storage manager.
+- Distributed mode with sharding.
