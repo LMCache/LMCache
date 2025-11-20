@@ -765,20 +765,16 @@ class LMCacheEngine:
 
         if tokens is not None:
             lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
-            total_length = len(tokens)
         else:
             assert offsets is not None
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
-            total_length = sum(offsets)
 
         # Skip the number of tokens that are already computed, align to chunk size
         skip_n_tokens = (
-            min(num_computed_tokens, total_length)
+            num_computed_tokens
             // self.config.chunk_size
             * self.config.chunk_size
-            if num_computed_tokens > 0
-            else 0
         )
 
         res = skip_n_tokens
@@ -795,7 +791,6 @@ class LMCacheEngine:
                 for start, end, key in chunk_info_iterator:
                     if end <= skip_n_tokens:
                         continue
-                    assert not (start < skip_n_tokens < end)
                     assert isinstance(key, CacheEngineKey)
 
                     # TODO(Jiayi): Optimize by checking only the existence of the key
@@ -827,7 +822,6 @@ class LMCacheEngine:
                     start, end, _ = chunk_info
                     if end <= skip_n_tokens:
                         continue
-                    assert not (start < skip_n_tokens < end)
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
 
@@ -857,6 +851,12 @@ class LMCacheEngine:
             # all tokens where found, return the maximal end
             return res
         finally:
+            # When num_computed_tokens is greater than a chunk, we skip
+            # some tokens to reduce the number of lookup requests.
+            # It is possible that res = skip_n_tokens and no lookup is performed.
+            # In this case, using res as the number of hit tokens will overcount
+            # the number of hit tokens.
+            # TODO deprecate this metric and use retreive metrics instead.
             self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
