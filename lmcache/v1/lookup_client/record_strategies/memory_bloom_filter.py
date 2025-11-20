@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Standard
+import time
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.lookup_client.record_strategies.base import RecordStrategy
@@ -55,12 +58,25 @@ class MemoryBloomFilterStrategy(RecordStrategy):
             unique = self.global_bloom.add_batch_with_hashes_and_check(
                 chunk_bloom_positions
             )
+
+            for chunk_bloom_position in chunk_bloom_positions:
+                if tuple(chunk_bloom_position) not in self.chunk_to_timestamps:
+                    self.chunk_to_timestamps[tuple(chunk_bloom_position)] = time.time()
+                self.chunk_to_latest_timestamp[tuple(chunk_bloom_position)] = (
+                    time.time()
+                )
             self.total_chunks += len(chunk_bloom_positions)
             self.unique_chunks_count += unique
 
     def get_statistics(self) -> dict:
         stats = super().get_statistics()
         stats.update({"bloom_filter": self.global_bloom.get_statistics()})
+        stats.update(
+            {
+                "chunk_to_timestamps": self.chunk_to_timestamps,
+                "chunk_to_latest_timestamp": self.chunk_to_latest_timestamp,
+            }
+        )
         return stats
 
     def setup_metrics(self, prometheus_logger) -> None:

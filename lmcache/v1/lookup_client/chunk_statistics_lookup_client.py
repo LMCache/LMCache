@@ -18,6 +18,7 @@ from lmcache.v1.lookup_client.record_strategies import (
     RecordStrategy,
     create_record_strategy,
 )
+from lmcache.v1.lookup_client.record_strategies.base import aggregate_chunk_lifespans
 
 logger = init_logger(__name__)
 
@@ -85,6 +86,10 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
             overhead_pct = (
                 (overhead_time / total_time * 100.0) if total_time > 0 else 0.0
             )
+            bucket_counts = aggregate_chunk_lifespans(
+                strategy_stats.get("chunk_to_timestamps", {}),
+                strategy_stats.get("chunk_to_latest_timestamp", {}),
+            )
             result = {
                 "enabled": self.enabled,
                 "total_requests": len(self.request_seen),
@@ -100,6 +105,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
                 "unique_chunks": strategy_stats.get("unique_chunks", 0),
                 "duplicate_chunks": strategy_stats.get("duplicate_chunks", 0),
                 "reuse_rate": strategy_stats.get("reuse_rate", 0.0),
+                "chunk_lifespan_buckets": bucket_counts,
                 **{
                     k: v
                     for k, v in strategy_stats.items()

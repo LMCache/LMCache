@@ -57,6 +57,11 @@ class FileHashStrategy(RecordStrategy):
                 "lookup_id": lookup_id,
                 "chunk_hashes": chunk_hashes,
             }
+            for chunk_hash in chunk_hashes:
+                if chunk_hash not in self.chunk_to_timestamps:
+                    self.chunk_to_timestamps[chunk_hash] = time.time()
+                self.chunk_to_latest_timestamp[chunk_hash] = time.time()
+
             if self.current_file_handle is not None:
                 file_handle = cast(io.TextIOWrapper, self.current_file_handle)
                 line = json.dumps(data) + "\n"
@@ -94,7 +99,9 @@ class FileHashStrategy(RecordStrategy):
                     "current_file_size": self.current_file_size,
                     "file_max_count": self.file_max_count,
                     "output_dir": str(self.output_dir),
-                }
+                },
+                "chunk_to_timestamps": self.chunk_to_timestamps,
+                "chunk_to_latest_timestamp": self.chunk_to_latest_timestamp,
             }
         )
         return stats

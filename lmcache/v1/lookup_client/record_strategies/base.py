@@ -17,6 +17,57 @@ from lmcache.v1.token_database import ChunkedTokenDatabase
 logger = init_logger(__name__)
 
 
+def aggregate_chunk_lifespans(chunk_to_timestamps, chunk_to_latest_timestamp):
+    # Define buckets as (label, lower_bound_inclusive, upper_bound_inclusive_or_None)
+    # All bounds are in seconds
+    HOUR = 3600
+    buckets = [
+        ("<= 0.5 hour", 0, 0.5 * HOUR),
+        ("0.5 to 1 hour", 0.5 * HOUR, 1 * HOUR),
+        ("1 to 2 hours", 1 * HOUR, 2 * HOUR),
+        ("2 to 5 hours", 2 * HOUR, 5 * HOUR),
+        ("5 to 10 hours", 5 * HOUR, 10 * HOUR),
+        ("10 to 24 hours", 10 * HOUR, 24 * HOUR),
+        ("24 to 48 hours", 24 * HOUR, 48 * HOUR),
+        ("> 48 hours", 48 * HOUR, None),  # open-ended upper bound
+    ]
+
+    # Initialize counts
+    bucket_counts = {label: 0 for (label, _, _) in buckets}
+
+    for chunk, first_ts in chunk_to_timestamps.items():
+        # Skip if chunk doesn't have a latest timestamp
+        if chunk not in chunk_to_latest_timestamp:
+            continue
+
+        latest_ts = chunk_to_latest_timestamp[chunk]
+        diff_seconds = latest_ts - first_ts
+
+        if diff_seconds < 0:
+            continue
+
+        # Find the bucket for this diff
+        for label, lower, upper in buckets:
+            if upper is None:
+                # last bucket: > lower
+                if diff_seconds > lower:
+                    bucket_counts[label] += 1
+                    break
+            else:
+                # lower < diff <= upper for all except first bucket,
+                # but we defined first bucket starting at 0 so:
+                if lower == 0:
+                    if 0 <= diff_seconds <= upper:
+                        bucket_counts[label] += 1
+                        break
+                else:
+                    if lower < diff_seconds <= upper:
+                        bucket_counts[label] += 1
+                        break
+
+    return bucket_counts
+
+
 class RecordStrategy(ABC):
     """Base class for chunk recording strategies."""
 
@@ -30,6 +81,14 @@ class RecordStrategy(ABC):
         self.total_chunks = 0
         self.unique_chunks_count = 0
         self.lock = threading.RLock()
+        self.chunk_to_timestamps: dict[
+            Union[str, tuple[int, ...]], float
+        ] = {}  # chunk hash to list of bloom filter positions
+        # or chunk hash to timestamp of first seen
+        self.chunk_to_latest_timestamp: dict[
+            Union[str, tuple[int, ...]], float
+        ] = {}  # chunk hash to list of bloom filter positions
+        # or chunk hash to timestamp of latest seen
 
         self._token_db = ChunkedTokenDatabase()
         self._token_db.chunk_size = chunk_size
