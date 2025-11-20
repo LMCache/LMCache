@@ -21,7 +21,10 @@
 # Note: L4 CI runners cannot use Flash Infer
 
 set -e
-trap 'cleanup $?' EXIT
+trap '{
+    ( setsid bash -c "cleanup $?" ) &
+    disown
+}' EXIT INT TERM
 
 CID=
 HF_TOKEN=
@@ -35,13 +38,12 @@ PORT=
 cleanup() {
     local code="${1:-0}"
 
-    trap '' INT TERM
-    echo "→ Cleaning up Docker containers and ports..." >&2
+    echo "→ Cleaning up Docker containers and ports..."
 
     # Clean up container IDs if defined
     for cid_var in CID PREFILLER_CID DECODER_CID CID1 CID2; do
         local cid="${!cid_var:-}"
-        echo "  - Killing and removing container: $cid" >&2
+        echo "  - Killing and removing container: $cid"
         if [[ -n "$cid" ]]; then
             timeout 10 docker rm -f "$cid" &>/dev/null || true
         fi
