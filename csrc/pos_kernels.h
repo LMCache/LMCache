@@ -2,7 +2,6 @@
 
 #include <torch/all.h>
 #include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Exception.h>
 
 void rotary_embedding_k_fused(const torch::Tensor& old_positions,

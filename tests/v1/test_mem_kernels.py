@@ -217,10 +217,10 @@ def test_multi_layer_kernel(num_tokens):
 
     # New extract with multi layer kernel
     kv_cache_pointers = torch.empty(
-        32, dtype=torch.int64, device="cpu", pin_memory=True
+        32, dtype=torch.uint64, device="cpu", pin_memory=True
     )
     for i in range(32):
-        kv_cache_pointers[i] = kv_cache[i].data_ptr()
+        kv_cache_pointers.numpy()[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -259,10 +259,10 @@ def test_multi_layer_kernel(num_tokens):
     )
 
     kv_cache_pointers_new = torch.empty(
-        32, dtype=torch.int64, device="cpu", pin_memory=True
+        32, dtype=torch.uint64, device="cpu", pin_memory=True
     )
     for i in range(32):
-        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+        kv_cache_pointers_new.numpy()[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
@@ -335,10 +335,10 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 
     # New extract with multi layer kernel
     kv_cache_pointers = torch.empty(
-        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
+        num_layers, dtype=torch.uint64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers[i] = kv_cache[i].data_ptr()
+        kv_cache_pointers.numpy()[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -383,10 +383,10 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     )
 
     kv_cache_pointers_new = torch.empty(
-        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
+        num_layers, dtype=torch.uint64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+        kv_cache_pointers_new.numpy()[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]

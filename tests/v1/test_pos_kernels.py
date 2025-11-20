@@ -3,12 +3,15 @@
 import pytest
 import torch
 
+import sys
+print("PYTEST sys.path:", sys.path)
+
 # First Party
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not torch.cuda.is_available() and not torch.xpu.is_available(),
     reason="TODO: Add non CUDA implementations for CUDA enhanced functions",
 )
 def test_rope():

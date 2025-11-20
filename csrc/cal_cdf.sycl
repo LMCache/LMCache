@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#include <ATen/ATen.h>
+#include <torch/extension.h>
+#include <sycl/sycl.hpp>
+#include <cstdint>
+#include <stdexcept>
+
+#define MAX_BINS_SUPPORTED 64
+
+using namespace sycl;
+
+template<int BLOCK_SIZE, int MAXBINS> class CDFKernel;
+
+extern int get_block_size(int);
+
+// Normalize CDF value
+inline uint16_t normalize_cdf_value(uint16_t cdf_value, uint16_t max_cdf_value, int max_bins) {
+    const uint32_t MAX_UINT16_VALUE = 0xFFFFu - (uint32_t)max_bins;
+    return (uint16_t)((uint32_t)MAX_UINT16_VALUE * (uint32_t)cdf_value / (uint32_t)max_cdf_value);
+}
+
+// SYCL kernel template
+template<int BLOCK_SIZE, int MAXBINS>
+void calculate_cdf_kernel(queue &q,
+                          const int8_t* input_ptr,
+                          int16_t* output_ptr,
+                          int nlayers, int ntokens, int nchannels, int max_bins) {
+    if (max_bins >= MAXBINS) throw std::runtime_error("max_bins >= MAXBINS");
+    if (nchannels % BLOCK_SIZE != 0) throw std::runtime_error("nchannels must be multiple of BLOCK_SIZE");
+
+    range<2> local_range(BLOCK_SIZE, 1);
+    range<2> global_range(nchannels, nlayers);
+
+    q.submit([&](handler &h) {
+        local_accessor<uint16_t, 1> hist_local(range<1>((max_bins + 1) * BLOCK_SIZE), h);
+
+        h.parallel_for<class CDFKernel<BLOCK_SIZE, MAXBINS>>(nd_range<2>(global_range, local_range), [=](nd_item<2> item) {
+            int local_id = item.get_local_id(0);
+            int group_x = item.get_group(0);
+            int group_y = item.get_group(1);
+
+            int channel_id = group_x * BLOCK_SIZE + local_id;
+            int layer_id = group_y;
+
+            // init hist
+            for (int b = 0; b <= max_bins; ++b)
+                hist_local[b * BLOCK_SIZE + local_id] = 0;
+
+            item.barrier(access::fence_space::local_space);
+
+            // histogram
+            for (int t = 0; t < ntokens; ++t) {
+                int idx = layer_id * (ntokens * nchannels) + t * nchannels + channel_id;
+                uint8_t value = static_cast<uint8_t>(input_ptr[idx]);
+                int pos = (value + 1) * BLOCK_SIZE + local_id;
+                hist_local[pos] += 1;
+            }
+
+            // prefix sum
+            uint16_t local_sum = 0;
+            for (int b = 0; b < max_bins; ++b) {
+                int pos = (b + 1) * BLOCK_SIZE + local_id;
+                uint16_t v = hist_local[pos];
+                hist_local[pos] += local_sum;
+                local_sum += v;
+            }
+
+            // normalize
+            for (int b = 0; b <= max_bins; ++b) {
+                int pos = b * BLOCK_SIZE + local_id;
+                hist_local[pos] = normalize_cdf_value(hist_local[pos], local_sum, max_bins) + b;
+            }
+
+            item.barrier(access::fence_space::local_space);
+
+            // write output
+            int start_channel = group_x * BLOCK_SIZE;
+            int num_elements = BLOCK_SIZE * (max_bins + 1);
+            for (int i = local_id; i < num_elements; i += BLOCK_SIZE) {
+                int bin_id = i % (max_bins + 1);
+                int cid = i / (max_bins + 1);
+                int out_channel = start_channel + cid;
+                int out_idx = layer_id * (nchannels * (max_bins + 1)) + out_channel * (max_bins + 1) + bin_id;
+                output_ptr[out_idx] = hist_local[bin_id * BLOCK_SIZE + cid];
+            }
+        });
+    });
+    q.wait();
+}
+
+// Host wrapper: same signature as original CUDA version
+at::Tensor calculate_cdf(const at::Tensor& input, const int max_bins) {
+    TORCH_CHECK(input.is_xpu(), "Input must be a XPU tensor");
+    TORCH_CHECK(max_bins < MAX_BINS_SUPPORTED, "Max bins must be less than ", MAX_BINS_SUPPORTED);
+    TORCH_CHECK(input.dim() == 3, "Input must be shape [nlayers, ntokens, nchannels]");
+
+    //auto input_contig = input.contiguous();
+    //auto input_ptr = input_contig.data_ptr<int8_t>();
+
+    //const int nlayers = input_contig.size(0);
+    //const int ntokens = input_contig.size(1);
+    //const int nchannels = input_contig.size(2);
+
+    const auto input_shape = input.sizes();
+    const int nlayers = input_shape[0];
+    const int ntokens = input_shape[1];
+    const int nchannels = input_shape[2];    
+
+    auto input_ptr = input.data_ptr<int8_t>();
+    auto output = torch::zeros({nlayers, nchannels, max_bins + 1},
+                               input.options().dtype(at::kShort));
+    auto output_ptr = output.data_ptr<int16_t>();
+
+    //queue q{gpu_selector_v};
+    // Get SYCL queue from tensor device
+    sycl::queue q;
+    auto device_id = input.device().index();
+    auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+    if (device_id >= 0 && device_id < static_cast<int>(devices.size())) {
+        q = sycl::queue(devices[device_id]);
+    } else {
+        q = sycl::queue(sycl::default_selector_v);  // Use default GPU
+    } 
+    int block_size = get_block_size(nchannels);
+
+    switch(block_size) {
+        case 1: calculate_cdf_kernel<1, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        case 2: calculate_cdf_kernel<2, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        case 4: calculate_cdf_kernel<4, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        case 8: calculate_cdf_kernel<8, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        case 16: calculate_cdf_kernel<16, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        case 32: calculate_cdf_kernel<32, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        case 64: calculate_cdf_kernel<64, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        case 128: calculate_cdf_kernel<128, MAX_BINS_SUPPORTED>(q, input_ptr, output_ptr, nlayers, ntokens, nchannels, max_bins); break;
+        default: throw std::runtime_error("Unsupported block size");
+    }
+
+    return output;
+}
+

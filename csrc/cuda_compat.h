@@ -6,8 +6,8 @@
  */
 
 #pragma once
-#ifndef USE_ROCM
-  #define LMCACHE_LDG(arg) __ldg(arg)
-#else
+#if defined(USE_ROCM) || defined(USE_XPU)
   #define LMCACHE_LDG(arg) *(arg)
+#else
+  #define LMCACHE_LDG(arg) __ldg(arg)
 #endif

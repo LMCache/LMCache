@@ -1,0 +1,490 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//
+// ac_dec.cpp for Intel XPU device
+//
+#include <sycl/sycl.hpp>
+#include <iostream>
+#include <stdexcept>
+#include <cstdint>
+#include <cstring>
+#include "cachegen_kernels.h"
+
+using namespace sycl;
+
+template <int BLOCK_SIZE> class DecodeKernel;
+template <int BLOCK_SIZE> class DecodePerfSumKernel;
+
+// keep your macros and limits
+#define MAX_LP 64
+#define MAX_THREAD_PER_BLOCK 128
+#define MAX_SHARED_MEMORY_PER_THREAD (0xc000 / MAX_THREAD_PER_BLOCK)
+#if MAX_SHARED_MEMORY_PER_THREAD - MAX_LP * 2 >= 256
+  #define MAX_TOKENS_PER_THREAD 256
+  #define OUTPUT_BUFFER_LENGTH_PER_THREAD 256
+#else
+  #define OUTPUT_BUFFER_LENGTH_PER_THREAD \
+    (MAX_SHARED_MEMORY_PER_THREAD - MAX_LP * 2)
+  #define MAX_TOKENS_PER_THREAD (OUTPUT_BUFFER_LENGTH_PER_THREAD)
+#endif
+
+extern int get_block_size(int);
+
+// --- helpers: endian conversion (host/device inline)
+template <typename T>
+inline T big_to_small_host(T value) {
+  return value;
+}
+
+template <>
+inline uint32_t big_to_small_host<uint32_t>(uint32_t value) {
+  return ((value & 0xFF000000U) >> 24) | ((value & 0x00FF0000U) >> 8) |
+         ((value & 0x0000FF00U) << 8) | ((value & 0x000000FFU) << 24);
+}
+
+template <>
+inline uint8_t big_to_small_host<uint8_t>(uint8_t value) {
+  return value;
+}
+
+// binsearch helper (operates on a linearized cdf_shared)
+template <int BLOCK_SIZE>
+inline uint16_t binsearch_local(const uint16_t* cdf_shared_base,
+                                uint16_t target, uint8_t max_sym,
+                                int tid) {
+  uint16_t left = 0;
+  uint16_t right = max_sym + 1;  // len(cdf) == max_sym + 2
+
+  while (left + 1 < right) {
+    const auto m = static_cast<uint16_t>((left + right) / 2);
+    const auto offset = m * BLOCK_SIZE + tid;
+    const auto v = cdf_shared_base[offset];
+    if (v < target) {
+      left = m;
+    } else if (v > target) {
+      right = m;
+    } else {
+      return m;
+    }
+  }
+  return left;
+}
+
+// bit read helpers
+template <int BUFFER_BITS, typename BUFFER_TYPE>
+inline void read_next_bit_device(uint32_t &value, BUFFER_TYPE &byte_buffer, int &bit_idx) {
+  value <<= 1;
+  value |= ((byte_buffer >> (BUFFER_BITS - bit_idx)) & 1);
+  bit_idx += 1;
+}
+
+template <int BUFFER_BITS, typename BUFFER_TYPE>
+inline void check_and_update_byte_buffer_device(BUFFER_TYPE &byte_buffer, int &bit_idx,
+                                                int &byte_buffer_offset, uint8_t* bytestream) {
+  if (bit_idx == BUFFER_BITS + 1) {
+    bit_idx = 1;
+    byte_buffer_offset++;
+    BUFFER_TYPE* p = reinterpret_cast<BUFFER_TYPE*>(bytestream);
+    byte_buffer = big_to_small_host<BUFFER_TYPE>(p[byte_buffer_offset]);
+  }
+}
+
+// -------------------- launch_decode_kernel (for decode_xpu_new) --------------------
+template <int BLOCK_SIZE>
+void launch_decode_kernel(queue &q,
+                          const int16_t* cdf_ptr,   // [nlayers * nchannels * lp]
+                          const uint8_t* bytestreams_ptr, // [nlayers * nchannels * OUTPUT_BUFFER_LENGTH_PER_THREAD]
+                          const int32_t* lengths_ptr, // [nlayers * nchannels]
+                          uint8_t* output_ptr, // [nlayers * ntokens * nchannels]
+                          int nlayers, int nchannels, int lp, int ntokens) {
+
+  // nd_range: global (nlayers, nchannels), local (1, BLOCK_SIZE)
+  range<2> local_range(1, BLOCK_SIZE);
+  range<2> global_range(nlayers, nchannels);
+  nd_range<2> ndRange(global_range, local_range);
+
+  q.submit([&](handler &h) {
+    local_accessor<uint16_t, 2> cdf_shared(range<2>(lp, BLOCK_SIZE), h);
+    local_accessor<uint8_t, 2> bytestreams_shared(range<2>(BLOCK_SIZE, OUTPUT_BUFFER_LENGTH_PER_THREAD), h);
+    local_accessor<int32_t, 1> lengths_shared(range<1>{BLOCK_SIZE}, h);
+
+    h.parallel_for<class DecodeKernel<BLOCK_SIZE>>(ndRange, [=](nd_item<2> item) {
+      const int layer_id = item.get_group(0);
+      const int global_channel = item.get_global_id(1);
+      const int local_channel_id = item.get_local_id(1);
+      const int channel_block_idx = item.get_group(1);
+      const int global_channel_offset = channel_block_idx * BLOCK_SIZE;
+      const int global_channel_id = global_channel;
+      const int max_symbol = lp - 2;
+
+      // copy lengths -> lengths_shared
+      for (int i = local_channel_id; i < BLOCK_SIZE; i += BLOCK_SIZE) {
+        int channel_idx = global_channel_offset + i;
+        if (channel_idx < nchannels) {
+          size_t idx = (size_t)layer_id * (size_t)nchannels + (size_t)channel_idx;
+          lengths_shared[i] = lengths_ptr[idx];
+        } else {
+          lengths_shared[i] = 0;
+        }
+      }
+      item.barrier(access::fence_space::local_space);
+
+      // copy bytestreams into shared
+      for (int i = 0; i < BLOCK_SIZE; ++i) {
+        int channel_id = global_channel_offset + i;
+        int len = (channel_id < nchannels) ? lengths_shared[i] : 0;
+        for (int j = local_channel_id; j < OUTPUT_BUFFER_LENGTH_PER_THREAD; j += BLOCK_SIZE) {
+          uint8_t value = 0;
+          if (j < len && channel_id < nchannels) {
+            size_t base_idx = (size_t)layer_id * (size_t)nchannels * (size_t)OUTPUT_BUFFER_LENGTH_PER_THREAD
+                              + (size_t)channel_id * (size_t)OUTPUT_BUFFER_LENGTH_PER_THREAD
+                              + (size_t)j;
+            value = bytestreams_ptr[base_idx];
+          }
+          bytestreams_shared[i][j] = value;
+        }
+      }
+      item.barrier(access::fence_space::local_space);
+
+      // copy CDF into shared
+      int cdf_size = lp * BLOCK_SIZE;
+      for (int i = local_channel_id; i < cdf_size; i += BLOCK_SIZE) {
+        int cid = i / lp;
+        int lid = i % lp;
+        int channel_id = global_channel_offset + cid;
+        uint16_t v = 0;
+        if (channel_id < nchannels) {
+          size_t idx = (size_t)layer_id * (size_t)nchannels * (size_t)lp
+                       + (size_t)channel_id * (size_t)lp + (size_t)lid;
+          v = static_cast<uint16_t>( static_cast<int16_t>( cdf_ptr[idx] ) );
+        } else {
+          v = 0;
+        }
+        cdf_shared[lid][cid] = v;
+      }
+      item.barrier(access::fence_space::local_space);
+
+      // decode
+      uint32_t low = 0;
+      uint32_t high = 0xFFFFFFFFU;
+      uint32_t value = 0;
+      const uint32_t c_count = 0x10000U;
+      const int precision = 16;
+      uint8_t byte_buffer = 0;
+      int bit_idx = 1;
+      int byte_buffer_offset = sizeof(value) / sizeof(byte_buffer);
+
+      // load initial 4 bytes into value
+      uint32_t v32 = 0;
+      for (int b = 0; b < (int)sizeof(uint32_t); ++b) {
+        uint8_t byte = bytestreams_shared[local_channel_id][b];
+        v32 |= ((uint32_t)byte) << (8 * b);
+      }
+      value = big_to_small_host<uint32_t>(v32);
+      byte_buffer = bytestreams_shared[local_channel_id][byte_buffer_offset];
+
+      const uint16_t* cdf_shared_base = &cdf_shared[0][0];
+
+      for (int i = 0; i < ntokens; ++i) {
+        const uint64_t span = (uint64_t)high - (uint64_t)low + 1;
+        const uint16_t count = static_cast<uint16_t>(
+            (((uint64_t)value - (uint64_t)low + 1) * (uint64_t)c_count - 1) / span);
+
+        uint16_t sym_i = binsearch_local<BLOCK_SIZE>(cdf_shared_base, count, (uint8_t)max_symbol, local_channel_id);
+
+        if (global_channel_id < nchannels) {
+          size_t out_idx = (size_t)layer_id * (size_t)ntokens * (size_t)nchannels
+                           + (size_t)i * (size_t)nchannels + (size_t)global_channel_id;
+          output_ptr[out_idx] = static_cast<uint8_t>(sym_i);
+        }
+
+        if (i == ntokens - 1) break;
+
+        uint32_t c_low = cdf_shared[sym_i][local_channel_id];
+        uint32_t c_high = (sym_i == max_symbol) ? 0x10000U : cdf_shared[sym_i + 1][local_channel_id];
+
+        high = (low - 1) + static_cast<uint32_t>(((uint64_t)span * (uint64_t)c_high) >> precision);
+        low = static_cast<uint32_t>((uint64_t)low + (((uint64_t)span * (uint64_t)c_low) >> precision));
+
+        while (true) {
+          if (low >= 0x80000000U || high < 0x80000000U) {
+            low <<= 1;
+            high <<= 1;
+            high |= 1;
+            read_next_bit_device<8>(value, byte_buffer, bit_idx);
+            check_and_update_byte_buffer_device<8, uint8_t>(byte_buffer, bit_idx, byte_buffer_offset,
+                                                            &bytestreams_shared[local_channel_id][0]);
+          } else if (low >= 0x40000000U && high < 0xC0000000U) {
+            low <<= 1;
+            low &= 0x7FFFFFFFU;
+            high <<= 1;
+            high |= 0x80000001U;
+            value -= 0x40000000U;
+            read_next_bit_device<8>(value, byte_buffer, bit_idx);
+            check_and_update_byte_buffer_device<8, uint8_t>(byte_buffer, bit_idx, byte_buffer_offset,
+                                                            &bytestreams_shared[local_channel_id][0]);
+          } else {
+            break;
+          }
+        }
+      } // ntokens
+    }); // parallel_for
+  }).wait();
+}
+
+// -------------------- launch_decode_prefsum_kernel (for decode_xpu_prefsum) --------------------
+template <int BLOCK_SIZE>
+void launch_decode_prefsum_kernel(queue &q,
+                                  const int16_t* cdf_ptr,   // [nlayers * nchannels * lp]
+                                  const uint8_t* bytestreams_ptr, // [sum(lengths) length total, 1-D]
+                                  const int64_t* lengths_prefsum_ptr, // [nlayers * nchannels] prefix sums flattened
+                                  uint8_t* output_ptr, // [nlayers * ntokens * nchannels]
+                                  int nlayers, int nchannels, int lp, int ntokens) {
+
+  range<2> local_range(1, BLOCK_SIZE);
+  range<2> global_range(nlayers, nchannels);
+  nd_range<2> ndRange(global_range, local_range);
+
+  q.submit([&](handler &h) {
+    local_accessor<uint16_t, 2> cdf_shared(range<2>(lp, BLOCK_SIZE), h);
+    local_accessor<uint8_t, 2> bytestreams_shared(range<2>(BLOCK_SIZE, OUTPUT_BUFFER_LENGTH_PER_THREAD), h);
+    // sum_lengths_shared has BLOCK_SIZE + 1 elements (int64_t)
+    local_accessor<int64_t, 1> sum_lengths_shared(range<1>(BLOCK_SIZE + 1), h);
+
+    h.parallel_for<class DecodePerfSumKernel<BLOCK_SIZE>>(ndRange, [=](nd_item<2> item) {
+      const int layer_id = item.get_group(0);
+      const int global_channel = item.get_global_id(1);
+      const int local_channel_id = item.get_local_id(1);
+      const int channel_block_idx = item.get_group(1);
+      const int global_channel_offset = channel_block_idx * BLOCK_SIZE;
+      const int global_channel_id = global_channel;
+      const int max_symbol = lp - 2;
+      const int nchannels_total = nchannels;
+
+      // copy prefix sums: for i in [0..BLOCK_SIZE] compute gid = layer_id * nchannels + global_channel_offset + i - 1
+      for (int i = local_channel_id; i < BLOCK_SIZE + 1; i += BLOCK_SIZE) {
+        int64_t gid_channel = global_channel_offset + i - 1;
+        int64_t gid = (int64_t)layer_id * (int64_t)nchannels_total + gid_channel;
+        if (gid_channel >= 0 && gid_channel < nchannels_total) {
+          sum_lengths_shared[i] = lengths_prefsum_ptr[ (size_t)gid ];
+        } else {
+          sum_lengths_shared[i] = 0;
+        }
+      }
+      item.barrier(access::fence_space::local_space);
+
+      // copy bytestreams: for each channel in block, start = sum_lengths_shared[i], end = sum_lengths_shared[i+1]
+      for (int i = 0; i < BLOCK_SIZE; ++i) {
+        int channel_id = global_channel_offset + i;
+        int64_t start_offset = sum_lengths_shared[i];
+        int64_t end_offset = sum_lengths_shared[i + 1];
+        int length = 0;
+        if (channel_id < nchannels_total) {
+          length = (int)(end_offset - start_offset);
+        } else {
+          length = 0;
+        }
+        for (int j = local_channel_id; j < OUTPUT_BUFFER_LENGTH_PER_THREAD; j += BLOCK_SIZE) {
+          uint8_t value = 0;
+          if (j < length && channel_id < nchannels_total) {
+            size_t base_idx = (size_t)start_offset + (size_t)j;
+            value = bytestreams_ptr[base_idx];
+          }
+          bytestreams_shared[i][j] = value;
+        }
+      }
+      item.barrier(access::fence_space::local_space);
+
+      // copy CDF into shared
+      int cdf_size = lp * BLOCK_SIZE;
+      for (int i = local_channel_id; i < cdf_size; i += BLOCK_SIZE) {
+        int cid = i / lp;
+        int lid = i % lp;
+        int channel_id = global_channel_offset + cid;
+        uint16_t v = 0;
+        if (channel_id < nchannels_total) {
+          size_t idx = (size_t)layer_id * (size_t)nchannels_total * (size_t)lp
+                       + (size_t)channel_id * (size_t)lp + (size_t)lid;
+          v = static_cast<uint16_t>( static_cast<int16_t>( cdf_ptr[idx] ) );
+        } else {
+          v = 0;
+        }
+        cdf_shared[lid][cid] = v;
+      }
+      item.barrier(access::fence_space::local_space);
+
+      // decode (same as other kernel)
+      uint32_t low = 0;
+      uint32_t high = 0xFFFFFFFFU;
+      uint32_t value = 0;
+      const uint32_t c_count = 0x10000U;
+      const int precision = 16;
+      uint8_t byte_buffer = 0;
+      int bit_idx = 1;
+      int byte_buffer_offset = sizeof(value) / sizeof(byte_buffer);
+
+      uint32_t v32 = 0;
+      for (int b = 0; b < (int)sizeof(uint32_t); ++b) {
+        uint8_t byte = bytestreams_shared[local_channel_id][b];
+        v32 |= ((uint32_t)byte) << (8 * b);
+      }
+      value = big_to_small_host<uint32_t>(v32);
+      byte_buffer = bytestreams_shared[local_channel_id][byte_buffer_offset];
+
+      const uint16_t* cdf_shared_base = &cdf_shared[0][0];
+
+      for (int i = 0; i < ntokens; ++i) {
+        const uint64_t span = (uint64_t)high - (uint64_t)low + 1;
+        const uint16_t count = static_cast<uint16_t>(
+            (((uint64_t)value - (uint64_t)low + 1) * (uint64_t)c_count - 1) / span);
+
+        uint16_t sym_i = binsearch_local<BLOCK_SIZE>(cdf_shared_base, count, (uint8_t)max_symbol, local_channel_id);
+
+        if (global_channel_id < nchannels_total) {
+          size_t out_idx = (size_t)layer_id * (size_t)ntokens * (size_t)nchannels_total
+                           + (size_t)i * (size_t)nchannels_total + (size_t)global_channel_id;
+          output_ptr[out_idx] = static_cast<uint8_t>(sym_i);
+        }
+
+        if (i == ntokens - 1) break;
+
+        uint32_t c_low = cdf_shared[sym_i][local_channel_id];
+        uint32_t c_high = (sym_i == max_symbol) ? 0x10000U : cdf_shared[sym_i + 1][local_channel_id];
+
+        high = (low - 1) + static_cast<uint32_t>(((uint64_t)span * (uint64_t)c_high) >> precision);
+        low = static_cast<uint32_t>((uint64_t)low + (((uint64_t)span * (uint64_t)c_low) >> precision));
+
+        while (true) {
+          if (low >= 0x80000000U || high < 0x80000000U) {
+            low <<= 1;
+            high <<= 1;
+            high |= 1;
+            read_next_bit_device<8>(value, byte_buffer, bit_idx);
+            check_and_update_byte_buffer_device<8, uint8_t>(byte_buffer, bit_idx, byte_buffer_offset,
+                                                            &bytestreams_shared[local_channel_id][0]);
+          } else if (low >= 0x40000000U && high < 0xC0000000U) {
+            low <<= 1;
+            low &= 0x7FFFFFFFU;
+            high <<= 1;
+            high |= 0x80000001U;
+            value -= 0x40000000U;
+            read_next_bit_device<8>(value, byte_buffer, bit_idx);
+            check_and_update_byte_buffer_device<8, uint8_t>(byte_buffer, bit_idx, byte_buffer_offset,
+                                                            &bytestreams_shared[local_channel_id][0]);
+          } else {
+            break;
+          }
+        }
+      } // ntokens
+    }); // parallel_for
+  }).wait();
+}
+
+// -------------------- Host functions with original signatures --------------------
+void decode_xpu_new(const at::Tensor& cdf, const at::Tensor& bytestreams,
+                     const at::Tensor& lengths, at::Tensor& output) {
+    TORCH_CHECK(cdf.is_xpu(), "CDF should be on XPU.");
+    TORCH_CHECK(bytestreams.is_xpu(), "Bytestreams should be on XPU.");
+    TORCH_CHECK(lengths.is_xpu(), "Lengths should be on XPU.");
+    TORCH_CHECK(output.is_xpu(), "Output should be on XPU.");
+
+    const auto cdf_shape = cdf.sizes();
+    const auto bs_shape = bytestreams.sizes();
+    const auto lengths_shape = lengths.sizes();
+    const auto output_shape = output.sizes();
+    TORCH_CHECK(cdf_shape[0] == bs_shape[0], "CDF and bytestreams should have the same number of layers");
+    TORCH_CHECK(cdf_shape[1] == bs_shape[1], "CDF and bytestreams should have the same number of channels");
+    TORCH_CHECK(cdf_shape[0] == lengths_shape[0], "CDF and lengths should have the same number of layers");
+    TORCH_CHECK(cdf_shape[1] == lengths_shape[1], "CDF and lengths should have the same number of channels");
+    TORCH_CHECK(cdf_shape[0] == output_shape[0], "CDF and output should have the same number of layers");
+    TORCH_CHECK(cdf_shape[1] == output_shape[2], "CDF and output should have the same number of channels");
+
+    const int nlayers = (int)cdf_shape[0];
+    const int nchannels = (int)cdf_shape[1];
+    const int ntokens = (int)output_shape[1];
+    const int lp = (int)cdf_shape[2];
+    const int block_size = get_block_size(nchannels);
+
+    TORCH_CHECK(ntokens <= MAX_TOKENS_PER_THREAD, "Number of tokens should be <= MAX_TOKENS_PER_THREAD");
+    TORCH_CHECK(nchannels % block_size == 0, "Number of channels should be divisible by block size");
+    TORCH_CHECK(lp <= MAX_LP, "CDF should have at most MAX_LP Lps");
+
+    const int16_t* cdf_ptr = cdf.data_ptr<int16_t>();
+    const uint8_t* bytestreams_ptr = bytestreams.data_ptr<uint8_t>();
+    const int32_t* lengths_ptr = lengths.data_ptr<int32_t>();
+    uint8_t* output_ptr = output.data_ptr<uint8_t>();
+
+    sycl::queue q;
+    auto device_id = cdf.device().index();
+    auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+    if (device_id >= 0 && device_id < static_cast<int>(devices.size())) {
+        q = sycl::queue(devices[device_id]);
+    } else {
+        q = sycl::queue(sycl::default_selector_v);  // Use default GPU
+    }  
+
+    switch (block_size) {
+      case 1: launch_decode_kernel<1>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      case 2: launch_decode_kernel<2>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      case 4: launch_decode_kernel<4>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      case 8: launch_decode_kernel<8>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      case 16: launch_decode_kernel<16>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      case 32: launch_decode_kernel<32>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      case 64: launch_decode_kernel<64>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      case 128: launch_decode_kernel<128>(q, cdf_ptr, bytestreams_ptr, lengths_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+      default: throw std::runtime_error("Unsupported block size");
+    }
+}
+
+void decode_xpu_prefsum(const at::Tensor& cdf, const at::Tensor& bytestreams,
+                         const at::Tensor& lengths_prefsum, at::Tensor& output) {
+    TORCH_CHECK(cdf.is_xpu(), "CDF should be on XPU.");
+    TORCH_CHECK(bytestreams.is_xpu(), "Bytestreams should be on XPU.");
+    TORCH_CHECK(lengths_prefsum.is_xpu(), "Lengths should be on XPU.");
+    TORCH_CHECK(output.is_xpu(), "Output should be on XPU.");
+
+    const auto cdf_shape = cdf.sizes();
+    const auto lengths_shape = lengths_prefsum.sizes();
+    const auto output_shape = output.sizes();
+    TORCH_CHECK(cdf_shape[0] == lengths_shape[0], "CDF and lengths should have the same number of layers");
+    TORCH_CHECK(cdf_shape[1] == lengths_shape[1], "CDF and lengths should have the same number of channels");
+    TORCH_CHECK(cdf_shape[0] == output_shape[0], "CDF and output should have the same number of layers");
+    TORCH_CHECK(cdf_shape[1] == output_shape[2], "CDF and output should have the same number of channels");
+
+    const int nlayers = (int)cdf_shape[0];
+    const int nchannels = (int)cdf_shape[1];
+    const int ntokens = (int)output_shape[1];
+    const int lp = (int)cdf_shape[2];
+    const int block_size = get_block_size(nchannels);
+
+    TORCH_CHECK(ntokens <= MAX_TOKENS_PER_THREAD, "Number of tokens should be <= MAX_TOKENS_PER_THREAD");
+    TORCH_CHECK(nchannels % block_size == 0, "Number of channels should be divisible by block size");
+    TORCH_CHECK(lp <= MAX_LP, "CDF should have at most MAX_LP Lps");
+
+    const int16_t* cdf_ptr = cdf.data_ptr<int16_t>();
+    const uint8_t* bytestreams_ptr = bytestreams.data_ptr<uint8_t>(); // flattened 1-D bytestreams
+    const int64_t* lengths_prefsum_ptr = lengths_prefsum.data_ptr<int64_t>();
+    uint8_t* output_ptr = output.data_ptr<uint8_t>();
+
+    sycl::queue q;
+    auto device_id = cdf.device().index();
+    auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+    if (device_id >= 0 && device_id < static_cast<int>(devices.size())) {
+        q = sycl::queue(devices[device_id]);
+    } else {
+        q = sycl::queue(sycl::default_selector_v);  // Use default GPU
+    }  
+
+    switch (block_size) {
+        case 1: launch_decode_prefsum_kernel<1>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        case 2: launch_decode_prefsum_kernel<2>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        case 4: launch_decode_prefsum_kernel<4>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        case 8: launch_decode_prefsum_kernel<8>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        case 16: launch_decode_prefsum_kernel<16>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        case 32: launch_decode_prefsum_kernel<32>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        case 64: launch_decode_prefsum_kernel<64>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        case 128: launch_decode_prefsum_kernel<128>(q, cdf_ptr, bytestreams_ptr, lengths_prefsum_ptr, output_ptr, nlayers, nchannels, lp, ntokens); break;
+        default: throw std::runtime_error("Unsupported block size");
+    }
+}
+

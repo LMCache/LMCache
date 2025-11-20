@@ -2,7 +2,6 @@
 
 #include <torch/all.h>
 #include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Exception.h>
 
 // #ifndef MEM_KERNELS_CUH

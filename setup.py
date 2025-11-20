@@ -15,6 +15,10 @@ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 # will run python setup.py sdist --dist-dir dist
 BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
 
+# python -m build --xpu
+# will run python setup.py xpu
+BUILD_WITH_XPU = "xpu" in sys.argv or os.environ.get("BUILD_WITH_XPU", "0") == "1"
+
 # New environment variable to choose between CUDA and HIP
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 
@@ -145,6 +149,42 @@ def rocm_extension() -> tuple[list, dict]:
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
+def xpu_extension() -> tuple[list, dict]:
+    # Third Party
+    from torch.utils import cpp_extension  # Import here
+
+    print("Building XPU extensions")
+
+    xpu_sources = [
+        "csrc/pybind.cpp",
+        "csrc/utils.cpp",
+        "csrc/cal_cdf.sycl",
+        "csrc/pos_kernels.sycl",
+        "csrc/ac_dec.sycl",
+        "csrc/ac_enc.sycl",
+        "csrc/mem_kernels.sycl",
+    ]
+
+    oneapi_root = os.environ.get("ONEAPI_ROOT", "/opt/intel/oneapi")
+    include_dirs = [f"{oneapi_root}/include"]
+    library_dirs = [f"{oneapi_root}/lib"]
+
+    ext_modules = [
+        cpp_extension.SyclExtension(
+            "lmcache.c_ops",
+            sources=xpu_sources,
+            include_dirs=include_dirs,
+            library_dirs=library_dirs,
+            extra_compile_args={
+                #"cxx": ["-g", "-lze_loader", "-lsycl"],
+                "icpx": ["-O2", "-D_GLIBCXX_USE_CXX11_ABI=1"],
+            },
+            define_macros = [("USE_XPU", "1")]
+        ),
+    ]
+    cmdclass = {"build_ext": cpp_extension.BuildExtension}
+    return ext_modules, cmdclass
+
 
 def source_dist_extension() -> tuple[list, dict]:
     print("Not building CUDA/HIP extensions for sdist")
@@ -154,6 +194,8 @@ def source_dist_extension() -> tuple[list, dict]:
 if __name__ == "__main__":
     if BUILDING_SDIST:
         get_extension = source_dist_extension
+    elif BUILD_WITH_XPU:
+        get_extension = xpu_extension
     elif BUILD_WITH_HIP:
         get_extension = rocm_extension
     else:

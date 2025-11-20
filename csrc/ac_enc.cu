@@ -3,7 +3,7 @@
 #include <iostream>
 #include <cstdio>
 #include <cuda_runtime.h>
-#include "cachegen_kernels.cuh"
+#include "cachegen_kernels.h"
 
 #define MAX_LP 48
 #define MAX_THREAD_PER_BLOCK 128

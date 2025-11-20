@@ -1,4 +1,3 @@
-#include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
@@ -9,6 +8,9 @@
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
 #include "mem_alloc.h"
 
+#ifndef USE_XPU
+
+#include <cuda_runtime.h>
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
   void* ptr = nullptr;
   cudaError_t err = cudaHostAlloc(&ptr, size, flags);
@@ -81,3 +83,9 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
 }
+
+#else
+
+
+
+#endif

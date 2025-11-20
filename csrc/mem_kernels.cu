@@ -2,7 +2,7 @@
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
-#include "mem_kernels.cuh"
+#include "mem_kernels.h"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #ifdef USE_ROCM

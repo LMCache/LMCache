@@ -1,0 +1,339 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//
+// ac_dec.cpp for Intel XPU device
+//
+
+#include <sycl/sycl.hpp>
+#include <cstdint>
+#include <stdexcept>
+#include <algorithm>
+#include <iostream>
+#include "cachegen_kernels.h"
+
+using namespace sycl;
+
+template <int BLOCK_SIZE> class EncodeKernel;
+
+#define MAX_LP 48
+#define MAX_THREAD_PER_BLOCK 128
+#define MAX_SHARED_MEMORY_PER_THREAD (0xc000 / MAX_THREAD_PER_BLOCK)
+
+#if MAX_SHARED_MEMORY_PER_THREAD - MAX_LP * 2 > 256
+  #define MAX_TOKENS_PER_THREAD 256
+  #define OUTPUT_BUFFER_LENGTH_PER_THREAD 256
+#else
+  #define OUTPUT_BUFFER_LENGTH_PER_THREAD \
+    (MAX_SHARED_MEMORY_PER_THREAD - MAX_LP * 2)
+  #define MAX_TOKENS_PER_THREAD (OUTPUT_BUFFER_LENGTH_PER_THREAD)
+#endif
+
+int get_block_size(int nchannels) {
+  // find the biggest 2^n that can divide nchannels
+  int factor = (nchannels ^ (nchannels - 1)) + 1;
+  factor >>= 1;
+  if (factor > MAX_THREAD_PER_BLOCK) {
+    factor = MAX_THREAD_PER_BLOCK;
+  }
+  return factor;
+}
+
+// Device-like helper functions (inline) that will be used inside kernels.
+// Implement as templated/static inline functions so SYCL can inline them.
+inline void spill_reg_to_shared_device(uint32_t &output_reg,
+                                       int &output_reg_len,
+                                       uint8_t *output_shared,
+                                       int &output_shared_offset) {
+    // rotate left so MSB bits align to high end
+    output_reg <<= (32 - output_reg_len);
+    output_reg_len = 0;
+    // write 4 bytes big-endian (matching original behavior)
+    output_shared[output_shared_offset] = static_cast<uint8_t>(output_reg >> 24);
+    output_shared[output_shared_offset + 1] = static_cast<uint8_t>((output_reg >> 16) & 0xFF);
+    output_shared[output_shared_offset + 2] = static_cast<uint8_t>((output_reg >> 8) & 0xFF);
+    output_shared[output_shared_offset + 3] = static_cast<uint8_t>(output_reg & 0xFF);
+    output_shared_offset += 4;
+    output_reg = 0;
+}
+
+inline void spill_partial_reg_to_shared_device(uint32_t output_reg,
+                                              int &output_reg_len,
+                                              uint8_t* output_shared,
+                                              int &output_shared_offset) {
+    output_reg <<= (32 - output_reg_len);
+    // write bytes while bits remain
+    while (output_reg_len > 0) {
+        output_reg_len -= 8;
+        output_shared[output_shared_offset] = static_cast<uint8_t>(output_reg >> 24);
+        output_shared_offset++;
+        output_reg <<= 8;
+    }
+}
+
+inline void add_bits_to_output_device(uint32_t bit, int num,
+                                      uint32_t &output_reg,
+                                      int &output_reg_len,
+                                      uint8_t* output_shared,
+                                      int &output_shared_offset) {
+    while (num > 0) {
+        const int remaining = std::min(num, 32 - output_reg_len);
+        // shift left by remaining, set lower 'remaining' bits to either 0 or 1
+        output_reg <<= remaining;
+        if (bit) {
+            // (1 << remaining) - 1  may overflow when remaining==32; but remaining <=32-output_reg_len and output_reg_len>=0 so remaining<=32
+            // but remaining==32 only when output_reg_len==0 and num>=32 -> safe as we use 32-bit shifting carefully.
+            if (remaining == 32) {
+              output_reg |= 0xFFFFFFFFu;
+            } else {
+              output_reg |= ((1u << remaining) - 1u);
+            }
+        }
+        num -= remaining;
+        output_reg_len += remaining;
+        if (output_reg_len == 32) {
+            spill_reg_to_shared_device(output_reg, output_reg_len, output_shared, output_shared_offset);
+        }
+    }
+}
+
+inline void append_bit_and_pending_device(uint32_t bit, uint64_t &pending_bits,
+                                         uint32_t &output_reg, int &output_reg_len,
+                                         uint8_t* output_shared, int &output_shared_offset) {
+    add_bits_to_output_device(bit, 1, output_reg, output_reg_len, output_shared, output_shared_offset);
+    if (pending_bits > 0) {
+        // append (1-bit) repeated pending_bits times
+        add_bits_to_output_device(1 - bit, static_cast<int>(pending_bits), output_reg, output_reg_len, output_shared, output_shared_offset);
+    }
+    pending_bits = 0;
+}
+
+
+// Template kernel for given BLOCK_SIZE
+template <int BLOCK_SIZE>
+void launch_encode_kernel(sycl::queue &q,
+                                   const int16_t* d_cdf,   // device pointer, shape [nlayers * nchannels * lp]
+                                   const int8_t* d_input_sym, // device pointer, shape [nlayers * ntokens * nchannels]
+                                   uint8_t* d_output_buffer, // device pointer, shape [nlayers * nchannels * output_buffer_length_per_thread]
+                                   int32_t* d_output_lengths, // device pointer, shape [nlayers * nchannels]
+                                   int nlayers, int nchannels, int lp, int ntokens) {
+    // Local sizes for nd_range: local range = (1, BLOCK_SIZE)
+    sycl::range<2> global_range((size_t)nlayers, (size_t)nchannels);
+    sycl::range<2> local_range(1, BLOCK_SIZE);
+    sycl::nd_range<2> ndRange(global_range, local_range);
+
+    // Submit kernel
+    q.submit([&](sycl::handler &h) {
+        // local memory (shared) arrays
+        // cdf_shared: uint16_t[MAX_LP * BLOCK_SIZE]
+        sycl::local_accessor<uint16_t, 1> cdf_shared_acc(sycl::range<1>(MAX_LP * BLOCK_SIZE), h);
+        // output_shared: uint8_t[BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD]
+        sycl::local_accessor<uint8_t, 1> output_shared_acc(sycl::range<1>(BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD), h);
+
+        h.parallel_for<class EncodeKernel<BLOCK_SIZE>>(ndRange, [=](sycl::nd_item<2> it) {
+            const int layer_id = it.get_group(0);       // blockIdx.x
+            const int block_y = it.get_group(1);        // blockIdx.y
+            const int thread_local_id = it.get_local_id(1); // threadIdx.x within block
+            const int channel_id = block_y * BLOCK_SIZE + thread_local_id;
+            const int local_threads = it.get_local_range(1);
+
+            // 1) Load CDF to local memory
+            const int cdf_size = BLOCK_SIZE * lp;
+            // each thread copies strided elements
+            for (int i = thread_local_id; i < cdf_size; i += local_threads) {
+                const int cid = i / lp; // index among block's channels [0..BLOCK_SIZE-1]
+                const int lid = i % lp; // lp index
+                const int shared_offset = lid * BLOCK_SIZE + cid; // layout: [lp][BLOCK_SIZE]
+                // read from global CDF: index = layer_id * nchannels * lp + (block_y*BLOCK_SIZE + cid) * lp + lid
+                int global_channel = block_y * BLOCK_SIZE + cid;
+                int global_index = layer_id * nchannels * lp + global_channel * lp + lid;
+                cdf_shared_acc[shared_offset] = static_cast<uint16_t>(d_cdf[global_index]);
+            }
+
+            it.barrier(sycl::access::fence_space::local_space);
+
+            // Setup encoding state
+            uint32_t low = 0u;
+            uint32_t high = 0xFFFFFFFFu;
+            uint64_t pending_bits = 0;
+            const int max_symbol = lp - 2;
+
+            uint32_t output_reg = 0;
+            int output_reg_len = 0;
+            int output_shared_offset = thread_local_id * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+            uint8_t *output_shared = output_shared_acc.get_multi_ptr<sycl::access::decorated::no>().get();
+
+            for (int t = 0; t < ntokens; ++t) {
+                // input symbol: input_sym[layer_id * ntokens * nchannels + t * nchannels + channel_id]
+                int input_index = layer_id * ntokens * nchannels + t * nchannels + channel_id;
+                uint8_t sym = static_cast<uint8_t>(d_input_sym[input_index]);
+
+                uint64_t span = static_cast<uint64_t>(high) - static_cast<uint64_t>(low) + 1ULL;
+
+                const uint32_t c_low = static_cast<uint32_t>( cdf_shared_acc[sym * BLOCK_SIZE + thread_local_id] );
+                const uint32_t c_high = (sym == max_symbol) ? 0x10000U : static_cast<uint32_t>( cdf_shared_acc[(sym + 1) * BLOCK_SIZE + thread_local_id] );
+
+                // note: use PRECISION
+                high = static_cast<uint32_t>((static_cast<uint64_t>(low) - 1ULL) + ((span * static_cast<uint64_t>(c_high)) >> PRECISION));
+                low  = static_cast<uint32_t>( (static_cast<uint64_t>(low)) + ((span * static_cast<uint64_t>(c_low)) >> PRECISION) );
+
+                // renormalization
+                while (true) {
+                    if (high < 0x80000000u) {
+                        append_bit_and_pending_device(0, pending_bits, output_reg, output_reg_len, output_shared, output_shared_offset);
+                        low <<= 1;
+                        high <<= 1;
+                        high |= 1;
+                    } else if (low >= 0x80000000u) {
+                        append_bit_and_pending_device(1, pending_bits, output_reg, output_reg_len, output_shared, output_shared_offset);
+                        low <<= 1;
+                        high <<= 1;
+                        high |= 1;
+                    } else if (low >= 0x40000000u && high < 0xC0000000u) {
+                        pending_bits++;
+                        low <<= 1;
+                        low &= 0x7FFFFFFFu;
+                        high <<= 1;
+                        high |= 0x80000001u;
+                    } else {
+                        break;
+                    }
+                }
+            } // tokens loop
+
+            // finish
+            pending_bits += 1;
+            if (low < 0x40000000u) {
+                append_bit_and_pending_device(0, pending_bits, output_reg, output_reg_len, output_shared, output_shared_offset);
+            } else {
+                append_bit_and_pending_device(1, pending_bits, output_reg, output_reg_len, output_shared, output_shared_offset);
+            }
+            spill_partial_reg_to_shared_device(output_reg, output_reg_len, output_shared, output_shared_offset);
+
+            // write out length for this thread
+            int out_len = output_shared_offset - thread_local_id * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+            // write to global lengths: output_lengths[layer_id * nchannels + channel_id]
+            d_output_lengths[layer_id * nchannels + channel_id] = out_len;
+
+            it.barrier(sycl::access::fence_space::local_space);
+
+            // reuse cdf_shared memory as int* prefix array in local memory
+            int *output_lengths_shared = reinterpret_cast<int*>(cdf_shared_acc.get_multi_ptr<sycl::access::decorated::no>().get());
+            output_lengths_shared[thread_local_id] = out_len;
+
+            it.barrier(sycl::access::fence_space::local_space);
+
+            // Copy the output buffer rows to global memory (coalesced by threads)
+            for (int i = 0; i < BLOCK_SIZE; ++i) {
+                int length = output_lengths_shared[i];
+                int current_channel = block_y * BLOCK_SIZE + i;
+                for (int j = thread_local_id; j < length; j += local_threads) {
+                    // global offset into output_buffer: layer_id * nchannels * output_buffer_len + current_channel * output_buffer_len + j
+                    size_t global_out_idx = static_cast<size_t>(layer_id) * (size_t)nchannels * OUTPUT_BUFFER_LENGTH_PER_THREAD
+                                           + static_cast<size_t>(current_channel) * OUTPUT_BUFFER_LENGTH_PER_THREAD
+                                           + static_cast<size_t>(j);
+                    size_t local_offset = static_cast<size_t>(i) * OUTPUT_BUFFER_LENGTH_PER_THREAD + static_cast<size_t>(j);
+                    d_output_buffer[global_out_idx] = output_shared[local_offset];
+                }
+            }
+
+        }); // parallel_for
+    }).wait(); // wait for kernel completion
+}
+
+void encode_xpu_new(const at::Tensor& cdf, const at::Tensor& input_sym,
+                     at::Tensor& output_buffer, at::Tensor& output_lengths) {
+    TORCH_CHECK(cdf.is_xpu(), "CDF should be on XPU");
+    TORCH_CHECK(input_sym.is_xpu(), "Input symbols should be on XPU");
+    TORCH_CHECK(output_buffer.is_xpu(), "Output buffer should be on XPU");
+    TORCH_CHECK(output_lengths.is_xpu(), "Output lengths should be on XPU"); 
+    TORCH_CHECK(cdf.dim() == 3, "CDF must be 3D [nlayers, nchannels, lp]");
+    TORCH_CHECK(input_sym.dim() == 3, "input_sym must be 3D [nlayers, ntokens, nchannels]");
+    TORCH_CHECK(output_buffer.dim() == 3, "output_buffer must be 3D [nlayers, nchannels, output_len]");
+    TORCH_CHECK(output_lengths.dim() == 2, "output_lengths must be 2D [nlayers, nchannels]");
+
+    const auto cdf_shape = cdf.sizes();
+    const auto input_shape = input_sym.sizes();
+    const auto output_shape = output_buffer.sizes();
+    const auto output_lengths_shape = output_lengths.sizes();
+
+    TORCH_CHECK(cdf_shape[0] == input_shape[0], "CDF and input should have same nlayers");
+    TORCH_CHECK(cdf_shape[1] == input_shape[2], "CDF and input should have same nchannels");
+    TORCH_CHECK(output_shape[0] == cdf_shape[0], "output_buffer nlayers mismatch");
+    TORCH_CHECK(output_shape[1] == cdf_shape[1], "output_buffer nchannels mismatch");
+    TORCH_CHECK(output_lengths_shape[0] == cdf_shape[0], "output_lengths nlayers mismatch");
+    TORCH_CHECK(output_lengths_shape[1] == cdf_shape[1], "output_lengths nchannels mismatch");
+
+    const int nlayers = static_cast<int>(cdf_shape[0]);
+    const int nchannels = static_cast<int>(cdf_shape[1]);
+    const int lp = static_cast<int>(cdf_shape[2]);
+    const int ntokens = static_cast<int>(input_shape[1]);
+
+    TORCH_CHECK(ntokens <= MAX_TOKENS_PER_THREAD,
+                "Number of tokens should be <= ", MAX_TOKENS_PER_THREAD);
+    TORCH_CHECK(nchannels % 1 == 0, "nchannels must be positive"); // trivial
+    TORCH_CHECK(lp <= MAX_LP, "CDF length must be <= MAX_LP");
+
+    // Get raw pointers from tensors. Assumes tensors are allocated in a way
+    // accessible to SYCL (USM/unified). If not, user must copy data to SYCL device memory.
+    const int16_t* d_cdf = cdf.data_ptr<int16_t>();
+    const int8_t* d_input_sym = input_sym.data_ptr<int8_t>();
+    uint8_t* d_output_buffer = output_buffer.data_ptr<uint8_t>();
+    int32_t* d_output_lengths = output_lengths.data_ptr<int32_t>();
+
+    // create a queue (select default device). Adjust selector if necessary.
+    //sycl::queue q(sycl::default_selector{});
+    sycl::queue q;
+    auto device_id = input_sym.device().index();
+    auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
+    if (device_id >= 0 && device_id < static_cast<int>(devices.size())) {
+        q = sycl::queue(devices[device_id]);
+    } else {
+        q = sycl::queue(sycl::default_selector_v);  // Use default GPU
+    } 
+
+    // compute block_size (as power-of-two divisor)
+    int block_size = get_block_size(nchannels);
+    // ensure divisible; fallback try to find divisor
+    if (nchannels % block_size != 0) {
+        int chosen = 1;
+        for (int p = 0; p <= 7; ++p) {
+            int candidate = 1 << p;
+            if (candidate <= MAX_THREAD_PER_BLOCK && nchannels % candidate == 0) chosen = candidate;
+        }
+        block_size = chosen;
+        if (nchannels % block_size != 0) {
+            throw std::runtime_error("nchannels not divisible by block size");
+        }
+    }
+
+    // Launch templated kernel by block_size
+    switch (block_size) {
+        case 1:
+            launch_encode_kernel<1>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        case 2:
+            launch_encode_kernel<2>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        case 4:
+            launch_encode_kernel<4>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        case 8:
+            launch_encode_kernel<8>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        case 16:
+            launch_encode_kernel<16>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        case 32:
+            launch_encode_kernel<32>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        case 64:
+            launch_encode_kernel<64>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        case 128:
+            launch_encode_kernel<128>(q, d_cdf, d_input_sym, d_output_buffer, d_output_lengths, nlayers, nchannels, lp, ntokens);
+            break;
+        default:
+            throw std::runtime_error("Unsupported block size for SYCL kernel");
+    }
+}
+

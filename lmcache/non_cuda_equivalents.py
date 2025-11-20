@@ -16,7 +16,7 @@ def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     Note: NUMA and pinned memory are not supported on non-CUDA."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)
@@ -43,7 +43,7 @@ def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     to it. Note: Pinned memory is not supported on non-CUDA."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)

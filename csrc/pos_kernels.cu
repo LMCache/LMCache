@@ -9,6 +9,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include "pos_kernels.h"
 #include "dispatch_utils.h"
 #include "cuda_compat.h"
 namespace lmc {
