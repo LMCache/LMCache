@@ -181,10 +181,15 @@
             // Check for Qwen3 models (fuzzy matching)
             const isQwen3Model = model.toLowerCase().includes("qwen/qwen3-");
 
+            // Check for GLM4 models (prefix matching)
+            const isGLM4Model = model.startsWith("zai-org/GLM-4.");
+
+            const isGQAWithHeadDimModel = isQwen3Model || isGLM4Model;
+
             if (isDeepSeekModel) {
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
-            } else if (isQwen3Model) {
-                // The Qwen3 series use GQA, and `head_dim` needs to be read from config file.
+            } else if (isGQAWithHeadDimModel) {
+                // The Qwen3 series and GLM use GQA, and `head_dim` needs to be read from config file.
                 ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, head_dim } = config);
                 console.log(config);
             } else {
@@ -210,7 +215,7 @@
             let total_elements;
             if (isDeepSeekModel) {
                 total_elements = num_hidden_layers * tokens * (kv_lora_rank + qk_rope_head_dim);
-            } else if (isQwen3Model) {
+            } else if (isGQAWithHeadDimModel) {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
             } else {
                 total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
@@ -235,7 +240,7 @@
                 <b>Total Bytes:</b> ${total_elements} × ${dtype_size} = ${total_bytes} bytes<br>
                 <b>KV Cache Size:</b> ${total_bytes} / (1024³) ≈ ${kvCacheSizeGB.toFixed(4)} GB
                 `;
-            } else if (isQwen3Model) {
+            } else if (isGQAWithHeadDimModel) {
                 steps = `
                 <strong>Calculation Details:</strong><br><br>
                 <b>Selected Model:</b> ${model}<br>
