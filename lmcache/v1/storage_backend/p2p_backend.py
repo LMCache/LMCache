@@ -102,7 +102,6 @@ class P2PBackend(StorageBackendInterface):
     # Default timeout constants for socket operations (in milliseconds)
     DEFAULT_SOCKET_RECV_TIMEOUT_MS = 30000
     DEFAULT_SOCKET_SEND_TIMEOUT_MS = 10000
-    DEFAULT_PEER_CONNECTION_TIMEOUT_MS = 60000
 
     def __init__(
         self,
@@ -127,9 +126,6 @@ class P2PBackend(StorageBackendInterface):
         )
         self.socket_send_timeout_ms = extra_config.get(
             "p2p_socket_send_timeout_ms", self.DEFAULT_SOCKET_SEND_TIMEOUT_MS
-        )
-        self.peer_connection_timeout_ms = extra_config.get(
-            "p2p_peer_connection_timeout_ms", self.DEFAULT_PEER_CONNECTION_TIMEOUT_MS
         )
 
         # tp rank is worker id for now
@@ -187,10 +183,35 @@ class P2PBackend(StorageBackendInterface):
         self.lookup_url_to_socket_params: dict[str, dict] = {}
         self.async_context: Optional[zmq.asyncio.Context] = None
         self.async_peer_socket: Optional[zmq.asyncio.Socket] = None
-        asyncio.run_coroutine_threadsafe(self._handle_peer_requests(), loop)
+        asyncio.run_coroutine_threadsafe(
+            self._run_peer_request_handler_with_recovery(), loop
+        )
 
     def __str__(self) -> str:
         return "P2PBackend"
+
+    async def _run_peer_request_handler_with_recovery(self) -> None:
+        """
+        Wrapper method that runs _handle_peer_requests with exception handling.
+        This ensures the handler keeps running even if unexpected errors occur.
+        """
+        while self.running.is_set():
+            try:
+                await self._handle_peer_requests()
+                # If _handle_peer_requests exits normally, break the loop
+                break
+            except asyncio.CancelledError:
+                logger.info("Peer request handler cancelled, shutting down")
+                break
+            except Exception as e:
+                logger.error(
+                    "Peer request handler crashed: %s",
+                    e,
+                    exc_info=True,
+                )
+                # Fast failure: log error but continue running
+                # Add small delay to prevent tight error loop
+                await asyncio.sleep(0.1)
 
     def _create_socket_with_timeout(
         self,
@@ -238,12 +259,21 @@ class P2PBackend(StorageBackendInterface):
         logger.info(f"Got layout info from controller: {layout_info}")
 
         if num_hit_chunks > 0:
-            await self._ensure_peer_connection(peer_init_url)
-            self.lookup_id_to_peer_mapping[lookup_id] = (
-                peer_init_url,
-                self.peer_id_to_lookup_url_mapping[peer_init_url],
-                location,
-            )
+            try:
+                await self._ensure_peer_connection(peer_init_url)
+                self.lookup_id_to_peer_mapping[lookup_id] = (
+                    peer_init_url,
+                    self.peer_id_to_lookup_url_mapping[peer_init_url],
+                    location,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to ensure peer connection for lookup_id %s: %s",
+                    lookup_id,
+                    e,
+                    exc_info=True,
+                )
+                return 0
 
         # TODO(Jiayi): We could potentially update the local cache here.
         # Or we can update after tier 3 lookup.
@@ -269,126 +299,96 @@ class P2PBackend(StorageBackendInterface):
         )
 
         while self.running.is_set():
-            try:
-                msg_bytes = await self.async_peer_socket.recv()
-                msg = msgspec.msgpack.decode(msg_bytes, type=P2PMsg)
+            msg_bytes = await self.async_peer_socket.recv()
+            msg = msgspec.msgpack.decode(msg_bytes, type=P2PMsg)
 
-                num_tokens = len(msg.mem_indexes) * self.chunk_size
-                monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
+            num_tokens = len(msg.mem_indexes) * self.chunk_size
+            monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
 
-                if isinstance(msg, BatchedLookupAndGetMsg):
-                    logger.info("Received P2P batched get msg")
+            if isinstance(msg, BatchedLookupAndGetMsg):
+                logger.info("Received P2P batched get msg")
 
-                    lookup_id = msg.lookup_id
-                    receiver_id = msg.receiver_id
-                    remote_mem_indexes = msg.mem_indexes
-                    keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+                lookup_id = msg.lookup_id
+                receiver_id = msg.receiver_id
+                remote_mem_indexes = msg.mem_indexes
+                keys = [CacheEngineKey.from_string(key) for key in msg.keys]
 
-                    # TODO(Jiayi): Optimally, there's no need to use async call
-                    # for some backends (e.g., local cpu) as there's overhead for
-                    # async function call.
-                    num_hit_chunks = (
-                        await self.local_cpu_backend.batched_async_contains(
-                            lookup_id=lookup_id,
-                            keys=keys,
-                            pin=True,
-                        )
-                    )
-
-                    mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
-                        lookup_id=lookup_id,
-                        keys=keys[:num_hit_chunks],
-                    )
-
-                    channel_transfer_spec = {
-                        "receiver_id": receiver_id,
-                        "remote_indexes": remote_mem_indexes[:num_hit_chunks],
-                    }
-                    await self.transfer_channel.async_batched_write(
-                        objects=mem_objs,
-                        transfer_spec=channel_transfer_spec,
-                    )
-
-                    ret_msg = BatchedLookupAndGetRetMsg(
-                        num_hit_chunks=num_hit_chunks,
-                    )
-
-                    for mem_obj in mem_objs:
-                        mem_obj.ref_count_down()
-                        mem_obj.unpin()
-                elif isinstance(msg, BatchedLookupAndPutMsg):
-                    logger.info("Received P2P batched put msg")
-
-                    sender_id = msg.sender_id
-                    r_mem_indexes = msg.mem_indexes
-                    keys = [CacheEngineKey.from_string(key) for key in msg.keys]
-                    offsets = msg.offsets
-
-                    # TODO(Jiayi): Need to support more backend
-                    r_mem_indexes_to_read = []
-                    keys_to_read = []
-                    local_mem_objs = []
-                    for idx, key in enumerate(keys):
-                        if self.local_cpu_backend.contains(key, pin=False):
-                            continue
-                        r_mem_indexes_to_read.append(r_mem_indexes[idx])
-                        shape = self.full_size_shape.copy()
-                        shape[self.fmt.token_dim()] = offsets[idx]
-                        local_mem_obj = self.local_cpu_backend.allocate(
-                            torch.Size(shape), self.dtype, self.fmt
-                        )
-                        local_mem_objs.append(local_mem_obj)
-                        keys_to_read.append(key)
-
-                    channel_transfer_spec = {
-                        "sender_id": sender_id,
-                        "remote_indexes": r_mem_indexes_to_read,
-                    }
-                    await self.transfer_channel.async_batched_read(
-                        buffers=local_mem_objs,
-                        transfer_spec=channel_transfer_spec,
-                    )
-
-                    self.local_cpu_backend.batched_submit_put_task(
-                        keys=keys_to_read,
-                        memory_objs=local_mem_objs,
-                    )
-
-                    ret_msg = BatchedLookupAndPutRetMsg(
-                        num_read_chunks=len(local_mem_objs),
-                    )
-                else:
-                    logger.error("Unknown message type received: %s", type(msg))
-                    ret_msg = BatchedLookupAndGetRetMsg(num_hit_chunks=0)
-
-                logger.info(f"P2P transfer finished for request {monitor_req_id}")
-                self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
-
-                await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
-            except zmq.Again as e:
-                logger.error("Timeout occurred on async peer socket, error: %s", e)
-                await self._send_error_response_safe(
-                    BatchedLookupAndGetRetMsg(num_hit_chunks=0)
-                )
-            except zmq.ZMQError as e:
-                logger.error("ZMQ error on async peer socket: %s", e)
-                await self._send_error_response_safe(
-                    BatchedLookupAndGetRetMsg(num_hit_chunks=0)
-                )
-            except Exception as e:
-                logger.error("Error handling P2P request: %s", e, exc_info=True)
-                await self._send_error_response_safe(
-                    BatchedLookupAndGetRetMsg(num_hit_chunks=0)
+                # TODO(Jiayi): Optimally, there's no need to use async call
+                # for some backends (e.g., local cpu) as there's overhead for
+                # async function call.
+                num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
+                    lookup_id=lookup_id,
+                    keys=keys,
+                    pin=True,
                 )
 
-    async def _send_error_response_safe(self, error_msg: P2PMsg) -> None:
-        """Safely send error response, catching any exceptions"""
-        if self.async_peer_socket is None:
-            return
-        try:
-            await self.async_peer_socket.send(msgspec.msgpack.encode(error_msg))
-        except Exception as e:
-            logger.error("Failed to send error response: %s", e)
+                mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
+                    lookup_id=lookup_id,
+                    keys=keys[:num_hit_chunks],
+                )
+
+                channel_transfer_spec = {
+                    "receiver_id": receiver_id,
+                    "remote_indexes": remote_mem_indexes[:num_hit_chunks],
+                }
+                await self.transfer_channel.async_batched_write(
+                    objects=mem_objs,
+                    transfer_spec=channel_transfer_spec,
+                )
+
+                ret_msg = BatchedLookupAndGetRetMsg(
+                    num_hit_chunks=num_hit_chunks,
+                )
+
+                for mem_obj in mem_objs:
+                    mem_obj.ref_count_down()
+                    mem_obj.unpin()
+            elif isinstance(msg, BatchedLookupAndPutMsg):
+                logger.info("Received P2P batched put msg")
+
+                sender_id = msg.sender_id
+                r_mem_indexes = msg.mem_indexes
+                keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+                offsets = msg.offsets
+
+                # TODO(Jiayi): Need to support more backend
+                r_mem_indexes_to_read = []
+                keys_to_read = []
+                local_mem_objs = []
+                for idx, key in enumerate(keys):
+                    if self.local_cpu_backend.contains(key, pin=False):
+                        continue
+                    r_mem_indexes_to_read.append(r_mem_indexes[idx])
+                    shape = self.full_size_shape.copy()
+                    shape[self.fmt.token_dim()] = offsets[idx]
+                    local_mem_obj = self.local_cpu_backend.allocate(
+                        torch.Size(shape), self.dtype, self.fmt
+                    )
+                    local_mem_objs.append(local_mem_obj)
+                    keys_to_read.append(key)
+
+                channel_transfer_spec = {
+                    "sender_id": sender_id,
+                    "remote_indexes": r_mem_indexes_to_read,
+                }
+                await self.transfer_channel.async_batched_read(
+                    buffers=local_mem_objs,
+                    transfer_spec=channel_transfer_spec,
+                )
+
+                self.local_cpu_backend.batched_submit_put_task(
+                    keys=keys_to_read,
+                    memory_objs=local_mem_objs,
+                )
+
+                ret_msg = BatchedLookupAndPutRetMsg(
+                    num_read_chunks=len(local_mem_objs),
+                )
+
+            logger.info(f"P2P transfer finished for request {monitor_req_id}")
+            self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
+
+            await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
 
     def _recreate_lookup_socket(self, peer_lookup_url: str) -> None:
         """Recreate a lookup socket for a specific peer"""
@@ -413,12 +413,32 @@ class P2PBackend(StorageBackendInterface):
             return
 
         logger.info("Recreating socket for peer %s", peer_lookup_url)
-        new_socket = self._create_socket_with_timeout(
-            peer_lookup_url,
-            zmq.REQ,
-            "connect",
-        )
-        self.lookup_url_to_socket_mapping[peer_lookup_url] = new_socket
+        try:
+            new_socket = self._create_socket_with_timeout(
+                peer_lookup_url,
+                zmq.REQ,
+                "connect",
+            )
+            self.lookup_url_to_socket_mapping[peer_lookup_url] = new_socket
+        except zmq.ZMQError as e:
+            logger.error(
+                "Failed to recreate socket for peer %s: %s",
+                peer_lookup_url,
+                e,
+                exc_info=True,
+            )
+            # Remove the failed socket mapping to avoid using broken connection
+            self.lookup_url_to_socket_mapping.pop(peer_lookup_url, None)
+            raise
+        except Exception as e:
+            logger.error(
+                "Unexpected error recreating socket for peer %s: %s",
+                peer_lookup_url,
+                e,
+                exc_info=True,
+            )
+            self.lookup_url_to_socket_mapping.pop(peer_lookup_url, None)
+            raise
 
     async def _ensure_peer_connection(
         self,
@@ -426,43 +446,32 @@ class P2PBackend(StorageBackendInterface):
     ) -> None:
         if peer_init_url in self.peer_id_to_lookup_url_mapping:
             return
+        init_side_msg = P2PInitSideMsg()
+        init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
+            local_id=self.peer_init_url,
+            peer_id=peer_init_url,
+            peer_init_url=peer_init_url,
+            init_side_msg=init_side_msg,
+        )
+        assert isinstance(init_ret_msg, P2PInitSideRetMsg)
+        peer_lookup_url = init_ret_msg.peer_lookup_url
+        self.peer_id_to_lookup_url_mapping[peer_init_url] = peer_lookup_url
 
-        try:
-            init_side_msg = P2PInitSideMsg()
-            init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
-                local_id=self.peer_init_url,
-                peer_id=peer_init_url,
-                peer_init_url=peer_init_url,
-                init_side_msg=init_side_msg,
-            )
-            assert isinstance(init_ret_msg, P2PInitSideRetMsg)
-            peer_lookup_url = init_ret_msg.peer_lookup_url
-            self.peer_id_to_lookup_url_mapping[peer_init_url] = peer_lookup_url
-
-            lookup_socket = self._create_socket_with_timeout(
-                peer_lookup_url,
-                zmq.REQ,
-                "connect",
-            )
-            self.lookup_url_to_socket_mapping[peer_lookup_url] = lookup_socket
-            self.lookup_url_to_lock_mapping[peer_lookup_url] = asyncio.Lock()
-            # Store socket parameters for recreation
-            self.lookup_url_to_socket_params[peer_lookup_url] = {
-                "peer_init_url": peer_init_url,
-            }
-            logger.info(
-                "Established connection to peer_init_url %s. The peer_lookup_url: %s",
-                peer_init_url,
-                peer_lookup_url,
-            )
-        except Exception as e:
-            logger.error(
-                "Failed to establish peer connection to %s: %s",
-                peer_init_url,
-                e,
-                exc_info=True,
-            )
-            raise
+        lookup_socket = self._create_socket_with_timeout(
+            peer_lookup_url,
+            zmq.REQ,
+            "connect",
+        )
+        self.lookup_url_to_socket_mapping[peer_lookup_url] = lookup_socket
+        self.lookup_url_to_lock_mapping[peer_lookup_url] = asyncio.Lock()
+        # Store socket parameters for future recreation
+        self.lookup_url_to_socket_params[peer_lookup_url] = {
+            "peer_init_url": peer_init_url,
+        }
+        logger.info(
+            f"Established connection to peer_init_url {peer_init_url}."
+            f" The peer_lookup_url: {peer_lookup_url}"
+        )
 
     async def batched_get_non_blocking(
         self,
@@ -504,38 +513,38 @@ class P2PBackend(StorageBackendInterface):
             mem_indexes=local_indexes,
         )
 
-        async with lookup_lock:
-            try:
+        try:
+            async with lookup_lock:
                 await lookup_socket.send(msgspec.msgpack.encode(msg))
                 ret_msg_bytes = await lookup_socket.recv()
                 ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
-            except zmq.Again as e:
-                logger.error(
-                    "Timeout occurred for lookup_id %s, recreating socket. Error: %s",
-                    lookup_id,
-                    e,
-                )
-                self._recreate_lookup_socket(peer_lookup_url)
-                self._cleanup_memory_objects(mem_objs)
-                return []
-            except zmq.ZMQError as e:
-                logger.error(
-                    "ZMQ error for lookup_id %s: %s, recreating socket",
-                    lookup_id,
-                    e,
-                )
-                self._recreate_lookup_socket(peer_lookup_url)
-                self._cleanup_memory_objects(mem_objs)
-                return []
-            except Exception as e:
-                logger.error(
-                    "Error during P2P get operation for lookup_id %s: %s",
-                    lookup_id,
-                    e,
-                    exc_info=True,
-                )
-                self._cleanup_memory_objects(mem_objs)
-                return []
+        except zmq.Again as e:
+            logger.error(
+                "Timeout occurred for lookup_id %s, recreating socket. Error: %s",
+                lookup_id,
+                e,
+            )
+            self._cleanup_memory_objects(mem_objs)
+            self._recreate_lookup_socket(peer_lookup_url)
+            return []
+        except zmq.ZMQError as e:
+            logger.error(
+                "ZMQ error for lookup_id %s: %s, recreating socket",
+                lookup_id,
+                e,
+            )
+            self._cleanup_memory_objects(mem_objs)
+            self._recreate_lookup_socket(peer_lookup_url)
+            return []
+        except Exception as e:
+            logger.error(
+                "Error during P2P get operation for lookup_id %s: %s",
+                lookup_id,
+                e,
+                exc_info=True,
+            )
+            self._cleanup_memory_objects(mem_objs)
+            return []
 
         num_hit_chunks = ret_msg.num_hit_chunks
 
@@ -551,6 +560,7 @@ class P2PBackend(StorageBackendInterface):
         objs: List[MemoryObj],
         transfer_spec: Any = None,
     ) -> None:
+        # TODO(baoloongmao): Add exception handling for socket operations
         # Code path for `move` operation in controller.
         assert isinstance(transfer_spec, dict)
         assert "peer_init_url" in transfer_spec
@@ -576,30 +586,9 @@ class P2PBackend(StorageBackendInterface):
         lookup_lock = self.lookup_url_to_lock_mapping[peer_lookup_url]
 
         async with lookup_lock:
-            try:
-                await lookup_socket.send(msgspec.msgpack.encode(msg))
-                ret_msg_bytes = await lookup_socket.recv()
-                ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
-            except zmq.Again as e:
-                logger.error(
-                    "Timeout occurred for put task, recreating socket. Error: %s",
-                    e,
-                )
-                self._recreate_lookup_socket(peer_lookup_url)
-                self._cleanup_memory_objects(objs)
-                raise
-            except zmq.ZMQError as e:
-                logger.error(
-                    "ZMQ error for put task: %s, recreating socket",
-                    e,
-                )
-                self._recreate_lookup_socket(peer_lookup_url)
-                self._cleanup_memory_objects(objs)
-                raise
-            except Exception as e:
-                logger.error("Error during P2P put operation: %s", e, exc_info=True)
-                self._cleanup_memory_objects(objs)
-                raise
+            await lookup_socket.send(msgspec.msgpack.encode(msg))
+            ret_msg_bytes = await lookup_socket.recv()
+        ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
 
         return ret_msg.num_read_chunks
 
@@ -622,40 +611,8 @@ class P2PBackend(StorageBackendInterface):
         """
         logger.info("Closing P2P backend")
         self.running.clear()
-
-        # Close all lookup sockets
-        for url, socket in self.lookup_url_to_socket_mapping.items():
-            try:
-                socket.close(linger=0)
-                logger.debug("Closed lookup socket for %s", url)
-            except Exception as e:
-                logger.warning("Error closing lookup socket for %s: %s", url, e)
-
-        # Close async peer socket
-        if self.async_peer_socket is not None:
-            try:
-                self.async_peer_socket.close(linger=0)
-                logger.debug("Closed async peer socket")
-            except Exception as e:
-                logger.warning("Error closing async peer socket: %s", e)
-
-        # Terminate context
-        if self.async_context is not None:
-            try:
-                self.async_context.term()
-                logger.debug("Terminated ZMQ context")
-            except Exception as e:
-                logger.warning("Error terminating ZMQ context: %s", e)
-
-        # Close transfer channel
-        try:
-            if hasattr(self.transfer_channel, "close"):
-                self.transfer_channel.close()
-                logger.debug("Closed transfer channel")
-        except Exception as e:
-            logger.warning("Error closing transfer channel: %s", e)
-
-        logger.info("P2P backend closed successfully")
+        # TODO(baoloongmao): Close lookup sockets, async peer, socket,
+        #  context and transfer channel
 
     ############################################################
     # Not-supported functions

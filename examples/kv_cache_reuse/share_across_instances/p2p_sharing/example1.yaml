@@ -22,4 +22,3 @@ extra_config:
   # P2P backend timeout configurations (optional, defaults shown)
   p2p_socket_recv_timeout_ms: 30000  # Socket receive timeout in milliseconds
   p2p_socket_send_timeout_ms: 10000  # Socket send timeout in milliseconds
-  p2p_peer_connection_timeout_ms: 60000  # Peer connection timeout in milliseconds

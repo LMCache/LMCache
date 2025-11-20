@@ -262,7 +262,6 @@ Settings for P2P (peer-to-peer) backend timeout behavior. These configurations a
     extra_config:
       p2p_socket_recv_timeout_ms: 30000
       p2p_socket_send_timeout_ms: 10000
-      p2p_peer_connection_timeout_ms: 60000
 
 .. list-table::
    :header-rows: 1
@@ -277,9 +276,6 @@ Settings for P2P (peer-to-peer) backend timeout behavior. These configurations a
    * - p2p_socket_send_timeout_ms
      - 10000
      - Timeout in milliseconds for socket send operations
-   * - p2p_peer_connection_timeout_ms
-     - 60000
-     - Timeout in milliseconds for establishing peer connections
 
 Nixl (as a storage backend) Configurations
 ------------------------------------------
