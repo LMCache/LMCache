@@ -167,10 +167,7 @@ class GPUCacheContext:
         """
         Returns the temporary GPU buffer for transfers
         """
-        if self.is_mla_:
-            return self.tmp_gpu_buffer_[:, :num_tokens, :]
-        else:
-            return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
+        return self.tmp_gpu_buffer_[:, :, :num_tokens, :]
 
     @_lmcache_nvtx_annotate
     def get_slot_mapping_tensor(self, gpu_block_ids: list[int]) -> torch.Tensor:
@@ -185,7 +182,7 @@ class GPUCacheContext:
         Returns the shape of the KV buffer for the given number of tokens
         """
         if self.is_mla_:
-            return torch.Size((self.num_layers_, num_tokens, self.hidden_dim_size_))
+            return torch.Size((1, self.num_layers_, num_tokens, self.hidden_dim_size_))
         else:
             return torch.Size((2, self.num_layers_, num_tokens, self.hidden_dim_size_))
 
