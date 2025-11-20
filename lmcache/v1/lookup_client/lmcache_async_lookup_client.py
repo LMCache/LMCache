@@ -262,16 +262,14 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
     def _cleanup_finished_aborted_lookups(self) -> None:
         """Check for finished aborted lookups and send cleanup messages to workers."""
-        with self.lock:
-            finished_lookups = [
-                lookup_id
-                for lookup_id in self.aborted_lookups
-                if self.reqs_status.get(lookup_id) is not None
-            ]
-            if finished_lookups:
-                self.aborted_lookups.difference_update(finished_lookups)
+        finished_lookups = [
+            lookup_id
+            for lookup_id in self.aborted_lookups
+            if self.reqs_status.get(lookup_id) is not None
+        ]
+        if finished_lookups:
+            self.aborted_lookups.difference_update(finished_lookups)
 
-        # Send cleanup messages outside the lock to avoid blocking
         for lookup_id in finished_lookups:
             self._send_cleanup_message(lookup_id)
 
