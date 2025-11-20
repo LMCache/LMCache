@@ -43,8 +43,8 @@ cleanup() {
         local cid="${!cid_var:-}"
         echo "  - Killing and removing container: $cid" >&2
         if [[ -n "$cid" ]]; then
-            docker kill "$cid" >&2
-            docker rm "$cid" >&2
+            docker kill "$cid" >&2 || echo "    [debug] docker kill exited with $?" >&2
+            docker rm "$cid" >&2 || echo "    [debug] docker rm exited with $?" >&2
         fi
     done
 
