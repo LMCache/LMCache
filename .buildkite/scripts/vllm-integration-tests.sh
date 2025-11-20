@@ -35,15 +35,15 @@ PORT=
 cleanup() {
     local code="${1:-0}"
 
-    echo "→ Cleaning up Docker containers and ports..." > &2
+    echo "→ Cleaning up Docker containers and ports..." >&2
 
     # Clean up container IDs if defined
     for cid_var in CID PREFILLER_CID DECODER_CID CID1 CID2; do
         local cid="${!cid_var:-}"
-        echo "  - Killing and removing container: $cid" > &2
+        echo "  - Killing and removing container: $cid" >&2
         if [[ -n "$cid" ]]; then
-            docker kill "$cid" > &2
-            docker rm "$cid" > &2
+            docker kill "$cid" >&2
+            docker rm "$cid" >&2
         fi
     done
 
