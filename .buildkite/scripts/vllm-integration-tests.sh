@@ -22,14 +22,14 @@
 
 set -e
 
-# --- ensure we are session/process group leader ---
-if [[ -z "${_VLLM_INTEGRATION_SETSID_DONE:-}" ]]; then
-    export _VLLM_INTEGRATION_SETSID_DONE=1
-    # 关键：在新的 session 里重新 exec 自己
-    exec setsid "$0" "$@"
-fi
+# # --- ensure we are session/process group leader ---
+# if [[ -z "${_VLLM_INTEGRATION_SETSID_DONE:-}" ]]; then
+#     export _VLLM_INTEGRATION_SETSID_DONE=1
+#     # 关键：在新的 session 里重新 exec 自己
+#     exec setsid "$0" "$@"
+# fi
 
-trap 'cleanup $?' EXIT
+trap 'cleanup $?' EXIT INT TERM
 
 CID=
 HF_TOKEN=
