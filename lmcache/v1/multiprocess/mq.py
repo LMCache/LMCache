@@ -59,6 +59,23 @@ def unwrap_request_payloads(
     return decoded_payloads
 
 
+def prepare_internal_push_pull_sockets(
+    ctx: zmq.Context,
+) -> tuple[zmq.Socket, zmq.Socket]:
+    """Create 2 inproc socket pair for the zmq-poller compatible task
+    queue
+
+    Returns:
+        tuple[zmq.Socket, zmq.Socket]: The (push_socket, pull_socket)
+    """
+    inproc_url = "inproc://mq_internal_push_pull/" + str(uuid.uuid4())
+    push_socket = ctx.socket(zmq.PUSH)
+    pull_socket = ctx.socket(zmq.PULL)
+    pull_socket.bind(inproc_url)
+    push_socket.connect(inproc_url)
+    return push_socket, pull_socket
+
+
 _SPECIAL_ENCODER_DECODERS = {
     CudaIPCWrapper: (
         get_customized_encoder(CudaIPCWrapper),
@@ -103,7 +120,9 @@ class MessageQueueClient:
         self.socket.connect(server_url)
 
         # Input queue
-        self.task_notifier, self.task_waiter = self._prepare_task_sockets()
+        self.task_notifier, self.task_waiter = prepare_internal_push_pull_sockets(
+            self.ctx
+        )
         self.input_queue: queue.Queue = queue.Queue()
 
         # Poller
@@ -119,20 +138,6 @@ class MessageQueueClient:
         # Pending job's futures
         self.request_counter = 0
         self.pending_futures: dict[int, MessagingFuture[Any]] = {}
-
-    def _prepare_task_sockets(self) -> tuple[zmq.Socket, zmq.Socket]:
-        """Create 2 inproc socket pair for the zmq-poller compatible task
-        queue
-
-        Returns:
-            tuple[zmq.Socket, zmq.Socket]: The (push_socket, pull_socket)
-        """
-        inproc_url = "inproc://mq_client_task_queue/" + str(uuid.uuid4())
-        push_socket = self.ctx.socket(zmq.PUSH)
-        pull_socket = self.ctx.socket(zmq.PULL)
-        pull_socket.bind(inproc_url)
-        push_socket.connect(inproc_url)
-        return push_socket, pull_socket
 
     def _process_outbound_task(self):
         try:
@@ -193,7 +198,6 @@ class MessageQueueClient:
                 request_type = msgspec_decode(b_request_type, cls=RequestType)
                 response_cls = get_response_class(request_type)
 
-                # TODO: we need a typing system for responses
                 if request_uid in self.pending_futures:
                     future = self.pending_futures.pop(request_uid)
                     if b_response:
@@ -330,10 +334,17 @@ class MessageQueueServer:
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
         self.socket.bind(bind_url)
+        # Output task notifier socket and output queue
+
+        self.output_notifier, self.output_waiter = prepare_internal_push_pull_sockets(
+            self.ctx
+        )
+        self.output_queue: queue.Queue = queue.Queue()
 
         # Poller
         self.poller = zmq.Poller()
         self.poller.register(self.socket, zmq.POLLIN)
+        self.poller.register(self.output_waiter, zmq.POLLIN)
 
         # Main loop thread
         self.is_finished = threading.Event()
@@ -384,15 +395,20 @@ class MessageQueueServer:
         """
         future = handler_entry(payloads)
 
-        def _send_response(fut: Future):
+        def _notify_response(fut: Future):
             try:
                 response = fut.result()
                 response_cls = handler_entry.get_response_class()
                 b_response = msgspec_encode(response, cls=response_cls)
-                if response is not None:
-                    self.socket.send_multipart(prefix_frames + [b_response])
-                else:
-                    self.socket.send_multipart(prefix_frames)
+                frames_to_send = (
+                    prefix_frames + [b_response]
+                    if response is not None
+                    else prefix_frames
+                )
+
+                self.output_queue.put(frames_to_send)
+                self.output_notifier.send(b"1")
+
             except Exception as e:
                 logger.error("Error in blocking handler: %s", e)
 
@@ -400,7 +416,7 @@ class MessageQueueServer:
         # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
         # WE SHOULD USE A ZMQ SOCKET TO NOTIFY THE MAIN THREAD TO SEND THE
         # RESPONSE AND USE THE THREAD-QUEUE TO PASS THE RESPONSE DATA
-        future.add_done_callback(_send_response)
+        future.add_done_callback(_notify_response)
 
     def _call_handler(
         self,
@@ -423,7 +439,11 @@ class MessageQueueServer:
     def _main_loop(self):
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
-            if socks.get(self.socket) == zmq.POLLIN:
+            inbound_state = socks.get(self.socket, None)
+            outbound_state = socks.get(self.output_waiter, None)
+
+            # Process the incoming requests
+            if inbound_state and inbound_state & zmq.POLLIN:
                 msg = self.socket.recv_multipart()
                 assert len(msg) >= 3, (
                     "Expected at least 3 message parts "
@@ -447,6 +467,22 @@ class MessageQueueServer:
                         "No handler registered for request type %s", request_type
                     )
                     logger.error("Available handlers: %s", list(self.handlers.keys()))
+
+            # Send the responses
+            if outbound_state and outbound_state & zmq.POLLIN:
+                # Drain the notifier
+                while True:
+                    try:
+                        self.output_waiter.recv(zmq.DONTWAIT)
+                    except zmq.Again:
+                        break
+
+                # Process the output tasks
+                try:
+                    while frames_to_send := self.output_queue.get_nowait():
+                        self.socket.send_multipart(frames_to_send)
+                except queue.Empty:
+                    pass
 
     def _inspect_handler_signature(self, request_type: RequestType, handler) -> bool:
         """Inspect the handler signature to ensure it matches the expected

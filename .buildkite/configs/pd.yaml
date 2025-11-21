@@ -2,7 +2,7 @@ workload:
   type: long_doc_qa
   max-inflight-requests: 20
   repeat-count: 1
-  expected-latency: 2
+  expected-latency: true
   completion: true
 
 feature:
