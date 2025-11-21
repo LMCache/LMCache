@@ -505,7 +505,7 @@ run_long_doc_qa() {
         if ! git remote get-url internal >/dev/null 2>&1; then
             git remote add internal git@github.com:TensorMesh-Internal/vllm.git
         fi
-        git push internal +benchmarks-main:dev
+        git push internal +HEAD:benchmarks-main
         return 0
     fi
 
