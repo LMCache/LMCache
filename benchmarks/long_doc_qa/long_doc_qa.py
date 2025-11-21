@@ -423,6 +423,11 @@ async def main(args):
         timeout=None,
     )
     model = args.model
+    if model == "auto":
+        print("Auto-selecting model...", end=" ")
+        models = (await client.models.list(),)
+        model = models[0].data[0].id
+        print(f"selected model: {model}")
 
     pre_warmup_prompts = [str(i) + "xx" + " ".join(["hi"] * 1000) for i in range(5)]
 
@@ -605,8 +610,9 @@ def create_argument_parser():
     parser.add_argument(
         "--model",
         type=str,
-        default="meta-llama/Llama-3.1-8B-Instruct",
-        help="Model name",
+        default="auto",
+        help="Model name, can be set to 'auto' if the "
+        "endpoint support openai api /models",
     )
 
     parser.add_argument(
