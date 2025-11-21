@@ -422,7 +422,15 @@ class RemoteBackend(StorageBackendInterface):
             assert self.connection.support_batched_async_contains(), (
                 f"Connector {self.connection} does not support batched async contains"
             )
-            return await self.connection.batched_async_contains(lookup_id, keys, pin)
+            # warning, this timeout will not actually stop the
+            # scheduler from waiting for the result
+            return await asyncio.wait_for(
+                self.connection.batched_async_contains(lookup_id, keys, pin),
+                self.blocking_timeout_secs,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("batched_async_contains timed out")
+            return 0
         except Exception as e:
             logger.warning(f"Error occurred in batched_async_contains: {e}")
             return 0
@@ -452,7 +460,19 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in batched_get_non_blocking, returning empty list"
             )
             return []
-        return await self.connection.batched_get_non_blocking(lookup_id, keys)
+        try:
+            # warning, this timeout will not actually stop the
+            # scheduler from waiting for the result
+            return await asyncio.wait_for(
+                self.connection.batched_get_non_blocking(lookup_id, keys),
+                self.blocking_timeout_secs,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("batched_get_non_blocking timed out")
+            return []
+        except Exception as e:
+            logger.warning(f"Error occurred in batched_get_non_blocking: {e}")
+            return []
 
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(

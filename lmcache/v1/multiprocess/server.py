@@ -6,15 +6,15 @@
 #   - Thread safe (Read/Write lock)
 #   - Eviction policy
 # - Double buffer for store/retrieve (5% optimization)
-# - Integrate with vLLM
 # - Refactor and reuse the existing LMCache classes
 # - Lock and unlock
-# - BUG of memory allocation
 ###
 
 # Standard
 import argparse
 import array
+import functools
+import threading
 import time
 
 # Third Party
@@ -47,6 +47,25 @@ def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
 
 def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
     return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(device)
+
+
+def synchronized(method):
+    """Decorator to synchronize instance methods using self.lock"""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        # Retrieve the instance’s lock
+        lock = getattr(self, "lock", None)
+        if lock is None:
+            raise AttributeError(
+                f"{self.__class__.__name__} has no attribute 'lock' "
+                "required by @synchronized"
+            )
+
+        with lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class GPUCacheContext:
@@ -202,6 +221,9 @@ class MPCacheEngine:
         # Temp CPU buffer for debug
         self.hot_buffer: dict[IPCCacheEngineKey, MemoryObj] = {}
 
+        # Temp thread lock for allocator and hot buffer
+        self.lock = threading.Lock()
+
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         gpu_context = GPUCacheContext(kv_caches)
         self.gpu_contexts[instance_id] = gpu_context
@@ -247,23 +269,35 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            num_tokens = self.chunk_size
+            cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
+            with self.lock:
+                memory_objects = self.memory_allocator.batched_allocate(
+                    cpu_shape, dtype=gpu_context.dtype, batch_size=len(keys)
+                )
+
             for idx, key in enumerate(keys):
-                if key in self.hot_buffer:
-                    # Already stored
-                    continue
+                memory_obj = memory_objects.pop()
+                with self.lock:
+                    if key in self.hot_buffer:
+                        # Already stored, free the pre-allocated memory
+                        memory_obj.ref_count_down()
+                        logger.debug(
+                            "Key %s already in cache, skipping store", key.chunk_hash
+                        )
+                        continue
+                    else:
+                        # NOTE: here we will have RAW hazard there is an immediate
+                        # retrieve before the store CUDA kernel finishes. To fix
+                        # this, either we add some extra cuda synchronization here, or
+                        # we need to use cudaLaunchHostFunc to `commit` the write
+                        # operation
+                        # This will be fixed in later versions.
+                        self.hot_buffer[key] = memory_obj
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
                 slot_mapping = slot_mapping_tensor[start:end]
-
-                # cpu shape
-                num_tokens = len(slot_mapping)
-                cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-
-                # Allocate pinned memory
-                memory_obj = self.memory_allocator.allocate(
-                    cpu_shape, dtype=gpu_context.dtype
-                )
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
@@ -279,9 +313,10 @@ class MPCacheEngine:
                 )
 
                 memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
-                self.hot_buffer[key] = memory_obj
+
             event.record()
 
+        assert len(memory_objects) == 0, "Some memory objects were not used!"
         ed = time.perf_counter()
         logger.info(
             "Stored %d tokens in %.3f seconds",
@@ -310,10 +345,6 @@ class MPCacheEngine:
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
-            # vllm_event = torch.cuda.Event.from_ipc_handle(
-            #    gpu_context.device, event_ipc_handle
-            # )
-            # vllm_event.wait()
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
             event = torch.cuda.Event(interprocess=True)
@@ -324,10 +355,13 @@ class MPCacheEngine:
                     results.append(False)
                     continue
 
-                if key not in self.hot_buffer:
-                    results.append(False)
-                    skip_remaining = True
-                    continue
+                with self.lock:
+                    if key not in self.hot_buffer:
+                        results.append(False)
+                        skip_remaining = True
+                        continue
+                    else:
+                        memory_obj = self.hot_buffer[key]
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
@@ -337,7 +371,6 @@ class MPCacheEngine:
                 num_tokens = len(slot_mapping)
 
                 # Copy from CPU to GPU
-                memory_obj = self.hot_buffer[key]
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(num_tokens)
                 tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
 
@@ -368,6 +401,7 @@ class MPCacheEngine:
     def get_chunk_size(self) -> int:
         return self.chunk_size
 
+    @synchronized
     @_lmcache_nvtx_annotate
     def lookup(
         self,
@@ -412,6 +446,7 @@ class MPCacheEngine:
 
         return "OK"
 
+    @synchronized
     def clear(self) -> None:
         # self.debug()
         logger.info("Received clear request!")
