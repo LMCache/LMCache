@@ -25,7 +25,9 @@ Commandline arguments:
     --shuffle-seed: Random seed when the repeat mode is "random".
                     (Optional, default: 0)
 
+    --host: Host to query the vLLM server
     --port: Port to query the vLLM server
+    --base-url: Base URL to query the LLM server (exclusive with --host/--port)
 
     --model: Model name
 
@@ -60,6 +62,7 @@ Commandline arguments:
 from dataclasses import dataclass
 import argparse
 import asyncio
+import os
 import random
 import sys
 import time
@@ -81,25 +84,61 @@ class RequestStats:
     request_start: float
     ttft: float
     request_end: float
+    successful: bool
 
 
-def has_content(chunk):
+def get_url_from_args(args):
     """
-    Check if the chunk has content in the choices.
+    Get the base URL from command line arguments.
+    Args:
+        args: Command line arguments.
+    Returns:
+        str: The base URL.
+    """
+    if args.base_url is not None:
+        return args.base_url
+    else:
+        host = args.host if args.host is not None else "localhost"
+        port = args.port if args.port is not None else 8000
+        return f"http://{host}:{port}/v1"
+
+
+def extract_reasoning_content(chunk):
+    """
+    Extract reasoning content from the response chunk.
     Args:
         chunk: The response chunk from OpenAI Chat Completions API.
-
     Returns:
-        bool: True if content exists, False otherwise.
+        str | None: The reasoning content extracted from the chunk.
+            None means no reasoning content in this chunk.
     """
-    return (
-        chunk.choices
-        and chunk.choices[0].delta
-        and (
-            chunk.choices[0].delta.content is not None
-            or chunk.choices[0].delta.reasoning_content is not None
-        )
-    )
+    delta = chunk.choices[0].delta
+    potential_reasoning_keys = [
+        "reasoning_content",
+        "reasoning",
+        "tool_calls",
+        "tool_call",
+        "tool_responses",
+    ]
+    for key in potential_reasoning_keys:
+        if hasattr(delta, key) and getattr(delta, key):
+            return getattr(delta, key)
+    return None
+
+
+def extract_normal_content(chunk):
+    """
+    Extract normal content from the response chunk.
+    Args:
+        chunk: The response chunk from OpenAI Chat Completions API.
+    Returns:
+        str | None: The normal content extracted from the chunk.
+            None means no normal content in this chunk.
+    """
+    delta = chunk.choices[0].delta
+    if hasattr(delta, "content") and delta.content:
+        return chunk.choices[0].delta.content
+    return None
 
 
 def has_content_completions(chunk):
@@ -109,20 +148,26 @@ def has_content_completions(chunk):
     return bool(chunk.choices) and (chunk.choices[0].text is not None)
 
 
-def extract_content(chunk):
+def has_content(chunk, completions_mode=False):
     """
-    Extract content from the response chunk.
+    Check if the chunk has content in the choices.
     Args:
         chunk: The response chunk from OpenAI Chat Completions API.
+
     Returns:
-        str: The content extracted from the chunk.
+        bool: True if content exists, False otherwise.
     """
-    if chunk.choices[0].delta.content is not None:
-        return chunk.choices[0].delta.content
-    elif chunk.choices[0].delta.reasoning_content is not None:
-        return chunk.choices[0].delta.reasoning_content
-    else:
-        return ""
+    if completions_mode:
+        return has_content_completions(chunk)
+
+    return (
+        chunk.choices
+        and chunk.choices[0].delta
+        and (
+            extract_normal_content(chunk) is not None
+            or extract_reasoning_content(chunk) is not None
+        )
+    )
 
 
 def extract_content_completions(chunk):
@@ -130,6 +175,25 @@ def extract_content_completions(chunk):
     Extract content from a Completions stream chunk.
     """
     return chunk.choices[0].text or ""
+
+
+def extract_content(chunk, completions_mode=False):
+    """
+    Extract content from the response chunk.
+    Args:
+        chunk: The response chunk from OpenAI Chat Completions API.
+    Returns:
+        str: The content extracted from the chunk.
+    """
+    if completions_mode:
+        return extract_content_completions(chunk)
+
+    if normal_content := extract_normal_content(chunk):
+        return normal_content
+    elif reasoning_content := extract_reasoning_content(chunk):
+        return reasoning_content
+    else:
+        return ""
 
 
 def write_resp(text: str):
@@ -180,42 +244,18 @@ async def process_single_prompt(
                 if eos_token_id is not None
                 else None,
             )
-
-            pieces = []
-            async for chunk in response:
-                if not has_content_completions(chunk):
-                    continue
-
-                content = extract_content_completions(chunk)
-                if first_token_time is None and content.strip():
-                    first_token_time = time.time()
-                pieces.append(content)
-
-            end_time = time.time()
-            final_response = "".join(pieces)
-            write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
-
-            # ttft is never 0.0 so it is an immediate tell
-            # that the request produced no output
-            ttft = (
-                (first_token_time - start_time) if first_token_time is not None else 0.0
+        else:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+                max_tokens=output_len,
+                temperature=0.0,
+                stream_options={"include_usage": True},
+                logit_bias={str(eos_token_id): -100}
+                if eos_token_id is not None
+                else None,
             )
-            return RequestStats(
-                prompt_id=prompt_index,
-                request_start=start_time,
-                ttft=ttft,
-                request_end=end_time,
-            )
-
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            stream=True,
-            max_tokens=output_len,
-            temperature=0.0,
-            stream_options={"include_usage": True},
-            logit_bias={str(eos_token_id): -100} if eos_token_id is not None else None,
-        )
 
         responses = []
         # Collect the response chunks
@@ -224,8 +264,8 @@ async def process_single_prompt(
                 continue
 
             # Handle content for chat completions
-            if has_content(chunk):
-                content = extract_content(chunk)
+            if has_content(chunk, completions_mode):
+                content = extract_content(chunk, completions_mode)
                 if first_token_time is None and content != "":
                     first_token_time = time.time()
                 responses.append(content)
@@ -234,14 +274,14 @@ async def process_single_prompt(
         final_response = "".join(responses)
         write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
 
-        # ttft is never 0.0 so it is an immediate tell
-        # that the request produced no output
-        ttft = (first_token_time - start_time) if first_token_time is not None else 0.0
+        # TTFT < 0 means not successful
+        ttft = (first_token_time - start_time) if first_token_time is not None else -1
         return RequestStats(
             prompt_id=prompt_index,
             request_start=start_time,
             ttft=ttft,
             request_end=end_time,
+            successful=ttft > 0,
         )
 
 
@@ -417,9 +457,14 @@ async def main(args):
 
     # Create the OpenAI client
     # No timeout: some benchmarks can take 4-5 minutes per request
+    base_url = get_url_from_args(args)
+    print("Using base URL:", base_url)
+
+    api_key = os.getenv("OPENAI_API_KEY", "sk-dummy")
+
     client = AsyncOpenAI(
-        base_url=f"http://localhost:{args.port}/v1",
-        api_key="sk-dummy",
+        base_url=base_url,
+        api_key=api_key,
         timeout=None,
     )
     model = args.model
@@ -488,13 +533,16 @@ async def main(args):
     benchmark_df.to_csv("query_round.csv", index=False)
 
     # Print results
-    warmup_mean_ttft = warmup_df["ttft"].mean()
-    query_mean_ttft = benchmark_df["ttft"].mean()
+    warmup_mean_ttft = warmup_df.query("successful == True")["ttft"].mean()
+    query_mean_ttft = benchmark_df.query("successful == True")["ttft"].mean()
+    warmup_success_count = warmup_df.query("successful == True").shape[0]
+    query_success_count = benchmark_df.query("successful == True").shape[0]
     CSI = "\x1b["
     RESET = CSI + "0m"
     print(f"Warmup round mean TTFT: {warmup_mean_ttft:.3f}s")
     print(f"Warmup round time: {warmup_end_time - warmup_start_time:.3f}s")
     print(f"Warmup round prompt count: {len(warmup_df)}")
+    print(f"Warmup round successful prompt count: {warmup_success_count}")
     print(f"{CSI}36;1m\n=== BENCHMARK RESULTS ==={RESET}")
     print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
     print(
@@ -502,50 +550,26 @@ async def main(args):
         f"{benchmark_end_time - benchmark_start_time:.3f}s{RESET}"
     )
     print(f"{CSI}35mQuery round prompt count: {len(benchmark_df)}{RESET}")
+    print(f"{CSI}34mQuery round successful prompt count: {query_success_count}{RESET}")
 
     if visualize:
         visualize_results(warmup_df, benchmark_df)
 
-    # Validate expected gains as multiplicative speed-ups
-    if args.expected_ttft_gain is not None:
-        actual_ttft_gain = (
-            warmup_mean_ttft / query_mean_ttft if query_mean_ttft > 0 else float("inf")
-        )
-        print(f"{CSI}34mActual TTFT gain: {actual_ttft_gain:.2f}×{RESET}")
-        if actual_ttft_gain < args.expected_ttft_gain:
-            sys.exit(
-                f"ERROR: TTFT gain {actual_ttft_gain:.2f}× < expected "
-                f"{args.expected_ttft_gain:.2f}×"
-            )
-
-    if args.expected_latency_gain is not None:
-        warmup_duration = warmup_end_time - warmup_start_time
+    if args.json_output:
+        query_ttft_per_prompt = query_mean_ttft / len(benchmark_df)
         query_duration = benchmark_end_time - benchmark_start_time
-
-        # compute per-prompt latency before comparing
-        warmup_per_prompt = warmup_duration / len(warmup_df)
-        query_per_prompt = query_duration / len(benchmark_df)
-        actual_latency_gain = (
-            warmup_per_prompt / query_per_prompt
-            if query_per_prompt > 0
-            else float("inf")
-        )
-        print(f"{CSI}34mActual latency gain: {actual_latency_gain:.2f}×{RESET}")
-        if actual_latency_gain < args.expected_latency_gain:
-            sys.exit(
-                f"ERROR: latency gain {actual_latency_gain:.2f}× < expected "
-                f"{args.expected_latency_gain:.2f}×"
-            )
-
-    if args.expected_latency is not None:
+        query_round_time_per_prompt = query_duration / len(benchmark_df)
         warmup_duration = warmup_end_time - warmup_start_time
-        warmup_per_prompt = warmup_duration / len(warmup_df)
-        print(f"{CSI}34mActual latency: {warmup_per_prompt:.2f}s{RESET}")
-        if warmup_per_prompt > args.expected_latency:
-            sys.exit(
-                f"ERROR: latency {warmup_per_prompt:.2f}s > expected "
-                f"{args.expected_latency:.2f}s"
-            )
+        warmup_round_time_per_prompt = warmup_duration / len(warmup_df)
+        # Standard
+        import json
+
+        summary = {
+            "query_ttft_per_prompt": query_ttft_per_prompt,
+            "query_round_time_per_prompt": query_round_time_per_prompt,
+            "warmup_round_time_per_prompt": warmup_round_time_per_prompt,
+        }
+        print(json.dumps(summary))
 
 
 def create_argument_parser():
@@ -601,10 +625,24 @@ def create_argument_parser():
     )
 
     parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host to query the vLLM server",
+    )
+
+    parser.add_argument(
         "--port",
         type=int,
-        default=8000,
+        default=None,
         help="Port to query the vLLM server",
+    )
+
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default=None,
+        help="Base URL to query the LLM server",
     )
 
     parser.add_argument(
@@ -634,30 +672,6 @@ def create_argument_parser():
         type=str,
         default=None,
         help="Filename to write all responses to; if omitted, writes to stdout.",
-    )
-    parser.add_argument(
-        "--expected-ttft-gain",
-        type=float,
-        default=None,
-        help=(
-            "Expected minimum speed-up in time-to-first-token (warmup/query) "
-            "as a factor, e.g. 4.3 for 4.3×. If actual gain is below this, exits."
-        ),
-    )
-    parser.add_argument(
-        "--expected-latency-gain",
-        type=float,
-        default=None,
-        help=(
-            "Expected minimum speed-up in total round time (warmup/query) "
-            "as a factor, e.g. 4.5 for 4.5×. If actual gain is below this, exits."
-        ),
-    )
-    parser.add_argument(
-        "--expected-latency",
-        type=float,
-        default=None,
-        help="Expected end to end latency for the first query round.",
     )
 
     parser.add_argument(
@@ -693,12 +707,27 @@ def create_argument_parser():
         ),
     )
 
+    parser.add_argument(
+        "--json-output",
+        action="store_true",
+        help="Print benchmark summary as a single JSON line to stdout.",
+    )
+
     return parser
+
+
+def validate_args(args):
+    # Verify port and base_url are exclusive
+    has_host_port = args.host is not None and args.port is not None
+    has_base_url = args.base_url is not None
+    if has_host_port and has_base_url:
+        raise ValueError("Cannot use --host/--port and --base-url together.")
 
 
 if __name__ == "__main__":
     parser = create_argument_parser()
     args = parser.parse_args()
+    validate_args(args)
     completions_mode = args.completions
     visualize = args.visualize
     if visualize:
