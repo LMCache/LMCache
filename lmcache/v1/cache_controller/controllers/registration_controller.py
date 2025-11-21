@@ -107,10 +107,7 @@ class RegistrationController:
         key = (instance_id, worker_id)
 
         # prevent duplicate registration
-        if (
-            key in self.socket_mapping
-            and key in self.worker_info_mapping
-        ):
+        if key in self.socket_mapping and key in self.worker_info_mapping:
             logger.warning(
                 "Instance-worker %s already registered, skip registration", key
             )
