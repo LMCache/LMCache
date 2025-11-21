@@ -498,6 +498,8 @@ run_long_doc_qa() {
         local baseline_path="$ORIG_DIR/benchmarks/long_doc_qa/$feature_type.json"
         printf '%s\n' "$json" > "$baseline_path"
 
+        git config user.email "shaotingf@uchicago.edu"
+        git config user.name "Shaoting Feng"
         git add "$baseline_path"
         git commit -m "Update long_doc_qa baseline: $feature_type.json" || true
         git remote add internal git@github.com:LMCache/LMCache.git
