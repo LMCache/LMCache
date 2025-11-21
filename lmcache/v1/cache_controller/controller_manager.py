@@ -14,6 +14,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controllers import KVController, RegistrationController
 from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
+from lmcache.v1.cache_controller.observability import PrometheusLogger
 from lmcache.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_socket,
@@ -60,6 +61,11 @@ class LMCacheControllerManager:
         health_check_interval: int,
         lmcache_worker_timeout: int,
     ):
+        # Initialize stats logger
+        prometheus_labels = {
+            "role": "controller",
+        }
+        PrometheusLogger.GetOrCreate(prometheus_labels)
         self.zmq_context = get_zmq_context()
         self.controller_urls = controller_urls
         # TODO(Jiayi): We might need multiple sockets if there are more

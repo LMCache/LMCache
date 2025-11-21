@@ -20,6 +20,7 @@ from lmcache.v1.cache_controller.message import (
     QueryWorkerInfoRetMsg,
     RegisterMsg,
 )
+from lmcache.v1.cache_controller.observability import PrometheusLogger
 from lmcache.v1.cache_controller.utils import WorkerInfo
 from lmcache.v1.rpc_utils import (
     close_zmq_socket,
@@ -49,6 +50,14 @@ class RegistrationController:
 
         # Mapping from `(instance_id, worker_id)` -> `WorkerInfo`
         self.worker_info_mapping: dict[tuple[str, int], WorkerInfo] = {}
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.registered_workers_count.set_function(
+                lambda: len(self.worker_info_mapping)
+            )
 
     def post_init(self, kv_controller, cluster_executor):
         """
