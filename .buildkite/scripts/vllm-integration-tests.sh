@@ -445,11 +445,11 @@ test_vllmopenai_server_with_lmcache_integrated() {
 run_long_doc_qa() {
     local workload_config="$1"
     local port="$2"
-    local has_expected_latency="$3"
-    local has_expected_ttft_gain="$4"
-    local has_expected_latency_gain="$5"
-    local feature_type="$6"
-    local need_upload="$7"
+    local has_expected_latency="${3:-"false"}"
+    local has_expected_ttft_gain="${4:-"false"}"
+    local has_expected_latency_gain="${5:-"false"}"
+    local feature_type="${6:-"dummy"}"
+    local need_upload="${7:-"false"}"
 
     echo "→ Running long_doc_qa with customed workload config:"
     printf '%s\n' "$workload_config"
@@ -498,8 +498,8 @@ run_long_doc_qa() {
         local baseline_path="$ORIG_DIR/benchmarks/long_doc_qa/$feature_type.json"
         printf '%s\n' "$json" > "$baseline_path"
 
-        git config user.email "shaotingf@uchicago.edu"
-        git config user.name "Shaoting Feng"
+        git config user.email "$USER_EMAIL"
+        git config user.name "$USER_NAME"
         git add "$baseline_path"
         git commit -m "Update long_doc_qa baseline: $feature_type.json" || true
         if ! git remote get-url internal >/dev/null 2>&1; then
