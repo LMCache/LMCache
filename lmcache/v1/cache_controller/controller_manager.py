@@ -113,7 +113,7 @@ class LMCacheControllerManager:
 
         if self.health_check_interval > 0:
             logger.info(
-                f"Start health check thread, interval: {self.health_check_interval}"
+                "Start health check thread, interval: %s", self.health_check_interval
             )
             self.loop = asyncio.new_event_loop()
             self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
