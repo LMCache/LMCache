@@ -139,7 +139,7 @@ class LMCacheWorker:
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
-                distributed_url=self.p2p_init_url,
+                peer_init_url=self.p2p_init_url,
             )
         )
 
@@ -219,7 +219,7 @@ class LMCacheWorker:
                         worker_id=self.worker_id,
                         ip=self.lmcache_worker_ip,
                         port=self.lmcache_worker_port,
-                        distributed_url=self.p2p_init_url,
+                        peer_init_url=self.p2p_init_url,
                     )
                 )
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)

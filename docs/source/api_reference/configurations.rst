@@ -166,12 +166,18 @@ Settings for enabling and configuring peer-to-peer CPU KV cache sharing and glob
    * - enable_p2p
      - LMCACHE_ENABLE_P2P
      - Whether to enable peer-to-peer sharing. Values: true/false. Default: false
-   * - lookup_url
-     - LMCACHE_LOOKUP_URL
-     - URL of the lookup server. Required if enable_p2p is true
-   * - distributed_url
-     - LMCACHE_DISTRIBUTED_URL
-     - URL of the distributed server. Required if enable_p2p is true
+   * - p2p_host
+     - LMCACHE_P2P_HOST
+     - Ip address. Required if enable_p2p is true
+   * - peer_init_ports
+     - LMCACHE_PEER_INIT_PORTS
+     - Ports for p2p peer init. Required if enable_p2p is true
+   * - peer_lookup_ports
+     - LMCACHE_PEER_lookup_PORTS
+     - Ports for p2p peer lookup. Required if enable_p2p is true
+   * - transfer_channel
+     - LMCACHE_TRANSFER_CHANNEL
+     - Such as `nixl`. Required if enable_p2p is true
 
 Controller Configurations
 -------------------------
