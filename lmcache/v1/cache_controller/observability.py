@@ -18,6 +18,7 @@ class PrometheusLogger:
     Provides dynamic metrics for monitoring KV pool and worker registration.
     """
 
+    _instance = None
     _gauge_cls = prometheus_client.Gauge
 
     def __init__(self, labels: dict):
@@ -38,7 +39,6 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
-
         # Registration Controller metrics
         self.registered_workers_count = self._gauge_cls(
             name="lmcache:cache_controller_registered_workers_count",
@@ -46,8 +46,47 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
+        # Socket message count metrics
+        self.pull_socket_message_count = self._gauge_cls(
+            name="lmcache:cache_controller_pull_socket_message_count",
+            documentation="The total number of messages received on PULL socket",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.rep_socket_message_count = self._gauge_cls(
+            name="lmcache:cache_controller_rep_socket_message_count",
+            documentation="The total number of messages received on REP socket",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
-    _instance = None
+        # Socket queue/backlog metrics
+        self.pull_socket_has_pending = self._gauge_cls(
+            name="lmcache:cache_controller_pull_socket_has_pending",
+            documentation="Whether PULL socket has pending messages (1=yes, 0=no)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.rep_socket_has_pending = self._gauge_cls(
+            name="lmcache:cache_controller_rep_socket_has_pending",
+            documentation="Whether REP socket has pending messages (1=yes, 0=no)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
+        # Active request metrics
+        self.pull_socket_active_requests = self._gauge_cls(
+            name="lmcache:cache_controller_pull_socket_active_requests",
+            documentation="Number of requests being processed from PULL socket",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.rep_socket_active_requests = self._gauge_cls(
+            name="lmcache:cache_controller_rep_socket_active_requests",
+            documentation="Number of requests being processed from REP socket",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
     @staticmethod
     def GetOrCreate(

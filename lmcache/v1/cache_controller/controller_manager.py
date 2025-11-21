@@ -97,6 +97,15 @@ class LMCacheControllerManager:
                 role=zmq.REP,  # type: ignore[attr-defined]
                 bind_or_connect="bind",
             )
+
+        # Message counters for observability
+        self.pull_socket_message_count = 0
+        self.rep_socket_message_count = 0
+
+        # Active request counters
+        self.pull_socket_active_requests = 0
+        self.rep_socket_active_requests = 0
+
         self.kv_controller = KVController()
         self.reg_controller = RegistrationController()
 
@@ -125,6 +134,15 @@ class LMCacheControllerManager:
             self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
             self.thread.start()
             asyncio.run_coroutine_threadsafe(self.health_check(), self.loop)
+
+        # Setup socket message count metrics
+        self._setup_socket_metrics()
+
+        # self.loop = asyncio.new_event_loop()
+        # self.thread = threading.Thread(target=self.loop.run_forever,
+        #                               daemon=True)
+        # self.thread.start()
+        # asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
         if isinstance(msg, HeartbeatMsg):
@@ -172,12 +190,93 @@ class LMCacheControllerManager:
             logger.error(f"Unknown orchestration message type: {msg}")
             raise RuntimeError(f"Unknown orchestration message type: {msg}")
 
+    def _setup_socket_metrics(self):
+        """Setup metrics for socket message counts."""
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.pull_socket_message_count.set_function(
+                lambda: self.pull_socket_message_count
+            )
+            prometheus_logger.rep_socket_message_count.set_function(
+                lambda: self.rep_socket_message_count
+            )
+
+            # Socket queue/backlog metrics
+            prometheus_logger.pull_socket_has_pending.set_function(
+                lambda: self._check_socket_has_pending(self.controller_pull_socket)
+            )
+            if self.controller_urls["reply"] is not None:
+                prometheus_logger.rep_socket_has_pending.set_function(
+                    lambda: self._check_socket_has_pending(self.controller_rep_socket)
+                )
+
+            # Active request metrics
+            prometheus_logger.pull_socket_active_requests.set_function(
+                lambda: self.pull_socket_active_requests
+            )
+            prometheus_logger.rep_socket_active_requests.set_function(
+                lambda: self.rep_socket_active_requests
+            )
+
+    def _check_socket_has_pending(self, socket) -> int:
+        """Check if socket has pending messages.
+
+        Returns:
+            1 if socket has pending messages, 0 otherwise
+        """
+        try:
+            events = socket.get(zmq.EVENTS)  # type: ignore[attr-defined]
+            # Check if POLLIN flag is set (indicates readable/pending messages)
+            has_pending = 1 if (events & zmq.POLLIN) else 0  # type: ignore[attr-defined]
+            return has_pending
+        except Exception as e:
+            logger.error(f"Error checking socket pending status: {e}")
+            return 0
+
     async def handle_batched_push_request(self, socket) -> Optional[MsgBase]:
         while True:
             try:
                 parts = await socket.recv_multipart()
+                part_count = len(parts)
+                self.pull_socket_message_count += part_count
+                self.pull_socket_active_requests += part_count
 
-                for part in parts:
+                try:
+                    for part in parts:
+                        # Parse message based on format
+                        if part.startswith(b"{"):
+                            # JSON format - typically from external systems
+                            # like Mooncake
+                            msg_dict = json.loads(part)
+                            msg = msgspec.convert(msg_dict, type=Msg)
+                        else:
+                            # MessagePack format - internal LMCache communication
+                            msg = msgspec.msgpack.decode(part, type=Msg)
+                        if isinstance(msg, WorkerMsg):
+                            await self.handle_worker_message(msg)
+
+                        # FIXME(Jiayi): The abstraction of control messages
+                        # might not be necessary.
+                        # elif isinstance(msg, ControlMsg):
+                        #    await self.issue_control_message(msg)
+                        elif isinstance(msg, OrchMsg):
+                            await self.handle_orchestration_message(msg)
+                        else:
+                            logger.error(f"Unknown message type: {type(msg)}")
+                finally:
+                    # Decrement active request counter
+                    self.pull_socket_active_requests -= part_count
+            except Exception as e:
+                logger.error(f"Controller Manager error: {e}")
+
+    async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
+        while True:
+            try:
+                part = await socket.recv()
+                self.rep_socket_message_count += 1
+                self.rep_socket_active_requests += 1
+
+                try:
                     # Parse message based on format
                     if part.startswith(b"{"):
                         # JSON format - typically from external systems like Mooncake
@@ -186,41 +285,17 @@ class LMCacheControllerManager:
                     else:
                         # MessagePack format - internal LMCache communication
                         msg = msgspec.msgpack.decode(part, type=Msg)
-                    if isinstance(msg, WorkerMsg):
-                        await self.handle_worker_message(msg)
 
-                    # FIXME(Jiayi): The abstraction of control messages
-                    # might not be necessary.
-                    # elif isinstance(msg, ControlMsg):
-                    #    await self.issue_control_message(msg)
-                    elif isinstance(msg, OrchMsg):
-                        await self.handle_orchestration_message(msg)
+                    if isinstance(msg, WorkerReqMsg):
+                        ret_msg = await self.handle_worker_req_message(msg)
+                        await socket.send(msgspec.msgpack.encode(ret_msg))
                     else:
                         logger.error(f"Unknown message type: {type(msg)}")
-            except Exception as e:
-                logger.error(f"Controller Manager error: {e}")
-
-    async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
-        while True:
-            try:
-                part = await socket.recv()
-
-                # Parse message based on format
-                if part.startswith(b"{"):
-                    # JSON format - typically from external systems like Mooncake
-                    msg_dict = json.loads(part)
-                    msg = msgspec.convert(msg_dict, type=Msg)
-                else:
-                    # MessagePack format - internal LMCache communication
-                    msg = msgspec.msgpack.decode(part, type=Msg)
-
-                if isinstance(msg, WorkerReqMsg):
-                    ret_msg = await self.handle_worker_req_message(msg)
-                    await socket.send(msgspec.msgpack.encode(ret_msg))
-                else:
-                    logger.error(f"Unknown message type: {type(msg)}")
-                    err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
-                    await socket.send(msgspec.msgpack.encode(err_msg))
+                        err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
+                        await socket.send(msgspec.msgpack.encode(err_msg))
+                finally:
+                    # Decrement active request counter
+                    self.rep_socket_active_requests -= 1
             except Exception as e:
                 logger.error(f"Controller Manager error: {e}")
 
