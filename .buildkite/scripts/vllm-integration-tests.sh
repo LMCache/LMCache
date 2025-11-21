@@ -448,6 +448,8 @@ run_long_doc_qa() {
     local has_expected_latency="$3"
     local has_expected_ttft_gain="$4"
     local has_expected_latency_gain="$5"
+    local feature_type="$6"
+    local need_upload="$7"
 
     echo "→ Running long_doc_qa with customed workload config:"
     printf '%s\n' "$workload_config"
@@ -492,11 +494,22 @@ run_long_doc_qa() {
     query_round_time_per_prompt=$(echo "$json" | jq -r '.query_round_time_per_prompt')
     warmup_round_time_per_prompt=$(echo "$json" | jq -r '.warmup_round_time_per_prompt')
 
+    if [ "$need_upload" = "true" ]; then
+        local baseline_path="$ORIG_DIR/benchmarks/long_doc_qa/$feature_type.json"
+        printf '%s\n' "$json" > "$baseline_path"
+
+        git add "$baseline_path"
+        git commit -m "Update long_doc_qa baseline: $feature_type.json" || true
+        git remote add internal git@github.com:LMCache/LMCache.git
+        git push internal +benchmarks-main:dev
+        return 0
+    fi
+
     # Fetch branch
     git fetch origin benchmarks-main >&2 || true
 
     # Load baseline from branch
-    baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/baseline.json 2>/dev/null || echo "")
+    baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/$feature_type.json 2>/dev/null || echo "")
 
     # Extract baseline numbers
     expected_query_ttft_per_prompt=$(echo "$baseline_json" | jq -r '.query_ttft_per_prompt')
@@ -656,9 +669,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         )
         if [[ "$feature_type" == "p2p" ]]; then
             run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "$feature_type" "true"
         else
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "$feature_type" "true"
         fi
     fi
 
