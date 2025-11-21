@@ -556,7 +556,6 @@ async def main(args):
         visualize_results(warmup_df, benchmark_df)
 
     if args.json_output:
-        query_ttft_per_prompt = query_mean_ttft / len(benchmark_df)
         query_duration = benchmark_end_time - benchmark_start_time
         query_round_time_per_prompt = query_duration / len(benchmark_df)
         warmup_duration = warmup_end_time - warmup_start_time
@@ -565,7 +564,7 @@ async def main(args):
         import json
 
         summary = {
-            "query_ttft_per_prompt": query_ttft_per_prompt,
+            "query_ttft_per_prompt": query_mean_ttft,
             "query_round_time_per_prompt": query_round_time_per_prompt,
             "warmup_round_time_per_prompt": warmup_round_time_per_prompt,
         }
