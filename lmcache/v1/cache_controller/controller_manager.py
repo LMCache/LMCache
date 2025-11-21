@@ -3,6 +3,8 @@
 from typing import Optional
 import asyncio
 import json
+import threading
+import time
 
 # Third Party
 import msgspec
@@ -52,7 +54,12 @@ logger = init_logger(__name__)
 
 
 class LMCacheControllerManager:
-    def __init__(self, controller_urls: dict[str, str]):
+    def __init__(
+        self,
+        controller_urls: dict[str, str],
+        health_check_interval: int,
+        lmcache_worker_timeout: int,
+    ):
         self.zmq_context = get_zmq_context()
         self.controller_urls = controller_urls
         # TODO(Jiayi): We might need multiple sockets if there are more
@@ -101,12 +108,17 @@ class LMCacheControllerManager:
             kv_controller=self.kv_controller,
             cluster_executor=self.cluster_executor,
         )
+        self.health_check_interval = health_check_interval
+        self.lmcache_worker_timeout = lmcache_worker_timeout
 
-        # self.loop = asyncio.new_event_loop()
-        # self.thread = threading.Thread(target=self.loop.run_forever,
-        #                               daemon=True)
-        # self.thread.start()
-        # asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
+        if self.health_check_interval > 0:
+            logger.info(
+                "Start health check thread, interval: %s", self.health_check_interval
+            )
+            self.loop = asyncio.new_event_loop()
+            self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+            self.thread.start()
+            asyncio.run_coroutine_threadsafe(self.health_check(), self.loop)
 
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
         if isinstance(msg, HeartbeatMsg):
@@ -205,6 +217,33 @@ class LMCacheControllerManager:
                     await socket.send(msgspec.msgpack.encode(err_msg))
             except Exception as e:
                 logger.error(f"Controller Manager error: {e}")
+
+    async def health_check(self):
+        while True:
+            time.sleep(self.health_check_interval)
+            worker_infos = list(self.reg_controller.worker_info_mapping.values())
+            for worker_info in worker_infos:
+                if (
+                    time.time() - worker_info.last_heartbeat_time
+                    > self.lmcache_worker_timeout
+                ):
+                    logger.warning(
+                        "Worker %s_%s last heartbeat time: %s, "
+                        "current time: %s, more than %s seconds",
+                        worker_info.instance_id,
+                        worker_info.worker_id,
+                        worker_info.last_heartbeat_time,
+                        time.time(),
+                        self.lmcache_worker_timeout,
+                    )
+                    # Perform a full deregister to clean up all associated resources.
+                    deregister_msg = DeRegisterMsg(
+                        instance_id=worker_info.instance_id,
+                        worker_id=worker_info.worker_id,
+                        ip=worker_info.ip,
+                        port=worker_info.port,
+                    )
+                    await self.reg_controller.deregister(deregister_msg)
 
     async def start_all(self):
         tasks = []

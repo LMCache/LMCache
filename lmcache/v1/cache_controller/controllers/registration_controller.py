@@ -104,16 +104,29 @@ class RegistrationController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
+        key = (instance_id, worker_id)
+
+        # prevent duplicate registration
+        if key in self.socket_mapping and key in self.worker_info_mapping:
+            logger.warning(
+                "Instance-worker %s already registered, skip registration", key
+            )
+            return
+
+        # register the instance-worker
+        assert key not in self.distributed_url_mapping
+        assert key not in self.socket_mapping
+        assert key not in self.worker_info_mapping
+
         ip = msg.ip
         port = msg.port
         url = f"{ip}:{port}"
         distributed_url = msg.distributed_url
         if distributed_url is not None:
-            self.distributed_url_mapping[(instance_id, worker_id)] = distributed_url
+            self.distributed_url_mapping[key] = distributed_url
         else:
             logger.info(
-                f"distributed url of {(instance_id, worker_id)} is None, "
-                f"only register when p2p is used."
+                "distributed url of %s is None, only register when p2p is used.", key
             )
 
         self.instance_mapping[ip] = instance_id
@@ -127,8 +140,8 @@ class RegistrationController:
             bind_or_connect="connect",
         )
 
-        self.socket_mapping[(instance_id, worker_id)] = socket
-        self.worker_info_mapping[(instance_id, worker_id)] = WorkerInfo(
+        self.socket_mapping[key] = socket
+        self.worker_info_mapping[key] = WorkerInfo(
             instance_id, worker_id, ip, port, distributed_url, time.time(), time.time()
         )
         if instance_id not in self.worker_mapping:
@@ -138,9 +151,7 @@ class RegistrationController:
         self.worker_mapping[instance_id].append(worker_id)
         self.worker_mapping[instance_id].sort()
 
-        logger.info(
-            f"Registered instance-worker {(instance_id, worker_id)} with URL {url}"
-        )
+        logger.info("Registered instance-worker %s with URL %s", key, url)
 
     async def deregister(self, msg: DeRegisterMsg) -> None:
         """
@@ -164,7 +175,7 @@ class RegistrationController:
         if (instance_id, worker_id) in self.socket_mapping:
             socket = self.socket_mapping.pop((instance_id, worker_id))
             close_zmq_socket(socket)
-            self.kv_controller.deregister(instance_id, worker_id)
+            await self.kv_controller.deregister(instance_id, worker_id)
             logger.info(f"Deregistered instance-worker {(instance_id, worker_id)}")
         else:
             logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")

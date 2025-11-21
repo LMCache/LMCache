@@ -186,7 +186,7 @@ class RequestTracker:
             skip_save (bool): whether the request cache should be saved
         """
         # vLLM 0.9.0 update: request.block_ids changed from list[int] to
-        # list[list[int]]
+        # tuple[list[int]]
         # Need to check the type of request.block_ids
 
         unfolded_block_ids = []
@@ -228,12 +228,12 @@ class RequestTracker:
         self,
         new_token_ids: list[int],
         new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
+        preempted: bool = False,
+        lmcache_cached_tokens: int = 0,
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
-
-        self.token_ids.extend(new_token_ids)
 
         if new_block_ids is None:
             # https://github.com/vllm-project/vllm/commit/
@@ -248,7 +248,16 @@ class RequestTracker:
             pass
         else:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
-        self.allocated_block_ids.extend(new_block_ids)
+
+        if preempted:
+            # the block ids will change after preemption
+            self.allocated_block_ids = new_block_ids
+            # reset the number of saved tokens
+            self.num_saved_tokens = lmcache_cached_tokens
+            # we don't need to extend the token ids in the preempted case
+        else:
+            self.allocated_block_ids.extend(new_block_ids)
+            self.token_ids.extend(new_token_ids)
 
         # When a request is scheduled again, and the number of new tokens
         # is 1 (excluding chunked prefill), the request is in decode phase.
@@ -305,7 +314,7 @@ class ReqMeta:
         input_token_len = len(input_token_ids)
 
         is_last_prefill = False
-        if input_token_len == tracker.prompt_len:
+        if input_token_len >= tracker.prompt_len:
             is_last_prefill = True
 
         # For save operation: do not save if the following condition is met
@@ -1354,14 +1363,29 @@ class LMCacheConnectorV1Impl:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        # to handle preempted requests, we want `get_num_new_matched_tokens` to be
+        # idempotent under the condition that `update_state_after_alloc` is NOT called
+        # then the two side-effects that must be idempotent are:
+        # 1. lookup_client caches a result
+        #     uncached in `update_state_after_alloc` if this request can be scheduled
+        # 2. cache engine will pin the KV caches for the request
+        #     unpinned in `wait_for_save` if this request can be scheduled
         if self.kv_role == "kv_producer" and not hasattr(
             self.lookup_client, "supports_producer_reuse"
         ):
             return 0
 
-        self._requests_priority[request.request_id] = getattr(request, "priority", 0)
+        req_id = request.request_id
 
-        token_ids = request.prompt_token_ids
+        # consult the cache before any processing
+        if cached_num_hit_toks := self.lookup_client.lookup_cache(lookup_id=req_id):
+            return cached_num_hit_toks
+
+        self._requests_priority[req_id] = getattr(request, "priority", 0)
+
+        # token_ids = request.prompt_token_ids
+        # all token ids covers the preemption case
+        token_ids = request.all_token_ids
 
         # If the request has multimodal hashes, apply them to the token ids
         mm_hashes, mm_positions = extract_mm_features(request)
@@ -1375,18 +1399,16 @@ class LMCacheConnectorV1Impl:
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
 
-        lookup_id = request.request_id
-
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,
-            lookup_id=lookup_id,
+            lookup_id=req_id,
             request_configs=request_configs,
         )
 
         if num_external_hit_tokens is None:
             logger.debug(
                 "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
-                request.request_id,
+                req_id,
                 request.num_tokens,
             )
             return None
@@ -1403,13 +1425,13 @@ class LMCacheConnectorV1Impl:
 
         logger.info(
             "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
-            request.request_id,
+            req_id,
             request.num_tokens,
             num_external_hit_tokens,
             need_to_allocate,
         )
 
-        self.load_specs[request.request_id] = LoadSpec(
+        self.load_specs[req_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
             lmcache_cached_tokens=num_external_hit_tokens,
             can_load=False,
@@ -1470,22 +1492,29 @@ class LMCacheConnectorV1Impl:
             self.load_specs[request.request_id].can_load = False
             return
 
-        # Only check for non-prompt-hit case
-        if (
-            self.load_specs[request.request_id].lmcache_cached_tokens
-            != request.num_tokens
-        ):
-            assert (
-                num_external_tokens > 0
-                and num_external_tokens
-                == self.load_specs[request.request_id].lmcache_cached_tokens
-                - self.load_specs[request.request_id].vllm_cached_tokens
-            ), (
-                f"Mismatch in number of tokens: {num_external_tokens} vs "
-                f"{self.load_specs[request.request_id].lmcache_cached_tokens} - "
-                f"{self.load_specs[request.request_id].vllm_cached_tokens}"
-                f" for request {request.request_id}"
+        recalc_last = (
+            1
+            if (
+                self.load_specs[request.request_id].lmcache_cached_tokens
+                == request.num_tokens
             )
+            else 0
+        )
+        assert (
+            num_external_tokens
+            == self.load_specs[request.request_id].lmcache_cached_tokens
+            - self.load_specs[request.request_id].vllm_cached_tokens
+            - recalc_last
+        ), (
+            f"Mismatch in tokens to load: {num_external_tokens} vs "
+            f"{self.load_specs[request.request_id].lmcache_cached_tokens} "
+            "(tokens in lmcache) - "
+            f"{self.load_specs[request.request_id].vllm_cached_tokens} "
+            "(tokens in vllm) - "
+            f"{recalc_last} "
+            "(full lmcache hits subtracts last token to recalculate logits)"
+            f" for request {request.request_id}"
+        )
 
         self.load_specs[request.request_id].can_load = True
 
@@ -1511,8 +1540,12 @@ class LMCacheConnectorV1Impl:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
 
+        # We should load KV for:
+        # 1. new requests
+        # 2. preempted requests (once per recovery)
+        # can_load will only be True if `update_state_after_alloc` has been called
+        # which only happens when vLLM's KV manager has space to receive KV from LMCache
         for request in scheduler_output.scheduled_new_reqs:
-            # Right now, we only load KV for new requests
             load_spec = self.load_specs.pop(request.req_id, None)
             num_tokens_to_compute = (
                 request.num_computed_tokens
@@ -1555,14 +1588,23 @@ class LMCacheConnectorV1Impl:
         # changed from list to object `CachedRequestData`
         if isinstance(cached_reqs, list):
             for i, req in enumerate(cached_reqs):
+                load_spec = self.load_specs.pop(req.req_id, None)
+                lmcache_cached_tokens = 0
+                if load_spec is not None:
+                    lmcache_cached_tokens = load_spec.lmcache_cached_tokens
                 request_tracker = self._request_trackers[req.req_id]
-                request_tracker.update(req.new_token_ids, req.new_block_ids)
+                request_tracker.update(
+                    req.new_token_ids,
+                    req.new_block_ids,
+                    req.resumed_from_preemption,
+                    lmcache_cached_tokens=lmcache_cached_tokens,
+                )
 
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     self._lmcache_chunk_size,
-                    load_spec=None,
+                    load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
@@ -1572,8 +1614,9 @@ class LMCacheConnectorV1Impl:
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            # TODO: this is a dangerous reference to the request object inside vllm
             if request := self._unfinished_requests.get(req_id):
-                num_current_tokens = len(request_tracker.token_ids)
+                num_current_tokens = request.num_computed_tokens
                 new_token_ids = request.all_token_ids[
                     num_current_tokens : num_current_tokens + num_new_tokens
                 ]
@@ -1584,13 +1627,23 @@ class LMCacheConnectorV1Impl:
                 )
             new_block_ids = cached_reqs.new_block_ids[i]
 
-            request_tracker.update(new_token_ids, new_block_ids)
+            load_spec = self.load_specs.pop(req_id, None)
+            lmcache_cached_tokens = 0
+            if load_spec is not None:
+                lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+
+            request_tracker.update(
+                new_token_ids,
+                new_block_ids,
+                preempted=req_id in cached_reqs.resumed_req_ids,
+                lmcache_cached_tokens=lmcache_cached_tokens,
+            )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
-                load_spec=None,
+                load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self._save_decode_cache,
             )

@@ -14,6 +14,7 @@ Supported Backends
    gds
    redis
    s3
+   sagemaker_hyperpod
    infinistore
    mooncake
    valkey
@@ -21,3 +22,4 @@ Supported Backends
    nixl
    external_backend
    eic
+   mock
