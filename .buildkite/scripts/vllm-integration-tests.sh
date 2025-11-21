@@ -60,7 +60,9 @@ cleanup() {
         if [[ -n "$port" ]]; then
             echo "  - Killing and removing port: $port" >&2
             fuser -k "${port}/tcp" >&2 || true
-            printf -v "$port_var" ''
+            if [[ "$port_var" != "PORT" ]]; then
+                printf -v "$port_var" ''
+            fi
         fi
     done
 }
