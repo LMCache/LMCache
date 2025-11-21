@@ -108,14 +108,18 @@ class RegistrationController:
 
         # prevent duplicate registration
         if (
-            key in self.distributed_url_mapping
-            or key in self.socket_mapping
-            or key in self.worker_info_mapping
+            key in self.socket_mapping
+            and key in self.worker_info_mapping
         ):
             logger.warning(
-                f"Instance-worker {key} already registered, skip registration"
+                "Instance-worker %s already registered, skip registration", key
             )
             return
+
+        # register the instance-worker
+        assert key not in self.distributed_url_mapping
+        assert key not in self.socket_mapping
+        assert key not in self.worker_info_mapping
 
         ip = msg.ip
         port = msg.port
@@ -125,7 +129,7 @@ class RegistrationController:
             self.distributed_url_mapping[key] = distributed_url
         else:
             logger.info(
-                f"distributed url of {key} is None, only register when p2p is used."
+                "distributed url of %s is None, only register when p2p is used.", key
             )
 
         self.instance_mapping[ip] = instance_id
@@ -150,7 +154,7 @@ class RegistrationController:
         self.worker_mapping[instance_id].append(worker_id)
         self.worker_mapping[instance_id].sort()
 
-        logger.info(f"Registered instance-worker {key} with URL {url}")
+        logger.info("Registered instance-worker %s with URL %s", key, url)
 
     async def deregister(self, msg: DeRegisterMsg) -> None:
         """
