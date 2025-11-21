@@ -2,7 +2,9 @@
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
-from lmcache.v1.transfer_channel.py_socket_channel import PySocketChannel
+from lmcache.v1.transfer_channel.mock_memory_channel import (
+    MockMemoryChannel,
+)
 
 logger = init_logger(__name__)
 
@@ -21,10 +23,11 @@ def CreateTransferChannel(
 ) -> BaseTransferChannel:
     """
     Create a transfer channel based on the specified channel type.
-    Supports "nixl" and "py_socket" channel types.
-    If nixl is not available, automatically falls back to py_socket.
+    Supports "nixl" and "mock_memory" channel types.
+    If nixl is not available, automatically falls back to mock_memory
+    which is a mock implementation for testing purposes.
 
-    :param channel_type: Type of the transfer channel (e.g., "nixl", "py_socket").
+    :param channel_type: Type of the transfer channel (e.g., "nixl", "mock_memory").
     :param async_mode: Whether to operate in asynchronous mode.
     :param role: Role of the channel (e.g., "both", "sender" or "receiver").
     :param buffer_ptr: Pointer to the pre-allocated buffer.
@@ -37,7 +40,7 @@ def CreateTransferChannel(
     :return: An instance of the specified transfer channel.
     """
 
-    assert channel_type in ["nixl", "py_socket"], (
+    assert channel_type in ["nixl", "mock_memory"], (
         f"Unsupported channel type: {channel_type}"
     )
 
@@ -62,12 +65,12 @@ def CreateTransferChannel(
             return transfer_channel
         except (ImportError, RuntimeError) as e:
             logger.warning(
-                "NIXL not available (%s), falling back to py_socket channel", str(e)
+                "NIXL not available (%s), falling back to mock_memory channel", str(e)
             )
-            channel_type = "py_socket"
+            channel_type = "mock_memory"
 
-    if channel_type == "py_socket":
-        py_socket_channel: BaseTransferChannel = PySocketChannel(
+    if channel_type == "mock_memory":
+        mock_memory_channel: BaseTransferChannel = MockMemoryChannel(
             async_mode=async_mode,
             role=role,
             buffer_ptr=buffer_ptr,
@@ -77,6 +80,6 @@ def CreateTransferChannel(
             peer_init_url=peer_init_url,
             **kwargs,
         )
-        return py_socket_channel
+        return mock_memory_channel
 
     raise ValueError(f"Unsupported channel type: {channel_type}")

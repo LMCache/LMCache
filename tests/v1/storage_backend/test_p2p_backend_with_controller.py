@@ -172,7 +172,7 @@ def create_test_config(
     p2p_host: str,
     p2p_init_ports: list[int],
     p2p_lookup_ports: list[int],
-    transfer_channel: str = "py_socket",
+    transfer_channel: str = "mock_memory",
     extra_config: Optional[dict] = None,
 ):
     """Create test configuration for P2P backend"""
@@ -317,7 +317,7 @@ class TestP2PBackendWithController:
 
     def test_p2p_backend_initialization(self, async_loop, local_cpu_backend):
         """
-        Test the basic initialization of P2P backend with py_socket transfer channel.
+        Test the basic initialization of P2P backend with mock_memory transfer channel.
 
         This test verifies that:
         - P2P backend can be properly initialized with valid configuration
