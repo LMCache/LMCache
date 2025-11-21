@@ -406,13 +406,20 @@ class P2PBackend(StorageBackendInterface):
             except AttributeError:
                 pass
 
-        # Create new socket using stored parameters
+        # Get stored parameters for recreation
         params = self.lookup_url_to_socket_params.get(peer_lookup_url)
         if params is None:
             logger.error("No socket params found for %s", peer_lookup_url)
             return
 
-        logger.info("Recreating socket for peer %s", peer_lookup_url)
+        # Use stored peer_init_url for logging/debugging purposes
+        peer_init_url = params.get("peer_init_url", "unknown")
+
+        logger.info(
+            "Recreating socket for peer_lookup_url %s (peer_init_url: %s)",
+            peer_lookup_url,
+            peer_init_url,
+        )
         try:
             new_socket = self._create_socket_with_timeout(
                 peer_lookup_url,
@@ -422,8 +429,10 @@ class P2PBackend(StorageBackendInterface):
             self.lookup_url_to_socket_mapping[peer_lookup_url] = new_socket
         except zmq.ZMQError as e:
             logger.error(
-                "Failed to recreate socket for peer %s: %s",
+                "Failed to recreate socket for peer_lookup_url %s "
+                "(peer_init_url: %s): %s",
                 peer_lookup_url,
+                peer_init_url,
                 e,
                 exc_info=True,
             )
@@ -432,8 +441,10 @@ class P2PBackend(StorageBackendInterface):
             raise
         except Exception as e:
             logger.error(
-                "Unexpected error recreating socket for peer %s: %s",
+                "Unexpected error recreating socket for peer_lookup_url %s "
+                "(peer_init_url: %s): %s",
                 peer_lookup_url,
+                peer_init_url,
                 e,
                 exc_info=True,
             )
