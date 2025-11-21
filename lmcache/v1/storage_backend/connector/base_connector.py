@@ -9,6 +9,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -67,11 +68,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         self.meta_fmt = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
-        dtype_size = torch.tensor([], dtype=metadata.kv_dtype).element_size()
-        num_elements = 1
-        for dim in metadata.kv_shape:
-            num_elements *= dim
-        self.full_chunk_size = dtype_size * num_elements
+        self.full_chunk_size = get_size_bytes(self.meta_shape, self.meta_dtype)
         assert self.full_chunk_size is not None
         assert self.full_chunk_size % metadata.kv_shape[2] == 0
         self.single_token_size = self.full_chunk_size // metadata.kv_shape[2]
