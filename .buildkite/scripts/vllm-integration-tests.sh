@@ -502,7 +502,9 @@ run_long_doc_qa() {
         git config user.name "Shaoting Feng"
         git add "$baseline_path"
         git commit -m "Update long_doc_qa baseline: $feature_type.json" || true
-        git remote add internal git@github.com:LMCache/LMCache.git
+        if ! git remote get-url internal >/dev/null 2>&1; then
+            git remote add internal git@github.com:TensorMesh-Internal/vllm.git
+        fi
         git push internal +benchmarks-main:dev
         return 0
     fi
@@ -671,9 +673,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         )
         if [[ "$feature_type" == "p2p" ]]; then
             run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "$feature_type" "true"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "true"
         else
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "$feature_type" "true"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "true"
         fi
     fi
 
