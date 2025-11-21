@@ -15,6 +15,7 @@ import sortedcontainers
 import torch
 
 # First Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -709,6 +710,18 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     def _Compute_aligned_size(raw_size: int, align: int) -> int:
         return (raw_size + align - 1) & ~(align - 1)
 
+    def _can_merge_with_prev(
+        self, curr_block: FreeBlock, prev_block: FreeBlock
+    ) -> bool:
+        """Hook: Check if curr_block can merge with prev_block."""
+        return prev_block.can_be_coalesced(curr_block)
+
+    def _can_merge_with_succ(
+        self, curr_block: FreeBlock, succ_block: FreeBlock
+    ) -> bool:
+        """Hook: Check if curr_block can merge with succ_block."""
+        return curr_block.can_be_coalesced(succ_block)
+
     @_lmcache_nvtx_annotate
     def _coalesce(
         self,
@@ -722,15 +735,12 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         Returns True if the current block was coalesced, otherwise False.
         """
-        if prev_block is not None and prev_block.can_be_coalesced(curr_block):
-            merge_prev = True
-        else:
-            merge_prev = False
-
-        if succ_block is not None and curr_block.can_be_coalesced(succ_block):
-            merge_succ = True
-        else:
-            merge_succ = False
+        merge_prev = prev_block is not None and self._can_merge_with_prev(
+            curr_block, prev_block
+        )
+        merge_succ = succ_block is not None and self._can_merge_with_succ(
+            curr_block, succ_block
+        )
 
         if merge_prev and merge_succ:
             prev_block.size += curr_block.size + succ_block.size  # type: ignore
@@ -799,13 +809,18 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
+        raw_data = self._get_buffer_slice(block.start, raw_size)
         return TensorMemoryObj(
-            raw_data=self.buffer[block.start : block.start + raw_size],
+            raw_data=raw_data,
             metadata=MemoryObjMetadata(
                 shape, dtype, block.start, aligned_size, 1, 0, fmt
             ),
             parent_allocator=self,
         )
+
+    def _get_buffer_slice(self, start: int, size: int) -> torch.Tensor:
+        """Hook: Get buffer slice. Override for custom buffer access."""
+        return self.buffer[start : start + size]
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
@@ -1035,9 +1050,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.dtype = dtype
         self.fmt = fmt
 
-        num_elements = shape.numel()
-        self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
-        self.align_bytes = num_elements * self.bytes_per_element
+        # full chunk size bytes
+        self.align_bytes = get_size_bytes(shape, dtype)
 
         assert self.buffer_size % self.align_bytes == 0, (
             f"Buffer size {self.buffer_size} must be a"
@@ -1112,7 +1126,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         free_block.meta.ref_count = 1
 
         if shape != self.shape:
-            size_in_bytes = shape.numel() * self.bytes_per_element
+            size_in_bytes = get_size_bytes(shape, dtype)
             free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
         # TODO (Jiayi): need a flag to drop these debug ops
@@ -1164,7 +1178,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.ref_count = 1
 
             if shape != self.shape:
-                size_in_bytes = shape.numel() * self.bytes_per_element
+                size_in_bytes = get_size_bytes(shape, dtype)
                 free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
             allocated_blocks.append(free_block)

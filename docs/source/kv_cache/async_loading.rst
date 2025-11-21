@@ -1,5 +1,5 @@
-Async Loading in LMCache
-=========================
+Async Loading
+=============
 
 .. contents:: Table of Contents
    :local:

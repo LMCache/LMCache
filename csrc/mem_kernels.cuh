@@ -24,7 +24,8 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_value_cache,
                               torch::Tensor& slot_mapping, const bool direction,
                               const bool token_major = false,
-                              const bool vllm_two_major = false);
+                              const bool vllm_two_major = false,
+                              const bool use_mla = false);
 
 void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
                                   torch::Tensor& sgl_key_cache,

@@ -39,6 +39,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     QueryWorkerInfoRetMsg,
 )
 from lmcache.v1.cache_controller.utils import WorkerInfo
+from lmcache.v1.internal_api_server.api_registry import APIRegistry
 
 logger = init_logger(__name__)
 
@@ -70,6 +71,11 @@ def create_app(
             pass
 
     app = FastAPI(lifespan=lifespan)
+    app.state.lmcache_controller_manager = lmcache_controller_manager
+
+    # Register internal APIs (only common APIs, not vllm-specific ones)
+    registry = APIRegistry(app)
+    registry.register_all_apis(categories=["common", "controller"])
 
     class QueryInstRequest(BaseModel):
         event_id: str

@@ -23,9 +23,9 @@ logger = init_logger(__name__)
 
 app = FastAPI()
 
-# Automatically register all APIs
+# Automatically register common, vllm, and controller APIs
 registry = APIRegistry(app)
-registry.register_all_apis()
+registry.register_all_apis(categories=["common", "vllm", "controller"])
 
 
 class InternalAPIServer:
