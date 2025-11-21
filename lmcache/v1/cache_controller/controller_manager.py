@@ -228,9 +228,13 @@ class LMCacheControllerManager:
                     > self.lmcache_worker_timeout
                 ):
                     logger.warning(
-                        f"Worker {worker_info.instance_id}_{worker_info.worker_id} last"
-                        f" heartbeat time: {worker_info.last_heartbeat_time}, current "
-                        f"time: {time.time()}, more than {self.lmcache_worker_timeout}s"
+                        "Worker %s_%s last heartbeat time: %s, "
+                        "current time: %s, more than %s seconds",
+                        worker_info.instance_id,
+                        worker_info.worker_id,
+                        worker_info.last_heartbeat_time,
+                        time.time(),
+                        self.lmcache_worker_timeout,
                     )
                     # Perform a full deregister to clean up all associated resources.
                     deregister_msg = DeRegisterMsg(
