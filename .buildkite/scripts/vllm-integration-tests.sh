@@ -500,7 +500,7 @@ run_long_doc_qa() {
         echo "Expected latency: $expected_query_ttft_per_prompt"
         echo "Actual latency: $query_ttft_per_prompt"
         awk -v expected="$expected_query_ttft_per_prompt" -v actual="$query_ttft_per_prompt" 'BEGIN {
-            if (actual < expected) {
+            if (actual > expected) {
                 print "TTFT gain requirement not met"
                 exit 1
             } else {
@@ -513,7 +513,7 @@ run_long_doc_qa() {
         echo "Expected latency: $expected_query_round_time_per_prompt"
         echo "Actual latency: $query_round_time_per_prompt"
         awk -v expected="$expected_query_round_time_per_prompt" -v actual="$query_round_time_per_prompt" 'BEGIN {
-            if (actual < expected) {
+            if (actual > expected) {
                 print "Latency gain requirement not met"
                 exit 1
             } else {
@@ -526,7 +526,7 @@ run_long_doc_qa() {
         echo "Expected warmup latency: $expected_warmup_round_time_per_prompt"
         echo "Actual warmup latency: $warmup_round_time_per_prompt"
         awk -v expected="$expected_warmup_round_time_per_prompt" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
-            if (actual < expected) {
+            if (actual > expected) {
                 print "Latency requirement not met"
                 exit 1
             } else {
