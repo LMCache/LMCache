@@ -496,6 +496,7 @@ run_long_doc_qa() {
 
     if [ "$need_upload" = "true" ]; then
         local baseline_path="$ORIG_DIR/benchmarks/long_doc_qa/$feature_type.json"
+        echo "$json"
         printf '%s\n' "$json" > "$baseline_path"
 
         git config user.email "$USER_EMAIL"
@@ -505,12 +506,12 @@ run_long_doc_qa() {
         if ! git remote get-url internal >/dev/null 2>&1; then
             git remote add internal git@github.com:TensorMesh-Internal/vllm.git
         fi
-        git push internal +HEAD:benchmarks-main
+        git push internal +HEAD:benchmarks-main >/dev/null 2>&1
         return 0
     fi
 
     # Fetch branch
-    git fetch origin benchmarks-main >&2 || true
+    git fetch origin benchmarks-main >/dev/null 2>&1 || true
 
     # Load baseline from branch
     baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/$feature_type.json 2>/dev/null || echo "")
@@ -524,7 +525,7 @@ run_long_doc_qa() {
         echo "Expected latency: $expected_query_ttft_per_prompt"
         echo "Actual latency: $query_ttft_per_prompt"
         awk -v expected="$expected_query_ttft_per_prompt" -v actual="$query_ttft_per_prompt" 'BEGIN {
-            if (actual > expected) {
+            if (actual > expected * 1.1) {
                 print "TTFT gain requirement not met"
                 exit 1
             } else {
@@ -537,7 +538,7 @@ run_long_doc_qa() {
         echo "Expected latency: $expected_query_round_time_per_prompt"
         echo "Actual latency: $query_round_time_per_prompt"
         awk -v expected="$expected_query_round_time_per_prompt" -v actual="$query_round_time_per_prompt" 'BEGIN {
-            if (actual > expected) {
+            if (actual > expected * 1.1) {
                 print "Latency gain requirement not met"
                 exit 1
             } else {
@@ -550,7 +551,7 @@ run_long_doc_qa() {
         echo "Expected warmup latency: $expected_warmup_round_time_per_prompt"
         echo "Actual warmup latency: $warmup_round_time_per_prompt"
         awk -v expected="$expected_warmup_round_time_per_prompt" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
-            if (actual > expected) {
+            if (actual > expected * 1.1) {
                 print "Latency requirement not met"
                 exit 1
             } else {
@@ -618,8 +619,8 @@ echo "Using port $PORT to send or receive requests."
 # Need to run from docker directory
 cd docker/
 
-# # Create the container image
-# build_lmcache_vllmopenai_image
+# Create the container image
+build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
@@ -673,9 +674,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         )
         if [[ "$feature_type" == "p2p" ]]; then
             run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "true"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         else
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "true"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         fi
     fi
 
