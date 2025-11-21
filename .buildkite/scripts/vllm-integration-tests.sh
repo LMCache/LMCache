@@ -492,9 +492,16 @@ run_long_doc_qa() {
     query_round_time_per_prompt=$(echo "$json" | jq -r '.query_round_time_per_prompt')
     warmup_round_time_per_prompt=$(echo "$json" | jq -r '.warmup_round_time_per_prompt')
 
-    expected_query_ttft_per_prompt=100
-    expected_query_round_time_per_prompt=100
-    expected_warmup_round_time_per_prompt=100
+    # Fetch branch
+    git fetch origin benchmarks-main >&2 || true
+
+    # Load baseline from branch
+    baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/baseline.json 2>/dev/null || echo "")
+
+    # Extract baseline numbers
+    expected_query_ttft_per_prompt=$(echo "$baseline_json" | jq -r '.query_ttft_per_prompt')
+    expected_query_round_time_per_prompt=$(echo "$baseline_json" | jq -r '.query_round_time_per_prompt')
+    expected_warmup_round_time_per_prompt=$(echo "$baseline_json" | jq -r '.warmup_round_time_per_prompt')
 
     if [ "$has_expected_ttft_gain" = "true" ]; then
         echo "Expected latency: $expected_query_ttft_per_prompt"
@@ -594,8 +601,8 @@ echo "Using port $PORT to send or receive requests."
 # Need to run from docker directory
 cd docker/
 
-# Create the container image
-build_lmcache_vllmopenai_image
+# # Create the container image
+# build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
