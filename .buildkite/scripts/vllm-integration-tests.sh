@@ -504,7 +504,7 @@ run_long_doc_qa() {
         git add "$baseline_path"
         git commit -m "Update long_doc_qa baseline: $feature_type.json" || true
         if ! git remote get-url internal >/dev/null 2>&1; then
-            git remote add internal git@github.com:TensorMesh-Internal/vllm.git
+            git remote add internal git@github.com:LMCache/LMCache.git
         fi
         git push internal +HEAD:benchmarks-main >/dev/null 2>&1
         return 0
