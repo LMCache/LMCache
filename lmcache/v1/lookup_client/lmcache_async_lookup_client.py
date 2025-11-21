@@ -166,7 +166,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             req_status = self.reqs_status.get(lookup_id, -1)
             if req_status is None:
                 time.sleep(self.lookup_backoff_time)
-                if time.time() - self.first_lookup_time[lookup_id] > self.timeout_ms:
+                if (
+                    time.time() - self.first_lookup_time[lookup_id]
+                ) * 1000 > self.timeout_ms:
                     logger.warning(
                         "Request %s is still waiting for async lookup",
                         "after %d seconds, returning 0 lmcache cached tokens",
