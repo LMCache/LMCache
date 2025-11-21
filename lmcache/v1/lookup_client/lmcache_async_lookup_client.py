@@ -174,11 +174,13 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     time.time() - self.first_lookup_time[lookup_id]
                 ) * 1000 > self.timeout_ms:
                     logger.warning(
-                        "Request %s is still waiting for async lookup",
-                        "after %d seconds, returning 0 lmcache cached tokens",
-                        "so vllm can recompute",
+                        (
+                            "Request %s is still waiting for async lookup "
+                            "after %d seconds, returning 0 lmcache cached tokens "
+                            "so vllm can recompute"
+                        ),
                         lookup_id,
-                        self.timeout_ms,
+                        self.timeout_ms // 1000,
                     )
                     self.first_lookup_time.pop(lookup_id, None)
                     return 0
