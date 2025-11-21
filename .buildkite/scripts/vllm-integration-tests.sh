@@ -21,12 +21,18 @@
 # Note: L4 CI runners cannot use Flash Infer
 
 set -e
-trap 'cleanup $?' EXIT
+trap 'cleanup $?' EXIT INT TERM
 
 CID=
+PREFILLER_CID=
+DECODER_CID=
+CID1=
+CID2=
 HF_TOKEN=
 SERVER_WAIT_TIMEOUT=180
 PORT=
+PORT1=
+PORT2=
 
 #############
 # UTILITIES #
@@ -35,14 +41,16 @@ PORT=
 cleanup() {
     local code="${1:-0}"
 
-    echo "→ Cleaning up Docker containers and ports..."
+    echo "→ Cleaning up Docker containers and ports..." >&2
 
     # Clean up container IDs if defined
     for cid_var in CID PREFILLER_CID DECODER_CID CID1 CID2; do
         local cid="${!cid_var:-}"
         if [[ -n "$cid" ]]; then
-            docker kill "$cid" &>/dev/null || true
-            docker rm "$cid" &>/dev/null || true
+            echo "  - Killing and removing container: $cid" >&2
+            docker kill "$cid" >&2 || true
+            docker rm "$cid" >&2 || true
+            printf -v "$cid_var" ''
         fi
     done
 
@@ -50,7 +58,11 @@ cleanup() {
     for port_var in PORT PORT1 PORT2; do
         local port="${!port_var:-}"
         if [[ -n "$port" ]]; then
-            fuser -k "${port}/tcp" &>/dev/null || true
+            echo "  - Killing and removing port: $port" >&2
+            fuser -k "${port}/tcp" >&2 || true
+            if [[ "$port_var" != "PORT" ]]; then
+                printf -v "$port_var" ''
+            fi
         fi
     done
 }
