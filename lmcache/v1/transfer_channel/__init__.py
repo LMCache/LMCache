@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
-from lmcache.v1.transfer_channel.mock_memory_channel import (
-    MockMemoryChannel,
-)
-
-logger = init_logger(__name__)
 
 
 # TODO(Jiayi): Refactor this function when we support more channels.
@@ -45,31 +39,30 @@ def CreateTransferChannel(
     )
 
     if channel_type == "nixl":
-        try:
-            # First Party
-            from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
+        # First Party
+        from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
 
-            assert "backends" in kwargs, (
-                "`backends` must be provided to create nixl transfer channel."
-            )
-            transfer_channel = NixlChannel(
-                async_mode=async_mode,
-                role=role,
-                buffer_ptr=buffer_ptr,
-                buffer_size=buffer_size,
-                align_bytes=align_bytes,
-                tp_rank=tp_rank,
-                peer_init_url=peer_init_url,
-                **kwargs,
-            )
-            return transfer_channel
-        except (ImportError, RuntimeError) as e:
-            logger.warning(
-                "NIXL not available (%s), falling back to mock_memory channel", str(e)
-            )
-            channel_type = "mock_memory"
+        assert "backends" in kwargs, (
+            "`backends` must be provided to create nixl transfer channel."
+        )
+        transfer_channel = NixlChannel(
+            async_mode=async_mode,
+            role=role,
+            buffer_ptr=buffer_ptr,
+            buffer_size=buffer_size,
+            align_bytes=align_bytes,
+            tp_rank=tp_rank,
+            peer_init_url=peer_init_url,
+            **kwargs,
+        )
+        return transfer_channel
 
     if channel_type == "mock_memory":
+        # First Party
+        from lmcache.v1.transfer_channel.mock_memory_channel import (
+            MockMemoryChannel,
+        )
+
         mock_memory_channel: BaseTransferChannel = MockMemoryChannel(
             async_mode=async_mode,
             role=role,

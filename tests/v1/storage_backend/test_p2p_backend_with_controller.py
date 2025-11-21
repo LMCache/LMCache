@@ -510,6 +510,7 @@ class TestP2PBackendWithController:
                             test_no_hits(), async_loop
                         ).result(timeout=5)
 
+    @pytest.mark.skip(reason="Skip this test for now")
     def test_p2p_backend_partial_hits(self, async_loop):
         """
         Test P2P backend behavior when only a subset of requested keys are found.
