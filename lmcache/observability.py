@@ -1050,6 +1050,62 @@ class PrometheusLogger:
             ).labels(**self.labels)
             setattr(self, metric_name, gauge)
 
+        # Chunk statistics metrics (dynamic)
+        self.chunk_statistics_enabled = self._gauge_cls(
+            name="lmcache:chunk_statistics_enabled",
+            documentation="Whether chunk statistics collection is enabled",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_total_requests = self._gauge_cls(
+            name="lmcache:chunk_statistics_total_requests",
+            documentation="Total number of requests processed by chunk statistics",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_total_chunks = self._gauge_cls(
+            name="lmcache:chunk_statistics_total_chunks",
+            documentation="Total number of chunks processed",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_unique_chunks = self._gauge_cls(
+            name="lmcache:chunk_statistics_unique_chunks",
+            documentation="Number of unique chunks (estimated)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_reuse_rate = self._gauge_cls(
+            name="lmcache:chunk_statistics_reuse_rate",
+            documentation="Chunk reuse rate (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_bloom_filter_size_mb = self._gauge_cls(
+            name="lmcache:chunk_statistics_bloom_filter_size_mb",
+            documentation="Bloom Filter memory usage in MB",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_bloom_filter_fill_rate = self._gauge_cls(
+            name="lmcache:chunk_statistics_bloom_filter_fill_rate",
+            documentation="Bloom Filter fill rate (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_file_count = self._gauge_cls(
+            name="lmcache:chunk_statistics_file_count",
+            documentation="Number of files created for file_hash strategy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_current_file_size = self._gauge_cls(
+            name="lmcache:chunk_statistics_current_file_size",
+            documentation="Current file size in bytes for file_hash strategy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
         # Connector metrics
         connector_metrics = [
             "scheduler_unfinished_requests_count",
