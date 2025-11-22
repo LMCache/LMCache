@@ -619,8 +619,8 @@ echo "Using port $PORT to send or receive requests."
 # Need to run from docker directory
 cd docker/
 
-# # Create the container image
-# build_lmcache_vllmopenai_image
+# Create the container image
+build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
@@ -674,9 +674,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         )
         if [[ "$feature_type" == "p2p" ]]; then
             run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "true"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         else
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "true"
+            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         fi
     fi
 
