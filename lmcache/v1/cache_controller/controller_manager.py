@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from enum import Enum
 from typing import Optional
 import asyncio
 import json
@@ -15,7 +14,11 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controllers import KVController, RegistrationController
 from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
-from lmcache.v1.cache_controller.observability import PrometheusLogger
+from lmcache.v1.cache_controller.observability import (
+    PrometheusLogger,
+    SocketMetricsContext,
+    SocketType,
+)
 from lmcache.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_socket,
@@ -53,13 +56,6 @@ logger = init_logger(__name__)
 # TODO(Jiayi): Need to align the message types. For example,
 # a controller should take in an control message and return
 # a control message.
-
-
-class SocketType(Enum):
-    """Enum for socket types to ensure type safety."""
-
-    PULL = "pull"
-    REPLY = "reply"
 
 
 class LMCacheControllerManager:
@@ -138,12 +134,6 @@ class LMCacheControllerManager:
         # Setup socket message count metrics
         self._setup_socket_metrics()
 
-        # self.loop = asyncio.new_event_loop()
-        # self.thread = threading.Thread(target=self.loop.run_forever,
-        #                               daemon=True)
-        # self.thread.start()
-        # asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
-
     async def handle_worker_message(self, msg: WorkerMsg) -> None:
         if isinstance(msg, HeartbeatMsg):
             await self.reg_controller.heartbeat(msg)
@@ -189,39 +179,6 @@ class LMCacheControllerManager:
         else:
             logger.error(f"Unknown orchestration message type: {msg}")
             raise RuntimeError(f"Unknown orchestration message type: {msg}")
-
-    class _SocketMetricsContext:
-        """Context manager for socket message counting and error handling."""
-
-        def __init__(self, manager, socket_type: SocketType, message_count: int = 1):
-            self.manager = manager
-            self.socket_type = socket_type
-            self.message_count = message_count
-            self.counter_attr = f"{socket_type.value}_socket_message_count"
-            self.active_attr = f"{socket_type.value}_socket_active_requests"
-
-        def __enter__(self):
-            setattr(
-                self.manager,
-                self.counter_attr,
-                getattr(self.manager, self.counter_attr) + self.message_count,
-            )
-            setattr(
-                self.manager,
-                self.active_attr,
-                getattr(self.manager, self.active_attr) + self.message_count,
-            )
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            setattr(
-                self.manager,
-                self.active_attr,
-                getattr(self.manager, self.active_attr) - self.message_count,
-            )
-            if exc_type is not None:
-                logger.error(f"Controller Manager error: {exc_val}")
-            return False
 
     def _setup_socket_metrics(self):
         """Setup metrics for socket message counts."""
@@ -278,7 +235,7 @@ class LMCacheControllerManager:
         while True:
             parts = await socket.recv_multipart()
             part_count = len(parts)
-            with self._SocketMetricsContext(self, SocketType.PULL, part_count):
+            with SocketMetricsContext(self, SocketType.PULL, part_count):
                 for part in parts:
                     # Parse message based on format
                     if part.startswith(b"{"):
@@ -304,7 +261,7 @@ class LMCacheControllerManager:
     async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
         while True:
             part = await socket.recv()
-            with self._SocketMetricsContext(self, SocketType.REPLY):
+            with SocketMetricsContext(self, SocketType.REPLY):
                 # Parse message based on format
                 if part.startswith(b"{"):
                     # JSON format - typically from external systems like Mooncake

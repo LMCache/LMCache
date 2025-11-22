@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from enum import Enum
 from typing import Optional
 
 # Third Party
@@ -10,6 +11,13 @@ import prometheus_client
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+class SocketType(Enum):
+    """Enum for socket types to ensure type safety."""
+
+    PULL = "pull"
+    REPLY = "reply"
 
 
 class PrometheusLogger:
@@ -128,3 +136,37 @@ class PrometheusLogger:
                 REGISTRY.unregister(collector)
             except KeyError:
                 pass
+
+
+class SocketMetricsContext:
+    """Context manager for socket message counting and error handling."""
+
+    def __init__(self, manager, socket_type: SocketType, message_count: int = 1):
+        self.manager = manager
+        self.socket_type = socket_type
+        self.message_count = message_count
+        self.counter_attr = f"{socket_type.value}_socket_message_count"
+        self.active_attr = f"{socket_type.value}_socket_active_requests"
+
+    def __enter__(self):
+        setattr(
+            self.manager,
+            self.counter_attr,
+            getattr(self.manager, self.counter_attr) + self.message_count,
+        )
+        setattr(
+            self.manager,
+            self.active_attr,
+            getattr(self.manager, self.active_attr) + self.message_count,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        setattr(
+            self.manager,
+            self.active_attr,
+            getattr(self.manager, self.active_attr) - self.message_count,
+        )
+        if exc_type is not None:
+            logger.error(f"Controller Manager error: {exc_val}")
+        return False
