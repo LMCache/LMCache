@@ -94,7 +94,7 @@ class LMCacheControllerManager:
         )
 
         if self.controller_urls["reply"] is not None:
-            self.controller_rep_socket = get_zmq_socket(
+            self.controller_reply_socket = get_zmq_socket(
                 self.zmq_context,
                 self.controller_urls["reply"],
                 protocol="tcp",
@@ -203,15 +203,15 @@ class LMCacheControllerManager:
                 lambda: self._check_socket_has_pending(self.controller_pull_socket)
             )
             if self.controller_urls["reply"] is not None:
-                prometheus_logger.rep_socket_has_pending.set_function(
-                    lambda: self._check_socket_has_pending(self.controller_rep_socket)
+                prometheus_logger.reply_socket_has_pending.set_function(
+                    lambda: self._check_socket_has_pending(self.controller_reply_socket)
                 )
 
             # Active request metrics
             prometheus_logger.pull_socket_active_requests.set_function(
                 lambda: self.pull_socket_active_requests
             )
-            prometheus_logger.rep_socket_active_requests.set_function(
+            prometheus_logger.reply_socket_active_requests.set_function(
                 lambda: self.reply_socket_active_requests
             )
 
@@ -308,7 +308,7 @@ class LMCacheControllerManager:
     async def start_all(self):
         tasks = []
         if self.controller_urls["reply"] is not None:
-            tasks.append(self.handle_batched_req_request(self.controller_rep_socket))
+            tasks.append(self.handle_batched_req_request(self.controller_reply_socket))
         tasks.append(self.handle_batched_push_request(self.controller_pull_socket))
         await asyncio.gather(
             *tasks,

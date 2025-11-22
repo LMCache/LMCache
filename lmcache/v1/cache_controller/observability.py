@@ -63,7 +63,7 @@ class PrometheusLogger:
         ).labels(**self.labels)
         self.reply_socket_message_count = self._gauge_cls(
             name="lmcache:cache_controller_reply_socket_message_count",
-            documentation="The total number of messages received on REP socket",
+            documentation="The total number of messages received on REPLY socket",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
@@ -75,9 +75,9 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
-        self.rep_socket_has_pending = self._gauge_cls(
-            name="lmcache:cache_controller_rep_socket_has_pending",
-            documentation="Whether REP socket has pending messages (1=yes, 0=no)",
+        self.reply_socket_has_pending = self._gauge_cls(
+            name="lmcache:cache_controller_reply_socket_has_pending",
+            documentation="Whether REPLY socket has pending messages (1=yes, 0=no)",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
@@ -89,9 +89,9 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
-        self.rep_socket_active_requests = self._gauge_cls(
-            name="lmcache:cache_controller_rep_socket_active_requests",
-            documentation="Number of requests being processed from REP socket",
+        self.reply_socket_active_requests = self._gauge_cls(
+            name="lmcache:cache_controller_reply_socket_active_requests",
+            documentation="Number of requests being processed from REPLY socket",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
