@@ -101,7 +101,6 @@ class LMCacheControllerManager:
                 role=zmq.REP,  # type: ignore[attr-defined]
                 bind_or_connect="bind",
             )
-
         self.kv_controller = KVController()
         self.reg_controller = RegistrationController()
 
