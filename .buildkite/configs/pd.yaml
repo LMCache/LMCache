@@ -4,6 +4,7 @@ workload:
   repeat-count: 1
   expected-latency: true
   completion: true
+  num-documents: 20
 
 feature:
   type: pd
