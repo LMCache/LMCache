@@ -53,8 +53,8 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
-        self.rep_socket_message_count = self._gauge_cls(
-            name="lmcache:cache_controller_rep_socket_message_count",
+        self.reply_socket_message_count = self._gauge_cls(
+            name="lmcache:cache_controller_reply_socket_message_count",
             documentation="The total number of messages received on REP socket",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",

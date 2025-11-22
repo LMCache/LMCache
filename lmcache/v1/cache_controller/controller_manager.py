@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from enum import Enum
 from typing import Optional
 import asyncio
 import json
@@ -54,6 +55,13 @@ logger = init_logger(__name__)
 # a control message.
 
 
+class SocketType(Enum):
+    """Enum for socket types to ensure type safety."""
+
+    PULL = "pull"
+    REPLY = "reply"
+
+
 class LMCacheControllerManager:
     def __init__(
         self,
@@ -97,14 +105,6 @@ class LMCacheControllerManager:
                 role=zmq.REP,  # type: ignore[attr-defined]
                 bind_or_connect="bind",
             )
-
-        # Message counters for observability
-        self.pull_socket_message_count = 0
-        self.rep_socket_message_count = 0
-
-        # Active request counters
-        self.pull_socket_active_requests = 0
-        self.rep_socket_active_requests = 0
 
         self.kv_controller = KVController()
         self.reg_controller = RegistrationController()
@@ -190,15 +190,56 @@ class LMCacheControllerManager:
             logger.error(f"Unknown orchestration message type: {msg}")
             raise RuntimeError(f"Unknown orchestration message type: {msg}")
 
+    class _SocketMetricsContext:
+        """Context manager for socket message counting and error handling."""
+
+        def __init__(self, manager, socket_type: SocketType, message_count: int = 1):
+            self.manager = manager
+            self.socket_type = socket_type
+            self.message_count = message_count
+            self.counter_attr = f"{socket_type.value}_socket_message_count"
+            self.active_attr = f"{socket_type.value}_socket_active_requests"
+
+        def __enter__(self):
+            setattr(
+                self.manager,
+                self.counter_attr,
+                getattr(self.manager, self.counter_attr) + self.message_count,
+            )
+            setattr(
+                self.manager,
+                self.active_attr,
+                getattr(self.manager, self.active_attr) + self.message_count,
+            )
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            setattr(
+                self.manager,
+                self.active_attr,
+                getattr(self.manager, self.active_attr) - self.message_count,
+            )
+            if exc_type is not None:
+                logger.error(f"Controller Manager error: {exc_val}")
+            return False
+
     def _setup_socket_metrics(self):
         """Setup metrics for socket message counts."""
+        # Initialize message counters for observability
+        self.pull_socket_message_count = 0
+        self.reply_socket_message_count = 0
+
+        # Initialize active request counters
+        self.pull_socket_active_requests = 0
+        self.reply_socket_active_requests = 0
+
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
             prometheus_logger.pull_socket_message_count.set_function(
                 lambda: self.pull_socket_message_count
             )
-            prometheus_logger.rep_socket_message_count.set_function(
-                lambda: self.rep_socket_message_count
+            prometheus_logger.reply_socket_message_count.set_function(
+                lambda: self.reply_socket_message_count
             )
 
             # Socket queue/backlog metrics
@@ -215,7 +256,7 @@ class LMCacheControllerManager:
                 lambda: self.pull_socket_active_requests
             )
             prometheus_logger.rep_socket_active_requests.set_function(
-                lambda: self.rep_socket_active_requests
+                lambda: self.reply_socket_active_requests
             )
 
     def _check_socket_has_pending(self, socket) -> int:
@@ -235,69 +276,51 @@ class LMCacheControllerManager:
 
     async def handle_batched_push_request(self, socket) -> Optional[MsgBase]:
         while True:
-            try:
-                parts = await socket.recv_multipart()
-                part_count = len(parts)
-                self.pull_socket_message_count += part_count
-                self.pull_socket_active_requests += part_count
-
-                try:
-                    for part in parts:
-                        # Parse message based on format
-                        if part.startswith(b"{"):
-                            # JSON format - typically from external systems
-                            # like Mooncake
-                            msg_dict = json.loads(part)
-                            msg = msgspec.convert(msg_dict, type=Msg)
-                        else:
-                            # MessagePack format - internal LMCache communication
-                            msg = msgspec.msgpack.decode(part, type=Msg)
-                        if isinstance(msg, WorkerMsg):
-                            await self.handle_worker_message(msg)
-
-                        # FIXME(Jiayi): The abstraction of control messages
-                        # might not be necessary.
-                        # elif isinstance(msg, ControlMsg):
-                        #    await self.issue_control_message(msg)
-                        elif isinstance(msg, OrchMsg):
-                            await self.handle_orchestration_message(msg)
-                        else:
-                            logger.error(f"Unknown message type: {type(msg)}")
-                finally:
-                    # Decrement active request counter
-                    self.pull_socket_active_requests -= part_count
-            except Exception as e:
-                logger.error(f"Controller Manager error: {e}")
-
-    async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
-        while True:
-            try:
-                part = await socket.recv()
-                self.rep_socket_message_count += 1
-                self.rep_socket_active_requests += 1
-
-                try:
+            parts = await socket.recv_multipart()
+            part_count = len(parts)
+            with self._SocketMetricsContext(self, SocketType.PULL, part_count):
+                for part in parts:
                     # Parse message based on format
                     if part.startswith(b"{"):
-                        # JSON format - typically from external systems like Mooncake
+                        # JSON format - typically from external systems
+                        # like Mooncake
                         msg_dict = json.loads(part)
                         msg = msgspec.convert(msg_dict, type=Msg)
                     else:
                         # MessagePack format - internal LMCache communication
                         msg = msgspec.msgpack.decode(part, type=Msg)
+                    if isinstance(msg, WorkerMsg):
+                        await self.handle_worker_message(msg)
 
-                    if isinstance(msg, WorkerReqMsg):
-                        ret_msg = await self.handle_worker_req_message(msg)
-                        await socket.send(msgspec.msgpack.encode(ret_msg))
+                    # FIXME(Jiayi): The abstraction of control messages
+                    # might not be necessary.
+                    # elif isinstance(msg, ControlMsg):
+                    #    await self.issue_control_message(msg)
+                    elif isinstance(msg, OrchMsg):
+                        await self.handle_orchestration_message(msg)
                     else:
                         logger.error(f"Unknown message type: {type(msg)}")
-                        err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
-                        await socket.send(msgspec.msgpack.encode(err_msg))
-                finally:
-                    # Decrement active request counter
-                    self.rep_socket_active_requests -= 1
-            except Exception as e:
-                logger.error(f"Controller Manager error: {e}")
+
+    async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
+        while True:
+            part = await socket.recv()
+            with self._SocketMetricsContext(self, SocketType.REPLY):
+                # Parse message based on format
+                if part.startswith(b"{"):
+                    # JSON format - typically from external systems like Mooncake
+                    msg_dict = json.loads(part)
+                    msg = msgspec.convert(msg_dict, type=Msg)
+                else:
+                    # MessagePack format - internal LMCache communication
+                    msg = msgspec.msgpack.decode(part, type=Msg)
+
+                if isinstance(msg, WorkerReqMsg):
+                    ret_msg = await self.handle_worker_req_message(msg)
+                    await socket.send(msgspec.msgpack.encode(ret_msg))
+                else:
+                    logger.error(f"Unknown message type: {type(msg)}")
+                    err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
+                    await socket.send(msgspec.msgpack.encode(err_msg))
 
     async def health_check(self):
         while True:
