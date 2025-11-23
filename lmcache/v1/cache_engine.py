@@ -127,9 +127,7 @@ class LMCacheEngine:
         if (
             self.enable_controller
             and self.metadata.role != "scheduler"
-            and (
-                len(lmcache_worker_ids) == 0 or metadata.worker_id in lmcache_worker_ids
-            )
+            and (not lmcache_worker_ids or metadata.worker_id in lmcache_worker_ids)
         ):
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 

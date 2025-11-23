@@ -658,7 +658,7 @@ def _get_extra_config_value(self, key, default_value=None):
 
 
 def _get_lmcache_worker_ids(self, use_mla, world_size):
-    if self.lmcache_worker_ids is None:
+    if not self.lmcache_worker_ids:
         # if mla is not enabled, return all worker ids, which means start
         # lmcache worker on all ranks as default;
         # if mla is enabled, return [0], which means start lmcache
@@ -672,7 +672,7 @@ def _get_lmcache_worker_ids(self, use_mla, world_size):
 
 
 def _get_lookup_server_worker_ids(self, use_mla, world_size):
-    if self.lookup_server_worker_ids is None:
+    if not self.lookup_server_worker_ids:
         # if mla is not enabled, return all worker ids, which means start
         # lookup server on all worker as default;
         # if mla is enabled, return [0], which means start lookup
