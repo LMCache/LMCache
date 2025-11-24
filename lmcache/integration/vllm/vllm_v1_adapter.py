@@ -1640,11 +1640,11 @@ class LMCacheConnectorV1Impl:
                 # Old version with resumed_from_preemption
                 preempted = cached_reqs.resumed_from_preemption[i]
             else:
-                # Fallback to False if neither attribute exists
-                preempted = False
-                logger.warning(
-                    f"Unable to determine preemption status for request {req_id}, "
-                    f"assuming not preempted"
+                # This case should not be reached with supported vLLM versions.
+                # Raising an error is safer than assuming not preempted.
+                raise AttributeError(
+                    f"Unable to determine preemption status for request {req_id}. "
+                    f"This might be due to an unsupported vLLM version."
                 )
 
             request_tracker.update(
