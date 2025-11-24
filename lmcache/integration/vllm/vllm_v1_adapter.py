@@ -1632,10 +1632,25 @@ class LMCacheConnectorV1Impl:
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
 
+            # Handle both old and new versions of CachedRequestData
+            if hasattr(cached_reqs, "resumed_req_ids"):
+                # New version with resumed_req_ids
+                preempted = req_id in cached_reqs.resumed_req_ids
+            elif hasattr(cached_reqs, "resumed_from_preemption"):
+                # Old version with resumed_from_preemption
+                preempted = cached_reqs.resumed_from_preemption[i]
+            else:
+                # Fallback to False if neither attribute exists
+                preempted = False
+                logger.warning(
+                    f"Unable to determine preemption status for request {req_id}, "
+                    f"assuming not preempted"
+                )
+
             request_tracker.update(
                 new_token_ids,
                 new_block_ids,
-                preempted=req_id in cached_reqs.resumed_req_ids,
+                preempted=preempted,
                 lmcache_cached_tokens=lmcache_cached_tokens,
             )
 
