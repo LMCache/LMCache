@@ -79,12 +79,14 @@ async def lifespan(app: FastAPI):
     prefill_pairs = pair_hosts_and_ports(
         pref_hosts, pref_ports, global_args.num_prefillers
     )
+
     for host, port in prefill_pairs:
         prefiller_base_url = f"http://{host}:{int(port)}"
         prefill_client = httpx.AsyncClient(timeout=None, base_url=prefiller_base_url)
         app.state.prefill_clients.append(
             ClientInfo(
                 prefill_client,
+                tp_size=global_args.prefiller_tp_size,
             )
         )
 
@@ -188,6 +190,7 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--prefiller-host", type=csv_strs, default=["localhost"])
+    parser.add_argument("--prefiller-tp-size", type=int, default=1)
     parser.add_argument("--prefiller-port", type=csv_ints, default=[8100])
     parser.add_argument("--num-prefillers", type=int, default=1)
     parser.add_argument("--decoder-host", type=csv_strs, default=["localhost"])
@@ -207,8 +210,12 @@ def parse_args():
 class ClientInfo:
     client: httpx.AsyncClient
     host: Optional[str] = None
-    init_port: Optional[list[int]] = None
-    alloc_port: Optional[list[int]] = None
+    init_ports: Optional[list[int]] = None
+    alloc_ports: Optional[list[int]] = None
+    tp_size: Optional[int] = None
+
+    def __post_init__(self):
+        self.tp_size = self.tp_size or len(self.init_ports or [])
 
 
 # Initialize variables to hold the persistent clients
@@ -303,7 +310,7 @@ async def stream_service_response(
             yield chunk
 
 
-def round_robin_pick_client(clients, idx):
+def round_robin_pick_client(clients, idx) -> ClientInfo:
     return clients[idx % len(clients)]
 
 
@@ -359,7 +366,6 @@ async def handle_completions(request: Request):
     st = time.time()
     try:
         req_data = await request.json()
-
         # Pick tokenization, prefill and decode client
         tokenization_client, prefill_client, decode_client = pick_up_clients(request)
 
@@ -372,13 +378,19 @@ async def handle_completions(request: Request):
         req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1
 
+        assert decode_client.tp_size, "Decode client init_port is empty"
+
+        num_prefiller_tp_rank = prefill_client.tp_size
+        assert num_prefiller_tp_rank, (
+            f"Prefill client tp_size is invalid: {num_prefiller_tp_rank}"
+        )
         disagg_spec = {
             "req_id": req_id,
             "receiver_host": decode_client.host,
-            "receiver_init_port": decode_client.init_port,
-            "receiver_alloc_port": decode_client.alloc_port,
+            "receiver_init_ports": decode_client.init_ports,
+            "receiver_alloc_ports": decode_client.alloc_ports,
+            "sender_tp_size": num_prefiller_tp_rank,
         }
-        num_tp_rank = len(decode_client.init_port or [])
 
         req_data["kv_transfer_params"] = {
             "ret_first_tok": True,
@@ -428,7 +440,7 @@ async def handle_completions(request: Request):
             ).encode()
 
             # Wait until decode node signals that kv is ready
-            await wait_decode_kv_ready(req_id, num_tp_rank)
+            await wait_decode_kv_ready(req_id, num_prefiller_tp_rank)
 
             async for chunk in stream_service_response(
                 decode_client.client, "/v1/completions", req_data
@@ -477,14 +489,16 @@ async def handle_chat_completions(request: Request):
             org_max_completion_tokens = req_data["max_completion_tokens"]
             req_data["max_completion_tokens"] = 1
 
+        assert decode_client.tp_size, "Decode client init_ports is empty"
+        num_decoder_tp_rank = decode_client.tp_size
+
         disagg_spec = {
             "req_id": req_id,
             "receiver_host": decode_client.host,
-            "receiver_init_port": decode_client.init_port,
-            "receiver_alloc_port": decode_client.alloc_port,
+            "receiver_init_ports": decode_client.init_ports,
+            "receiver_alloc_ports": decode_client.alloc_ports,
+            "receiver_tp_size": num_decoder_tp_rank,
         }
-
-        num_tp_rank = len(decode_client.init_port or [])
 
         req_data["kv_transfer_params"] = {
             "ret_first_tok": True,
@@ -554,7 +568,11 @@ async def handle_chat_completions(request: Request):
                 "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
             ).encode()
 
-            await wait_decode_kv_ready(req_id, num_tp_rank)
+            num_prefiller_tp_rank = prefill_client.tp_size
+            assert num_prefiller_tp_rank, (
+                f"Prefill client tp_size is invalid: {num_prefiller_tp_rank}"
+            )
+            await wait_decode_kv_ready(req_id, num_prefiller_tp_rank)
 
             # Stream and convert completion format chunks to chat completion format
             async for chunk in stream_service_response(
