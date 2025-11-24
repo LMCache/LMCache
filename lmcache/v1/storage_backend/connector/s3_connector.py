@@ -14,6 +14,7 @@ import tempfile
 from awscrt import auth, io, s3
 from awscrt.http import HttpHeaders, HttpRequest
 from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
+import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -99,6 +100,8 @@ class S3Connector(RemoteConnector):
         s3_endpoint: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
+        meta_shape: torch.Size,
+        meta_dtype: torch.dtype,
         full_chunk_size: int,
         s3_part_size: Optional[int],
         s3_file_prefix: Optional[str],
@@ -109,6 +112,11 @@ class S3Connector(RemoteConnector):
         s3_enable_s3express: bool,
         disable_tls: bool,
     ):
+        # TODO: these can be removed after we support unfull_chunk
+        # full_chunk_size
+        # meta_shape (need to store the chunk meta in s3 probably)
+        # meta_dtype (need to store the chunk meta in s3 probably)
+
         if not s3_endpoint.startswith("s3://"):
             raise ValueError("S3 url must start with 's3://'")
 
@@ -138,6 +146,9 @@ class S3Connector(RemoteConnector):
         self.credentials_provider = auth.AwsCredentialsProvider.new_default_chain(
             client_bootstrap
         )
+
+        self.meta_shape = meta_shape
+        self.meta_dtype = meta_dtype
 
         tls_opts = None
 
@@ -329,7 +340,6 @@ class S3Connector(RemoteConnector):
             return 0
         return got["len"] if got["len"] is not None else 0
 
-    # TODO(Jiayi): implement real async
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.exists_sync(key)
 
@@ -426,7 +436,6 @@ class S3Connector(RemoteConnector):
             return memory_obj
         except Exception as e:
             logger.error(f"Failed to download {key_str} from S3: {e}")
-            self.adhoc_shm_manager.free(recv_path, shm)
             return None
         finally:
             self.inflight_sema.release()
@@ -486,7 +495,6 @@ class S3Connector(RemoteConnector):
                 self.object_size_cache[key_str] = obj_size
 
             await self.inflight_sema.acquire()
-
             memory_obj = self.local_cpu_backend.allocate(
                 self.meta_shape,
                 self.meta_dtype,
