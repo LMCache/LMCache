@@ -168,7 +168,9 @@ class LMCacheEngine:
         self.num_layers = metadata.kv_shape[0]
         self.fmt = None
         if self.use_layerwise:
-            if config.enable_blending:
+            if metadata.use_mla:
+                self.fmt = MemoryFormat.KV_MLA_FMT
+            elif config.enable_blending:
                 self.fmt = MemoryFormat.KV_2TD
             else:
                 self.fmt = MemoryFormat.KV_T2D
@@ -799,14 +801,12 @@ class LMCacheEngine:
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
 
-                batched_contains_res = self.storage_manager.batched_contains(
-                    keys, search_range, pin, True
+                # hit chunks by prefix matching
+                hit_chunks = self.storage_manager.batched_contains(
+                    keys, search_range, pin
                 )
-                assert len(batched_contains_res) == len(chunk_info_list)
-                for (start, end, key), exists in zip(
-                    chunk_info_list, batched_contains_res, strict=False
-                ):
-                    if exists:
+                for idx, (start, end, key) in enumerate(chunk_info_list):
+                    if idx < hit_chunks:
                         if pin:
                             assert lookup_id is not None, (
                                 "lookup_id is required when pin is True"
@@ -1189,13 +1189,7 @@ class LMCacheEngine:
         assert self.storage_manager is not None
 
         tot_kv_size = 0
-        # location -> [(CacheEngineKey, start, end)]
-        block_mapping: dict[str, list[tuple[CacheEngineKey, int, int]]] = defaultdict(
-            list
-        )
-
         reordered_chunks: List[ProcessedChunk] = []
-
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
@@ -1208,39 +1202,24 @@ class LMCacheEngine:
         skip_contains_check = (
             kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
         )
+        chunk_infos = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
+            chunk_infos.append((key, start, end))
 
-            location = None
-            if key in self.lookup_cache:
-                # TODO(Jiayi): we can reduce the number of `contains` calls
-                # by checking the lookup cache first (should be updated in `lookup`)
-                pass
-            else:
-                # NOTE: key should always be in the lookup cache once we support it.
-                # TODO: use lookup_cache to skip the contains
-                if (
-                    skip_contains_check
-                    and len(self.storage_manager.non_allocator_backends) == 1
-                ):
-                    location = self.storage_manager.non_allocator_backends[0]
-                else:
-                    location = self.storage_manager.contains(key)
-                if location is None:
-                    break
-
-                # NOTE: Here we make the assumption that the underlying
-                # storage backend support pin operation, and the memory
-                # object is already pinned in the storage backend.
-                ret_mask[start:end] = True
-
-            assert location is not None
-
-            block_mapping[location].append((key, start, end))
+        # block_mapping: location -> [(CacheEngineKey, start, end)]
+        if (
+            skip_contains_check
+            and len(self.storage_manager.non_allocator_backends) == 1
+        ):
+            location = self.storage_manager.non_allocator_backends[0]
+            block_mapping = {location: chunk_infos}
+        else:
+            block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
 
         last_failed_block_start = None
         for location, blocks in block_mapping.items():
@@ -1266,6 +1245,7 @@ class LMCacheEngine:
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
+                ret_mask[start:end] = True
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False

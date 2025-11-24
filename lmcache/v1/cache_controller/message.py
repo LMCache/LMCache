@@ -42,14 +42,14 @@ class RegisterMsg(WorkerMsg):
     ip: str
     port: int
     # URL for actual KV cache transfer, only useful when p2p is enabled
-    distributed_url: Optional[str]
+    peer_init_url: Optional[str]
 
     def describe(self) -> str:
         return (
             f"Registering instance {self.instance_id}, "
             f"worker {self.worker_id} "
             f"at {self.ip}:{self.port}"
-            f" with distributed URL {self.distributed_url}"
+            f" with peer init URL {self.peer_init_url}"
         )
 
 

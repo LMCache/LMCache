@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
@@ -350,8 +351,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 ]
             )
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
+            chunk_size_bytes = get_size_bytes(new_shape, metadata.kv_dtype)
+            origin_cpu_size_bytes = int(cpu_size * 1024**3)
+            align_cpu_size_bytes = (
+                origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
+            )
+            logger.info(
+                f"Auto align cpu size bytes, origin: {origin_cpu_size_bytes}, "
+                f"aligned: {align_cpu_size_bytes}, chunk size: {chunk_size_bytes}"
+            )
             paged_mem_allocator.init_cpu_memory_allocator(
-                int(cpu_size * 1024**3),
+                align_cpu_size_bytes,
                 shape=new_shape,
                 dtype=metadata.kv_dtype,
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
