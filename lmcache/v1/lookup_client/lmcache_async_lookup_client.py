@@ -262,6 +262,8 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
     def _cleanup_finished_aborted_lookups(self) -> None:
         """Check for finished aborted lookups and send cleanup messages to workers."""
+        # A lookup whose status is None is still loading.
+        # We wait for it to finish before cleanup.
         finished_lookups = [
             lookup_id
             for lookup_id in self.aborted_lookups
@@ -269,13 +271,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         ]
         if finished_lookups:
             self.aborted_lookups.difference_update(finished_lookups)
-            with self.lock:
-                for lookup_id in finished_lookups:
-                    self.reqs_status.pop(lookup_id, None)
 
         # Tell the server to free the reserved memory buffers for each aborted lookup.
         for lookup_id in finished_lookups:
             self._send_cleanup_message(lookup_id)
+            self.clear_lookup_status(lookup_id)
 
     def _send_cleanup_message(self, lookup_id: str) -> None:
         """Send cleanup message to workers to release memory objects."""
