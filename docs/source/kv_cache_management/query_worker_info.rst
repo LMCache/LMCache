@@ -62,7 +62,7 @@ The controller responds with a message similar to:
 
 .. code-block:: text
 
-    {"event_id": "xxx", "worker_infos": [{"instance_id": "lmcache_default_instance", "worker_id": 0, "ip": "127.0.0.1", "port": 8001, "distributed_url": "127.0.0.1:8200", "registration_time": 123456, "last_heartbeat_time": 456789}]}
+    {"event_id": "xxx", "worker_infos": [{"instance_id": "lmcache_default_instance", "worker_id": 0, "ip": "127.0.0.1", "port": 8001, "peer_init_url": "127.0.0.1:8200", "registration_time": 123456, "last_heartbeat_time": 456789}]}
 
 ``worker_infos`` contains the queried worker information.
 returned ``event_id`` can be used to query the status of the operation.

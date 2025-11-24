@@ -35,11 +35,11 @@ class RegistrationController:
         # Mapping from `instance_id` -> `worker_ids`
         self.worker_mapping: dict[str, list[int]] = {}
 
-        # Mapping from `(instance_id, worker_id)` -> `distributed_url`
-        # NOTE(Jiayi): `distributed_url` is used for actual KV cache transfer(p2p),
+        # Mapping from `(instance_id, worker_id)` -> `peer_init_url`
+        # NOTE(Jiayi): `peer_init_url` is used for actual KV cache transfer(p2p),
         # It's not the lmcache_worker_url.
-        # if p2p is not used, distributed_url is None and not registered.
-        self.distributed_url_mapping: dict[tuple[str, int], str] = {}
+        # if p2p is not used, peer_init_url is None and not registered.
+        self.peer_init_url_mapping: dict[tuple[str, int], str] = {}
 
         # Mapping from `(instance_id, worker_id)` -> `socket`
         self.socket_mapping: dict[tuple[str, int], zmq.asyncio.Socket] = {}
@@ -68,15 +68,15 @@ class RegistrationController:
             logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
         return socket
 
-    def get_distributed_url(self, instance_id: str, worker_id: int) -> Optional[str]:
+    def get_peer_init_url(self, instance_id: str, worker_id: int) -> Optional[str]:
         """
         Get the URL for a given instance and worker ID.
         """
-        url = self.distributed_url_mapping.get((instance_id, worker_id))
+        url = self.peer_init_url_mapping.get((instance_id, worker_id))
         if url is None:
             logger.warning(
-                f"Instance-worker {(instance_id, worker_id)} not registered "
-                f"or P2P is not used"
+                "Instance-worker %s not registered or P2P is not used",
+                (instance_id, worker_id),
             )
         return url
 
@@ -114,19 +114,20 @@ class RegistrationController:
             return
 
         # register the instance-worker
-        assert key not in self.distributed_url_mapping
+        assert key not in self.peer_init_url_mapping
         assert key not in self.socket_mapping
         assert key not in self.worker_info_mapping
 
         ip = msg.ip
         port = msg.port
         url = f"{ip}:{port}"
-        distributed_url = msg.distributed_url
-        if distributed_url is not None:
-            self.distributed_url_mapping[key] = distributed_url
+
+        peer_init_url = msg.peer_init_url
+        if peer_init_url is not None:
+            self.peer_init_url_mapping[key] = peer_init_url
         else:
             logger.info(
-                "distributed url of %s is None, only register when p2p is used.", key
+                "peer init url of %s is None, only register when p2p is used.", key
             )
 
         self.instance_mapping[ip] = instance_id
@@ -142,7 +143,7 @@ class RegistrationController:
 
         self.socket_mapping[key] = socket
         self.worker_info_mapping[key] = WorkerInfo(
-            instance_id, worker_id, ip, port, distributed_url, time.time(), time.time()
+            instance_id, worker_id, ip, port, peer_init_url, time.time(), time.time()
         )
         if instance_id not in self.worker_mapping:
             self.worker_mapping[instance_id] = []
@@ -170,7 +171,7 @@ class RegistrationController:
         else:
             logger.warning(f"Instance {instance_id} not registered")
 
-        self.distributed_url_mapping.pop((instance_id, worker_id), None)
+        self.peer_init_url_mapping.pop((instance_id, worker_id), None)
 
         if (instance_id, worker_id) in self.socket_mapping:
             socket = self.socket_mapping.pop((instance_id, worker_id))

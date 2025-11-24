@@ -300,7 +300,7 @@ class LMCacheClusterExecutor:
             src_worker_ids, dst_worker_ids, strict=False
         ):
             socket = self.reg_controller.get_socket(src_instance_id, src_worker_id)
-            dst_url = self.reg_controller.get_distributed_url(
+            dst_url = self.reg_controller.get_peer_init_url(
                 dst_instance_id, dst_worker_id
             )
 

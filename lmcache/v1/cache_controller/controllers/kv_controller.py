@@ -216,7 +216,7 @@ class KVController:
             elif instance_id == "":
                 instance_id = matched_kv_chunk_meta.instance_id
                 location = matched_kv_chunk_meta.location
-                peer_init_url = self.reg_controller.get_distributed_url(
+                peer_init_url = self.reg_controller.get_peer_init_url(
                     instance_id, worker_id
                 )
                 assert peer_init_url is not None

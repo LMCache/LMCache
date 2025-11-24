@@ -14,7 +14,7 @@ class WorkerInfoResponse(BaseModel):
     worker_id: int
     ip: str
     port: int
-    distributed_url: Optional[str]
+    peer_init_url: Optional[str]
     registration_time: float
     last_heartbeat_time: float
 
@@ -67,7 +67,7 @@ async def get_workers(
                 worker_id=worker_info.worker_id,
                 ip=worker_info.ip,
                 port=worker_info.port,
-                distributed_url=worker_info.distributed_url,
+                peer_init_url=worker_info.peer_init_url,
                 registration_time=worker_info.registration_time,
                 last_heartbeat_time=worker_info.last_heartbeat_time,
             )
@@ -92,7 +92,7 @@ async def get_workers(
                             worker_id=worker_info.worker_id,
                             ip=worker_info.ip,
                             port=worker_info.port,
-                            distributed_url=worker_info.distributed_url,
+                            peer_init_url=worker_info.peer_init_url,
                             registration_time=worker_info.registration_time,
                             last_heartbeat_time=worker_info.last_heartbeat_time,
                         )
@@ -110,7 +110,7 @@ async def get_workers(
                         worker_id=worker_info.worker_id,
                         ip=worker_info.ip,
                         port=worker_info.port,
-                        distributed_url=worker_info.distributed_url,
+                        peer_init_url=worker_info.peer_init_url,
                         registration_time=worker_info.registration_time,
                         last_heartbeat_time=worker_info.last_heartbeat_time,
                     )
