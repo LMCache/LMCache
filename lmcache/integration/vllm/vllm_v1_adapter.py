@@ -1662,8 +1662,9 @@ class LMCacheConnectorV1Impl:
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
             # Cancel any ongoing async lookup and prefetch tasks on workers
+            lookup_id = request.request_id
             self.lookup_client.cancel_lookup(  # type: ignore[attr-defined]
-                request.request_id
+                lookup_id
             )
 
         params = (

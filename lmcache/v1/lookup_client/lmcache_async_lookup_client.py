@@ -273,6 +273,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 for lookup_id in finished_lookups:
                     self.reqs_status.pop(lookup_id, None)
 
+        # Tell the server to free the reserved memory buffers for each aborted lookup.
         for lookup_id in finished_lookups:
             self._send_cleanup_message(lookup_id)
 
@@ -283,7 +284,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
         for i in range(self.num_ranks):
             self.push_sockets[i].send(msg_buf, copy=False)
-        logger.debug(f"Sent cleanup message for lookup_id={lookup_id}")
+        logger.debug("Sent cleanup message for lookup_id=%s", lookup_id)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
@@ -349,6 +350,8 @@ class LMCacheAsyncLookupServer:
         while self.running:
             try:
                 msg_buf = self.pull_socket.recv(copy=False)
+                # rely on msgspec to automatically discriminate
+                # between LookupRequestMsg and LookupCleanupMsg
                 msg = msgspec.msgpack.decode(
                     msg_buf,
                     type=Union[LookupRequestMsg, LookupCleanupMsg],
@@ -369,10 +372,10 @@ class LMCacheAsyncLookupServer:
                     self.lmcache_engine.cleanup_memory_objs(msg.lookup_id)
 
                 else:
-                    logger.warning(f"Unknown message type: {type(msg)}")
+                    logger.warning("Unknown message type: %s", type(msg))
 
             except Exception as e:
-                logger.error(f"Error processing request from scheduler: {e}")
+                logger.error("Error processing request from scheduler: %s", e)
 
     def send_response_to_scheduler(self, lookup_id: str, num_hit_tokens: int):
         # Create structured response message

@@ -948,7 +948,7 @@ class LMCacheEngine:
                 != EventStatus.DONE
             ):
                 logger.debug(
-                    f"No completed event found for lookup_id={lookup_id} to clean up."
+                    "No completed event found for lookup_id=%s to clean up.", lookup_id
                 )
                 return
             future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
@@ -961,7 +961,7 @@ class LMCacheEngine:
             # Release each memory object
             for memory_obj in memory_objs_flat:
                 try:
-                    logger.debug(f"Releasing memory object for lookup_id={lookup_id}")
+                    logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
                     memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
