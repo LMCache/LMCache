@@ -737,9 +737,11 @@ class StorageManager:
 
             # NOTE(Jiayi): We do not pin for PDBackend
             if backend_name == "PDBackend":
-                pin = False
+                pin_in_backend = False
+            else:
+                pin_in_backend = pin
 
-            if backend.contains(key, pin):
+            if backend.contains(key, pin_in_backend):
                 return backend_name
 
         return None
@@ -770,7 +772,13 @@ class StorageManager:
             if search_range and backend_name not in search_range:
                 continue
 
-            hit_chunks = backend.batched_contains(keys, pin)
+            # NOTE(Jiayi): We do not pin for PDBackend
+            if backend_name == "PDBackend":
+                pin_in_backend = False
+            else:
+                pin_in_backend = pin
+
+            hit_chunks = backend.batched_contains(keys, pin_in_backend)
             if hit_chunks == 0:
                 continue
             total_hit_chunks += hit_chunks
