@@ -132,3 +132,112 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         assert key.chunk_hash == hashes[i]
         # print(st, starts[i])
         # print(ed, ends[i])
+
+
+@pytest.mark.parametrize(
+    "hash_algorithm,extra_keys_val",
+    [
+        ("builtin", None),
+        ("builtin", []),
+        ("builtin", (42,)),
+        ("sha256", None),
+        ("sha256_cbor", None),
+    ],
+)
+def test_hash_tokens_deterministicity(hash_algorithm, extra_keys_val):
+    """Test that _hash_tokens produces deterministic results."""
+    # Check if vLLM is available for sha256/sha256_cbor
+    os.environ["PYTHONHASHSEED"] = "0"
+    if hash_algorithm in ["sha256", "sha256_cbor"]:
+        try:
+            from vllm.utils import sha256, sha256_cbor
+        except ImportError:
+            pytest.skip("vLLM not available, skipping sha256/sha256_cbor tests")
+
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=256, backend="cpu", pre_caching_hash_algorithm=hash_algorithm
+    )
+    metadata = dumb_metadata()
+    db = ChunkedTokenDatabase(cfg, metadata)
+
+    # Test with torch.Tensor
+    tokens_tensor = torch.tensor([1, 2, 3, 4, 5], device="cpu")
+    prefix_hash = 12345
+    extra_keys = extra_keys_val
+
+    # Call multiple times - should produce same hash
+    hash1 = db._hash_tokens(tokens_tensor, prefix_hash, extra_keys)
+    hash2 = db._hash_tokens(tokens_tensor, prefix_hash, extra_keys)
+    hash3 = db._hash_tokens(tokens_tensor, prefix_hash, extra_keys)
+
+    assert hash1 == hash2 == hash3, "Hash should be deterministic"
+
+    # Test with list - should produce same hash as equivalent tensor
+    tokens_list = [1, 2, 3, 4, 5]
+    hash_list = db._hash_tokens(tokens_list, prefix_hash, extra_keys)
+    assert hash1 == hash_list, "List and tensor with same values should produce same hash"
+
+
+def test_hash_tokens_edge_cases():
+    """Test edge cases for _hash_tokens."""
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=256, backend="cpu")
+    metadata = dumb_metadata()
+    db = ChunkedTokenDatabase(cfg, metadata)
+
+    tokens = torch.tensor([1, 2, 3], device="cpu")
+
+    # Test 1: extra_keys is None
+    hash_none_extra = db._hash_tokens(tokens, prefix_hash=100, extra_keys=None)
+    hash_empty_extra = db._hash_tokens(tokens, prefix_hash=100, extra_keys=[])
+    # None and empty list should produce same hash (both converted to empty tuple)
+    assert hash_none_extra == hash_empty_extra
+
+    # Test 2: prefix_hash is None
+    hash_none_prefix = db._hash_tokens(tokens, prefix_hash=None, extra_keys=None)
+    hash_zero_prefix = db._hash_tokens(tokens, prefix_hash=0, extra_keys=None)
+    # None and 0 should produce same hash (None converted to 0)
+    assert hash_none_prefix == hash_zero_prefix
+
+    # Test 3: Both None
+    hash_both_none = db._hash_tokens(tokens, prefix_hash=None, extra_keys=None)
+    hash_both_zero = db._hash_tokens(tokens, prefix_hash=0, extra_keys=[])
+    assert hash_both_none == hash_both_zero
+
+    # Test 4: extra_keys with values
+    hash_with_extra = db._hash_tokens(
+        tokens, prefix_hash=100, extra_keys=["key1", "key2", 123]
+    )
+    hash_without_extra = db._hash_tokens(tokens, prefix_hash=100, extra_keys=None)
+    # Should be different when extra_keys is provided
+    assert hash_with_extra != hash_without_extra
+
+    # Test 5: Different prefix_hash produces different hash
+    hash_prefix1 = db._hash_tokens(tokens, prefix_hash=100, extra_keys=None)
+    hash_prefix2 = db._hash_tokens(tokens, prefix_hash=200, extra_keys=None)
+    assert hash_prefix1 != hash_prefix2
+
+    # Test 6: Empty tokens
+    empty_tokens_tensor = torch.tensor([], device="cpu")
+    empty_tokens_list = []
+    hash_empty_tensor = db._hash_tokens(empty_tokens_tensor, prefix_hash=100)
+    hash_empty_list = db._hash_tokens(empty_tokens_list, prefix_hash=100)
+    assert hash_empty_tensor == hash_empty_list
+
+    # Test 7: Different tokens produce different hash
+    tokens1 = torch.tensor([1, 2, 3], device="cpu")
+    tokens2 = torch.tensor([4, 5, 6], device="cpu")
+    hash1 = db._hash_tokens(tokens1, prefix_hash=100)
+    hash2 = db._hash_tokens(tokens2, prefix_hash=100)
+    assert hash1 != hash2
+
+    # Test 8: Invalid token type should raise ValueError
+    with pytest.raises(ValueError, match="Unsupported tokens type"):
+        db._hash_tokens("invalid", prefix_hash=100)
+
+    # Test 9: Deterministicity with same inputs multiple times
+    tokens = torch.tensor([10, 20, 30, 40], device="cpu")
+    prefix = 999
+    extra = ["a", "b", "c"]
+
+    hashes = [db._hash_tokens(tokens, prefix, extra) for _ in range(10)]
+    assert len(set(hashes)) == 1, "All hashes should be identical"
