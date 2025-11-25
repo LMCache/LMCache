@@ -11,6 +11,12 @@
         "num_hidden_layers": 80,
         "num_key_value_heads": 8
     },
+    "MiniMaxAI/MiniMax-M2": {
+        "hidden_size": 3072,
+        "num_attention_heads": 48,
+        "num_hidden_layers": 62,
+        "num_key_value_heads": 8
+    },
     "mistralai/Mistral-7B-Instruct-v0.2": {
         "hidden_size": 4096,
         "num_attention_heads": 32,
