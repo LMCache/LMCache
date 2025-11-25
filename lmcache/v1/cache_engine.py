@@ -823,17 +823,9 @@ class LMCacheEngine:
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
 
-<<<<<<< HEAD
                 # hit chunks by prefix matching
                 hit_chunks = self.storage_manager.batched_contains(
                     keys, search_range, pin
-=======
-                if not chunk_info_list:
-                    return res
-
-                batched_contains_res = self.storage_manager.batched_contains(
-                    keys, search_range, pin, True
->>>>>>> db04554 (Optimize LMCache lookups by skipping cached chunks)
                 )
                 for idx, (start, end, key) in enumerate(chunk_info_list):
                     if idx < hit_chunks:
