@@ -11,6 +11,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 
@@ -77,6 +78,7 @@ class MPStorageManager:
             return True
         return False
 
+    @_lmcache_nvtx_annotate
     def reserve(
         self,
         keys: list[IPCCacheEngineKey],
@@ -166,6 +168,7 @@ class MPStorageManager:
             for key in reserved_dict:
                 self._reserved_keys.remove(key)
 
+    @_lmcache_nvtx_annotate
     def lookup(
         self,
         keys: list[IPCCacheEngineKey],
@@ -188,6 +191,7 @@ class MPStorageManager:
                     break
         return found_count
 
+    @_lmcache_nvtx_annotate
     def retrieve(
         self,
         keys: list[IPCCacheEngineKey],

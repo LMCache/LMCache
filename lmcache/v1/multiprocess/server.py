@@ -304,11 +304,12 @@ class MPCacheEngine:
             self.storage_manager.commit, reserve_handle
         )
         ed = time.perf_counter()
-        logger.info(
-            "Stored %d tokens in %.3f seconds",
-            len(slot_mapping_tensor),
-            ed - st,
-        )
+        if length := len(reserved_dict):
+            logger.info(
+                "Stored %d tokens in %.3f seconds",
+                length * self.chunk_size,
+                ed - st,
+            )
         return event.ipc_handle(), True
 
     @_lmcache_nvtx_annotate
