@@ -47,8 +47,8 @@ async def load_fs_chunks(
 
     Args:
         request: The FastAPI request object
-        config_path: Path to the configuration file for RemoteBackend
-        max_chunks: Maximum number of chunks to load (optional, loads all if None)
+        request_body: Request body containing config_path, max_chunks,
+            and max_failed_keys
 
     Returns:
         PlainTextResponse: JSON response with loading statistics
@@ -175,37 +175,55 @@ async def _load_chunks_from_fs_connector(
         if max_chunks:
             chunk_files = chunk_files[:max_chunks]
 
-        logger.info(f"Found {len(chunk_files)} chunk files to load")
+        logger.info("Found {} chunk files to load".format(len(chunk_files)))
 
         loaded_chunks = 0
         failed_keys: List[str] = []
 
-        for chunk_filename in chunk_files:
-            try:
+        # Use semaphore to control concurrency (max 10 concurrent tasks)
+        semaphore = asyncio.Semaphore(10)
+
+        async def process_chunk(chunk_filename: str) -> bool:
+            """Process a single chunk file."""
+            async with semaphore:
                 key_str = chunk_filename.replace("-SEP-", "/")
-                key = CacheEngineKey.from_string(key_str)
+                try:
+                    key = CacheEngineKey.from_string(key_str)
 
-                memory_obj = await asyncio.get_event_loop().run_in_executor(
-                    None, remote_backend.get_blocking, key
-                )
+                    # Get data from remote backend
+                    memory_obj = await asyncio.get_event_loop().run_in_executor(
+                        None, remote_backend.get_blocking, key
+                    )
 
-                if memory_obj:
+                    if memory_obj is None:
+                        failed_keys.append(key_str)
+                        logger.warning("Failed to load chunk: {}".format(key_str))
+                        return False
+
+                    # Put into local cpu backend and immediately release reference
                     local_cpu_backend.submit_put_task(key, memory_obj)
                     memory_obj.ref_count_down()
-                    loaded_chunks += 1
+                    return True
 
-                    if loaded_chunks % 100 == 0:
-                        logger.info(f"Loaded {loaded_chunks} chunks...")
-                else:
+                except Exception as e:
                     failed_keys.append(key_str)
-                    logger.warning(f"Failed to load chunk: {key_str}")
+                    logger.warning("Error processing chunk {}: {}".format(key_str, e))
+                    return False
 
-            except Exception as e:
-                failed_keys.append(chunk_filename)
-                logger.warning(f"Error loading chunk {chunk_filename}: {e}")
+        # Process all chunks concurrently
+        tasks = [process_chunk(chunk_filename) for chunk_filename in chunk_files]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Count successful loads
+        loaded_chunks = sum(1 for result in results if result is True)
+
+        if loaded_chunks > 0 and loaded_chunks % 100 == 0:
+            logger.info("Loaded {} chunks...".format(loaded_chunks))
 
         logger.info(
-            f"Successfully loaded {loaded_chunks} chunks from {total_files} files"
+            "Successfully loaded {} chunks from {} files".format(
+                loaded_chunks, total_files
+            )
         )
 
         return {
@@ -215,7 +233,7 @@ async def _load_chunks_from_fs_connector(
         }
 
     except Exception as e:
-        logger.error(f"Error in chunk loading process: {e}")
+        logger.error("Error in chunk loading process: {}".format(e))
         raise HTTPException(
-            status_code=500, detail=f"Chunk loading failed: {str(e)}"
+            status_code=500, detail="Chunk loading failed: {}".format(str(e))
         ) from e

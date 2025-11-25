@@ -12,6 +12,7 @@ import threading
 from fastapi.testclient import TestClient
 import pytest
 import torch
+import yaml
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -105,14 +106,13 @@ class TestLoadFSChunksAPI:
         """Create a temporary config file for testing."""
         config_data = {
             "chunk_size": 256,
-            "local_cpu": True,
-            "max_local_cpu_size": 5.0,
+            "local_cpu": False,
+            "max_local_cpu_size": 2.0,
             "remote_url": f"fs://host:0/{temp_fs_path}",
-            "remote_serde": "naive",
         }
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(config_data, f)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_data, f)
             temp_path = f.name
 
         yield temp_path
@@ -161,15 +161,15 @@ class TestLoadFSChunksAPI:
             local_cpu_backend=local_cpu_backend,
             dst_device="cpu",
         )
-
-        for i in range(num_chunks):
-            key = self._create_test_key(i)
-            memory_obj = self._create_test_memory_obj()
-            future = remote_backend.submit_put_task(key, memory_obj)
-            if future:
-                future.result(timeout=5.0)
-
-        remote_backend.close()
+        try:
+            for i in range(num_chunks):
+                key = self._create_test_key(i)
+                memory_obj = self._create_test_memory_obj()
+                future = remote_backend.submit_put_task(key, memory_obj)
+                if future:
+                    future.result(timeout=5.0)
+        finally:
+            remote_backend.close()
         return num_chunks
 
     def test_load_fs_chunks_success(
@@ -183,8 +183,13 @@ class TestLoadFSChunksAPI:
         test_metadata,
     ):
         """Test successful load-fs-chunks operation with real FSConnector."""
+        num_chunks = 3
         self._prepare_test_data(
-            temp_fs_path, async_loop, local_cpu_backend, test_metadata, num_chunks=3
+            temp_fs_path,
+            async_loop,
+            local_cpu_backend,
+            test_metadata,
+            num_chunks=num_chunks,
         )
 
         response = client_with_adapter.post(
@@ -198,6 +203,8 @@ class TestLoadFSChunksAPI:
         assert response_data["loaded_chunks"] == 2
         assert response_data["total_files"] == 3
         assert response_data["config_path"] == temp_config_file
+
+        self._verify_hot_cache(local_cpu_backend, num_chunks, 2)
 
     def test_load_fs_chunks_no_engine(self, client_with_adapter, temp_config_file):
         """Test load-fs-chunks when engine is not configured."""
@@ -242,6 +249,26 @@ class TestLoadFSChunksAPI:
         assert response_data["loaded_chunks"] == 0
         assert response_data["total_files"] == 0
 
+    def _verify_hot_cache(
+        self, local_cpu_backend: LocalCPUBackend, num_chunks: int, expected_count: int
+    ):
+        """Verify hot cache contains expected memory objects with ref count 1."""
+        with local_cpu_backend.cpu_lock:
+            assert len(local_cpu_backend.hot_cache) == expected_count
+
+            # Check that exactly expected_count keys from total_files
+            # are present in hot cache
+            found_count = 0
+            for i in range(num_chunks):  # total_files is num_chunks
+                key = self._create_test_key(i)
+                if key in local_cpu_backend.hot_cache:
+                    found_count += 1
+                    memory_obj = local_cpu_backend.hot_cache[key]
+                    assert memory_obj.get_ref_count() == 1
+
+            # Verify that we found exactly expected_count keys
+            assert found_count == expected_count
+
     def test_load_fs_chunks_all_chunks(
         self,
         client_with_adapter,
@@ -253,8 +280,13 @@ class TestLoadFSChunksAPI:
         test_metadata,
     ):
         """Test load-fs-chunks loading all chunks without max_chunks limit."""
+        num_chunks = 3
         self._prepare_test_data(
-            temp_fs_path, async_loop, local_cpu_backend, test_metadata, num_chunks=3
+            temp_fs_path,
+            async_loop,
+            local_cpu_backend,
+            test_metadata,
+            num_chunks=num_chunks,
         )
 
         response = client_with_adapter.post(
@@ -267,3 +299,5 @@ class TestLoadFSChunksAPI:
         assert response_data["loaded_chunks"] == 3
         assert response_data["total_files"] == 3
         assert len(response_data["failed_keys"]) == 0
+
+        self._verify_hot_cache(local_cpu_backend, num_chunks, 3)
