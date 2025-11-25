@@ -107,6 +107,9 @@ async def load_fs_chunks(
         )
 
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        logger.error(f"Unexpected error in load_fs_chunks: {e}", exc_info=True)
         error_info = {
             "error": "Failed to load chunks from FSConnector",
             "message": str(e),
