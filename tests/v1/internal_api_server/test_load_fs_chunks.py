@@ -220,9 +220,9 @@ class TestLoadFSChunksAPI:
             "/cache/load-fs-chunks", json={"config_path": "/nonexistent/config.json"}
         )
 
-        assert response.status_code == 500
+        assert response.status_code == 400
         response_data = json.loads(response.text)
-        assert "Failed to load chunks from FSConnector" in response_data["error"]
+        assert "Invalid configuration file" in response_data["detail"]
 
     def test_load_fs_chunks_empty_directory(
         self,
