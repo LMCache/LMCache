@@ -13,11 +13,11 @@
 # Standard
 import argparse
 import array
-import functools
 import threading
 import time
 
 # Third Party
+import cupy
 import torch
 import zmq
 
@@ -48,25 +48,6 @@ def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
 
 def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
     return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(device)
-
-
-def synchronized(method):
-    """Decorator to synchronize instance methods using self.lock"""
-
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        # Retrieve the instance’s lock
-        lock = getattr(self, "lock", None)
-        if lock is None:
-            raise AttributeError(
-                f"{self.__class__.__name__} has no attribute 'lock' "
-                "required by @synchronized"
-            )
-
-        with lock:
-            return method(self, *args, **kwargs)
-
-    return wrapper
 
 
 class GPUCacheContext:
@@ -119,8 +100,19 @@ class GPUCacheContext:
             tmp_buffer_shape, dtype=self.dtype, device=self.device_
         )
 
-        # Cuda stream
+        # Cuda streams
         self.cuda_stream_ = torch.cuda.Stream(device=self.device_)
+        self.cupy_stream_ = cupy.cuda.ExternalStream(
+            self.cuda_stream_.cuda_stream, self.device_.index
+        )
+
+        # Extra initialization
+        self.cupy_stream_.launch_host_func(
+            lambda logger: logger.info(
+                "Initialized cuda stream on device %s", str(self.device_)
+            ),
+            logger,
+        )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -147,6 +139,10 @@ class GPUCacheContext:
         Returns the CUDA stream for KV cache operations
         """
         return self.cuda_stream_
+
+    @property
+    def cupy_stream(self) -> cupy.cuda.Stream:
+        return self.cupy_stream_
 
     @property
     def block_size(self) -> int:
@@ -212,17 +208,10 @@ class MPCacheEngine:
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
 
-        # Memory allocator
-        # size_in_bytes = int(cpu_buffer_size * (1 << 30))  # Convert GB to bytes
-        # self.memory_allocator = MixedMemoryAllocator(size_in_bytes)
-
         # chunk size
         self.chunk_size = chunk_size
 
-        # Temp CPU buffer for debug
-        # self.hot_buffer: dict[IPCCacheEngineKey, MemoryObj] = {}
-
-        # Temp thread lock for allocator and hot buffer
+        # thread lock to avoid tmp buffer conflicts
         self.lock = threading.Lock()
 
         # storage manager
@@ -311,7 +300,9 @@ class MPCacheEngine:
 
             event.record()
 
-        self.storage_manager.commit(reserve_handle)
+        self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
+            self.storage_manager.commit, reserve_handle
+        )
         ed = time.perf_counter()
         logger.info(
             "Stored %d tokens in %.3f seconds",
@@ -404,42 +395,13 @@ class MPCacheEngine:
         return [True] * found_count + [False] * (len(keys) - found_count)
 
     def debug(self) -> str:
-        # if not hasattr(self, "_checked_keys"):
-        #    self._checked_keys: set[IPCCacheEngineKey] = set()
-
-        # def _display_memory_obj(mem_obj: MemoryObj) -> str:
-        #    # Print each layer of the memory object
-        #    num_layers = mem_obj.get_shape()[1]
-        #    logstr = ""
-        #    for i in range(num_layers):
-        #        layer_tensor = mem_obj.tensor[:, i, ...]  # type: ignore
-        #        # logstr += f"Layer {i:03d}: Mean={layer_tensor.mean().item():.6f}\n"
-        #        if layer_tensor.mean().abs() < 1e-6:
-        #            logstr += (
-        #                f"Layer {i:03d}: Mostly Zeros with mean = "
-        #                + f"{layer_tensor.mean().item():.6f}\n"
-        #            )
-        #    return logstr
-
-        # logger.info("Received debug request!")
-        # for key, mem_obj in self.hot_buffer.items():
-        #    if key in self._checked_keys:
-        #        continue
-        #    self._checked_keys.add(key)
-        #    logstr = _display_memory_obj(mem_obj)
-        #    if len(logstr) > 0:
-        #        logger.error("========================================")
-        #        logger.error("Key: %s", str(key))
-        #        logger.error(logstr)
-        #        logger.error("========================================")
-
         return "OK"
 
-    @synchronized
     def clear(self) -> None:
-        self.storage_manager.memcheck()
-        self.storage_manager.clear()
-        self.storage_manager.memcheck()
+        with self.lock:
+            self.storage_manager.memcheck()
+            self.storage_manager.clear()
+            self.storage_manager.memcheck()
 
 
 def add_handler_helper(
