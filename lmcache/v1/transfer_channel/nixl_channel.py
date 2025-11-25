@@ -28,6 +28,7 @@ from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
     SideMsg,
+    handle_p2p_init_side_msg,
 )
 
 logger = init_logger(__name__)
@@ -284,7 +285,7 @@ class NixlChannel(BaseTransferChannel):
 
             logger.info("Replying mem register response")
         elif isinstance(req, InitSideMsgBase):
-            resp = self.handle_init_side_msg(req)
+            resp = handle_p2p_init_side_msg(req, self.peer_lookup_url or "")
             logger.info("Replying P2P init side response")
         else:
             raise ValueError(f"Unsupported InitMsg type: {type(req)}")

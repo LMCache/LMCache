@@ -23,6 +23,7 @@ from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
     SideMsg,
+    handle_p2p_init_side_msg,
 )
 
 logger = init_logger(__name__)
@@ -131,11 +132,11 @@ class PySocketChannel(BaseTransferChannel):
             "connect",
         )
 
-        mock_memory_init_req = PySocketInitRequest(peer_init_url=self.peer_init_url)
-        await init_tmp_socket.send(msgspec.msgpack.encode(mock_memory_init_req))
+        init_req = PySocketInitRequest(peer_init_url=self.peer_init_url)
+        await init_tmp_socket.send(msgspec.msgpack.encode(init_req))
 
-        mock_memory_init_resp_bytes = await init_tmp_socket.recv()
-        _ = msgspec.msgpack.decode(mock_memory_init_resp_bytes, type=PySocketMsg)
+        init_resp_bytes = await init_tmp_socket.recv()
+        _ = msgspec.msgpack.decode(init_resp_bytes, type=PySocketMsg)
 
         self.remote_connections[peer_id] = {
             "peer_init_url": peer_init_url,
@@ -189,7 +190,7 @@ class PySocketChannel(BaseTransferChannel):
             logger.info("Replying initialization response")
 
         elif isinstance(req, InitSideMsgBase):
-            resp = self.handle_init_side_msg(req)
+            resp = handle_p2p_init_side_msg(req, self.peer_lookup_url or "")
             logger.info("Replying P2P init side response")
         else:
             raise ValueError(f"Unsupported InitMsg type: {type(req)}")
