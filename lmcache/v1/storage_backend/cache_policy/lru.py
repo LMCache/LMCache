@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Dict
+import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
 
@@ -18,6 +20,8 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
 
     def __init__(self):
         logger.info("Initializing LRUCachePolicy")
+        self.chunk_hash_to_init_timestamp: Dict[Any, Any] = {}
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
     def init_mutable_mapping(self) -> OrderedDict[CacheEngineKey, Any]:
         return OrderedDict()
@@ -27,6 +31,12 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
         key: CacheEngineKey,
         cache_dict: OrderedDict[CacheEngineKey, Any],
     ) -> None:
+        if key.chunk_hash in self.chunk_hash_to_init_timestamp:
+            time_interval = (
+                time.time() - self.chunk_hash_to_init_timestamp[key.chunk_hash]
+            )
+            self.stats_monitor.on_chunk_reuse(time_interval)
+
         cache_dict.move_to_end(key)
 
     def update_on_put(
@@ -34,6 +44,8 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
         key: CacheEngineKey,
     ) -> None:
         # No action needed for LRU on put, as the key is already at the end.
+        if key.chunk_hash not in self.chunk_hash_to_init_timestamp:
+            self.chunk_hash_to_init_timestamp[key.chunk_hash] = time.time()
         pass
 
     def update_on_force_evict(
