@@ -1633,10 +1633,25 @@ class LMCacheConnectorV1Impl:
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
 
+            # Handle both old and new versions of CachedRequestData
+            if hasattr(cached_reqs, "resumed_req_ids"):
+                # New version with resumed_req_ids
+                preempted = req_id in cached_reqs.resumed_req_ids
+            elif hasattr(cached_reqs, "resumed_from_preemption"):
+                # Old version with resumed_from_preemption
+                preempted = cached_reqs.resumed_from_preemption[i]
+            else:
+                # This case should not be reached with supported vLLM versions.
+                # Raising an error is safer than assuming not preempted.
+                raise AttributeError(
+                    f"Unable to determine preemption status for request {req_id}. "
+                    f"This might be due to an unsupported vLLM version."
+                )
+
             request_tracker.update(
                 new_token_ids,
                 new_block_ids,
-                preempted=req_id in cached_reqs.resumed_req_ids,
+                preempted=preempted,
                 lmcache_cached_tokens=lmcache_cached_tokens,
             )
 
