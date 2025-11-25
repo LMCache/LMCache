@@ -446,7 +446,7 @@ class S3Connector(RemoteConnector):
     def on_get_done(
         self,
         obj_size: int,
-        memory_obj: Union[MemoryObj, None],
+        memory_obj: Optional[MemoryObj],
         shm: Union[int, None],
         recv_path: str,
         _: asyncio.Future,
