@@ -4,7 +4,6 @@
 # Standard
 from itertools import compress
 from typing import Union
-import functools
 import threading
 
 # Third Party
@@ -19,25 +18,6 @@ logger = init_logger(__name__)
 
 ReserveHandle = int
 ReserveResult = tuple[ReserveHandle, dict[IPCCacheEngineKey, MemoryObj]]
-
-
-def synchronized(method):
-    """Decorator to synchronize instance methods using self.lock"""
-
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        # Retrieve the instance’s lock
-        lock = getattr(self, "lock", None)
-        if lock is None:
-            raise AttributeError(
-                f"{self.__class__.__name__} has no attribute 'lock' "
-                "required by @synchronized"
-            )
-
-        with lock:
-            return method(self, *args, **kwargs)
-
-    return wrapper
 
 
 class MemoryExhaustedError(Exception):
@@ -282,7 +262,7 @@ class MPStorageManager:
             self._commited_memory_objects.clear()
 
             for handle, reserved_list in self._reserved_memory_object_pools.items():
-                for key, obj in reserved_list:
+                for key, obj in reserved_list.items():
                     obj.ref_count_down()
             logger.info(
                 "Cleared %d reserved memory objects pools.",
