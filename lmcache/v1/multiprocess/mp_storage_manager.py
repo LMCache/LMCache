@@ -201,8 +201,7 @@ class MPStorageManager:
 
         Returns:
             list[MemoryObj]: the list of memory objects corresponding to
-                the input keys. If a key is not found, None will be
-                returned in the corresponding position.
+                the input keys. It requires all keys to be found.
 
         Raises:
             RuntimeError if there are one or more memory objects that are
@@ -214,13 +213,11 @@ class MPStorageManager:
         # with storage_manager.retrieve(keys) as objs:
         # ```
         # This will help unlock and free the objects automatically.
-        ret: list[MemoryObj] = []
         with self._buffer_lock:
-            for key in keys:
-                if key not in self._commited_memory_objects:
-                    raise RuntimeError(f"Key not found: {key}")
-                ret.append(self._commited_memory_objects[key])
-        return ret
+            try:
+                return [self._commited_memory_objects[key] for key in keys]
+            except KeyError as e:
+                raise RuntimeError(f"Key not found: {e.args[0]}") from e
 
     def prefetch(
         self,

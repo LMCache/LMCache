@@ -386,6 +386,25 @@ class TestRetrieve:
         for obj1, obj2 in zip(objects1, objects2, strict=False):
             assert obj1 is obj2
 
+    def test_retrieve_cleared(
+        self, storage_manager, test_keys, test_shape, test_dtype, test_format
+    ):
+        """Test that retrieve fails after objects are cleared (if applicable)."""
+        keys = test_keys[:3]
+        handle, _ = storage_manager.reserve(keys, test_shape, test_dtype, test_format)
+        storage_manager.commit(handle)
+
+        # Retrieve once successfully
+        objects = storage_manager.retrieve(keys)
+        assert len(objects) == len(keys)
+
+        # clear objects
+        storage_manager.clear()
+
+        # Attempt to retrieve again should fail
+        with pytest.raises(RuntimeError):
+            storage_manager.retrieve(keys)
+
 
 # Tests for prefetch()
 class TestPrefetch:
