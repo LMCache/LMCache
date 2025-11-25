@@ -13,7 +13,7 @@ class LMCBlendCommonMetadata:
     CommonMetadata (fixed hyperparams) for blending operations in LMCache.
     """
 
-    check_layers: List[int]
+    check_layers: Optional[List[int]] = None
     recomp_ratios: Optional[List[float]] = None
     thresholds: Optional[List[float]] = None
 
