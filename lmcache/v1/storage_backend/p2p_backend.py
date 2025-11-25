@@ -227,7 +227,9 @@ class P2PBackend(StorageBackendInterface):
             socket_type,
             bind_or_connect,
         )
-        socket.setsockopt(zmq.RCVTIMEO, self.socket_recv_timeout_ms)
+        # Only set RCVTIMEO for client role connect sockets
+        if bind_or_connect == "connect":
+            socket.setsockopt(zmq.RCVTIMEO, self.socket_recv_timeout_ms)
         socket.setsockopt(zmq.SNDTIMEO, self.socket_send_timeout_ms)
         return socket
 
