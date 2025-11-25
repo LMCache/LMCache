@@ -42,14 +42,15 @@ class HitLimitLookupClient(LookupClientInterface):
         # get real hit tokens
         result = self.actual_lookup_client.lookup(token_ids, lookup_id, request_configs)
         if result is not None:
+            hit_tokens = result[0] if isinstance(result, tuple) else result
             total_tokens_length = len(token_ids)
-            assert result <= total_tokens_length
+            assert hit_tokens <= total_tokens_length
             current_hit_ratio = 0.0
             if total_tokens_length > 0:
-                current_hit_ratio = result / total_tokens_length
+                current_hit_ratio = hit_tokens / total_tokens_length
             # limit the hit tokens
             if current_hit_ratio > self.hit_ratio_upper:
-                origin_result = result
+                origin_result = hit_tokens
                 # align to chunk size
                 new_result = (
                     int(total_tokens_length * self.hit_ratio_upper)
@@ -57,13 +58,18 @@ class HitLimitLookupClient(LookupClientInterface):
                     * self.chunk_size
                 )
                 # check again
-                result = min(result, new_result)
+                hit_tokens = min(hit_tokens, new_result)
                 logger.debug(
                     f"hit ratio upper: {self.hit_ratio_upper} is smaller than "
                     f"the real hit ratio {current_hit_ratio}, "
                     f"the origin result is {origin_result}, "
-                    f"the new result is {new_result}, the final result is {result}"
+                    f"the new result is {new_result}, the final result is {hit_tokens}"
                 )
+            if isinstance(result, tuple):
+                # Keep tuple shape but cap both fields with the limited value
+                result = (hit_tokens, min(result[1], hit_tokens))
+            else:
+                result = hit_tokens
         return result
 
     def clear_lookup_status(self, lookup_id: str) -> None:

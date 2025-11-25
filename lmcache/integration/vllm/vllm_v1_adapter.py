@@ -1288,22 +1288,36 @@ class LMCacheConnectorV1Impl:
         # If the request has multimodal hashes, apply them to the token ids
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
+            logger.info("Applying multimodal hashes to token ids for request %s, mm_hashes: %s, mm_positions: %s",
+                         request.request_id, mm_hashes, mm_positions)
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
             apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
             token_ids = token_ids.tolist()
 
         request_configs = extract_request_configs(request.sampling_params)
+
+        # Update request configs with mm_hashes and mm_positions
+        # req_cfg = dict(request_configs or {})
+        # req_cfg["mm_hashes"] = mm_hashes
+        # req_cfg["mm_positions"] = [
+        #     {"offset": int(p.offset), "length": int(p.length)} for p in mm_positions
+        # ]
+        # request_configs = req_cfg
+
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]
 
         lookup_id = request.request_id
-
+        logger.info("request %s: Looking up KV cache for %d tokens with configs %s",
+                    request.request_id, len(token_ids), request_configs)
+        
         num_external_hit_tokens = self.lookup_client.lookup(
             token_ids,
             lookup_id=lookup_id,
             request_configs=request_configs,
         )
+        logger.info("Lookup result for request %s: %s", request.request_id, num_external_hit_tokens)
 
         if num_external_hit_tokens is None:
             logger.info(
@@ -1321,6 +1335,7 @@ class LMCacheConnectorV1Impl:
 
         # In, full-prompt-hit case, we need to recompute the last token
         if num_external_hit_tokens == request.num_tokens:
+            logger.info("Full prompt hit for request %s, need to recompute the last token", request.request_id)
             need_to_allocate -= 1
 
         logger.info(

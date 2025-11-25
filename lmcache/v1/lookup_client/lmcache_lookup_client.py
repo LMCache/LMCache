@@ -179,6 +179,9 @@ class LMCacheLookupClient(LookupClientInterface):
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
+        # 判定是否进入这个函数
+        logger.info("LMCacheLookupClient.lookup called with %d tokens, lookup_id=%s", len(token_ids), lookup_id)   
+
         if not self.enable_blending:
             hashes = []
             offsets = []
@@ -198,11 +201,13 @@ class LMCacheLookupClient(LookupClientInterface):
         else:
             # print(len(token_ids))
             tokens_buf = self.encoder.encode(token_ids)
+            logger.info("Lookup client sending %d tokens, lookup_id=%s", len(token_ids), lookup_id)
             msg_buf = [
                 tokens_buf,
                 lookup_id_buf,
                 request_configs_buf,
             ]
+            logger.info("msg_buf lengths: %s", [len(buf) for buf in msg_buf])
 
         results = []
         failed_rank = -1
@@ -318,13 +323,24 @@ class LMCacheLookupServer:
                 else:
                     token_frames = frames[0]
                     tokens = self.decoder.decode(token_frames)
+                    logger.debug("Lookup server received %d tokens, lookup_id=%s", len(tokens), lookup_id)
                     result = self.lmcache_engine.lookup(
                         tokens=tokens,
                         lookup_id=lookup_id,
                         pin=True,
                         request_configs=request_configs,
                     )
-                response = result.to_bytes(4, "big")
+                if isinstance(result, tuple):
+                    # Unpack potential (num_hit, total_hit) tuple returned by
+                    # LMCacheEngine.lookup(). The first element is the prefix hit
+                    # length expected by the client.
+                    result = result[0]
+
+                # Defensive: fallback to 0 if lookup returns None for any reason.
+                if result is None:
+                    result = 0
+
+                response = int(result).to_bytes(4, "big")
                 self.socket.send(response)
 
         logger.info("lmcache lookup server start on %s", socket_path)
