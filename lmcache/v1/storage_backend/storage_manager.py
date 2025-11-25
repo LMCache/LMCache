@@ -656,7 +656,7 @@ class StorageManager:
 
         return: True if the key exists in the specified storage backends.
         """
-
+        # logger.info(f"Checking contains for key {key} with pin={pin}")
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
@@ -666,6 +666,7 @@ class StorageManager:
                 pin = False
 
             if backend.contains(key, pin):
+                # logger.info(f"Key {key} found in backend {backend_name}, pin={pin}")
                 return backend_name
 
         return None

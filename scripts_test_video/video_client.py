@@ -7,12 +7,18 @@ import cv2
 import json
 import glob
 import base64
+import hashlib
 import argparse
 from typing import List, Tuple
 
 import numpy as np
 from PIL import Image
 from openai import OpenAI
+
+def img_bytes_md5(img):
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95, optimize=True, subsampling=0)
+    return hashlib.md5(buf.getvalue()).hexdigest()
 
 def probe_video_opencv(video_path: str) -> Tuple[float, int, float]:
     """
@@ -85,19 +91,22 @@ def frames_to_user_content(frames: List[Image.Image], prompt_text: str) -> List[
     content = []
     for i, img in enumerate(frames):
         # Insert a separate segment tag (as a separate text part) before every CHUNK_FRAMES frames
-        if i % args.chunk_frames == 0:
-            print(f"[DEBUG] Inserting segment tag before frame {i}")
-            content.append({"type": "text", "text": f"\n{args.seg_tag}\n"})
+        # if i % args.chunk_frames == 0:
+        print(f"[DEBUG] Inserting segment tag before frame {i}")
+        content.append({"type": "text", "text": args.blend_special_str})
 
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=95, optimize=True, subsampling=0)
+        # img.save(buf, format="JPEG", quality=95, optimize=True, subsampling=0)
+        img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         content.append({
             "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+            "image_url": {"url": f"data:image/png;base64,{b64}"}
         })
 
     # Finally, append your question text
+    content.append({"type": "text", "text": args.blend_special_str})  # Separator between images and text
+    print(f"[DEBUG] Inserting final segment tag before prompt text")
     content.append({"type": "text", "text": prompt_text})
     return content
 
@@ -174,6 +183,11 @@ def run_video_client(args):
 
             # Sample the "base frame sequence" once
             base_frames = sample_all_frames_once(video_path, fps=args.sample_fps)
+
+            # Debug: print md5 of first frame multiple times to verify no re-encoding
+            print("md5 frame 0:", img_bytes_md5(base_frames[0]))
+            print("md5 frame 0 again:", img_bytes_md5(base_frames[0]))
+
             n_base = len(base_frames)
             print(f"[INFO] Sampled {n_base} frames @ {args.sample_fps} FPS (no re-encode)")
 
@@ -187,9 +201,9 @@ def run_video_client(args):
                 stride_frames = max(1, int(round(win_frames * args.stride_ratio)))
                 windows = generate_windows_by_frames(n_base, win_frames, stride_frames)
                 print(f"[INFO] Sliding windows: win={win_frames} frames, stride={stride_frames} frames, num_windows={len(windows)}")
-                # tmp_wins = [windows[0], windows[0], windows[0]]
+                tmp_wins = [windows[0], windows[1], windows[2]]  # Debug: only run the first window
 
-                for widx, (s_idx, e_idx) in enumerate(windows):
+                for widx, (s_idx, e_idx) in enumerate(tmp_wins):
                     sub_frames = base_frames[s_idx:e_idx]  # Directly take subsequence, frame pixels are exactly the same
                     messages = build_messages_from_frames(sub_frames, user_prompt)
 
@@ -259,11 +273,11 @@ def build_argparser():
     ap.add_argument("--sample-fps", type=float, default=1.0, help="FPS to sample frames from original video.")
     ap.add_argument("--use-sliding-window", action="store_true", help="Use frame-index sliding window over sampled frames.")
     ap.add_argument("--window-seconds", type=float, default=10.0, help="Window size in seconds (converted to frames via sample_fps).")
-    ap.add_argument("--stride-ratio", type=float, default=0.2, help="Stride ratio relative to window size (e.g., 0.2 = 20%% overlap).")
+    ap.add_argument("--stride-ratio", type=float, default=0.4, help="Stride ratio relative to window size (e.g., 0.2 = 20%% overlap).")
     ap.add_argument("--base-url", type=str, default="http://localhost:8000/v1", help="OpenAI-compatible base URL.")
     ap.add_argument("--api-key", type=str, default="EMPTY", help="API key (not used, but required by OpenAI client).")
     ap.add_argument("--video-path", type=str, default="/root/workspace/dataset/video/*.mp4", help="Glob of video files.")
-    ap.add_argument("--seg-tag", type=str, default="<SEG>", help="Special segment tag for blending (if applicable).")
+    ap.add_argument("--blend-special-str", type=str, default="<<SEG>>", help="Special segment tag for blending (if applicable).")
     ap.add_argument("--chunk-frames", type=int, default=1, help="Chunk size in frames for blending (if applicable).")
     return ap
 

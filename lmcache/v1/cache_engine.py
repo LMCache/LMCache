@@ -738,7 +738,7 @@ class LMCacheEngine:
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
-                    if start == 0: continue
+                    # if start == 0: continue
                     logger.info(f"Looking up start={start}, end={end}, key={key}")
                     assert isinstance(key, CacheEngineKey)
 
@@ -748,7 +748,7 @@ class LMCacheEngine:
 
                     found = False
                     for key_single_layer in key_all_layers:
-                        # logger.info(f"Looking up single layer key={key_single_layer}, search_range={search_range}, pin={pin}")  # noqa: E501
+                        # logger.info(f"Looking up single layer key={key_single_layer}, search_range={search_range}, pin={pin}")  
                         if self.storage_manager.contains(
                             key_single_layer, search_range, pin
                         ):
@@ -763,8 +763,9 @@ class LMCacheEngine:
                             )
                         res = end
                         total_hit_tokens += end - start
+                        logger.info(f"Hit: start={start}, end={end}, key={key}")
                         continue
-                    logger.info(f"total_hit_tokens to {total_hit_tokens}, res is {res}")  # noqa: E501
+                    logger.info(f"total_hit_tokens to {total_hit_tokens}, res is {res}")  
                     return res
             else:
                 chunk_info_list = []
@@ -789,15 +790,15 @@ class LMCacheEngine:
                             self.lookup_pins[lookup_id].append(key)
                         res = end
                         total_hit_tokens += end - start
+                        logger.info(f"Hit: start={start}, end={end}, key={key}")
                         continue
                     logger.info(f"Res: {res}, updating total_hit_tokens to {total_hit_tokens}")
                     return res
 
             # all tokens where found, return the maximal end
-            # return total_hit_tokens
             return res
         finally:
-            self.stats_monitor.on_lookup_finished(lookup_request_id, total_hit_tokens)
+            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()

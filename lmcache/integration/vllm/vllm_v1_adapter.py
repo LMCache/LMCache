@@ -1112,11 +1112,12 @@ class LMCacheConnectorV1Impl:
                         * self._lmcache_chunk_size
                     )
 
+                logger.info(f"kv_role: {self.kv_role}, layer_name: {layer_name}, skip_leading_tokens: {skip_leading_tokens}")
                 store_mask = torch.ones(len(token_ids), dtype=torch.bool)
                 store_mask[:skip_leading_tokens] = False
 
                 logger.info(
-                    "Storing KV cache for %d out of %d tokens "
+                    "save_kv_layer->Storing KV cache for %d out of %d tokens "
                     "(skip_leading_tokens=%d) for request %s",
                     len(token_ids) - skip_leading_tokens,
                     len(token_ids),
@@ -1154,6 +1155,8 @@ class LMCacheConnectorV1Impl:
             # Don't do save if the role is kv_consumer
             return
 
+        # logger.info("Waiting for saving KV caches to LMCache, kv_role=%s, and "
+                    # "use_layerwise=%s", self.kv_role, self.use_layerwise)
         if self.use_layerwise:
             for layerwise_storer in self.layerwise_storers:
                 next(layerwise_storer)
@@ -1195,18 +1198,20 @@ class LMCacheConnectorV1Impl:
 
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
+            logger.info(f"kv_role: {self.kv_role}, before-skip_leading_tokens: {skip_leading_tokens}")
             # Align to lmcache chunk size
             skip_leading_tokens = (
                 skip_leading_tokens
                 // self._lmcache_chunk_size
                 * self._lmcache_chunk_size
             )
+            logger.info(f"kv_role: {self.kv_role}, after-skip_leading_tokens: {skip_leading_tokens}")
 
             store_mask = torch.ones(len(token_ids), dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
 
             logger.info(
-                "Storing KV cache for %d out of %d tokens "
+                "wait_for_save->Storing KV cache for %d out of %d tokens "
                 "(skip_leading_tokens=%d) for request %s",
                 len(token_ids) - skip_leading_tokens,
                 len(token_ids),
@@ -1296,14 +1301,6 @@ class LMCacheConnectorV1Impl:
             token_ids = token_ids.tolist()
 
         request_configs = extract_request_configs(request.sampling_params)
-
-        # Update request configs with mm_hashes and mm_positions
-        # req_cfg = dict(request_configs or {})
-        # req_cfg["mm_hashes"] = mm_hashes
-        # req_cfg["mm_positions"] = [
-        #     {"offset": int(p.offset), "length": int(p.length)} for p in mm_positions
-        # ]
-        # request_configs = req_cfg
 
         if self.skip_last_n_tokens > 0:
             token_ids = token_ids[: -self.skip_last_n_tokens]

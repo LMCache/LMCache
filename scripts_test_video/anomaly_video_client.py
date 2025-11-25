@@ -20,6 +20,8 @@ import glob
 import io
 import json
 import os
+import time
+import csv
 from typing import Iterable, List, Tuple
 
 import cv2
@@ -148,6 +150,8 @@ def infer_category(video_path: str, dataset_root: str) -> str:
 
 def run(args):
     client = OpenAI(api_key="EMPTY", base_url=args.base_url)
+    request_timings = []
+    overall_start = time.perf_counter()
 
     if args.use_sliding_window:
         responses_dir = args.output_dir or os.path.join(
@@ -162,6 +166,7 @@ def run(args):
             f"anomaly_full_fps{args.sample_fps}"
         )
     os.makedirs(responses_dir, exist_ok=True)
+    csv_path = args.csv_path or os.path.join(responses_dir, "request_times.csv")
 
     prompt = args.prompt_text
 
@@ -193,12 +198,15 @@ def run(args):
                 sub_frames = base_frames[s_idx:e_idx]
                 messages = build_messages_from_frames(sub_frames, prompt, args.blend_special_str)
 
+                req_start = time.perf_counter()
                 resp = client.chat.completions.create(
-                    model=args.model_name,
+                    model=args.model,
                     messages=messages,
+                    max_tokens=args.max_tokens if args.max_tokens > 0 else None,
                     temperature=0.01,
                     top_p=1.0,
                 )
+                req_dur = time.perf_counter() - req_start
 
                 try:
                     resp_obj = resp.model_dump()
@@ -225,9 +233,52 @@ def run(args):
                 with open(out_path, "w") as f:
                     json.dump({"meta": meta, "response": resp_obj}, f, indent=2, ensure_ascii=False)
                 print(f"[SAVE] {out_path}")
+                print(f"[STATS] request {widx} for {video_path} took {req_dur:.3f}s")
+                request_timings.append(
+                    {
+                        "video_path": video_path,
+                        "category": category,
+                        "window_index": widx,
+                        "start_frame": s_idx,
+                        "end_frame": e_idx,
+                        "num_frames": e_idx - s_idx,
+                        "mode": "sliding" if args.use_sliding_window else "full",
+                        "duration_seconds": f"{req_dur:.6f}",
+                        "output_path": out_path,
+                    }
+                )
 
         except Exception as e:
             print(f"[ERROR] {video_path}: {e}")
+
+    total_elapsed = time.perf_counter() - overall_start
+    total_requests = len(request_timings)
+    if request_timings:
+        fieldnames = [
+            "video_path",
+            "category",
+            "window_index",
+            "start_frame",
+            "end_frame",
+            "num_frames",
+            "mode",
+            "duration_seconds",
+            "output_path",
+        ]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(request_timings)
+        print(f"[STATS] wrote per-request timings to {csv_path}")
+    if total_requests:
+        avg = total_elapsed / total_requests
+        print(
+            f"[STATS] total requests: {total_requests}, "
+            f"total elapsed: {total_elapsed:.3f}s, "
+            f"avg: {avg:.3f}s/request"
+        )
+    else:
+        print("[STATS] no requests were sent; no timings recorded.")
 
 
 def build_argparser():
@@ -237,10 +288,10 @@ def build_argparser():
                     help="Root dir of the dataset.")
     ap.add_argument("--pattern", type=str, default="**/*.mp4", help="Glob pattern under dataset_root.")
     ap.add_argument("--output-dir", type=str, default="", help="Where to save responses (default auto name).")
-    ap.add_argument("--model-name", type=str, default="qwen-vl-7b-instant", help="Model name.")
+    ap.add_argument("--model", type=str, default="qwen-vl-7b-instant", help="Model name.")
     ap.add_argument("--sample-fps", type=float, default=1.0, help="FPS to sample frames from video.")
     ap.add_argument("--use-sliding-window", action="store_true", help="Enable sliding window; otherwise send full video frames once.")
-    ap.add_argument("--window-seconds", type=float, default=10.0, help="Window size in seconds (converted via sample_fps).")
+    ap.add_argument("--window-seconds", type=float, default=30.0, help="Window size in seconds (converted via sample_fps).")
     ap.add_argument("--stride-ratio", type=float, default=0.4, help="Stride ratio relative to window size.")
     ap.add_argument("--max-windows", type=int, default=0, help="Optional cap on number of windows per video (0 = all).")
     ap.add_argument("--blend-special-str", type=str, default="<<SEG>>", help="Segment token inserted before each frame.")
@@ -248,6 +299,8 @@ def build_argparser():
     ap.add_argument("--prompt-text", type=str,
                     default="Analyze the video and determine if any anomalous or violent behavior occurs. Answer with \"Yes\" or \"No\" and briefly explain.",
                     help="Prompt sent with each window.")
+    ap.add_argument("--max-tokens", type=int, default=1, help="Max tokens for the response (<=0 to disable).")
+    ap.add_argument("--csv-path", type=str, default="", help="Where to save per-request timing stats (default: responses/request_times.csv).")
     return ap
 
 

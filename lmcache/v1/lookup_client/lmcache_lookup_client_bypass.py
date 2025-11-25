@@ -80,6 +80,8 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                 )
             else:
                 # For blending mode, pass tokens directly
+                logger.info("lmcache_loopup_client_bypass: Blending mode enabled.")
+                
                 result = self.lmcache_engine.lookup(
                     tokens=token_ids,
                     lookup_id=lookup_id,

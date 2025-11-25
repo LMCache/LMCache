@@ -179,7 +179,6 @@ class LMCacheLookupClient(LookupClientInterface):
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
-        # 判定是否进入这个函数
         logger.info("LMCacheLookupClient.lookup called with %d tokens, lookup_id=%s", len(token_ids), lookup_id)   
 
         if not self.enable_blending:
