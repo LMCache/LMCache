@@ -22,30 +22,36 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
         logger.info("Initializing LRUCachePolicy")
         self.chunk_hash_to_init_timestamp: Dict[Any, Any] = {}
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        self.max_num_chunk_hash = 12500000
 
     def init_mutable_mapping(self) -> OrderedDict[CacheEngineKey, Any]:
         return OrderedDict()
 
-    def update_on_hit(
-        self,
-        key: CacheEngineKey,
-        cache_dict: OrderedDict[CacheEngineKey, Any],
-    ) -> None:
+    def update_chunk_hash_dict(self, key: CacheEngineKey) -> None:
+        if key.chunk_hash not in self.chunk_hash_to_init_timestamp:
+            if len(self.chunk_hash_to_init_timestamp) >= self.max_num_chunk_hash:
+                # Clear the dictionary to avoid memory leak
+                self.chunk_hash_to_init_timestamp = {}
+            self.chunk_hash_to_init_timestamp[key.chunk_hash] = time.time()
         if key.chunk_hash in self.chunk_hash_to_init_timestamp:
             time_interval = (
                 time.time() - self.chunk_hash_to_init_timestamp[key.chunk_hash]
             )
             self.stats_monitor.on_chunk_reuse(time_interval)
 
+    def update_on_hit(
+        self,
+        key: CacheEngineKey,
+        cache_dict: OrderedDict[CacheEngineKey, Any],
+    ) -> None:
+        self.update_chunk_hash_dict(key)
         cache_dict.move_to_end(key)
 
     def update_on_put(
         self,
         key: CacheEngineKey,
     ) -> None:
-        # No action needed for LRU on put, as the key is already at the end.
-        if key.chunk_hash not in self.chunk_hash_to_init_timestamp:
-            self.chunk_hash_to_init_timestamp[key.chunk_hash] = time.time()
+        self.update_chunk_hash_dict(key)
         pass
 
     def update_on_force_evict(
