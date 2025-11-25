@@ -39,6 +39,7 @@ Example ``lmcache-config.yaml`` for POSIX backend:
       nixl_backend: POSIX
       nixl_pool_size: 64
       nixl_path: /mnt/nixl/cache/
+      use_direct_io: True
 
 Key settings:
 

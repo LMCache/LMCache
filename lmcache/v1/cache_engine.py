@@ -26,7 +26,7 @@ from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     SGLangLayerwiseGPUConnector,
@@ -120,19 +120,52 @@ class LMCacheEngine:
         from lmcache.v1.cache_controller import LMCacheWorker
 
         self.lmcache_worker: Optional[LMCacheWorker] = None
-        if self.enable_controller:
+        lmcache_worker_ids = config.get_lmcache_worker_ids(
+            metadata.use_mla, metadata.world_size
+        )
+        # lmcache_worker_ids is empty means start on all workers
+        if (
+            self.enable_controller
+            and self.metadata.role != "scheduler"
+            and (not lmcache_worker_ids or metadata.worker_id in lmcache_worker_ids)
+        ):
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
         self.async_loading = config.enable_async_loading
         self.event_manager = EventManager()
 
-        self.storage_manager = StorageManager(
-            config,
-            metadata,
-            # self.memory_allocator,
-            event_manager=self.event_manager,
-            lmcache_worker=self.lmcache_worker,
+        self.use_layerwise = config.use_layerwise
+
+        # TODO: support save_only_first_rank when use layerwise
+        # if use_layerwise is True, all ranks will initialize the storage_manager
+        # if save_only_first_rank is False, all ranks will initialize
+        # the storage_manager
+        # if save_only_first_rank is True, only the first rank and
+        # lookup server workers will initialize the storage_manager
+        self.storage_manager = None
+        lookup_server_worker_ids = self.config.get_lookup_server_worker_ids(
+            metadata.use_mla, metadata.world_size
         )
+        if (
+            self.lmcache_worker is not None
+            or self.use_layerwise
+            or not self.save_only_first_rank
+            or self.metadata.is_first_rank()
+            or len(lookup_server_worker_ids) == 0
+            or self.metadata.worker_id in lookup_server_worker_ids
+        ):
+            logger.info(
+                f"Initialize storage manager on rank {self.metadata.worker_id}, "
+                f"use layerwise: {self.use_layerwise},"
+                f"save only first rank: {self.save_only_first_rank}"
+            )
+            self.storage_manager = StorageManager(
+                config,
+                metadata,
+                # self.memory_allocator,
+                event_manager=self.event_manager,
+                lmcache_worker=self.lmcache_worker,
+            )
 
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
@@ -140,11 +173,12 @@ class LMCacheEngine:
         # at decoder.
         self.remove_after_retrieve = config.enable_pd and config.pd_role == "receiver"
 
-        self.use_layerwise = config.use_layerwise
         self.num_layers = metadata.kv_shape[0]
         self.fmt = None
         if self.use_layerwise:
-            if config.enable_blending:
+            if metadata.use_mla:
+                self.fmt = MemoryFormat.KV_MLA_FMT
+            elif config.enable_blending:
                 self.fmt = MemoryFormat.KV_2TD
             else:
                 self.fmt = MemoryFormat.KV_T2D
@@ -175,7 +209,8 @@ class LMCacheEngine:
         if "async_lookup_server" in kwargs:
             self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:
-            self.storage_manager.post_init(**kwargs)
+            if self.storage_manager is not None:
+                self.storage_manager.post_init(**kwargs)
             logger.info("Post-initializing LMCacheEngine")
             if self.gpu_connector is not None:
                 self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
@@ -217,6 +252,8 @@ class LMCacheEngine:
         if self._is_passive():
             logger.debug(f"rank={self.metadata.worker_id} ignore store")
             return
+
+        assert self.storage_manager is not None
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -342,6 +379,7 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
+        assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
         )
@@ -521,6 +559,7 @@ class LMCacheEngine:
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
+                assert self.storage_manager is not None
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
@@ -571,6 +610,7 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
+        assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
         )
@@ -717,6 +757,7 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
+        assert self.storage_manager is not None
 
         if tokens is not None:
             lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
@@ -768,14 +809,12 @@ class LMCacheEngine:
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
 
-                batched_contains_res = self.storage_manager.batched_contains(
-                    keys, search_range, pin, True
+                # hit chunks by prefix matching
+                hit_chunks = self.storage_manager.batched_contains(
+                    keys, search_range, pin
                 )
-                assert len(batched_contains_res) == len(chunk_info_list)
-                for (start, end, key), exists in zip(
-                    chunk_info_list, batched_contains_res, strict=False
-                ):
-                    if exists:
+                for idx, (start, end, key) in enumerate(chunk_info_list):
+                    if idx < hit_chunks:
                         if pin:
                             assert lookup_id is not None, (
                                 "lookup_id is required when pin is True"
@@ -805,6 +844,7 @@ class LMCacheEngine:
         """
         Perform cross-node move of the KV cache.
         """
+        assert self.storage_manager is not None
 
         num_tokens = self.lookup(
             tokens,
@@ -877,6 +917,7 @@ class LMCacheEngine:
         (2) sync lookup + async retrieval (e.g., disk)
         (3) async lookup + async retrieval (e.g., p2p)
         """
+        assert self.storage_manager is not None
 
         keys: list[CacheEngineKey] = []
         cum_chunk_lengths = [0]
@@ -899,6 +940,42 @@ class LMCacheEngine:
             self.storage_manager.loop,
         )
 
+    def cleanup_memory_objs(self, lookup_id: str) -> None:
+        """
+        Cleanup memory objects allocated during prefetch for an aborted lookup.
+
+        Called by the scheduler when it determines that an aborted lookup
+        has finished its prefetch tasks.
+        """
+        try:
+            # Get the completed future from event_manager
+            if (
+                self.event_manager.get_event_status(EventType.LOADING, lookup_id)
+                != EventStatus.DONE
+            ):
+                logger.debug(
+                    "No completed event found for lookup_id=%s to clean up.", lookup_id
+                )
+                return
+            future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
+
+            # Get memory objects from the future result
+            memory_objs = future.result()
+            # Flatten nested lists (each backend returns a list of chunks)
+            memory_objs_flat = [mm for m in memory_objs for mm in m]
+
+            # Release each memory object
+            for memory_obj in memory_objs_flat:
+                try:
+                    logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
+                    memory_obj.ref_count_down()
+                except Exception as e:
+                    logger.error(f"Error releasing memory object: {e}")
+        except Exception as e:
+            logger.error(
+                f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
+            )
+
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
     # In this case, we compress all tokens.
     # TODO(Jiayi): support other compression methods.
@@ -910,6 +987,7 @@ class LMCacheEngine:
         location: str,
         event_id: str,
     ) -> int:
+        assert self.storage_manager is not None
         if method not in ["cachegen"]:
             logger.warning(f"Unsupported compression method: {method}.")
             return 0
@@ -965,6 +1043,7 @@ class LMCacheEngine:
         location: str,
         event_id: str,
     ) -> int:
+        assert self.storage_manager is not None
         if method not in ["cachegen"]:
             logger.warning(f"Unsupported decompression method: {method}.")
             return 0
@@ -1017,6 +1096,7 @@ class LMCacheEngine:
     @_lmcache_nvtx_annotate
     def lookup_unpin(self, lookup_id: str) -> None:
         if lookup_id in self.lookup_pins:
+            assert self.storage_manager is not None
             self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
             del self.lookup_pins[lookup_id]
 
@@ -1042,6 +1122,7 @@ class LMCacheEngine:
         locations: Optional[List[str]] = None,
         request_configs: Optional[dict] = None,
     ) -> int:
+        assert self.storage_manager is not None
         assert isinstance(self.storage_manager, StorageManager)
         # Clear all caches if tokens is None
         if tokens is None or len(tokens) == 0:
@@ -1066,6 +1147,7 @@ class LMCacheEngine:
         Check the health of the cache engine.
         return: 0 if healthy, otherwise the error code
         """
+        assert self.storage_manager is not None
         return 0 if self.storage_manager.memcheck() else -1
 
     def close(self) -> None:
@@ -1074,7 +1156,8 @@ class LMCacheEngine:
         if self.lmcache_worker is not None:
             self.lmcache_worker.close()
 
-        self.storage_manager.close()
+        if self.storage_manager is not None:
+            self.storage_manager.close()
 
         logger.info("LMCacheEngine closed.")
 
@@ -1147,15 +1230,10 @@ class LMCacheEngine:
             ret_mask: Output mask updated with cache hit positions
             **kwargs: Additional keyword arguments
         """
+        assert self.storage_manager is not None
 
         tot_kv_size = 0
-        # location -> [(CacheEngineKey, start, end)]
-        block_mapping: dict[str, list[tuple[CacheEngineKey, int, int]]] = defaultdict(
-            list
-        )
-
         reordered_chunks: List[ProcessedChunk] = []
-
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
@@ -1168,39 +1246,24 @@ class LMCacheEngine:
         skip_contains_check = (
             kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
         )
+        chunk_infos = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
+            chunk_infos.append((key, start, end))
 
-            location = None
-            if key in self.lookup_cache:
-                # TODO(Jiayi): we can reduce the number of `contains` calls
-                # by checking the lookup cache first (should be updated in `lookup`)
-                pass
-            else:
-                # NOTE: key should always be in the lookup cache once we support it.
-                # TODO: use lookup_cache to skip the contains
-                if (
-                    skip_contains_check
-                    and len(self.storage_manager.non_allocator_backends) == 1
-                ):
-                    location = self.storage_manager.non_allocator_backends[0]
-                else:
-                    location = self.storage_manager.contains(key)
-                if location is None:
-                    break
-
-                # NOTE: Here we make the assumption that the underlying
-                # storage backend support pin operation, and the memory
-                # object is already pinned in the storage backend.
-                ret_mask[start:end] = True
-
-            assert location is not None
-
-            block_mapping[location].append((key, start, end))
+        # block_mapping: location -> [(CacheEngineKey, start, end)]
+        if (
+            skip_contains_check
+            and len(self.storage_manager.non_allocator_backends) == 1
+        ):
+            location = self.storage_manager.non_allocator_backends[0]
+            block_mapping = {location: chunk_infos}
+        else:
+            block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
 
         last_failed_block_start = None
         for location, blocks in block_mapping.items():
@@ -1226,6 +1289,7 @@ class LMCacheEngine:
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
+                ret_mask[start:end] = True
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
