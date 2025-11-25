@@ -44,7 +44,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         vllm_is_available = True
         try:
             # Third Party
-            from vllm.utils.hashing import sha256, sha256_cbor
+            from vllm.utils import sha256, sha256_cbor
         except ImportError:
             # sha256, sha256_cbor are available through vLLM only
             vllm_is_available = False
@@ -144,7 +144,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # Ignore extra keys for now
         # Extra keys are for multi-modal inputs and
         # request specific metadata (e.g., LoRA ID).
-        return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
+        hashable_extra_keys = tuple(extra_keys) if extra_keys is not None else ()
+        hashable_prefix_hash = prefix_hash if prefix_hash is not None else 0
+        return self.hash_func((hashable_prefix_hash, tokens_tuple, hashable_extra_keys))
 
 
 class ChunkedTokenDatabase(TokenDatabase):
