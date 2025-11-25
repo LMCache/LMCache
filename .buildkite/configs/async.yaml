@@ -2,7 +2,7 @@ workload:
   type: long_doc_qa
   max-inflight-requests: 20
   sleep-time-after-warmup: 20
-  expected-latency-gain: 1.5
+  expected-latency-gain: true
   num-documents: 20
   repeat-count: 1
   hit-miss-ratio: 2:2

@@ -42,6 +42,9 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     MemoryObjMetadata,
     PagedTensorMemoryAllocator,
+    _allocate_cpu_memory,
+    _allocate_gpu_memory,
+    _free_cpu_memory,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -57,6 +60,7 @@ class NixlStorageConfig:
     buffer_device: str
     path: str
     backend: str
+    use_direct_io: bool
     backend_params: dict[str, str]
 
     @staticmethod
@@ -86,6 +90,9 @@ class NixlStorageConfig:
         assert pool_size is not None
         assert backend is not None
 
+        use_direct_io = extra_config.get("use_direct_io", False)
+        assert use_direct_io in [False, True]
+
         assert NixlStorageConfig.validate_nixl_backend(
             backend, config.nixl_buffer_device
         ), "Invalid NIXL backend & device combination"
@@ -103,6 +110,7 @@ class NixlStorageConfig:
             pool_size=pool_size,
             buffer_device=corrected_device,
             path=path,
+            use_direct_io=use_direct_io,
             backend=backend,
             backend_params=backend_params,
         )
@@ -113,7 +121,6 @@ class NixlDescPool(ABC):
         self.lock = threading.Lock()
         self.size: int = size
         self.indices: List[int] = []
-
         self.indices.extend(reversed(range(size)))
 
     def get_num_available_descs(self) -> int:
@@ -136,16 +143,17 @@ class NixlDescPool(ABC):
 
 
 class NixlFilePool(NixlDescPool):
-    def __init__(self, size: int, path: str):
+    def __init__(self, size: int, path: str, use_direct_io: bool):
         super().__init__(size)
         self.fds: List[int] = []
 
         assert path is not None
 
+        flags = os.O_CREAT | os.O_RDWR | (os.O_DIRECT if use_direct_io else 0)
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
             tmp_path = os.path.join(path, filename)
-            fd = os.open(tmp_path, os.O_CREAT | os.O_RDWR)
+            fd = os.open(tmp_path, flags)
             self.fds.append(fd)
 
     def close(self):
@@ -334,9 +342,9 @@ class NixlStorageBackend(AllocatorBackendInterface):
     """
 
     @staticmethod
-    def createPool(backend: str, size: int, path: str):
+    def createPool(backend: str, size: int, path: str, use_direct_io: bool):
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
-            return NixlFilePool(size, path)
+            return NixlFilePool(size, path, use_direct_io)
         elif backend in ("OBJ"):
             return NixlObjectPool(size)
         else:
@@ -368,7 +376,10 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
         self.pool = NixlStorageBackend.createPool(
-            nixl_config.backend, nixl_config.pool_size, nixl_config.path
+            nixl_config.backend,
+            nixl_config.pool_size,
+            nixl_config.path,
+            nixl_config.use_direct_io,
         )
         assert self.pool is not None
 
@@ -579,6 +590,9 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         self.memory_allocator.close()
 
+        if self.free_pinned_buffer:
+            _free_cpu_memory(self.buffer)
+
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
@@ -594,22 +608,19 @@ class NixlStorageBackend(AllocatorBackendInterface):
             metadata.worker_id,
         )
 
-        buffer = torch.empty(
-            config.nixl_buffer_size,
-            dtype=torch.uint8,
-            device=corrected_device,
-        )
-
         if corrected_device == "cpu":
-            torch.cuda.cudart().cudaHostRegister(
-                buffer.data_ptr(), config.nixl_buffer_size, 0
-            )
+            self.buffer = _allocate_cpu_memory(config.nixl_buffer_size)
+            self.free_pinned_buffer = True
         else:
-            logger.info(f"Setting cuda device to {corrected_device} ")
+            base_buffer, self.buffer = _allocate_gpu_memory(
+                config.nixl_buffer_size, corrected_device
+            )
             torch.cuda.set_device(corrected_device)
+            self.base_buffer = base_buffer  # Prevents early GC of the aligned tensor.
+            self.free_pinned_buffer = False
 
         return PagedTensorMemoryAllocator(
-            buffer,
+            self.buffer,
             torch.Size(metadata.kv_shape),
             metadata.kv_dtype,
             MemoryFormat.KV_2LTD,

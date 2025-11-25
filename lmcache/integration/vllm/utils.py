@@ -218,3 +218,10 @@ def extract_mm_features(
             return (request.mm_hashes, request.mm_positions)
     else:
         return ([], [])
+
+
+def get_size_bytes(shape: torch.Size, kv_dtype: torch.dtype):
+    """
+    Calculate the size in bytes with the given shape and dtype.
+    """
+    return shape.numel() * kv_dtype.itemsize

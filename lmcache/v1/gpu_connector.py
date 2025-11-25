@@ -733,6 +733,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         self.load_stream = torch.cuda.Stream()
         self.store_stream = torch.cuda.Stream()
 
+        self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+
     def _lazy_initialize_buffer(self, kv_caches):
         """
         Lazily initialize the GPU buffer allocator if it is not initialized yet.
@@ -747,25 +749,37 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            # flash attention: [num_layers, 2, num_blocks, block_size,
-            # num_heads, head_size]
-            # flash infer: [num_layers, num_blocks, 2, block_size, num_heads, head_size]
-            assert kv_caches[0].shape[0] == 2 or kv_caches[0].shape[1] == 2, (
-                "The kv_caches should have shape [num_layers, 2, num_blocks, "
-                "block_size, num_heads, head_size] or "
-                "[num_layers, num_blocks, 2, block_size, num_heads, head_size]"
-            )
-
-            self.vllm_two_major = kv_caches[0].shape[0] == 2
-
-            if self.vllm_two_major:
-                k_cache_shape_per_layer = kv_caches[0][0].shape
+            if self.use_mla:
+                # MLA format: [num_blocks, block_size, head_size]
+                assert kv_caches[0].dim() == 3, (
+                    "For MLA, the kv_caches should have shape [num_blocks, "
+                    "block_size, head_size]"
+                )
+                k_cache_shape_per_layer = kv_caches[0].shape
+                max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
+                num_elements = k_cache_shape_per_layer.numel()
+                self.vllm_two_major = False  # MLA doesn't need vllm_two_major
             else:
-                k_cache_shape_per_layer = kv_caches[0][:, 0].shape
-            max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
+                # flash attention: [num_layers, 2, num_blocks, block_size,
+                # num_heads, head_size]
+                # flash infer:
+                # [num_layers, num_blocks, 2, block_size, num_heads, head_size]
+                assert kv_caches[0].shape[0] == 2 or kv_caches[0].shape[1] == 2, (
+                    "The kv_caches should have shape [num_layers, 2, num_blocks, "
+                    "block_size, num_heads, head_size] or "
+                    "[num_layers, num_blocks, 2, block_size, num_heads, head_size]"
+                )
+
+                self.vllm_two_major = kv_caches[0].shape[0] == 2
+
+                if self.vllm_two_major:
+                    k_cache_shape_per_layer = kv_caches[0][0].shape
+                else:
+                    k_cache_shape_per_layer = kv_caches[0][:, 0].shape
+                max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
+                num_elements = k_cache_shape_per_layer.numel() * 2
 
             logger.info(f"Lazily initializing GPU buffer (max tokens={max_tokens}).")
-            num_elements = k_cache_shape_per_layer.numel() * 2
             gpu_buffer_size = num_elements * self.element_size
             self.gpu_buffer_allocator = GPUMemoryAllocator(
                 gpu_buffer_size, device=self.device
@@ -855,7 +869,17 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
                 ):
-                    assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
+                    # Validate memory format
+                    if self.use_mla:
+                        assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT, (
+                            f"Expected memory format {MemoryFormat.KV_MLA_FMT}, "
+                            f"got {memory_obj.metadata.fmt}"
+                        )
+                    else:
+                        assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D, (
+                            f"Expected memory format {MemoryFormat.KV_T2D}, "
+                            f"got {memory_obj.metadata.fmt}"
+                        )
                     if self.use_gpu:
                         tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
                             memory_obj.tensor, non_blocking=True
@@ -868,6 +892,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             False,
                             True,
                             self.vllm_two_major,
+                            self.use_mla,
                         )
 
                 if self.use_gpu:
@@ -878,6 +903,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         False,
                         True,
                         self.vllm_two_major,
+                        self.use_mla,
                     )
         yield
 
@@ -977,6 +1003,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         True,
                         True,
                         self.vllm_two_major,
+                        self.use_mla,
                     )
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
@@ -995,7 +1022,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             True,
                             True,
                             self.vllm_two_major,
+                            self.use_mla,
                         )
+                    # Set metadata format
+                    if self.use_mla:
+                        memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
             yield
             if sync:
@@ -1008,7 +1039,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:
-        return torch.Size([num_tokens, 2, self.hidden_dim_size])
+        if self.use_mla:
+            # MLA format: [num_tokens, hidden_dim_size]
+            return torch.Size([num_tokens, self.hidden_dim_size])
+        else:
+            # Standard format: [num_tokens, 2, hidden_dim_size]
+            return torch.Size([num_tokens, 2, self.hidden_dim_size])
 
 
 class SGLangGPUConnector(GPUConnectorInterface):
