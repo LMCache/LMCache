@@ -24,8 +24,9 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MemoryObj, MixedMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -212,17 +213,20 @@ class MPCacheEngine:
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
 
         # Memory allocator
-        size_in_bytes = int(cpu_buffer_size * (1 << 30))  # Convert GB to bytes
-        self.memory_allocator = MixedMemoryAllocator(size_in_bytes)
+        # size_in_bytes = int(cpu_buffer_size * (1 << 30))  # Convert GB to bytes
+        # self.memory_allocator = MixedMemoryAllocator(size_in_bytes)
 
         # chunk size
         self.chunk_size = chunk_size
 
         # Temp CPU buffer for debug
-        self.hot_buffer: dict[IPCCacheEngineKey, MemoryObj] = {}
+        # self.hot_buffer: dict[IPCCacheEngineKey, MemoryObj] = {}
 
         # Temp thread lock for allocator and hot buffer
         self.lock = threading.Lock()
+
+        # storage manager
+        self.storage_manager = MPStorageManager(cpu_buffer_size)
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         gpu_context = GPUCacheContext(kv_caches)
@@ -271,29 +275,18 @@ class MPCacheEngine:
 
             num_tokens = self.chunk_size
             cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-            with self.lock:
-                memory_objects = self.memory_allocator.batched_allocate(
-                    cpu_shape, dtype=gpu_context.dtype, batch_size=len(keys)
-                )
+            fmt = (
+                MemoryFormat.KV_MLA_FMT if gpu_context.is_mla else MemoryFormat.KV_2LTD
+            )
+            reserve_handle, reserved_dict = self.storage_manager.reserve(
+                keys, cpu_shape, gpu_context.dtype, fmt=fmt
+            )
 
             for idx, key in enumerate(keys):
-                memory_obj = memory_objects.pop()
-                with self.lock:
-                    if key in self.hot_buffer:
-                        # Already stored, free the pre-allocated memory
-                        memory_obj.ref_count_down()
-                        logger.debug(
-                            "Key %s already in cache, skipping store", key.chunk_hash
-                        )
-                        continue
-                    else:
-                        # NOTE: here we will have RAW hazard there is an immediate
-                        # retrieve before the store CUDA kernel finishes. To fix
-                        # this, either we add some extra cuda synchronization here, or
-                        # we need to use cudaLaunchHostFunc to `commit` the write
-                        # operation
-                        # This will be fixed in later versions.
-                        self.hot_buffer[key] = memory_obj
+                if key in reserved_dict:
+                    memory_obj = reserved_dict[key]
+                else:
+                    continue
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
@@ -301,22 +294,24 @@ class MPCacheEngine:
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_buffer,
-                    # memory_obj.tensor,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    True,
-                    gpu_context.is_mla,
-                )
+                with self.lock:
+                    lmc_ops.multi_layer_kv_transfer(
+                        tmp_buffer,
+                        # memory_obj.tensor,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        True,
+                        gpu_context.is_mla,
+                    )
 
-                memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
+                    assert memory_obj.tensor is not None
+                    memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
 
             event.record()
 
-        assert len(memory_objects) == 0, "Some memory objects were not used!"
+        self.storage_manager.commit(reserve_handle)
         ed = time.perf_counter()
         logger.info(
             "Stored %d tokens in %.3f seconds",
@@ -349,19 +344,15 @@ class MPCacheEngine:
 
             event = torch.cuda.Event(interprocess=True)
 
-            skip_remaining = False
-            for idx, key in enumerate(keys):
-                if skip_remaining:
-                    results.append(False)
-                    continue
+            try:
+                memory_objs = self.storage_manager.retrieve(keys)
+            except Exception as e:
+                logger.warning("Cannot retrieve keys: %s", str(e))
+                event.record()
+                return event.ipc_handle(), [False] * len(keys)
 
-                with self.lock:
-                    if key not in self.hot_buffer:
-                        results.append(False)
-                        skip_remaining = True
-                        continue
-                    else:
-                        memory_obj = self.hot_buffer[key]
+            for idx, key in enumerate(keys):
+                memory_obj = memory_objs[idx]
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
@@ -372,18 +363,19 @@ class MPCacheEngine:
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(num_tokens)
-                tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
+                with self.lock:
+                    tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
 
-                lmc_ops.multi_layer_kv_transfer(
-                    # memory_obj.tensor,
-                    tmp_gpu_buffer_,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    False,
-                    gpu_context.is_mla,
-                )
+                    lmc_ops.multi_layer_kv_transfer(
+                        # memory_obj.tensor,
+                        tmp_gpu_buffer_,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        False,
+                        gpu_context.is_mla,
+                    )
                 results.append(True)
 
             event.record()
@@ -401,62 +393,53 @@ class MPCacheEngine:
     def get_chunk_size(self) -> int:
         return self.chunk_size
 
-    @synchronized
-    @_lmcache_nvtx_annotate
     def lookup(
         self,
         keys: list[IPCCacheEngineKey],
         lock: bool | None = None,
     ) -> list[bool]:
-        results = []
-        for key in keys:
-            exists = key in self.hot_buffer
-            results.append(exists)
-        return results
+        # NOTE: we are doing per-request lookup, the caller need
+        # to be aware of this! We need to add this to the doc!
+        found_count = self.storage_manager.lookup(keys)
+        return [True] * found_count + [False] * (len(keys) - found_count)
 
     def debug(self) -> str:
-        if not hasattr(self, "_checked_keys"):
-            self._checked_keys: set[IPCCacheEngineKey] = set()
+        # if not hasattr(self, "_checked_keys"):
+        #    self._checked_keys: set[IPCCacheEngineKey] = set()
 
-        def _display_memory_obj(mem_obj: MemoryObj) -> str:
-            # Print each layer of the memory object
-            num_layers = mem_obj.get_shape()[1]
-            logstr = ""
-            for i in range(num_layers):
-                layer_tensor = mem_obj.tensor[:, i, ...]  # type: ignore
-                # logstr += f"Layer {i:03d}: Mean={layer_tensor.mean().item():.6f}\n"
-                if layer_tensor.mean().abs() < 1e-6:
-                    logstr += (
-                        f"Layer {i:03d}: Mostly Zeros with mean = "
-                        + f"{layer_tensor.mean().item():.6f}\n"
-                    )
-            return logstr
+        # def _display_memory_obj(mem_obj: MemoryObj) -> str:
+        #    # Print each layer of the memory object
+        #    num_layers = mem_obj.get_shape()[1]
+        #    logstr = ""
+        #    for i in range(num_layers):
+        #        layer_tensor = mem_obj.tensor[:, i, ...]  # type: ignore
+        #        # logstr += f"Layer {i:03d}: Mean={layer_tensor.mean().item():.6f}\n"
+        #        if layer_tensor.mean().abs() < 1e-6:
+        #            logstr += (
+        #                f"Layer {i:03d}: Mostly Zeros with mean = "
+        #                + f"{layer_tensor.mean().item():.6f}\n"
+        #            )
+        #    return logstr
 
-        logger.info("Received debug request!")
-        for key, mem_obj in self.hot_buffer.items():
-            if key in self._checked_keys:
-                continue
-            self._checked_keys.add(key)
-            logstr = _display_memory_obj(mem_obj)
-            if len(logstr) > 0:
-                logger.error("========================================")
-                logger.error("Key: %s", str(key))
-                logger.error(logstr)
-                logger.error("========================================")
+        # logger.info("Received debug request!")
+        # for key, mem_obj in self.hot_buffer.items():
+        #    if key in self._checked_keys:
+        #        continue
+        #    self._checked_keys.add(key)
+        #    logstr = _display_memory_obj(mem_obj)
+        #    if len(logstr) > 0:
+        #        logger.error("========================================")
+        #        logger.error("Key: %s", str(key))
+        #        logger.error(logstr)
+        #        logger.error("========================================")
 
         return "OK"
 
     @synchronized
     def clear(self) -> None:
-        # self.debug()
-        logger.info("Received clear request!")
-        self.memory_allocator.memcheck()
-        length = len(self.hot_buffer)
-        for obj in self.hot_buffer.values():
-            obj.ref_count_down()
-        self.hot_buffer.clear()
-        logger.info("Cleared %d cached items", length)
-        self.memory_allocator.memcheck()
+        self.storage_manager.memcheck()
+        self.storage_manager.clear()
+        self.storage_manager.memcheck()
 
 
 def add_handler_helper(
