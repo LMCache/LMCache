@@ -388,7 +388,7 @@ def test_retrieve_partial_miss(
 ):
     """
     Test retrieving when some keys exist and some don't.
-    The retrieve should stop at the first missing key.
+    The retrieve should return ALL FALSE if any key is missing.
     """
     # Store first 30 keys (480 pages)
     num_stored = 30
@@ -425,12 +425,26 @@ def test_retrieve_partial_miss(
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
 
     assert len(retrieve_result) == num_requested
-    # First 30 should succeed
-    assert all(retrieve_result[:num_stored]), "Stored keys should be retrieved"
+    # assert all(retrieve_result[:num_stored]), "Stored keys should be retrieved"
     # Remaining should fail
-    assert not any(retrieve_result[num_stored:]), (
-        "Non-existent keys should fail retrieval"
+    assert not any(retrieve_result), (
+        "Retrieve is expected to return all FALSE if any key is missing"
     )
+
+    # Try to retrieve the first 30 keys only (all exist)
+    retrieve_block_ids_2 = list(range(0, 16 * num_stored))
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+    retrieve_future_2 = client.submit_request(
+        RequestType.RETRIEVE,
+        [stored_keys, registered_instance, retrieve_block_ids_2, event.ipc_handle()],
+        get_response_class(RequestType.RETRIEVE),
+    )
+    retrieve_result_2 = retrieve_future_2.to_cuda_future().result(
+        timeout=DEFAULT_TIMEOUT
+    )
+    assert len(retrieve_result_2) == num_stored
+    assert all(retrieve_result_2), "All stored keys should be retrieved successfully"
 
 
 @pytest.mark.skipif(
