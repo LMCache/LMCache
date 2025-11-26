@@ -1381,14 +1381,14 @@ class LMCacheConnectorV1Impl:
         # consult the cache before any processing
         if cached_num_hit_toks := self.lookup_client.lookup_cache(lookup_id=req_id):
             need_to_allocate = max(0, cached_num_hit_toks - num_computed_tokens)
-            
+
             if cached_num_hit_toks == request.num_tokens:
                 need_to_allocate = max(0, need_to_allocate - 1)
 
             self.load_specs[req_id] = LoadSpec(
-                vllm_cached_tokens=num_computed_tokens, 
+                vllm_cached_tokens=num_computed_tokens,
                 lmcache_cached_tokens=cached_num_hit_toks,
-                can_load=False, 
+                can_load=False,
             )
 
             return need_to_allocate
