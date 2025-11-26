@@ -302,10 +302,27 @@ class TestLocalCPUBackend:
 
     def test_remove_with_worker(self, memory_allocator):
         """Test remove() with LMCacheWorker."""
+        # First Party
+        from lmcache.config import LMCacheEngineMetadata
+
         config = create_test_config()
         lmcache_worker = MockLMCacheWorker()
+
+        # Create mock metadata for batched message sender initialization
+        metadata = LMCacheEngineMetadata(
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            fmt="vllm",
+            kv_dtype=torch.bfloat16,
+            kv_shape=(32, 2, 256, 32, 128),
+            use_mla=False,
+            role="worker",
+        )
+
         backend = LocalCPUBackend(
             config=config,
+            metadata=metadata,
             memory_allocator=memory_allocator,
             lmcache_worker=lmcache_worker,
         )
@@ -319,13 +336,39 @@ class TestLocalCPUBackend:
         # Remove the key
         backend.remove(key)
 
-        # Check that evict message was sent
-        assert len(lmcache_worker.messages) == 2  # 1 admit + 1 evict
-        # First Party
-        from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
+        # Manually flush to ensure messages are sent for testing
+        if backend.batched_msg_sender is not None:
+            backend.batched_msg_sender.flush()
 
-        assert any(isinstance(msg, KVAdmitMsg) for msg in lmcache_worker.messages)
-        assert any(isinstance(msg, KVEvictMsg) for msg in lmcache_worker.messages)
+        # Check that batched messages were sent
+        # First Party
+        from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, OpType
+
+        # Check that we have batched messages
+        batched_msgs = [
+            msg
+            for msg in lmcache_worker.messages
+            if isinstance(msg, BatchedKVOperationMsg)
+        ]
+        assert len(batched_msgs) >= 1, "Should have at least one batched message"
+
+        # Collect all operations from all batches
+        all_admit_ops = []
+        all_evict_ops = []
+        for msg in batched_msgs:
+            for op in msg.operations:
+                if op.op_type == OpType.ADMIT:
+                    all_admit_ops.append(op)
+                elif op.op_type == OpType.EVICT:
+                    all_evict_ops.append(op)
+
+        # Verify we have exactly one ADMIT and one EVICT operation
+        assert len(all_admit_ops) == 1, "Should have exactly one ADMIT operation"
+        assert len(all_evict_ops) == 1, "Should have exactly one EVICT operation"
+
+        # Verify the operations are for the correct key
+        assert all_admit_ops[0].key == key.chunk_hash
+        assert all_evict_ops[0].key == key.chunk_hash
 
         memory_allocator.close()
 
