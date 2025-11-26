@@ -1194,11 +1194,11 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     def get_kv_events(self) -> Iterable[CacheStoreEvent]:
-        if not self.kv_events_enabled or not self.kv_events:
-            yield from []
-        else:
-            yield from self.kv_events
-            self.kv_events.clear()
+        if self.kv_events_enabled and self.kv_events:
+            events = self.kv_events
+            self.kv_events = []
+            return events
+        return []
 
     def _clear(
         self,
