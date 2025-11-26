@@ -378,8 +378,10 @@ class RedisSentinelConnector(RemoteConnector):
         ).serialize()
 
         key_str = key.to_string()
-        await self.master.set(key_str + "metadata", metadata_bytes)
-        await self.master.set(key_str + "kv_bytes", kv_bytes)
+        await asyncio.gather(
+            self.master.set(key_str + "metadata", metadata_bytes),
+            self.master.set(key_str + "kv_bytes", kv_bytes),
+        )
 
         memory_obj.ref_count_down()
 
