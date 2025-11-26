@@ -519,7 +519,7 @@ class LMCStatsMonitor:
         )
 
         request_lifespan = list(self.interval_request_cache_lifespan.values())
-        
+
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
