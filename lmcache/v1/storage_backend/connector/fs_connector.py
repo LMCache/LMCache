@@ -95,7 +95,7 @@ class FSConnector(RemoteConnector):
         return base_path
 
     def _get_file_name(self, key: CacheEngineKey) -> str:
-        return key.to_string().replace("/", "-") + ".data"
+        return key.to_string().replace("/", "-SEP-") + ".data"
 
     def _get_file_path(self, key: CacheEngineKey) -> Path:
         """Get file path for the given key"""

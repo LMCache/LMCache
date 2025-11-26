@@ -77,7 +77,9 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 # ==============================================================================
 
 
-def store_handler(keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]) -> bool:
+def store_handler(
+    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
+) -> tuple[bytes, bool]:
     """
     Dummy handler for STORE requests.
 
@@ -96,8 +98,11 @@ def store_handler(keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]) ->
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
     )
+    assert isinstance(ipc_handle, bytes), (
+        f"Expected ipc_handle to be bytes, got {type(ipc_handle)}"
+    )
     # Return success
-    return True
+    return b"\x01" * 64, True
 
 
 # ==============================================================================
@@ -106,8 +111,8 @@ def store_handler(keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]) ->
 
 
 def retrieve_handler(
-    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int]
-) -> list[bool]:
+    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int], event_handler: bytes
+) -> tuple[bytes, list[bool]]:
     """
     Dummy handler for RETRIEVE requests.
 
@@ -126,8 +131,11 @@ def retrieve_handler(
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
     )
+    assert isinstance(event_handler, bytes), (
+        f"Expected event_handler to be bytes, got {type(event_handler)}"
+    )
     # Return success
-    return [True for _ in keys]
+    return b"\x01" * 64, [True for _ in keys]
 
 
 # ==============================================================================
