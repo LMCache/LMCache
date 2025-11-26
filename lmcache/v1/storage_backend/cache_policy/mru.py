@@ -9,10 +9,8 @@ from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy,
 
 logger = init_logger(__name__)
 
-MapType = OrderedDict[KeyType, Any]
 
-
-class MRUCachePolicy(BaseCachePolicy[KeyType, MapType]):
+class MRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
     """
     MRU cache policy.
     """

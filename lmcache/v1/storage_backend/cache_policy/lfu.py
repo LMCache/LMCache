@@ -12,10 +12,8 @@ from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy,
 
 logger = init_logger(__name__)
 
-MapType = dict[KeyType, Any]
 
-
-class LFUCachePolicy(BaseCachePolicy[KeyType, MapType]):
+class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
     """
     LFU cache policy.
     """
