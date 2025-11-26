@@ -302,14 +302,16 @@ class RedisSentinelConnector(RemoteConnector):
         self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return bool(self.slave.exists(key.to_string() + "metadata"))
+        value = await self.slave.exists(key.to_string() + "metadata")
+        return bool(value)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        return bool(self.slave.exists(key.to_string() + "metadata"))
+        value = self.slave.exists(key.to_string() + "metadata")
+        return bool(value)
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        metadata_bytes = self.slave.get(key_str + "metadata")
+        metadata_bytes = await self.slave.get(key_str + "metadata")
 
         if metadata_bytes is None:
             return None
@@ -328,7 +330,7 @@ class RedisSentinelConnector(RemoteConnector):
             return None
 
         # TODO(Jiayi): Find a way to do `get` inplace
-        kv_bytes = self.slave.get(key_str + "kv_bytes")
+        kv_bytes = await self.slave.get(key_str + "kv_bytes")
 
         assert not inspect.isawaitable(kv_bytes)
 
@@ -341,7 +343,7 @@ class RedisSentinelConnector(RemoteConnector):
                 "Key exists but KV cache does not exist."
                 "Might happen when the cache is evicted by redis."
             )
-            self.master.delete(key_str + "metadata")
+            await self.master.delete(key_str + "metadata")
             return None
 
         if isinstance(memory_obj.byte_array, memoryview):
@@ -375,8 +377,8 @@ class RedisSentinelConnector(RemoteConnector):
         ).serialize()
 
         key_str = key.to_string()
-        self.master.set(key_str + "metadata", metadata_bytes)
-        self.master.set(key_str + "kv_bytes", kv_bytes)
+        await self.master.set(key_str + "metadata", metadata_bytes)
+        await self.master.set(key_str + "kv_bytes", kv_bytes)
 
         memory_obj.ref_count_down()
 
@@ -386,8 +388,10 @@ class RedisSentinelConnector(RemoteConnector):
         pass
 
     async def close(self):
-        self.master.close()
-        self.slave.close()
+        await asyncio.gather(
+            self.master.close(),
+            self.slave.close()
+        )
 
 
 class RedisClusterConnector(RemoteConnector):
