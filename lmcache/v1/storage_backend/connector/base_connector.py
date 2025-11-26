@@ -90,7 +90,8 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         assert self.full_chunk_size is not None
         assert self.single_token_size is not None
         if (
-            bytes_read % self.single_token_size != 0
+            bytes_read == 0
+            or bytes_read % self.single_token_size != 0
             or bytes_read > self.full_chunk_size
         ):
             raise ValueError(
