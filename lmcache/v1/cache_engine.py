@@ -366,7 +366,7 @@ class LMCacheEngine:
                     )
                 elif hashes is not None:
                     stored_event.token_ids = hashes[start : end + 1]
-                logger.info(
+                logger.debug(
                     f"Added kv cache event '{stored_event}' to kv cache events queue"
                 )
                 self.kv_events.append(stored_event)
