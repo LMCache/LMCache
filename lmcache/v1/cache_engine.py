@@ -1213,6 +1213,17 @@ class LMCacheEngine:
 
         return chunks, tot_kv_size
 
+    def _get_available_local_pools(self) -> list[str]:
+        """Get list of available local cache pool names (LocalCPUBackend/ LocalDiskBackend)."""
+        if self.storage_manager is None:
+            return []
+        local_pools = []
+        # Filter local backends from storage managers
+        for backend_name in self.storage_manager.storage_backends:
+            if backend_name in ["LocalCPUBackend", "LocalDiskBackend"]:
+                local_pools.append(backend_name)
+        return local_pools
+
     def _process_tokens_internal(
         self,
         tokens,
@@ -1276,6 +1287,31 @@ class LMCacheEngine:
                 "Failed to get memory objects from storage backend"
             )
 
+            # Store remote data to local cache pools if available
+            available_local_pools = self._get_available_local_pools()
+            is_remote_location = location.lower() in ["remote", "remotebackend", "mooncache"]
+            if self.config.auto_store_remote_to_local and is_remote_location and available_local_pools:
+                target_local_pool = available_local_pools[0]  # Prioritize first local pool
+                # Filter keys not existing in local pool to avoid duplicate storage
+                local_missing_keys = []
+                local_missing_objs = []
+                for key, memory_obj in zip(keys, memory_objs, strict=False):
+                    if memory_obj is not None and not self.storage_manager.contains(
+                            key, search_range=[target_local_pool]
+                    ):
+                        local_missing_keys.append(key)
+                        local_missing_objs.append(memory_obj)
+
+                # Save missing remote data to local pool
+                if local_missing_keys:
+                    self.storage_manager.batched_put(
+                        keys=local_missing_keys,
+                        memory_objs=local_missing_objs,
+                        location=target_local_pool
+                    )
+                    logger.debug(
+                        f"[Remote→Local] Stored {len(local_missing_keys)} keys from {location} to {target_local_pool}"
+                    )
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
