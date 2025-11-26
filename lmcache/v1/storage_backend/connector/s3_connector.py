@@ -160,6 +160,11 @@ class S3Connector(RemoteConnector):
         # asyncio scheduling is cooperative and not preemptive
         self.object_size_cache: dict[str, int] = {}
 
+        # Circuit breaker for connection failures
+        self.connection_failures = 0
+        self.max_connection_failures = 3
+        self.connection_disabled = False
+
         self.pq_executor = AsyncPQExecutor(loop)
 
     def post_init(self):
@@ -284,6 +289,10 @@ class S3Connector(RemoteConnector):
         return self.exists_sync(key)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
+        # Circuit breaker: if connection is disabled, return False
+        if self.connection_disabled:
+            return False
+
         key_str = key.to_string()
         if key_str in self.object_size_cache:
             return self.object_size_cache[key_str] > 0
@@ -338,6 +347,13 @@ class S3Connector(RemoteConnector):
         return s3_req
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        # Circuit breaker: if connection is disabled, return None immediately
+        if self.connection_disabled:
+            logger.debug(
+                f"S3 connection disabled. Skipping download for {key.to_string()}"
+            )
+            return None
+
         key_str = key.to_string()
 
         obj_size = self.object_size_cache.get(key_str, None)
@@ -354,10 +370,16 @@ class S3Connector(RemoteConnector):
             self.meta_dtype,
             self.meta_fmt,
         )
-        # TODO(Jiayi): Please support this
-        assert obj_size == memory_obj.get_size(), (
-            "Saving unfull chunk is not supported in S3Connector."
-        )
+
+        # Check if stored size matches expected size
+        if obj_size != memory_obj.get_size():
+            logger.error(
+                f"Size mismatch for {key_str}: S3 has {obj_size} bytes, "
+                f"but current config expects {memory_obj.get_size()} bytes. "
+                f"This usually means the data was stored with different chunk_size "
+                f"or model configuration. Please use matching config or clear S3."
+            )
+            return None
 
         s3_req = self._s3_download(
             key_str=key_str,
@@ -367,14 +389,55 @@ class S3Connector(RemoteConnector):
         try:
             # use blocking_timeout_sec in config to control the timeout
             await asyncio.wrap_future(s3_req.finished_future)
+
+            # Reset failure counter on success
+            if self.connection_failures > 0:
+                logger.info("S3 connection recovered")
+                self.connection_failures = 0
+
             return memory_obj
         except Exception as e:
-            logger.error(f"Failed to download {key_str} from S3: {e}")
+            error_msg = str(e)
+
+            # Check if it's a connection error
+            is_connection_error = (
+                "CONNECTION_REFUSED" in error_msg
+                or "SOCKET" in error_msg
+                or "DNS" in error_msg
+                or "TIMEOUT" in error_msg
+            )
+
+            if is_connection_error:
+                self.connection_failures += 1
+                logger.error(
+                    f"S3 connection error ({self.connection_failures}/"
+                    f"{self.max_connection_failures}): {error_msg}"
+                )
+
+                if self.connection_failures >= self.max_connection_failures:
+                    self.connection_disabled = True
+                    logger.error(
+                        f"S3 connection disabled after "
+                        f"{self.max_connection_failures} "
+                        f"consecutive failures. "
+                        f"All future S3 operations will be skipped."
+                    )
+            else:
+                logger.error(f"Failed to download {key_str} from S3: {e}")
+
             return None
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
+        # Circuit breaker: if connection is disabled, return all None
+        if self.connection_disabled:
+            logger.debug(
+                f"S3 connection disabled. "
+                f"Skipping batched download for {len(keys)} keys"
+            )
+            return [None] * len(keys)
+
         memory_objs: List[Optional[MemoryObj]] = []
         futures = []
 
@@ -398,15 +461,21 @@ class S3Connector(RemoteConnector):
                 self.meta_fmt,
             )
 
-            memory_objs.append(memory_obj)
-
             if not memory_obj:
+                memory_objs.append(None)
                 continue
 
-            # TODO(Jiayi): Please support this
-            assert obj_size == memory_obj.get_size(), (
-                "Saving unfull chunk is not supported in S3Connector."
-            )
+            # Check if stored size matches expected size
+            if obj_size != memory_obj.get_size():
+                logger.error(
+                    f"Size mismatch for {key_str}: S3 has {obj_size} bytes, "
+                    f"but current config expects {memory_obj.get_size()} bytes. "
+                    f"Skipping this key."
+                )
+                memory_objs.append(None)
+                continue
+
+            memory_objs.append(memory_obj)
 
             s3_req = self._s3_download(
                 key_str=key_str,
@@ -464,22 +533,68 @@ class S3Connector(RemoteConnector):
         """
         Store data to S3
         """
-        logger.debug(f"Uploading {key} to S3")
+        # Circuit breaker: if connection is disabled, just log and return
+        if self.connection_disabled:
+            logger.debug(
+                f"S3 connection disabled due to repeated failures. "
+                f"Skipping upload for {key.to_string()}"
+            )
+            return
+
         key_str = key.to_string()
 
-        # TODO(Jiayi): Please support this
-        assert memory_obj.get_physical_size() == self.s3_part_size, (
-            "Saving unfull chunk is not supported in S3Connector."
-        )
+        # Check if the chunk size matches expected S3 part size
+        if memory_obj.get_physical_size() != self.s3_part_size:
+            logger.error(
+                f"Cannot upload {key_str}: chunk size {memory_obj.get_physical_size()} "
+                f"bytes does not match S3 part size {self.s3_part_size} bytes. "
+                f"Partial/unfull chunks are not supported."
+            )
+            return
 
         try:
+            logger.debug(f"Uploading {key_str} to S3")
             s3_req = self._s3_upload(key_str, memory_obj)
             await asyncio.wrap_future(s3_req.finished_future)
 
             self.object_size_cache[key_str] = memory_obj.get_physical_size()
             logger.debug(f"Uploaded {key_str} to S3 successfully")
+
+            # Reset failure counter on success
+            if self.connection_failures > 0:
+                logger.info("S3 connection recovered")
+                self.connection_failures = 0
         except Exception as e:
-            logger.error(f"Failed to upload {key_str} to S3: {e}")
+            error_msg = str(e)
+
+            # Check if it's a connection error
+            is_connection_error = (
+                "CONNECTION_REFUSED" in error_msg
+                or "SOCKET" in error_msg
+                or "DNS" in error_msg
+                or "TIMEOUT" in error_msg
+            )
+
+            if is_connection_error:
+                self.connection_failures += 1
+                logger.error(
+                    f"S3 connection error ({self.connection_failures}/"
+                    f"{self.max_connection_failures}): {error_msg}"
+                )
+
+                if self.connection_failures >= self.max_connection_failures:
+                    self.connection_disabled = True
+                    logger.error(
+                        f"S3 connection disabled after "
+                        f"{self.max_connection_failures} "
+                        f"consecutive failures. "
+                        f"All future S3 operations will be skipped. "
+                        f"Please check network connectivity and "
+                        f"restart the service."
+                    )
+            else:
+                # Not a connection error, just log it
+                logger.error(f"Failed to upload {key_str} to S3: {e}")
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         return await self.pq_executor.submit_job(
@@ -495,6 +610,10 @@ class S3Connector(RemoteConnector):
     async def _batched_async_contains(
         self, lookup_id: str, keys: List[CacheEngineKey], pin: bool = False
     ) -> int:
+        # Circuit breaker: if connection is disabled, return 0
+        if self.connection_disabled:
+            return 0
+
         num_hit_counts = 0
         for key in keys:
             key_str = key.to_string()
