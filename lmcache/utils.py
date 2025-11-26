@@ -253,7 +253,7 @@ class CacheEngineKey:
             for kv in parts[6:]:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
-                   raise ValueError(f"Invalid key string: {s}")
+                    raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         # Handle negative hex numbers in chunk_hash
         chunk_hash_str = parts[4]
