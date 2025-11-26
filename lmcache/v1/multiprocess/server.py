@@ -24,7 +24,7 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MemoryFormat
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
@@ -320,41 +320,27 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, list[bool]]:
+        # NOTE: this function will only return all True or all False even if
+        # there is a partial hit. This is because we are requiring all the
+        # retrieves objects is pre-locked by the lookup function (so they
+        # must be all found)
         st = time.perf_counter()
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
         )
 
         gpu_context = self.gpu_contexts[instance_id]
-        results = []
 
-        with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
-        ):
-            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
-
-            event = torch.cuda.Event(interprocess=True)
-
-            try:
-                memory_objs = self.storage_manager.retrieve(keys)
-            except Exception as e:
-                logger.warning("Cannot retrieve keys: %s", str(e))
-                event.record()
-                return event.ipc_handle(), [False] * len(keys)
-
-            for idx, key in enumerate(keys):
-                memory_obj = memory_objs[idx]
-
+        def _retrieve_loop(keys: list[IPCCacheEngineKey], memory_objs: list[MemoryObj]):
+            for idx, (key, memory_obj) in enumerate(
+                zip(keys, memory_objs, strict=False)
+            ):
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
                 slot_mapping = slot_mapping_tensor[start:end]
 
-                # cpu shape
-                num_tokens = len(slot_mapping)
-
                 # Copy from CPU to GPU
-                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(num_tokens)
+                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                 with self.lock:
                     tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
 
@@ -368,11 +354,26 @@ class MPCacheEngine:
                         False,
                         gpu_context.is_mla,
                     )
-                results.append(True)
+
+        with (
+            torch.cuda.device(gpu_context.device),
+            torch.cuda.stream(gpu_context.stream),
+        ):
+            slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
+
+            event = torch.cuda.Event(interprocess=True)
+
+            try:
+                with self.storage_manager.retrieve(keys) as memory_objs:
+                    _retrieve_loop(keys, memory_objs)
+            except Exception as e:
+                logger.warning("Cannot retrieve keys: %s", str(e))
+                event.record()
+                return event.ipc_handle(), [False] * len(keys)
 
             event.record()
 
-        tokens_retrieved = sum(results) * self.chunk_size
+        tokens_retrieved = len(keys) * self.chunk_size
         ed = time.perf_counter()
         logger.info(
             "Retrieved %d tokens in %.3f seconds",
@@ -380,7 +381,7 @@ class MPCacheEngine:
             ed - st,
         )
 
-        return event.ipc_handle(), results
+        return event.ipc_handle(), [True] * len(keys)
 
     def get_chunk_size(self) -> int:
         return self.chunk_size

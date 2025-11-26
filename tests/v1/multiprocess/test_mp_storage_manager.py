@@ -327,16 +327,16 @@ class TestRetrieve:
         storage_manager.commit(handle)
 
         # Retrieve the objects
-        objects_retrieved = storage_manager.retrieve(keys)
-
-        assert len(objects_retrieved) == len(keys)
-        assert all(obj is not None for obj in objects_retrieved)
+        with storage_manager.retrieve(keys) as objects_retrieved:
+            assert len(objects_retrieved) == len(keys)
+            assert all(obj is not None for obj in objects_retrieved)
 
     def test_retrieve_key_not_found(self, storage_manager, test_keys):
         """Test retrieve raises RuntimeError when key is not found."""
         # Try to retrieve non-existent keys
         with pytest.raises(RuntimeError):
-            storage_manager.retrieve(test_keys[:3])
+            with storage_manager.retrieve(test_keys[:3]) as _:
+                pass
 
     def test_retrieve_partial_keys_not_found(
         self, storage_manager, test_keys, test_shape, test_dtype, test_format
@@ -350,7 +350,8 @@ class TestRetrieve:
 
         # Try to retrieve 3 keys (third one doesn't exist)
         with pytest.raises(RuntimeError):
-            storage_manager.retrieve(test_keys[:3])
+            with storage_manager.retrieve(test_keys[:3]) as _:
+                pass
 
     def test_retrieve_reserved_not_committed(
         self, storage_manager, test_keys, test_shape, test_dtype, test_format
@@ -362,12 +363,13 @@ class TestRetrieve:
 
         # Should raise RuntimeError
         with pytest.raises(RuntimeError):
-            storage_manager.retrieve(keys)
+            with storage_manager.retrieve(keys) as _:
+                pass
 
     def test_retrieve_empty_keys(self, storage_manager):
         """Test retrieve with empty key list."""
-        objects = storage_manager.retrieve([])
-        assert len(objects) == 0
+        with storage_manager.retrieve([]) as objects:
+            assert len(objects) == 0
 
     def test_retrieve_returns_same_objects(
         self, storage_manager, test_keys, test_shape, test_dtype, test_format
@@ -378,13 +380,12 @@ class TestRetrieve:
         storage_manager.commit(handle)
 
         # Retrieve twice
-        objects1 = storage_manager.retrieve(keys)
-        objects2 = storage_manager.retrieve(keys)
-
-        # Should be the same objects
-        assert len(objects1) == len(objects2)
-        for obj1, obj2 in zip(objects1, objects2, strict=False):
-            assert obj1 is obj2
+        with storage_manager.retrieve(keys) as objects1:
+            with storage_manager.retrieve(keys) as objects2:
+                # Should be the same objects
+                assert len(objects1) == len(objects2)
+                for obj1, obj2 in zip(objects1, objects2, strict=False):
+                    assert obj1 is obj2
 
     def test_retrieve_cleared(
         self, storage_manager, test_keys, test_shape, test_dtype, test_format
@@ -395,15 +396,16 @@ class TestRetrieve:
         storage_manager.commit(handle)
 
         # Retrieve once successfully
-        objects = storage_manager.retrieve(keys)
-        assert len(objects) == len(keys)
+        with storage_manager.retrieve(keys) as objects:
+            assert len(objects) == len(keys)
 
         # clear objects
         storage_manager.clear()
 
         # Attempt to retrieve again should fail
         with pytest.raises(RuntimeError):
-            storage_manager.retrieve(keys)
+            with storage_manager.retrieve(keys) as objects:
+                pass
 
 
 # Tests for prefetch()
@@ -430,7 +432,8 @@ class TestClose:
         handle, _ = manager.reserve(test_keys[:3], shape, test_dtype, test_format)
         manager.commit(handle)
         manager.lookup(test_keys[:3])
-        manager.retrieve(test_keys[:3])
+        with manager.retrieve(test_keys[:3]) as _:
+            pass
 
         # Close should work without issues
         manager.close()
@@ -460,8 +463,8 @@ class TestIntegration:
         assert found == len(keys)
 
         # Retrieve
-        retrieved_objects = storage_manager.retrieve(keys)
-        assert len(retrieved_objects) == len(keys)
+        with storage_manager.retrieve(keys) as retrieved_objects:
+            assert len(retrieved_objects) == len(keys)
 
     def test_multiple_reserve_commit_cycles(
         self, storage_manager, test_keys, test_shape, test_dtype, test_format
@@ -486,8 +489,8 @@ class TestIntegration:
         storage_manager.commit(handle3)
 
         # Verify all keys are retrievable
-        all_objects = storage_manager.retrieve(test_keys[:9])
-        assert len(all_objects) == 9
+        with storage_manager.retrieve(test_keys[:9]) as all_objects:
+            assert len(all_objects) == 9
 
 
 # Multi-threaded tests
@@ -551,8 +554,8 @@ class TestThreadSafety:
         for keys in all_keys:
             found = storage_manager.lookup(keys)
             assert found == len(keys)
-            objects = storage_manager.retrieve(keys)
-            assert len(objects) == len(keys)
+            with storage_manager.retrieve(keys) as objects:
+                assert len(objects) == len(keys)
 
     def test_concurrent_reserve_same_keys(
         self, storage_manager, test_keys, test_dtype, test_format
@@ -599,8 +602,8 @@ class TestThreadSafety:
             # Lookup
             found = storage_manager.lookup(keys[:5])
             # Retrieve
-            objects = storage_manager.retrieve(keys[:5])
-            return found, len(objects)
+            with storage_manager.retrieve(keys[:5]) as objects:
+                return found, len(objects)
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(lookup_and_retrieve) for _ in range(num_threads)]
@@ -683,8 +686,8 @@ class TestThreadSafety:
                 assert found == len(keys)
 
                 # Retrieve
-                retrieved = storage_manager.retrieve(keys)
-                assert len(retrieved) == len(keys)
+                with storage_manager.retrieve(keys) as retrieved:
+                    assert len(retrieved) == len(keys)
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [

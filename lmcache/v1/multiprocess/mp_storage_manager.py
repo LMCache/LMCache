@@ -2,8 +2,9 @@
 # NOTE: this file will be moved and the class implementation
 # will be largely refactored in the future.
 # Standard
+from contextlib import contextmanager
 from itertools import compress
-from typing import Union
+from typing import Iterator, Union
 import threading
 
 # Third Party
@@ -192,10 +193,11 @@ class MPStorageManager:
         return found_count
 
     @_lmcache_nvtx_annotate
+    @contextmanager
     def retrieve(
         self,
         keys: list[IPCCacheEngineKey],
-    ) -> list[MemoryObj]:
+    ) -> Iterator[list[MemoryObj]]:
         """Retrieve the memory objects for the given keys.
         The memory objects should be locked before retrieval.
         It will unlock the memory objects after retrieval.
@@ -211,17 +213,21 @@ class MPStorageManager:
             RuntimeError if there are one or more memory objects that are
                 not found.
         """
-        # TODO: implement UNLOCK mechanism
-        # TODO: make it a context manager. i.e. caller will do the following
-        # ```
-        # with storage_manager.retrieve(keys) as objs:
-        # ```
-        # This will help unlock and free the objects automatically.
+        # NOTE: this function is implemented as a context manager. This
+        # gives us more flexibility when we have to wait for objects from
+        # the L2 memory. Also, it's easier to manage the locking/unlocking,
+        # and the ref-counting of the memory objects.
         with self._buffer_lock:
             try:
-                return [self._commited_memory_objects[key] for key in keys]
+                objs = [self._commited_memory_objects[key] for key in keys]
             except KeyError as e:
                 raise RuntimeError(f"Key not found: {e.args[0]}") from e
+
+        try:
+            yield objs
+        finally:
+            # TODO: Unlock the memory objects once we have it
+            pass
 
     def prefetch(
         self,
