@@ -442,9 +442,14 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     # Memory management configurations
-    "pin_timeout_seconds": {
+    "pin_timeout_sec": {
         "type": int,
         "default": 300,
+        "env_converter": int,
+    },
+    "pin_check_interval_sec": {
+        "type": int,
+        "default": 30,
         "env_converter": int,
     },
 }
