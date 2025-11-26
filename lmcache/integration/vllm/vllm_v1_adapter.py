@@ -1412,7 +1412,7 @@ class LMCacheConnectorV1Impl:
                 req_id,
                 request.num_tokens,
             )
-            return None
+            return 0
 
         # When prompt length is divisible by the block size and all
         # blocks are cached, we need to recompute the last token.
