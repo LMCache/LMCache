@@ -31,13 +31,11 @@ class S3ConnectorAdapter(ConnectorAdapter):
 
         self.s3_part_size = int(extra_config.get("s3_part_size", full_chunk_size))
         self.s3_num_io_threads = int(extra_config.get("s3_num_io_threads", 64))
-        self.s3_max_inflight_reqs = int(extra_config.get("s3_max_inflight_reqs", 64))
         self.s3_prefer_http2 = bool(extra_config.get("s3_prefer_http2", True))
         self.s3_region = extra_config.get("s3_region", None)
         assert self.s3_region is not None, "s3_region is required"
         self.s3_region = str(self.s3_region)
         self.s3_enable_s3express = bool(extra_config.get("s3_enable_s3express", False))
-        self.s3_file_prefix = extra_config.get("s3_file_prefix", None)
         self.disable_tls = bool(extra_config.get("disable_tls", False))
         if context.metadata is None:
             raise ValueError("metadata is required for S3Connector")
@@ -56,9 +54,7 @@ class S3ConnectorAdapter(ConnectorAdapter):
             meta_dtype=self.meta_dtype,
             full_chunk_size=full_chunk_size,
             s3_part_size=self.s3_part_size,
-            s3_file_prefix=self.s3_file_prefix,
             s3_num_io_threads=self.s3_num_io_threads,
-            s3_max_inflight_reqs=self.s3_max_inflight_reqs,
             s3_prefer_http2=self.s3_prefer_http2,
             s3_region=self.s3_region,
             s3_enable_s3express=self.s3_enable_s3express,
