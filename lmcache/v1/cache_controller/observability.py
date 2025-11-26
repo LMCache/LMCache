@@ -2,6 +2,7 @@
 # Standard
 from enum import Enum
 from typing import Optional
+import traceback
 
 # Third Party
 from prometheus_client import REGISTRY
@@ -168,5 +169,6 @@ class SocketMetricsContext:
             getattr(self.manager, self.active_attr) - self.message_count,
         )
         if exc_type is not None:
-            logger.error(f"Controller Manager error: {exc_val}")
+            stack_trace = traceback.format_exception(exc_type, exc_val, exc_tb)
+            logger.error("Controller Manager error: %s", "".join(stack_trace))
         return False
