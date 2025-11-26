@@ -28,16 +28,15 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
         return OrderedDict()
 
     def update_chunk_hash_dict(self, key: CacheEngineKey) -> None:
-        if key.chunk_hash not in self.chunk_hash_to_init_timestamp:
-            if len(self.chunk_hash_to_init_timestamp) >= self.max_num_chunk_hash:
-                # Clear the dictionary to avoid memory leak
-                self.chunk_hash_to_init_timestamp = {}
-            self.chunk_hash_to_init_timestamp[key.chunk_hash] = time.time()
-        if key.chunk_hash in self.chunk_hash_to_init_timestamp:
-            time_interval = (
-                time.time() - self.chunk_hash_to_init_timestamp[key.chunk_hash]
-            )
+        curr_time = time.time()
+        key_hash = key.chunk_hash
+        if init_timestamp := self.chunk_hash_to_init_timestamp.get(key_hash, None):
+            time_interval = curr_time - init_timestamp
             self.stats_monitor.on_chunk_reuse(time_interval)
+        else:
+            if len(self.chunk_hash_to_init_timestamp) >= self.max_num_chunk_hash:
+                self.chunk_hash_to_init_timestamp.clear()
+            self.chunk_hash_to_init_timestamp[key_hash] = curr_time
 
     def update_on_hit(
         self,
