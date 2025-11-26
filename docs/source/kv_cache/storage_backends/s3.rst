@@ -17,7 +17,7 @@ Basic S3 Configuration
    blocking_timeout_secs: 10
    extra_config:
      s3_region: "us-east-1"
-     s3_max_io_concurrency: 64
+     s3_num_io_threads: 64
      s3_max_inflight_reqs: 64
 
 S3 Express One Zone
@@ -32,7 +32,7 @@ S3 Express One Zone
    remote_serde: "naive"
    blocking_timeout_secs: 10
    extra_config:
-     s3_max_io_concurrency: 64
+     s3_num_io_threads: 64
      s3_max_inflight_reqs: 64
      s3_prefer_http2: True
      s3_region: "{REGION}"
@@ -53,15 +53,19 @@ CoreWeave (S3-compatible)
    remote_serde: "naive"
    blocking_timeout_secs: 10
    extra_config:
-     s3_max_io_concurrency: 320
+     s3_num_io_threads: 320
      s3_max_inflight_reqs: 320
      s3_prefer_http2: False
      s3_region: "US-WEST-04A"
      s3_enable_s3express: False
      save_chunk_meta: False
      s3_file_prefix: "test-2"
+     disable_tls: True
 
-**Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that caches for GPU locality. Set `s3_enable_s3express: False` for non-AWS services.
+**Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that caches for GPU locality. You can set `disable_tls: True` for non-AWS services.
+
+Check out the blog post between LMCache, Cohere, and CoreWeave: https://blog.lmcache.ai/en/2025/10/29/breaking-the-memory-barrier-how-lmcache-and-coreweave-power-efficient-llm-inference-for-cohere/
+
 
 Configuration Parameters
 ------------------------
@@ -75,19 +79,19 @@ S3-Specific (in extra_config)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 * **s3_region**: AWS region for S3 client (required)
-* **s3_max_io_concurrency**: Max concurrent I/O operations for event loop group (controls AWS CRT threading)
-* **s3_max_inflight_reqs**: Max simultaneous S3 requests (creates this many /dev/shm buffers and semaphore limit)
+* **s3_num_io_threads**: Number of IO threads for the AWS CRT client to spawn. Benefits taper out after exceeding the number of CPU cores.
+* **s3_max_inflight_reqs**: Max simultaneous S3 requests (creates this many `/dev/shm` files/buffers and semaphore limit)
 * **s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation (["h2", "http/1.1"])
 * **s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT client
 * **s3_file_prefix**: Prefix for S3 object keys (e.g., `cache` becomes `/cache/key_name`). Avoid leading/trailing slashes.
 * **save_chunk_meta**: Whether to save chunk metadata with data (set False for performance)
 
-The effective concurrency is limited by the minimum of `s3_max_io_concurrency` and `s3_max_inflight_reqs`.
+The effective concurrency is limited by `s3_max_inflight_reqs`.
 
 /dev/shm Configuration
 ----------------------
 
-/dev/shm is used as the tmpfs that S3 can use to transfer only into RAM instead of having to touch a block device. 
+/dev/shm is used as the tmpfs that S3 can use to transfer only into RAM (OS page cache mapped to user space with `mmap`) instead of having to touch a block device. This reduces a memory copy.
 
 Memory Requirements and Configuration Calculation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
