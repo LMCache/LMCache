@@ -499,7 +499,7 @@ class LMCacheEngine:
                     lora_id=None,
                     medium="GPU",
                 )
-                logger.info(
+                logger.debug(
                     f"Added kv cache event '{stored_event}' to kv cache events queue"
                 )
                 self.kv_events.append(stored_event)
