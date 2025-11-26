@@ -20,7 +20,7 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
 
     def __init__(self):
         logger.info("Initializing LRUCachePolicy")
-        self.chunk_hash_to_init_timestamp: Dict[Any, Any] = {}
+        self.chunk_hash_to_init_timestamp: Dict[int, float] = {}
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.max_num_chunk_hash = 12500000
 
