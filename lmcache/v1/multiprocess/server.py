@@ -218,6 +218,13 @@ class MPCacheEngine:
         self.storage_manager = MPStorageManager(cpu_buffer_size)
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
+        """
+        Registers the KV cache tensors for a given GPU instance ID.
+
+        Args:
+            instance_id (int): The GPU instance ID (such as PID).
+            kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
+        """
         gpu_context = GPUCacheContext(kv_caches)
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
@@ -227,6 +234,12 @@ class MPCacheEngine:
         )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
+        """
+        Unregisters the KV cache tensors for a given GPU instance ID.
+
+        Args:
+            instance_id (int): The GPU instance ID (such as PID).
+        """
         if instance_id in self.gpu_contexts:
             del self.gpu_contexts[instance_id]
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
@@ -242,6 +255,20 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
+        """
+        Stores the GPU KV cache blocks to CPU.
+
+        Args:
+            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            instance_id (int): The GPU instance ID (such as PID).
+            gpu_block_ids (list[int]): The GPU block IDs to store.
+            event_ipc_handle (bytes): The IPC handle of the event to wait on.
+
+        Returns:
+            tuple[bytes, bool]: The first element is the IPC handle of the event
+                that signals the completion of the store operation. The second
+                element indicates whether the store operation was successful.
+        """
         st = time.perf_counter()
 
         assert instance_id in self.gpu_contexts, (
@@ -320,6 +347,26 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, list[bool]]:
+        """
+        Retrieves the CPU KV cache and put into GPU blocks.
+
+        Args:
+            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            instance_id (int): The GPU instance ID (such as PID).
+            gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
+            event_ipc_handle (bytes): The IPC handle of the event to wait on.
+
+        Returns:
+            tuple[bytes, list[bool]]: The first element is the IPC handle of the event
+                that signals the completion of the retrieve operation. The second
+                element is a list indicating whether each key was successfully
+                retrieved.
+
+
+        Notes:
+            - The caller must ensure that all keys are present in the storage (i.e.,
+                a prior lookup should have been performed).
+        """
         # NOTE: this function will only return all True or all False even if
         # there is a partial hit. This is because we are requiring all the
         # retrieves objects is pre-locked by the lookup function (so they
@@ -384,6 +431,12 @@ class MPCacheEngine:
         return event.ipc_handle(), [True] * len(keys)
 
     def get_chunk_size(self) -> int:
+        """
+        Returns the chunk size used for KV cache operations.
+
+        Returns:
+            int: The chunk size.
+        """
         return self.chunk_size
 
     def lookup(
@@ -391,6 +444,23 @@ class MPCacheEngine:
         keys: list[IPCCacheEngineKey],
         lock: bool | None = None,
     ) -> list[bool]:
+        """
+        Looks up the presence of keys in the storage. The keys
+        should belongs to a single request (same prompt).
+
+        Args:
+            keys (list[IPCCacheEngineKey]): The keys to look up.
+            lock (bool | None): Whether to lock the found keys.
+
+        Returns:
+            list[bool]: A list indicating whether each key was found.
+
+        Notes:
+            - `lock` is going to be always True in the future.
+            - The function does prefix-based lookup. Therefore, it
+                requires that the keys are from the same request and
+                are in order.
+        """
         # NOTE: we are doing per-request lookup, the caller need
         # to be aware of this! We need to add this to the doc!
         found_count = self.storage_manager.lookup(keys)
@@ -400,6 +470,9 @@ class MPCacheEngine:
         return "OK"
 
     def clear(self) -> None:
+        """
+        Clears all stored KV cache data from the storage manager.
+        """
         with self.lock:
             self.storage_manager.memcheck()
             self.storage_manager.clear()
