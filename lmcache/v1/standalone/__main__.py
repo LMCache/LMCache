@@ -2,7 +2,7 @@
 """
 LMCache Standalone Starter
 
-A production-ready standalone starter for LMCacheEngine that:
+A standalone starter for LMCacheEngine that:
 - Loads configuration from YAML file or environment variables
 - Supports command-line parameter overrides
 - Starts a real LMCacheEngine instance
@@ -43,9 +43,21 @@ class LMCacheStandaloneStarter:
     ):
         self.config = config
         self.metadata = metadata
-        self.engine: Optional[LMCacheEngine] = None
-        self.lmcache_engine: Optional[LMCacheEngine] = None
-        self.api_server: Optional[InternalAPIServer] = None
+
+        # Create objects in constructor for better error handling
+        instance_id = self.config.lmcache_instance_id
+        self.lmcache_engine = LMCacheEngineBuilder.get_or_create(
+            instance_id=instance_id,
+            config=self.config,
+            metadata=self.metadata,
+            gpu_connector=None,
+            broadcast_fn=mock_up_broadcast_fn,
+            broadcast_object_fn=mock_up_broadcast_object_fn,
+        )
+
+        # Create API server in constructor
+        self.api_server = InternalAPIServer(self)  # type: ignore[arg-type]
+
         self.running = False
 
     def start(self) -> LMCacheEngine:
@@ -58,25 +70,13 @@ class LMCacheStandaloneStarter:
         logger.info(f"Metadata: {self.metadata}")
 
         instance_id = self.config.lmcache_instance_id
-        logger.info(f"Creating LMCache engine with instance ID: {instance_id}")
+        logger.info(f"Starting LMCache engine with instance ID: {instance_id}")
 
-        self.lmcache_engine = LMCacheEngineBuilder.get_or_create(
-            instance_id=instance_id,
-            config=self.config,
-            metadata=self.metadata,
-            gpu_connector=None,
-            broadcast_fn=mock_up_broadcast_fn,
-            broadcast_object_fn=mock_up_broadcast_object_fn,
-        )
-
-        logger.info("LMCache engine created successfully")
-        logger.info(f"Storage manager: {self.lmcache_engine.storage_manager}")
-
+        # Initialize the engine
         self.lmcache_engine.post_init()
         logger.info("LMCache engine post-initialized")
 
-        # Start internal API server (always enabled, config from LMCache config file)
-        self.api_server = InternalAPIServer(self)  # type: ignore[arg-type]
+        # Start internal API server
         self.api_server.start()
 
         self.running = True
@@ -94,11 +94,9 @@ class LMCacheStandaloneStarter:
             logger.info("Stopping internal API server...")
             self.api_server.stop()
 
-        if self.engine:
-            if hasattr(self.engine, "storage_manager") and self.engine.storage_manager:
-                logger.info("Closing storage manager...")
-                if hasattr(self.engine.storage_manager, "close"):
-                    self.engine.storage_manager.close()
+        if self.lmcache_engine:
+            logger.info("Closing LMCache engine...")
+            self.lmcache_engine.close()
 
             instance_id = self.config.lmcache_instance_id
             LMCacheEngineBuilder.destroy(instance_id)
