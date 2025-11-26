@@ -299,6 +299,7 @@ class RedisSentinelConnector(RemoteConnector):
             service_name, socket_timeout=timeout, username=username, password=password
         )
 
+        self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
     async def exists(self, key: CacheEngineKey) -> bool:
@@ -306,8 +307,8 @@ class RedisSentinelConnector(RemoteConnector):
         return bool(value)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        value = self.slave.exists(key.to_string() + "metadata")
-        return bool(value)
+        future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
+        return bool(future.result())
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
