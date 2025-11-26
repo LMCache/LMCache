@@ -5,13 +5,14 @@ from typing import Any
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
+from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy, KeyType
 
 logger = init_logger(__name__)
 
+MapType = OrderedDict[KeyType, Any]
 
-class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
+
+class LRUCachePolicy(BaseCachePolicy[KeyType, MapType]):
     """
     LRU cache policy.
     """
@@ -19,26 +20,26 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
     def __init__(self):
         logger.info("Initializing LRUCachePolicy")
 
-    def init_mutable_mapping(self) -> OrderedDict[CacheEngineKey, Any]:
+    def init_mutable_mapping(self) -> OrderedDict[KeyType, Any]:
         return OrderedDict()
 
     def update_on_hit(
         self,
-        key: CacheEngineKey,
-        cache_dict: OrderedDict[CacheEngineKey, Any],
+        key: KeyType,
+        cache_dict: OrderedDict[KeyType, Any],
     ) -> None:
         cache_dict.move_to_end(key)
 
     def update_on_put(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         # No action needed for LRU on put, as the key is already at the end.
         pass
 
     def update_on_force_evict(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         pass
 
@@ -46,9 +47,9 @@ class LRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
     # of returned keys mignt be smaller than num_candidates.
     def get_evict_candidates(
         self,
-        cache_dict: OrderedDict[CacheEngineKey, Any],
+        cache_dict: OrderedDict[KeyType, Any],
         num_candidates: int = 1,
-    ) -> list[CacheEngineKey]:
+    ) -> list[KeyType]:
         evict_keys = []
         for key, cache in cache_dict.items():
             if not cache.can_evict:
