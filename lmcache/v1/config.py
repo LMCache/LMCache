@@ -225,6 +225,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
+    "lmcache_worker_ids": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     # LMCache Worker heartbeat
     # the lmcache_worker_heartbeat_delay_time means that delay a period of time
     # before starting, ensures that the heartbeat starts working only after the
@@ -542,6 +547,7 @@ def _create_config_class():
             "log_config": _log_config,
             "to_original_config": _to_original_config,
             "get_extra_config_value": _get_extra_config_value,
+            "get_lmcache_worker_ids": _get_lmcache_worker_ids,
             "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
             "from_defaults": classmethod(_from_defaults),
             "from_legacy": classmethod(_from_legacy),
@@ -651,13 +657,27 @@ def _get_extra_config_value(self, key, default_value=None):
         return default_value
 
 
+def _get_lmcache_worker_ids(self, use_mla, world_size):
+    if not self.lmcache_worker_ids:
+        # if mla is not enabled, return all worker ids, which means start
+        # lmcache worker on all ranks as default;
+        # if mla is enabled, return [0], which means start lmcache
+        # worker on worker 0 as default.
+        return [0] if use_mla else list(range(world_size))
+
+    # check the input
+    for worker_id in self.lmcache_worker_ids:
+        assert -1 < worker_id < world_size
+    return self.lmcache_worker_ids
+
+
 def _get_lookup_server_worker_ids(self, use_mla, world_size):
-    if self.lookup_server_worker_ids is None:
-        # if mla is not enabled, return [], which means start
+    if not self.lookup_server_worker_ids:
+        # if mla is not enabled, return all worker ids, which means start
         # lookup server on all worker as default;
         # if mla is enabled, return [0], which means start lookup
         # server on worker 0 as default.
-        return [0] if use_mla else []
+        return [0] if use_mla else list(range(world_size))
 
     # check the input
     for worker_id in self.lookup_server_worker_ids:
