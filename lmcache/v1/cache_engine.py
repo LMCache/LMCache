@@ -351,9 +351,7 @@ class LMCacheEngine:
             # Create KV event
             if self.kv_events_enabled:
                 stored_event = CacheStoreEvent(
-                    block_hashes=[hash(key)]
-                    if isinstance(key, CacheEngineKey)
-                    else [key],
+                    block_hashes=[key.chunk_hash],
                     parent_block_hash=None if start == 0 else prev_key,
                     token_ids=[],
                     block_size=num_tokens,
@@ -372,7 +370,7 @@ class LMCacheEngine:
                     f"Added kv cache event '{stored_event}' to kv cache events queue"
                 )
                 self.kv_events.append(stored_event)
-                prev_key = hash(key) if isinstance(key, CacheEngineKey) else key
+                prev_key = key.chunk_hash
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
@@ -492,9 +490,7 @@ class LMCacheEngine:
             # Create KV event
             if self.kv_events_enabled and tokens is not None:
                 stored_event = CacheStoreEvent(
-                    block_hashes=[hash(key)]
-                    if isinstance(key, CacheEngineKey)
-                    else [key],
+                    block_hashes=[key.chunk_hash],
                     parent_block_hash=None if start == 0 else prev_key,
                     token_ids=tokens.tolist()[start : end + 1]
                     if isinstance(tokens, torch.Tensor)
@@ -507,7 +503,7 @@ class LMCacheEngine:
                     f"Added kv cache event '{stored_event}' to kv cache events queue"
                 )
                 self.kv_events.append(stored_event)
-                prev_key = hash(key) if isinstance(key, CacheEngineKey) else key
+                prev_key = key.chunk_hash
 
         if keys:
             # Transpose the keys and memory objects into layer major format
