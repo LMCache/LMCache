@@ -26,7 +26,7 @@ from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     SGLangLayerwiseGPUConnector,
@@ -120,7 +120,15 @@ class LMCacheEngine:
         from lmcache.v1.cache_controller import LMCacheWorker
 
         self.lmcache_worker: Optional[LMCacheWorker] = None
-        if self.enable_controller and self.metadata.role != "scheduler":
+        lmcache_worker_ids = config.get_lmcache_worker_ids(
+            metadata.use_mla, metadata.world_size
+        )
+        # lmcache_worker_ids is empty means start on all workers
+        if (
+            self.enable_controller
+            and self.metadata.role != "scheduler"
+            and (not lmcache_worker_ids or metadata.worker_id in lmcache_worker_ids)
+        ):
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
         self.async_loading = config.enable_async_loading
@@ -931,6 +939,42 @@ class LMCacheEngine:
             ),
             self.storage_manager.loop,
         )
+
+    def cleanup_memory_objs(self, lookup_id: str) -> None:
+        """
+        Cleanup memory objects allocated during prefetch for an aborted lookup.
+
+        Called by the scheduler when it determines that an aborted lookup
+        has finished its prefetch tasks.
+        """
+        try:
+            # Get the completed future from event_manager
+            if (
+                self.event_manager.get_event_status(EventType.LOADING, lookup_id)
+                != EventStatus.DONE
+            ):
+                logger.debug(
+                    "No completed event found for lookup_id=%s to clean up.", lookup_id
+                )
+                return
+            future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
+
+            # Get memory objects from the future result
+            memory_objs = future.result()
+            # Flatten nested lists (each backend returns a list of chunks)
+            memory_objs_flat = [mm for m in memory_objs for mm in m]
+
+            # Release each memory object
+            for memory_obj in memory_objs_flat:
+                try:
+                    logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
+                    memory_obj.ref_count_down()
+                except Exception as e:
+                    logger.error(f"Error releasing memory object: {e}")
+        except Exception as e:
+            logger.error(
+                f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
+            )
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
     # In this case, we compress all tokens.
