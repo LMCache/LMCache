@@ -12,6 +12,8 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
+    P2PInitSideMsg,
+    P2PInitSideRetMsg,
     SideMsg,
 )
 
@@ -53,6 +55,28 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
         """
 
         raise NotImplementedError
+
+    def handle_init_side_msg(
+        self,
+        req: InitSideMsgBase,
+    ) -> InitSideRetMsgBase:
+        """
+        Handle side messages during initialization.
+
+        :param req: The initialization-related side message
+        received from the peer.
+
+        :return: A side message to be sent back to the peer.
+        """
+        if isinstance(req, P2PInitSideMsg):
+            assert hasattr(self, "peer_lookup_url"), (
+                "P2PInitSideMsg requires `peer_lookup_url` attribute."
+            )
+            return P2PInitSideRetMsg(
+                peer_lookup_url=self.peer_lookup_url,
+            )
+        else:
+            raise ValueError(f"Unsupported InitSideMsg type: {type(req)}")
 
     def send_init_side_msg(
         self,
