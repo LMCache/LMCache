@@ -139,7 +139,8 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
     """
     print(f"Parsing key string: {key_str}")
     parts = key_str.strip().split("@")
-    # Layer mode: fmt@model@world_size@worker_id@chunk_hash@dtype@layer_id (7 parts, parts[6] is layer_id)
+    # Layer mode: fmt@model@world_size@worker_id@chunk_hash@dtype@layer_id
+    #             (7 parts, parts[6] is layer_id)
     # Non-layer mode: fmt@model@world_size@worker_id@chunk_hash@dtype (6 parts)
     if len(parts) >= 7 and parts[6].isdigit():
         return LayerCacheEngineKey.from_string(key_str)

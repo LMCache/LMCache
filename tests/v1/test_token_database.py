@@ -148,12 +148,6 @@ def test_hash_tokens_deterministicity(hash_algorithm, extra_keys_val):
     """Test that _hash_tokens produces deterministic results."""
     # Check if vLLM is available for sha256/sha256_cbor
     os.environ["PYTHONHASHSEED"] = "0"
-    if hash_algorithm in ["sha256", "sha256_cbor"]:
-        try:
-            from vllm.utils import sha256, sha256_cbor
-        except ImportError:
-            pytest.skip("vLLM not available, skipping sha256/sha256_cbor tests")
-
     cfg = LMCacheEngineConfig.from_legacy(
         chunk_size=256, backend="cpu", pre_caching_hash_algorithm=hash_algorithm
     )
@@ -175,7 +169,7 @@ def test_hash_tokens_deterministicity(hash_algorithm, extra_keys_val):
     # Test with list - should produce same hash as equivalent tensor
     tokens_list = [1, 2, 3, 4, 5]
     hash_list = db._hash_tokens(tokens_list, prefix_hash, extra_keys)
-    assert hash1 == hash_list, "List and tensor with same values should produce same hash"
+    assert hash1 == hash_list, "List and tensor should produce same hash"
 
 
 def test_hash_tokens_edge_cases():
