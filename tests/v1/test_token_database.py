@@ -146,7 +146,6 @@ def test_segment_token_database(prefix_length, chunk_lengths):
 )
 def test_hash_tokens_deterministicity(hash_algorithm, extra_keys_val):
     """Test that _hash_tokens produces deterministic results."""
-    # Check if vLLM is available for sha256/sha256_cbor
     os.environ["PYTHONHASHSEED"] = "0"
     cfg = LMCacheEngineConfig.from_legacy(
         chunk_size=256, backend="cpu", pre_caching_hash_algorithm=hash_algorithm
