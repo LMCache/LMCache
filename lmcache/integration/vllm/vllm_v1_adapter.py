@@ -409,8 +409,9 @@ class ReqMeta:
         # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
             logger.debug(
-                "Scheduled to load %d tokens for request %s",
+                "Scheduled to load %d tokens (%d cached in vLLM) for request %s",
                 load_spec.lmcache_cached_tokens,
+                load_spec.vllm_cached_tokens,
                 tracker.req_id,
             )
         else:
@@ -1501,6 +1502,7 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
+                num_computed_tokens=num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:

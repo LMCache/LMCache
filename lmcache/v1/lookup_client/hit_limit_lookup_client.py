@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 
 
 """
-HitLimitLookupClient now is used for test, when lookup is called, cal the cache hit,
+HitLimitLookupClient now is used for test, when lookup is called, call the cache hit,
 - if the cache hit <= (1 - hit_miss_ratio), direct return the result
 - if the cache hit > (1 - hit_miss_ratio), re-compute the result by hit_miss_ratio
 """
@@ -41,9 +41,15 @@ class HitLimitLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         # get real hit tokens
-        result = self.actual_lookup_client.lookup(token_ids, lookup_id, request_configs)
+        result = self.actual_lookup_client.lookup(
+            token_ids,
+            lookup_id,
+            request_configs,
+            num_computed_tokens,
+        )
         if result is not None:
             total_tokens_length = len(token_ids)
             assert result <= total_tokens_length

@@ -60,17 +60,30 @@ class LMCacheBypassLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         try:
             if not self.enable_blending:
                 # Process tokens to get hashes and offsets
                 hashes = []
                 offsets = []
+                # We already have hashes here so we can skip the chunks that are already
+                # in GPU cache. Don't pass num_computed_tokens to engine.
+                skip_n_tokens = (
+                    num_computed_tokens
+                    // self.config.chunk_size
+                    * self.config.chunk_size
+                )
                 for start, end, key in self.token_database.process_tokens(
                     token_ids, make_key=False
                 ):
+                    if end <= skip_n_tokens:
+                        continue
                     hashes.append(key)
                     offsets.append(end - start)
+                # Return skip_n_tokens immediately if there is no token to lookup
+                if len(hashes) == 0:
+                    return skip_n_tokens
 
                 # Call LMCacheEngine lookup with hashes and offsets
                 result = self.lmcache_engine.lookup(
@@ -79,6 +92,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     lookup_id=lookup_id,
                     pin=True,
                     request_configs=request_configs,
+                    num_computed_tokens=0,
                 )
             else:
                 # For blending mode, pass tokens directly
@@ -87,6 +101,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     lookup_id=lookup_id,
                     pin=True,
                     request_configs=request_configs,
+                    num_computed_tokens=num_computed_tokens,
                 )
 
             return result
