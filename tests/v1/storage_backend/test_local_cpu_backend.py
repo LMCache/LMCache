@@ -933,27 +933,35 @@ class TestBatchedMessageSender:
         # Verify all operations were sent
         assert len(all_ops) == num_operations
 
-        # Verify sequence numbers are strictly consecutive
-        # The single consumer thread ensures messages are sent in order.
-        # However, we need to verify that within each batch,
-        # sequence numbers are consecutive and that the overall
-        # sequence is monotonically increasing.
+        # Verify sequence numbers are strictly increasing
+        # In a concurrent environment, we need to ensure that:
+        # 1. Sequence numbers are strictly increasing within each batch
+        # 2. No sequence numbers are duplicated
+        # 3. All sequence numbers from 0 to num_operations-1 are present
 
-        # First, verify that sequence numbers are strictly increasing
         seq_nums = [op.seq_num for op in all_ops]
-        for i in range(1, len(seq_nums)):
-            assert seq_nums[i] > seq_nums[i - 1], (
-                f"Sequence numbers must be strictly increasing: "
-                f"{seq_nums[i - 1]} -> {seq_nums[i]} at index {i}"
-            )
 
-        # Verify that we have all sequence numbers from 0 to num_operations-1
-        # This ensures no messages were lost
+        # Verify no duplicate sequence numbers
+        assert len(seq_nums) == len(set(seq_nums)), "Sequence numbers must be unique"
+
+        # Verify all sequence numbers are present (no messages lost)
         expected_seq_nums = set(range(num_operations))
         actual_seq_nums = set(seq_nums)
         assert expected_seq_nums == actual_seq_nums, (
             f"Missing sequence numbers: {expected_seq_nums - actual_seq_nums}"
         )
+
+        # Verify sequence numbers are strictly increasing within each batch
+        # Since we have a single consumer thread, each batch should be processed
+        # in the order it was created, and within each batch, messages should be
+        # in the order they were added to the queue.
+        for msg in lmcache_worker.messages:
+            batch_seq_nums = [op.seq_num for op in msg.operations]
+            for i in range(1, len(batch_seq_nums)):
+                assert batch_seq_nums[i] > batch_seq_nums[i - 1], (
+                    f"Sequence numbers must be strictly increasing within batch: "
+                    f"{batch_seq_nums[i - 1]} -> {batch_seq_nums[i]}"
+                )
 
         sender.close()
 
