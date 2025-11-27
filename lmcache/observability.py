@@ -81,6 +81,8 @@ class LMCacheStats:
     interval_lookup_hit_rates: List[float]
     interval_lookup_0_hit_requests: int
 
+    interval_request_cache_lifespan: List[float]  # cache lifespan in minutes
+
 
 @dataclass
 class LookupRequestStats:
@@ -208,6 +210,9 @@ class LMCStatsMonitor:
         self.store_request_id = 0
         self.lookup_request_id = 0
 
+        self.interval_request_cache_lifespan: Dict[int, float] = {}
+        self.reuse_chunk_id = 0
+
     @thread_safe
     def on_lookup_request(self, num_tokens: int) -> int:
         """
@@ -311,6 +316,14 @@ class LMCStatsMonitor:
         p2p_stats = self.p2p_requests[request_id]
         self.interval_p2p_transferred_tokens += p2p_stats.num_tokens
         p2p_stats.end_time = curr_time
+
+    @thread_safe
+    def on_chunk_reuse(self, time_interval: float):
+        """
+        time_interval: float or int, in seconds
+        """
+        self.interval_request_cache_lifespan[self.reuse_chunk_id] = time_interval / 60.0
+        self.reuse_chunk_id += 1
 
     @thread_safe
     def update_local_cache_usage(self, usage: int):
@@ -447,6 +460,9 @@ class LMCStatsMonitor:
                 new_lookup_requests[request_id] = lookup_stats
         self.lookup_requests = new_lookup_requests
 
+        self.interval_request_cache_lifespan.clear()
+        self.reuse_chunk_id = 0
+
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
         """
@@ -502,6 +518,8 @@ class LMCStatsMonitor:
             ]
         )
 
+        request_lifespan = list(self.interval_request_cache_lifespan.values())
+
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
@@ -542,6 +560,7 @@ class LMCStatsMonitor:
             p2p_time_to_transfer=p2p_time_to_transfer,
             p2p_transfer_speed=p2p_transfer_speed,
             interval_lookup_hit_rates=request_lookup_hit_rates,
+            interval_request_cache_lifespan=request_lifespan,
             interval_prompt_tokens=self.interval_prompt_tokens,
             interval_lookup_0_hit_requests=self.interval_lookup_0_hit_requests,
         )
@@ -991,6 +1010,30 @@ class PrometheusLogger:
             buckets=request_cache_hit_rate,
         )
 
+        request_cache_lifespan_buckets = [
+            0,
+            1,
+            5,
+            10,
+            20,
+            40,
+            60,
+            80,
+            100,
+            250,
+            500,
+            750,
+            1000,
+            2500,
+            5000,
+        ]
+        self.histogram_request_cache_lifespan = self._histogram_cls(
+            name="lmcache:request_cache_lifespan",
+            documentation="Request cache lifespan in minutes",
+            labelnames=labelnames,
+            buckets=request_cache_lifespan_buckets,
+        )
+
         # Ping latency metrics: use a gauge to record the latest ping latency
         self.gauge_remote_ping_latency = self._gauge_cls(
             name="lmcache:remote_ping_latency",
@@ -1047,6 +1090,82 @@ class PrometheusLogger:
                 documentation=f"The number of {status.replace('_', ' ')} events",
                 labelnames=labelnames,
                 multiprocess_mode="sum",
+            ).labels(**self.labels)
+            setattr(self, metric_name, gauge)
+
+        # Chunk statistics metrics (dynamic)
+        self.chunk_statistics_enabled = self._gauge_cls(
+            name="lmcache:chunk_statistics_enabled",
+            documentation="Whether chunk statistics collection is enabled",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_total_requests = self._gauge_cls(
+            name="lmcache:chunk_statistics_total_requests",
+            documentation="Total number of requests processed by chunk statistics",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_total_chunks = self._gauge_cls(
+            name="lmcache:chunk_statistics_total_chunks",
+            documentation="Total number of chunks processed",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_unique_chunks = self._gauge_cls(
+            name="lmcache:chunk_statistics_unique_chunks",
+            documentation="Number of unique chunks (estimated)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_reuse_rate = self._gauge_cls(
+            name="lmcache:chunk_statistics_reuse_rate",
+            documentation="Chunk reuse rate (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_bloom_filter_size_mb = self._gauge_cls(
+            name="lmcache:chunk_statistics_bloom_filter_size_mb",
+            documentation="Bloom Filter memory usage in MB",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_bloom_filter_fill_rate = self._gauge_cls(
+            name="lmcache:chunk_statistics_bloom_filter_fill_rate",
+            documentation="Bloom Filter fill rate (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_file_count = self._gauge_cls(
+            name="lmcache:chunk_statistics_file_count",
+            documentation="Number of files created for file_hash strategy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.chunk_statistics_current_file_size = self._gauge_cls(
+            name="lmcache:chunk_statistics_current_file_size",
+            documentation="Current file size in bytes for file_hash strategy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
+        # Connector metrics
+        connector_metrics = [
+            "scheduler_unfinished_requests_count",
+            "connector_load_specs_count",
+            "connector_request_trackers_count",
+            "connector_kv_caches_count",
+            "connector_layerwise_retrievers_count",
+            "connector_invalid_block_ids_count",
+            "connector_requests_priority_count",
+        ]
+
+        for metric_name in connector_metrics:
+            gauge = self._gauge_cls(
+                name=f"lmcache:{metric_name}",
+                documentation=f"The count of {metric_name.replace('_', ' ')}",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
             ).labels(**self.labels)
             setattr(self, metric_name, gauge)
 
@@ -1158,6 +1277,9 @@ class PrometheusLogger:
         self._log_histogram(
             self.histogram_request_cache_hit_rate, stats.interval_lookup_hit_rates
         )
+        self._log_histogram(
+            self.histogram_request_cache_lifespan, stats.interval_request_cache_lifespan
+        )
         self._log_gauge(
             self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
         )
@@ -1182,6 +1304,7 @@ class PrometheusLogger:
         return {
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
+            "role": metadata.role,
         }
 
     _instance = None

@@ -66,16 +66,19 @@ class IPCCacheEngineKey:
 
     @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
+        # NOTE: this is only used by tests
         return chunk_hash.to_bytes(4, byteorder="big")
 
     @staticmethod
     def Bytes2IntHash(chunk_hash: bytes) -> int:
+        # NOTE: this is only used by tests
         return int.from_bytes(chunk_hash, byteorder="big") & ((1 << 64) - 1)
 
     @classmethod
     def from_int_hash(
         cls, model_name: str, world_size: int, worker_id: int, chunk_hash: int
     ) -> "IPCCacheEngineKey":
+        # NOTE: this is only used by tests
         return cls(
             model_name=model_name,
             world_size=world_size,
