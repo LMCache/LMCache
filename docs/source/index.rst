@@ -77,6 +77,7 @@ Documentation
    getting_started/kv_cache_calculator
    getting_started/troubleshoot
    getting_started/faq
+   getting_started/quickstart/standalone_starter
    
 
 :raw-html:`<br />`
@@ -169,4 +170,3 @@ Documentation
    community/blogs
 
 :raw-html:`<br />`
-   
