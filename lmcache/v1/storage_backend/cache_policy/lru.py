@@ -20,16 +20,20 @@ class LRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
 
     def __init__(self):
         logger.info("Initializing LRUCachePolicy")
-        self.chunk_hash_to_init_timestamp: Dict[int, float] = {}
+        self.chunk_hash_to_init_timestamp: Dict[Any, float] = {}
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.max_num_chunk_hash = 12500000
 
     def init_mutable_mapping(self) -> OrderedDict[KeyType, Any]:
         return OrderedDict()
 
-    def update_chunk_hash_dict(self, key: CacheEngineKey) -> None:
+    def update_chunk_hash_dict(self, key: KeyType) -> None:
         curr_time = time.time()
-        key_hash = key.chunk_hash
+        # HACK: doing type conversion here
+        key_hash: Any = key
+        if isinstance(key, CacheEngineKey):
+            key_hash = key.chunk_hash
+
         if init_timestamp := self.chunk_hash_to_init_timestamp.get(key_hash, None):
             time_interval = curr_time - init_timestamp
             self.stats_monitor.on_chunk_reuse(time_interval)
