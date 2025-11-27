@@ -100,8 +100,16 @@ class BatchedMessageSender:
                 # Wait for timeout or notification from producer
                 self.cv.wait(timeout=self.batch_timeout)
 
-            # Drain the queue and send messages
-            self._drain_and_send()
+                # Check if we have messages to process while still holding the lock
+                # This prevents race conditions where producers add messages after
+                # we're notified but before we start processing
+                if self.message_queue.empty():
+                    continue
+
+                # Drain the queue and send messages while still holding the lock
+                # This ensures strict ordering: no new messages can be added
+                # while we're processing the current batch
+                self._drain_and_send()
 
     def _get_next_sequence_number(self) -> int:
         """Get next sequence number for message tracking.

@@ -935,9 +935,24 @@ class TestBatchedMessageSender:
 
         # Verify sequence numbers are strictly consecutive
         # The single consumer thread ensures messages are sent in order.
+        # However, we need to verify that within each batch,
+        # sequence numbers are consecutive and that the overall
+        # sequence is monotonically increasing.
+
+        # First, verify that sequence numbers are strictly increasing
         seq_nums = [op.seq_num for op in all_ops]
-        assert seq_nums == list(range(num_operations)), (
-            "Sequence numbers must be consecutive starting from 0"
+        for i in range(1, len(seq_nums)):
+            assert seq_nums[i] > seq_nums[i - 1], (
+                f"Sequence numbers must be strictly increasing: "
+                f"{seq_nums[i - 1]} -> {seq_nums[i]} at index {i}"
+            )
+
+        # Verify that we have all sequence numbers from 0 to num_operations-1
+        # This ensures no messages were lost
+        expected_seq_nums = set(range(num_operations))
+        actual_seq_nums = set(seq_nums)
+        assert expected_seq_nums == actual_seq_nums, (
+            f"Missing sequence numbers: {expected_seq_nums - actual_seq_nums}"
         )
 
         sender.close()
