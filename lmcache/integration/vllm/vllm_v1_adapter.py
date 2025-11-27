@@ -20,6 +20,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.request import RequestStatus
 
 # First Party
 # Use LMCache's own math utilities instead of vllm's
@@ -1632,10 +1633,25 @@ class LMCacheConnectorV1Impl:
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
 
+            # Handle both old and new versions of CachedRequestData
+            if hasattr(cached_reqs, "resumed_req_ids"):
+                # New version with resumed_req_ids
+                preempted = req_id in cached_reqs.resumed_req_ids
+            elif hasattr(cached_reqs, "resumed_from_preemption"):
+                # Old version with resumed_from_preemption
+                preempted = cached_reqs.resumed_from_preemption[i]
+            else:
+                # This case should not be reached with supported vLLM versions.
+                # Raising an error is safer than assuming not preempted.
+                raise AttributeError(
+                    f"Unable to determine preemption status for request {req_id}. "
+                    f"This might be due to an unsupported vLLM version."
+                )
+
             request_tracker.update(
                 new_token_ids,
                 new_block_ids,
-                preempted=req_id in cached_reqs.resumed_req_ids,
+                preempted=preempted,
                 lmcache_cached_tokens=lmcache_cached_tokens,
             )
 
@@ -1658,6 +1674,14 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        # Cleanup if request was aborted
+        if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
+            # Cancel any ongoing async lookup and prefetch tasks on workers
+            lookup_id = request.request_id
+            self.lookup_client.cancel_lookup(  # type: ignore[attr-defined]
+                lookup_id
+            )
+
         params = (
             request.kv_transfer_params
             if hasattr(request, "kv_transfer_params")

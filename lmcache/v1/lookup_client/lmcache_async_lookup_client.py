@@ -15,6 +15,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.async_lookup_message import (
+    LookupCleanupMsg,
     LookupRequestMsg,
     LookupResponseMsg,
 )
@@ -140,6 +141,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # The two parts are [lookup_id (i.e., req_id), num_hit_tokens]
         self.num_parts = 2
 
+        # Track lookup_ids that have been aborted for cleanup
+        self.aborted_lookups: set[str] = set()
+
         self.running = True
 
         self.thread = threading.Thread(
@@ -165,6 +169,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
+        # Check if any aborted lookups are finished, send cleanup messages
+        self._cleanup_finished_aborted_lookups()
+
         with self.lock:
             # -1 indicates not found; None indicates ongoing.
             req_status = self.reqs_status.get(lookup_id, -1)
@@ -249,6 +256,36 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             self.reqs_status.pop(lookup_id, None)
             self.first_lookup_time.pop(lookup_id, None)
 
+    def cancel_lookup(self, lookup_id: str) -> None:
+        """Mark lookup as aborted. Cleanup will happen after task finishes."""
+        self.aborted_lookups.add(lookup_id)
+
+    def _cleanup_finished_aborted_lookups(self) -> None:
+        """Check for finished aborted lookups and send cleanup messages to workers."""
+        # A lookup whose status is None is still loading.
+        # We wait for it to finish before cleanup.
+        finished_lookups = [
+            lookup_id
+            for lookup_id in self.aborted_lookups
+            if self.reqs_status.get(lookup_id) is not None
+        ]
+        if finished_lookups:
+            self.aborted_lookups.difference_update(finished_lookups)
+
+        # Tell the server to free the reserved memory buffers for each aborted lookup.
+        for lookup_id in finished_lookups:
+            self._send_cleanup_message(lookup_id)
+            self.clear_lookup_status(lookup_id)
+
+    def _send_cleanup_message(self, lookup_id: str) -> None:
+        """Send cleanup message to workers to release memory objects."""
+        msg = LookupCleanupMsg(lookup_id=lookup_id)
+        msg_buf = msgspec.msgpack.encode(msg)
+
+        for i in range(self.num_ranks):
+            self.push_sockets[i].send(msg_buf, copy=False)
+        logger.debug("Sent cleanup message for lookup_id=%s", lookup_id)
+
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
         return True
@@ -313,9 +350,11 @@ class LMCacheAsyncLookupServer:
         while self.running:
             try:
                 msg_buf = self.pull_socket.recv(copy=False)
+                # rely on msgspec to automatically discriminate
+                # between LookupRequestMsg and LookupCleanupMsg
                 msg = msgspec.msgpack.decode(
                     msg_buf,
-                    type=LookupRequestMsg,
+                    type=Union[LookupRequestMsg, LookupCleanupMsg],
                 )
 
                 if isinstance(msg, LookupRequestMsg):
@@ -327,11 +366,16 @@ class LMCacheAsyncLookupServer:
                         pin=True,
                         request_configs=msg.request_configs,
                     )
+
+                elif isinstance(msg, LookupCleanupMsg):
+                    # Handle cleanup request - release memory objects for aborted lookup
+                    self.lmcache_engine.cleanup_memory_objs(msg.lookup_id)
+
                 else:
-                    logger.warning(f"Unknown message type: {type(msg)}")
+                    logger.warning("Unknown message type: %s", type(msg))
 
             except Exception as e:
-                logger.error(f"Error processing request from scheduler: {e}")
+                logger.error("Error processing request from scheduler: %s", e)
 
     def send_response_to_scheduler(self, lookup_id: str, num_hit_tokens: int):
         # Create structured response message
