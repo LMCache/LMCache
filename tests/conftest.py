@@ -204,8 +204,8 @@ class MockRedisSentinel:
         self.socket_timeout = socket_timeout
         # Create a shared store but separate instances for master/slave
         self.shared_store = {}
-        self.master_redis = MockRedis()
-        self.slave_redis = MockRedis()
+        self.master_redis = MockAsyncRedis()
+        self.slave_redis = MockAsyncRedis()
         # Share the store between master and slave to simulate Redis Sentinel behavior
         self.master_redis.store = self.shared_store
         self.slave_redis.store = self.shared_store
