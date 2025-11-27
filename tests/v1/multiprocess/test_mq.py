@@ -4,7 +4,6 @@ from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
 import multiprocessing as mp
 import sys
-import threading
 import time
 
 # Third Party
@@ -17,7 +16,6 @@ from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineK
 from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
     MessageQueueServer,
-    MessagingFuture,
 )
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -27,149 +25,6 @@ from lmcache.v1.multiprocess.protocol import (
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
-
-
-def test_messaging_future_basic_usage():
-    """Test basic usage of MessagingFuture: set result and retrieve it."""
-    future = MessagingFuture[int]()
-
-    # Initially, future should not be done
-    assert not future.query(), "Future should not be done initially"
-
-    # Set result
-    future.set_result(42)
-
-    # Future should now be done
-    assert future.query(), "Future should be done after setting result"
-
-    # Get result (should be immediate)
-    result = future.result(timeout=1)
-    assert result == 42, f"Expected result 42, got {result}"
-
-
-def test_messaging_future_with_thread():
-    """Test MessagingFuture with result set from another thread."""
-    future = MessagingFuture[str]()
-
-    def set_future_result():
-        time.sleep(0.5)
-        future.set_result("Hello from thread")
-
-    # Start thread that will set the result
-    thread = threading.Thread(target=set_future_result)
-    thread.start()
-
-    # Initially should not be done
-    assert not future.query(), "Future should not be done before thread sets result"
-
-    # Wait for result
-    result = future.result(timeout=2)
-    assert result == "Hello from thread", f"Expected 'Hello from thread', got {result}"
-
-    # Should be done now
-    assert future.query(), "Future should be done after getting result"
-
-    thread.join()
-
-
-def test_messaging_future_wait_success():
-    """Test wait method when result becomes available."""
-    future = MessagingFuture[int]()
-
-    def set_future_result():
-        time.sleep(0.3)
-        future.set_result(100)
-
-    thread = threading.Thread(target=set_future_result)
-    thread.start()
-
-    # Wait should return True when result is set
-    success = future.wait(timeout=1)
-    assert success, "Wait should return True when result is available"
-    assert future.query(), "Future should be done after wait returns True"
-
-    thread.join()
-
-
-def test_messaging_future_wait_timeout():
-    """Test wait method when timeout is reached."""
-    future = MessagingFuture[int]()
-
-    # Wait with short timeout (result never set)
-    start_time = time.time()
-    success = future.wait(timeout=0.2)
-    elapsed = time.time() - start_time
-
-    assert not success, "Wait should return False on timeout"
-    assert not future.query(), "Future should not be done after timeout"
-    assert 0.15 < elapsed < 0.3, f"Wait should respect timeout, elapsed: {elapsed}"
-
-
-def test_messaging_future_result_timeout():
-    """Test result method raises TimeoutError when timeout is reached."""
-    future = MessagingFuture[int]()
-
-    # Try to get result with timeout (result never set)
-    with pytest.raises(
-        TimeoutError, match="Future result not available within timeout"
-    ):
-        future.result(timeout=0.2)
-
-    assert not future.query(), "Future should not be done after timeout"
-
-
-def test_messaging_future_wait_no_timeout():
-    """Test wait method without timeout (waits indefinitely until result is set)."""
-    future = MessagingFuture[float]()
-
-    def set_future_result():
-        time.sleep(0.3)
-        future.set_result(3.14)
-
-    thread = threading.Thread(target=set_future_result)
-    thread.start()
-
-    # Wait without timeout should wait until result is available
-    success = future.wait()  # No timeout parameter
-    assert success, "Wait should return True when result is set"
-    assert future.result() == 3.14, "Result should be accessible after wait"
-
-    thread.join()
-
-
-def test_messaging_future_multiple_result_calls():
-    """Test that result can be retrieved multiple times after being set."""
-    future = MessagingFuture[str]()
-    future.set_result("persistent value")
-
-    # Get result multiple times
-    result1 = future.result(timeout=0.1)
-    result2 = future.result(timeout=0.1)
-    result3 = future.result(timeout=0.1)
-
-    assert result1 == result2 == result3 == "persistent value", (
-        "Result should be retrievable multiple times"
-    )
-
-
-def test_messaging_future_complex_type():
-    """Test MessagingFuture with complex types like lists and dicts."""
-    future = MessagingFuture[dict]()
-
-    complex_data = {"key1": [1, 2, 3], "key2": {"nested": "value"}, "key3": 42}
-
-    def set_future_result():
-        time.sleep(0.2)
-        future.set_result(complex_data)
-
-    thread = threading.Thread(target=set_future_result)
-    thread.start()
-
-    result = future.result(timeout=1)
-    assert result == complex_data, "Complex types should be preserved"
-
-    thread.join()
-
 
 # ==============================================================================
 # MessageQueueServer and MessageQueueClient Tests Infrastructure
@@ -564,6 +419,7 @@ def test_mq_store():
     ]
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
+    test_handle = b"\x00" * 64
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5562")
@@ -572,8 +428,8 @@ def test_mq_store():
     # Run test with STORE request
     helper.run_test(
         request_type=RequestType.STORE,
-        payloads=[keys, gpu_id, gpu_block_ids],
-        expected_response=True,
+        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
+        expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
 
@@ -593,6 +449,7 @@ def test_mq_retrieve():
     ]
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
+    test_handle = b"\x00" * 64
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5563")
@@ -603,8 +460,8 @@ def test_mq_retrieve():
     # Run test with RETRIEVE request
     helper.run_test(
         request_type=RequestType.RETRIEVE,
-        payloads=[keys, gpu_id, gpu_block_ids],
-        expected_response=[True, True, True],
+        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
+        expected_response=(b"\x01" * 64, [True, True, True]),
         num_requests=1,
     )
 

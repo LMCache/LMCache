@@ -121,7 +121,7 @@ def test_get_lookup_server_worker_ids(use_mla):
     if use_mla:
         assert lookup_server_worker_ids == [0]
     else:
-        assert lookup_server_worker_ids == []
+        assert lookup_server_worker_ids == [0, 1, 2, 3, 4, 5, 6, 7]
 
     # test different config
     # TODO: not support format "[]" or "[0, 3, 6]

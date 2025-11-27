@@ -45,6 +45,17 @@ class RequestType(enum.Enum):
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
 
+    # Controller operations
+    CLEAR = enum.auto()
+    # REMOVE = enum.auto()
+    # PERSIST = enum.auto()
+    # UNPERSIST = enum.auto()
+    # MOVE = enum.auto()
+    # COMPRESS = enum.auto()
+
+    # For configuration read commands (vllm integration)
+    GET_CHUNK_SIZE = enum.auto()
+
     # For debug, could be used as heartbeats
     NOOP = enum.auto()
 
@@ -111,21 +122,23 @@ _PROTOCOL_DEFINTIONS = {
     # - keys: list[KeyType]
     # - instance_id: int
     # - gpu_block_ids: list[int]
-    # Returns: bool (success)
+    # - event_ipc_handle: bytes
+    # Returns: cuda event handle, bool (success)
     RequestType.STORE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int]],
-        response_class=bool,
+        payload_classes=[list[KeyType], int, list[int], bytes],
+        response_class=tuple[bytes, bool],
         handler_type=HandlerType.BLOCKING,
     ),
     # Retrieve
     # - keys: list[KeyType]
     # - instance_id: int
     # - gpu_block_ids: list[int]
-    # Returns: list[bool]
+    # - event_ipc_handle: bytes
+    # Returns: cuda event handle, list[bool]
     # NOTE: no layerwise support for now
     RequestType.RETRIEVE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int]],
-        response_class=list[bool],
+        payload_classes=[list[KeyType], int, list[int], bytes],
+        response_class=tuple[bytes, list[bool]],
         handler_type=HandlerType.BLOCKING,
     ),
     # Lookup
@@ -136,6 +149,19 @@ _PROTOCOL_DEFINTIONS = {
         payload_classes=[list[KeyType], Optional[bool]],
         response_class=list[bool],
         handler_type=HandlerType.BLOCKING,
+    ),
+    # Clear (all caches)
+    # - Returns: None
+    RequestType.CLEAR: ProtocolDefinition(
+        payload_classes=[],
+        response_class=None,
+        handler_type=HandlerType.BLOCKING,
+    ),
+    # Configuration read commands
+    RequestType.GET_CHUNK_SIZE: ProtocolDefinition(
+        payload_classes=[],
+        response_class=int,
+        handler_type=HandlerType.SYNC,
     ),
     # Debug commands
     RequestType.NOOP: ProtocolDefinition(
