@@ -133,8 +133,8 @@ class LMCacheEngine:
         else:
             self.lmcache_worker = None
             logger.info(
-                "LMCacheWorker is not initialized. enable_controller: %s, "
-                "role: %s, worker_id: %s, worker_ids: %s",
+                "LMCacheWorker is not initialized (related configs: "
+                "enable_controller: %s, role: %s, worker_id: %s, worker_ids: %s).",
                 self.enable_controller,
                 self.metadata.role,
                 self.metadata.worker_id,
