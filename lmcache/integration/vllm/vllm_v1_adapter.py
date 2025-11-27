@@ -212,10 +212,17 @@ class RequestTracker:
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
+        # In case of P/D disaggregated inference, the new request the
+        # decode node gets will include the first output token.
+        token_ids = (
+            new_request.prompt_token_ids[:num_tokens_to_compute].copy()
+            + new_request.output_token_ids.copy()
+        )
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            token_ids=token_ids,
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
