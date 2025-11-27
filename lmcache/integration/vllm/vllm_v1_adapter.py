@@ -1364,6 +1364,9 @@ class LMCacheConnectorV1Impl:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        # Ignore DP attention mock requests
+        if request.request_id.startswith("mock_req"):
+            return 0
         # to handle preempted requests, we want `get_num_new_matched_tokens` to be
         # idempotent under the condition that `update_state_after_alloc` is NOT called
         # then the two side-effects that must be idempotent are:
@@ -1547,6 +1550,9 @@ class LMCacheConnectorV1Impl:
         # can_load will only be True if `update_state_after_alloc` has been called
         # which only happens when vLLM's KV manager has space to receive KV from LMCache
         for request in scheduler_output.scheduled_new_reqs:
+            # Ignore DP attention mock requests
+            if request.req_id.startswith("mock_req"):
+                continue
             load_spec = self.load_specs.pop(request.req_id, None)
             num_tokens_to_compute = (
                 request.num_computed_tokens
