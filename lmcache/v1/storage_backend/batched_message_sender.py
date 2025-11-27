@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, List, Optional
-import asyncio
+import queue
 import threading
 
 # First Party
@@ -65,16 +65,15 @@ class BatchedMessageSender:
         self.worker_id = metadata.worker_id
         self.location = location
 
-        # Use a single queue to maintain order consistency between admit and evict
-        # Store lightweight operations without redundant common fields
-        self.message_queue: List[KVOpEvent] = []
+        # Use thread-safe queue for producer-consumer pattern
+        self.message_queue: queue.Queue[KVOpEvent] = queue.Queue()
         self.sequence_number = 0
-        self.lock = threading.Lock()
+        self.sequence_lock = threading.Lock()
 
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.thread: Optional[threading.Thread] = None
-        self.flush_task: Optional[asyncio.Task] = None
+        # Condition variable for coordinating producer and consumer
+        self.cv = threading.Condition()
         self.running = False
+        self.thread: Optional[threading.Thread] = None
 
         self._start_background_thread()
 
@@ -85,33 +84,34 @@ class BatchedMessageSender:
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
             prometheus_logger.kv_msg_queue_size.set_function(
-                lambda: len(self.message_queue)
+                lambda: self.message_queue.qsize()
             )
 
     def _start_background_thread(self):
         """Start background thread for periodic flushing."""
         self.running = True
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self._run_event_loop, daemon=True)
+        self.thread = threading.Thread(target=self._consumer_loop, daemon=True)
         self.thread.start()
 
-    def _run_event_loop(self):
-        """Run the event loop in background thread."""
-        asyncio.set_event_loop(self.loop)
-        self.flush_task = self.loop.create_task(self._periodic_flush())
-        self.loop.run_forever()
-
-    async def _periodic_flush(self):
-        """Periodically flush messages based on timeout."""
+    def _consumer_loop(self):
+        """Consumer loop that drains queue and sends batched messages."""
         while self.running:
-            await asyncio.sleep(self.batch_timeout)
-            self._flush_if_needed(force=True)
+            with self.cv:
+                # Wait for timeout or notification from producer
+                self.cv.wait(timeout=self.batch_timeout)
+
+            # Drain the queue and send messages
+            self._drain_and_send()
 
     def _get_next_sequence_number(self) -> int:
-        """Get next sequence number for message tracking."""
-        seq = self.sequence_number
-        self.sequence_number += 1
-        return seq
+        """Get next sequence number for message tracking.
+
+        Thread-safe: Uses dedicated lock for sequence number generation.
+        """
+        with self.sequence_lock:
+            seq = self.sequence_number
+            self.sequence_number += 1
+            return seq
 
     def add_kv_op(
         self,
@@ -120,69 +120,82 @@ class BatchedMessageSender:
     ):
         """Add a KV operation to the batch queue.
 
+        Producer method: Adds operation to queue and notifies consumer
+        when batch size threshold is reached.
+
         Args:
             op_type: Operation type (ADMIT or EVICT)
             key: Chunk hash key
         """
+        seq_num = self._get_next_sequence_number()
+        op = KVOpEvent(op_type=op_type, key=key, seq_num=seq_num)
 
-        with self.lock:
-            # Store only the lightweight operation
-            seq_num = self._get_next_sequence_number()
-            op = KVOpEvent(op_type=op_type, key=key, seq_num=seq_num)
-            self.message_queue.append(op)
-            self._flush_if_needed(force=False)
+        # Thread-safe queue put
+        self.message_queue.put(op)
 
-    def _flush_if_needed(self, force: bool = False):
-        """Flush messages if batch size threshold is reached or force is True.
+        # Notify consumer if batch size threshold is reached
+        if self.message_queue.qsize() >= self.batch_size:
+            with self.cv:
+                self.cv.notify()
 
-        NOTE: This method must be called with self.lock held.
+    def _drain_and_send(self):
+        """Drain the queue and send all messages in a batch.
+
+        This method is called by the consumer thread to collect all pending
+        operations from the queue and send them as a single batched message.
         """
+        if self.message_queue.empty():
+            return
 
-        should_flush = (force and len(self.message_queue) > 0) or (
-            len(self.message_queue) >= self.batch_size
+        ops_to_send: List[KVOpEvent] = []
+
+        # Drain all messages from the queue
+        while not self.message_queue.empty():
+            try:
+                op = self.message_queue.get_nowait()
+                ops_to_send.append(op)
+                # Mark task as done to maintain queue count accuracy
+                self.message_queue.task_done()
+            except queue.Empty:
+                break
+
+        if not ops_to_send:
+            return
+
+        # Ensure common fields are set
+        assert self.instance_id is not None, "instance_id must be set"
+        assert self.worker_id is not None, "worker_id must be set"
+        assert self.location is not None, "location must be set"
+
+        # Create batched message with common fields and lightweight operations
+        # This reduces redundancy: common fields are sent once instead of N times
+        batched_msg = BatchedKVOperationMsg(
+            instance_id=self.instance_id,
+            worker_id=self.worker_id,
+            location=self.location,
+            operations=ops_to_send,
         )
-        if should_flush:
-            ops_to_send: List[KVOpEvent] = self.message_queue[:]
-            self.message_queue.clear()
-
-            # Ensure common fields are set (should be set by first message)
-            assert self.instance_id is not None, "instance_id must be set"
-            assert self.worker_id is not None, "worker_id must be set"
-            assert self.location is not None, "location must be set"
-
-            # Create batched message with common fields and lightweight operations
-            # This reduces redundancy: common fields are sent once instead of N times
-            batched_msg = BatchedKVOperationMsg(
-                instance_id=self.instance_id,
-                worker_id=self.worker_id,
-                location=self.location,
-                operations=ops_to_send,
-            )
-            self.lmcache_worker.put_msg(batched_msg)
+        self.lmcache_worker.put_msg(batched_msg)
 
     def flush(self):
         """Manually flush all pending messages."""
-        with self.lock:
-            self._flush_if_needed(force=True)
+        self._drain_and_send()
 
     def close(self):
         """Close the batched message sender and flush remaining messages."""
         self.running = False
 
+        # Wake up consumer thread to exit
+        with self.cv:
+            self.cv.notify()
+
+        # Wait for thread to finish
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+            if self.thread.is_alive():
+                logger.warning(
+                    "Batched message sender thread did not terminate within timeout"
+                )
+
         # Flush remaining messages
         self.flush()
-
-        # Stop and close event loop
-        if self.loop is not None:
-            if self.loop.is_running():
-                self.loop.call_soon_threadsafe(self.loop.stop)
-            # Wait for thread to finish
-            if self.thread is not None and self.thread.is_alive():
-                self.thread.join(timeout=1.0)
-                if self.thread.is_alive():
-                    logger.warning(
-                        "Batched message sender thread did not terminate within timeout"
-                    )
-            # Close the loop after thread stops
-            if not self.loop.is_closed():
-                self.loop.close()

@@ -156,7 +156,6 @@ class LMCacheControllerManager:
                         location=location,
                         seq_num=op.seq_num,
                     )
-                    # Check sequence number if available
                     self.kv_controller.check_sequence_number(admit_msg)
                     await self.kv_controller.admit(admit_msg)
                 elif op.op_type == OpType.EVICT:
@@ -167,11 +166,10 @@ class LMCacheControllerManager:
                         location=location,
                         seq_num=op.seq_num,
                     )
-                    await self.kv_controller.evict(evict_msg)
-                    # Check sequence number if available
                     self.kv_controller.check_sequence_number(evict_msg)
+                    await self.kv_controller.evict(evict_msg)
                 else:
-                    logger.error(f"Unknown operation type: {op.op_type}")
+                    logger.error("Unknown operation type: %s", op.op_type)
         # TODO(baoloongmao): Use BatchedKVOperationMsg instead of these two
         elif isinstance(msg, KVAdmitMsg):
             await self.kv_controller.admit(msg)
