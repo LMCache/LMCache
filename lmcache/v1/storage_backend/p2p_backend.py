@@ -425,7 +425,7 @@ class P2PBackend(StorageBackendInterface):
             return BatchedLookupAndPutRetMsg(num_read_chunks=len(local_mem_objs))
         except Exception as e:
             logger.error(
-                "Error during P2P batched lookup and put operation for lookup_id %s",
+                "Error during P2P batched lookup and put operation: %s",
                 e,
                 exc_info=True,
             )
