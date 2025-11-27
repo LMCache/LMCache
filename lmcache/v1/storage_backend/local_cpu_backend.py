@@ -10,11 +10,13 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -335,6 +337,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
 
         if config.enable_p2p:
+            # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
+            # For now, keep the original P2P implementation
             assert metadata is not None
             meta_shape = torch.Size(metadata.kv_shape)
             # TODO(Jiayi): remove this hardcode
@@ -347,8 +351,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 ]
             )
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
+            chunk_size_bytes = get_size_bytes(new_shape, metadata.kv_dtype)
+            origin_cpu_size_bytes = int(cpu_size * 1024**3)
+            align_cpu_size_bytes = (
+                origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
+            )
+            logger.info(
+                f"Auto align cpu size bytes, origin: {origin_cpu_size_bytes}, "
+                f"aligned: {align_cpu_size_bytes}, chunk size: {chunk_size_bytes}"
+            )
             paged_mem_allocator.init_cpu_memory_allocator(
-                int(cpu_size * 1024**3),
+                align_cpu_size_bytes,
                 shape=new_shape,
                 dtype=metadata.kv_dtype,
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
@@ -356,10 +369,42 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             return paged_mem_allocator
         else:
-            return MixedMemoryAllocator(
-                int(cpu_size * 1024**3),
-                numa_mapping=numa_mapping,
+            # Check if lazy memory allocator should be enabled
+            use_lazy = (
+                config.enable_lazy_memory_allocator
+                and cpu_size > config.lazy_memory_safe_size
             )
+
+            if use_lazy:
+                logger.info(
+                    f"Using LazyMixedMemoryAllocator with "
+                    f"initial_ratio={config.lazy_memory_initial_ratio}, "
+                    f"expand_trigger_ratio="
+                    f"{config.lazy_memory_expand_trigger_ratio}, "
+                    f"step_ratio={config.lazy_memory_step_ratio}"
+                )
+                return LazyMixedMemoryAllocator(
+                    int(cpu_size * 1024**3),
+                    config=config,
+                    numa_mapping=numa_mapping,
+                    memory_limit_callback=lambda: int(
+                        self._calculate_effective_cpu_size(cpu_size, config, metadata)
+                        * 1024**3
+                    ),
+                )
+            else:
+                if config.enable_lazy_memory_allocator:
+                    logger.info(
+                        f"LazyMixedMemoryAllocator is disabled because "
+                        f"cpu_size ({cpu_size:.2f} GB) does not exceed "
+                        f"lazy_memory_safe_size "
+                        f"({config.lazy_memory_safe_size:.2f} GB). "
+                        f"Using MixedMemoryAllocator instead."
+                    )
+                return MixedMemoryAllocator(
+                    int(cpu_size * 1024**3),
+                    numa_mapping=numa_mapping,
+                )
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -573,7 +618,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         Returns:
             int: The estimated chunk budget for concurrent allocations
         """
-        logger.info("Attempting to calculate chunk budget for async loading")
+        logger.debug("Attempting to calculate chunk budget for async loading")
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
         )
@@ -597,13 +642,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
         else:
             # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
             chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
-        logger.info(
+        logger.debug(
             f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
             f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
             f"dtype_size={dtype_size}, "
             f"hidden_dim={hidden_dim}"
         )
-        logger.info(f"Calculated bytes per chunk per rank: {chunk_bytes}")
+        logger.debug(f"Calculated bytes per chunk per rank: {chunk_bytes}")
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         assert hasattr(self.memory_allocator, "align_bytes")
@@ -613,8 +658,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # calculate budget with safety margin
         max_chunks = total_memory // aligned_chunk_bytes
 
-        chunk_budget = int(max_chunks)
-        return chunk_budget
+        return max_chunks
 
     def get_keys(self) -> List[CacheEngineKey]:
         """

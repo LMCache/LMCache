@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import namedtuple
 from typing import TYPE_CHECKING, Optional, Union
 import json
 import threading
@@ -32,12 +33,14 @@ class LMCacheLookupClient(LookupClientInterface):
     ZMQ-based lookup client that communicates with a lookup server.
 
     Related extra_config:
-    - mla_lookup_server_worker_id:
-        is a flag to control whether to create lookup server only on one worker.
-        if mla is not enabled, default is -1;
-        if mla is enabled, default is 0;
-        - if mla_lookup_server_worker_id < 0, start lookup server on all workers
-        - if mla_lookup server_worker_id >= 0, start lookup server on the given worker
+    - lookup_server_worker_ids:
+        is a config to control create lookup server on some workers.
+        if mla is not enabled, default is [];
+        if mla is enabled, default is [0];
+        - if lookup_server_worker_ids is [], start lookup server on all workers
+        - if lookup_server_worker_ids is [0], start lookup server on worker0
+        - if lookup_server_worker_ids is [0, 3, 6], start lookup server on
+          worker0, worker3 and worker6
     """
 
     def __init__(
@@ -52,20 +55,32 @@ class LMCacheLookupClient(LookupClientInterface):
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
+        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.mla_lookup_server_worker_id = config.get_mla_lookup_server_worker_id(
-            metadata.use_mla
+        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
+            metadata.use_mla, metadata.world_size
         )
-        assert self.mla_lookup_server_worker_id < metadata.world_size
 
         self.sockets = []
-        if self.mla_lookup_server_worker_id >= 0:
-            ranks = [self.mla_lookup_server_worker_id]
+        if len(self.lookup_server_worker_ids) > 0:
+            ranks = self.lookup_server_worker_ids
+            self.num_ranks = len(self.lookup_server_worker_ids)
         else:
-            ranks = [i for i in range(self.tensor_parallel_size)]
+            ranks = [i for i in range(self.num_ranks)]
 
-        # Set timeout values from config
-        timeout_ms = config.lookup_timeout_ms
+        # Store socket creation parameters for recreation
+        SocketParams = namedtuple("SocketParams", ["socket_path", "rank"])
+        self.socket_params = [
+            SocketParams(
+                socket_path=get_zmq_rpc_path_lmcache(
+                    vllm_config, "lookup", rpc_port, rank
+                ),
+                rank=rank,
+            )
+            for rank in ranks
+        ]
+        self.timeout_ms = config.lookup_timeout_ms
 
         # NOTE: map from lookup_id (i.e., req_id) to req's status.
         # int indicates number of hit tokens.
@@ -74,25 +89,23 @@ class LMCacheLookupClient(LookupClientInterface):
         # same result.
         self.reqs_status: dict[str, int] = {}
 
-        for tp_rank in ranks:
-            socket_path = get_zmq_rpc_path_lmcache(
-                vllm_config, "lookup", rpc_port, tp_rank
-            )
+        for params in self.socket_params:
             logger.info(
-                f"lmcache lookup client connect to tp_rank {tp_rank} "
-                f"with socket path {socket_path}"
+                "lmcache lookup client connect to rank %s with socket path %s",
+                params.rank,
+                params.socket_path,
             )
             socket = get_zmq_socket(
                 self.ctx,
-                socket_path,
+                params.socket_path,
                 "ipc",
                 zmq.REQ,
                 "connect",
             )
 
             # Set socket timeout during initialization
-            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+            socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
 
             self.sockets.append(socket)
 
@@ -110,24 +123,58 @@ class LMCacheLookupClient(LookupClientInterface):
         else:
             self.token_database = ChunkedTokenDatabase(config, metadata)
 
+    def _recreate_socket(self) -> None:
+        """Recreate all sockets."""
+        for rank_idx in range(self.num_ranks):
+            # Close old socket
+            old_socket = self.sockets[rank_idx]
+            if old_socket is not None:
+                try:
+                    old_socket.close(linger=0)
+                except zmq.ZMQError as e:
+                    logger.warning(
+                        "ZMQ error closing old socket for rank %s: %s",
+                        rank_idx,
+                        e,
+                    )
+                except AttributeError:
+                    # Socket already closed or invalid
+                    pass
+
+            # Create new socket using stored parameters
+            params = self.socket_params[rank_idx]
+            logger.info(
+                "Recreating socket for rank %s with path %s",
+                params.rank,
+                params.socket_path,
+            )
+
+            new_socket = get_zmq_socket(
+                self.ctx,
+                params.socket_path,
+                "ipc",
+                zmq.REQ,
+                "connect",
+            )
+            new_socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+            new_socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+
+            self.sockets[rank_idx] = new_socket
+
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        return self.reqs_status.get(lookup_id, None)
+
     def lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        cached_num_hit_toks = self.reqs_status.get(lookup_id, None)
-        if cached_num_hit_toks is not None:
-            return cached_num_hit_toks
-
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
             request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
-        ranks = self.tensor_parallel_size
-        if self.mla_lookup_server_worker_id >= 0:
-            ranks = 1
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
@@ -148,6 +195,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 request_configs_buf,
             ]
         else:
+            # print(len(token_ids))
             tokens_buf = self.encoder.encode(token_ids)
             msg_buf = [
                 tokens_buf,
@@ -156,30 +204,44 @@ class LMCacheLookupClient(LookupClientInterface):
             ]
 
         results = []
+        failed_rank = -1
         try:
-            for i in range(ranks):
+            for i in range(self.num_ranks):
+                failed_rank = i
                 self.sockets[i].send_multipart(msg_buf, copy=False)
 
             # TODO(Jiayi): we can use zmq poll to optimize a bit
-            for i in range(ranks):
+            for i in range(self.num_ranks):
+                failed_rank = i
                 resp = self.sockets[i].recv()
                 result = int.from_bytes(resp, "big")
                 results.append(result)
-        except zmq.Again:
-            logger.error(f"Timeout occurred for rank {i}")
+        except zmq.Again as e:
+            logger.error(
+                "Timeout occurred for rank %s, recreating all sockets. Error: %s",
+                failed_rank,
+                e,
+            )
+            self._recreate_socket()
             return 0
         except zmq.ZMQError as e:
-            logger.error(f"ZMQ error for rank {i}: {str(e)}")
+            logger.error(
+                "ZMQ error for rank %s: %s, recreating all sockets",
+                failed_rank,
+                e,
+            )
+            self._recreate_socket()
             return 0
 
-        assert len(results) == ranks
+        assert len(results) == self.num_ranks
         if len(set(results)) > 1:
             logger.warning(
-                f"Lookup results (number of hit tokens) differ "
-                f"across tensor parallel ranks: {results}."
+                "Lookup results (number of hit tokens) differ "
+                "across (TP and PP) ranks: %s.",
+                results,
             )
         # NOTE: it is possible that the number of hit tokens is different
-        # across TP ranks, so we can use the minimum value as the
+        # across (TP and PP) ranks, so we can use the minimum value as the
         # number of hit tokens.
         num_hit_toks = min(results)
         self.reqs_status[lookup_id] = num_hit_toks
@@ -198,13 +260,13 @@ class LMCacheLookupClient(LookupClientInterface):
             try:
                 socket.close(linger=0)
             except Exception as e:
-                logger.warning(f"Error closing socket: {e}")
+                logger.warning("Error closing socket: %s", e)
 
         try:
             if self.ctx:
                 self.ctx.term()
         except Exception as e:
-            logger.warning(f"Error terminating ZMQ context: {e}")
+            logger.warning("Error terminating ZMQ context: %s", e)
 
 
 class LMCacheLookupServer:
@@ -264,7 +326,7 @@ class LMCacheLookupServer:
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 
-        logger.info(f"lmcache lookup server start on {socket_path}")
+        logger.info("lmcache lookup server start on %s", socket_path)
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 

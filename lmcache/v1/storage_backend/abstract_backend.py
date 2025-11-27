@@ -256,6 +256,29 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """
+        Check whether the keys are in the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObj.
+
+        :param bool pin: Whether to pin the key.
+            If True, the corresponding KV cache will be
+            pinned in the storage backend.
+
+        :return: Return hit chunks by prefix match.
+        """
+        hit_chunks = 0
+        for key in keys:
+            if not self.contains(key, pin):
+                break
+            hit_chunks += 1
+        return hit_chunks
+
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """

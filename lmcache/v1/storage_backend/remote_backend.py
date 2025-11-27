@@ -28,7 +28,7 @@ class RemoteBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         loop: asyncio.AbstractEventLoop,
-        local_cpu_backend: LocalCPUBackend,
+        local_cpu_backend: Optional[LocalCPUBackend],
         dst_device: str = "cuda",
     ):
         super().__init__(dst_device=dst_device)
@@ -136,14 +136,7 @@ class RemoteBackend(StorageBackendInterface):
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.request_configs,
-            )
+            key = key.with_new_worker_id(0)
 
         try:
             if self.config.extra_config is not None and self.config.extra_config.get(
@@ -160,6 +153,27 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning(f"Remote connection failed in contains: {e}")
             logger.warning("Returning False")
             return False
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        if self.connection is None:
+            logger.warning("Connection is None in batched_contains, returning 0")
+            return 0
+
+        if not self.connection.support_batched_contains():
+            return super().batched_contains(keys, pin)
+
+        if self._mla_worker_id_as0_mode:
+            keys = [key.with_new_worker_id(0) for key in keys]
+
+        try:
+            return self.connection.batched_contains(keys)
+        except Exception as e:
+            logger.warning(f"Remote connection failed in batched_contains: {e}")
+            return 0
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:
@@ -257,20 +271,20 @@ class RemoteBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in get_blocking "
+                "(likely scheduler role), returning None"
+            )
+            return None
 
         if self.connection is None:
             logger.warning("Connection is None in get_blocking, returning None")
             return None
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            key = CacheEngineKey(
-                key.fmt,
-                key.model_name,
-                key.world_size,
-                0,
-                key.chunk_hash,
-                key.request_configs,
-            )
+            key = key.with_new_worker_id(0)
         t1 = time.perf_counter()
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
@@ -300,31 +314,27 @@ class RemoteBackend(StorageBackendInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_blocking "
+                "(likely scheduler role), returning None list"
+            )
+            return [None] * len(keys)
+
         if self.connection is None:
             logger.warning("Connection is None in batched_get_blocking, returning None")
             return [None] * len(keys)
 
         # For MLA worker id as 0 mode, use worker_id 0
         if self._mla_worker_id_as0_mode:
-            new_keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.request_configs,
-                )
-                for key in keys
-            ]
-        else:
-            new_keys = keys
+            keys = [key.with_new_worker_id(0) for key in keys]
 
         t1 = time.perf_counter()
         # batched get
         if self.connection.support_batched_get():
             future = asyncio.run_coroutine_threadsafe(
-                self.connection.batched_get(new_keys), self.loop
+                self.connection.batched_get(keys), self.loop
             )
             try:
                 memory_objs = future.result(self.blocking_timeout_secs)
@@ -334,17 +344,16 @@ class RemoteBackend(StorageBackendInterface):
                         "batched get blocking timeout, trigger cancel the future task"
                     )
                     future.cancel()
-                with self.lock:
-                    self.connection = None
-                    self.failure_time = time.time()
-                logger.warning(
-                    f"Error occurred in batched_get_blocking: {e}, returning None list"
-                )
+                else:
+                    logger.warning(
+                        f"Error occurred in batched_get_blocking: {e}, "
+                        f"returning None list"
+                    )
                 return [None] * len(keys)
         else:
             futures = [
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
-                for key in new_keys
+                for key in keys
             ]
             memory_objs = []
             failed = False
@@ -359,12 +368,10 @@ class RemoteBackend(StorageBackendInterface):
                                 "get blocking timeout, trigger cancel the future task"
                             )
                             fut.cancel()
-                        with self.lock:
-                            self.connection = None
-                            self.failure_time = time.time()
-                        logger.warning(
-                            f"Error occurred in get_blocking: {e}, returning None"
-                        )
+                        else:
+                            logger.warning(
+                                f"Error occurred in get_blocking: {e}, returning None"
+                            )
                         memory_obj = None
                     memory_objs.append(memory_obj)
                 else:
@@ -404,23 +411,21 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in batched_async_contains, returning 0")
             return 0
         if self._mla_worker_id_as0_mode:
-            keys = [
-                CacheEngineKey(
-                    key.fmt,
-                    key.model_name,
-                    key.world_size,
-                    0,
-                    key.chunk_hash,
-                    key.request_configs,
-                )
-                for key in keys
-            ]
+            keys = [key.with_new_worker_id(0) for key in keys]
 
         try:
             assert self.connection.support_batched_async_contains(), (
                 f"Connector {self.connection} does not support batched async contains"
             )
-            return await self.connection.batched_async_contains(lookup_id, keys, pin)
+            # warning, this timeout will not actually stop the
+            # scheduler from waiting for the result
+            return await asyncio.wait_for(
+                self.connection.batched_async_contains(lookup_id, keys, pin),
+                self.blocking_timeout_secs,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("batched_async_contains timed out")
+            return 0
         except Exception as e:
             logger.warning(f"Error occurred in batched_async_contains: {e}")
             return 0
@@ -437,12 +442,32 @@ class RemoteBackend(StorageBackendInterface):
         keys: List[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> List[MemoryObj]:
+        # Check if local_cpu_backend is available (required for memory allocation)
+        if self.local_cpu_backend is None:
+            logger.warning(
+                "local_cpu_backend is None in batched_get_non_blocking "
+                "(likely scheduler role), returning empty list"
+            )
+            return []
+
         if self.connection is None:
             logger.warning(
                 "Connection is None in batched_get_non_blocking, returning empty list"
             )
             return []
-        return await self.connection.batched_get_non_blocking(lookup_id, keys)
+        try:
+            # warning, this timeout will not actually stop the
+            # scheduler from waiting for the result
+            return await asyncio.wait_for(
+                self.connection.batched_get_non_blocking(lookup_id, keys),
+                self.blocking_timeout_secs,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("batched_get_non_blocking timed out")
+            return []
+        except Exception as e:
+            logger.warning(f"Error occurred in batched_get_non_blocking: {e}")
+            return []
 
     def pin(self, key: CacheEngineKey) -> bool:
         logger.debug(
@@ -472,6 +497,10 @@ class RemoteBackend(StorageBackendInterface):
             return False
 
     def get_allocator_backend(self):
+        assert self.local_cpu_backend is not None, (
+            "local_cpu_backend is required for get_allocator_backend, "
+            "should not be called in scheduler role"
+        )
         return self.local_cpu_backend
 
     def close(self):

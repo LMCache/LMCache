@@ -8,6 +8,7 @@ from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
 import math
+import os
 import threading
 
 # Third Party
@@ -15,6 +16,7 @@ import sortedcontainers
 import torch
 
 # First Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -301,6 +303,8 @@ def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
 ) -> torch.Tensor:
+    if size == 0:
+        return torch.empty(0, dtype=torch.uint8)
     if numa_mapping:
         if torch.cuda.is_available():
             current_device_id = torch.cuda.current_device()
@@ -320,6 +324,36 @@ def _allocate_cpu_memory(
     buffer = torch.frombuffer(buf, dtype=torch.uint8)
 
     return buffer
+
+
+def _free_cpu_memory(
+    buffer: torch.Tensor,
+    size: int | None = None,
+    numa_mapping: Optional[NUMAMapping] = None,
+) -> torch.Tensor:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    if numa_mapping:
+        lmc_ops.free_pinned_numa_ptr(buffer.data_ptr(), size)
+    else:
+        lmc_ops.free_pinned_ptr(buffer.data_ptr())
+
+
+def _allocate_gpu_memory(
+    size: int,
+    device: str,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    page_size = os.sysconf("SC_PAGESIZE")
+
+    # Over-allocate
+    base_buffer = torch.empty(size + page_size, dtype=torch.uint8, device=device)
+    offset = -base_buffer.data_ptr() % page_size
+
+    # Make aligned view
+    aligned_buffer = base_buffer[offset : offset + size]
+
+    # Need to return the base buffer as well in order to prevent GC
+    return base_buffer, aligned_buffer
 
 
 class TensorMemoryObj(MemoryObj):
@@ -707,6 +741,18 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     def _Compute_aligned_size(raw_size: int, align: int) -> int:
         return (raw_size + align - 1) & ~(align - 1)
 
+    def _can_merge_with_prev(
+        self, curr_block: FreeBlock, prev_block: FreeBlock
+    ) -> bool:
+        """Hook: Check if curr_block can merge with prev_block."""
+        return prev_block.can_be_coalesced(curr_block)
+
+    def _can_merge_with_succ(
+        self, curr_block: FreeBlock, succ_block: FreeBlock
+    ) -> bool:
+        """Hook: Check if curr_block can merge with succ_block."""
+        return curr_block.can_be_coalesced(succ_block)
+
     @_lmcache_nvtx_annotate
     def _coalesce(
         self,
@@ -720,15 +766,12 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         Returns True if the current block was coalesced, otherwise False.
         """
-        if prev_block is not None and prev_block.can_be_coalesced(curr_block):
-            merge_prev = True
-        else:
-            merge_prev = False
-
-        if succ_block is not None and curr_block.can_be_coalesced(succ_block):
-            merge_succ = True
-        else:
-            merge_succ = False
+        merge_prev = prev_block is not None and self._can_merge_with_prev(
+            curr_block, prev_block
+        )
+        merge_succ = succ_block is not None and self._can_merge_with_succ(
+            curr_block, succ_block
+        )
 
         if merge_prev and merge_succ:
             prev_block.size += curr_block.size + succ_block.size  # type: ignore
@@ -797,13 +840,18 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
+        raw_data = self._get_buffer_slice(block.start, raw_size)
         return TensorMemoryObj(
-            raw_data=self.buffer[block.start : block.start + raw_size],
+            raw_data=raw_data,
             metadata=MemoryObjMetadata(
                 shape, dtype, block.start, aligned_size, 1, 0, fmt
             ),
             parent_allocator=self,
         )
+
+    def _get_buffer_slice(self, start: int, size: int) -> torch.Tensor:
+        """Hook: Get buffer slice. Override for custom buffer access."""
+        return self.buffer[start : start + size]
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
@@ -1033,9 +1081,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.dtype = dtype
         self.fmt = fmt
 
-        num_elements = shape.numel()
-        self.bytes_per_element = torch.tensor([], dtype=dtype).element_size()
-        self.align_bytes = num_elements * self.bytes_per_element
+        # full chunk size bytes
+        self.align_bytes = get_size_bytes(shape, dtype)
 
         assert self.buffer_size % self.align_bytes == 0, (
             f"Buffer size {self.buffer_size} must be a"
@@ -1110,7 +1157,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         free_block.meta.ref_count = 1
 
         if shape != self.shape:
-            size_in_bytes = shape.numel() * self.bytes_per_element
+            size_in_bytes = get_size_bytes(shape, dtype)
             free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
         # TODO (Jiayi): need a flag to drop these debug ops
@@ -1162,7 +1209,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.ref_count = 1
 
             if shape != self.shape:
-                size_in_bytes = shape.numel() * self.bytes_per_element
+                size_in_bytes = get_size_bytes(shape, dtype)
                 free_block.raw_data = free_block.raw_data[:size_in_bytes]
 
             allocated_blocks.append(free_block)
@@ -1406,10 +1453,13 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
 
-        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(ptr)
-        self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+        if size == 0:
+            self.buffer = torch.empty(0, dtype=torch.uint8)
+        else:
+            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+            array_type = ctypes.c_uint8 * size
+            buf = array_type.from_address(ptr)
+            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
         self._unregistered = False
 
         self.allocator: MemoryAllocatorInterface
@@ -1480,6 +1530,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            if self.buffer.numel() == 0:
+                return
             lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
             self._unregistered = True
 
@@ -1621,6 +1673,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+            if self.buffer.numel() == 0:
+                return
             if self.numa_mapping:
                 lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
             else:

@@ -36,6 +36,7 @@ def generate_test_data(
                 world_size=1,
                 worker_id=0,
                 chunk_hash=i,
+                dtype=dtype,
             )
         )
         obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
