@@ -74,6 +74,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     // self.config.chunk_size
                     * self.config.chunk_size
                 )
+                result = skip_n_tokens
                 for start, end, key in self.token_database.process_tokens(
                     token_ids, make_key=False
                 ):
@@ -83,10 +84,10 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     offsets.append(end - start)
                 # Return skip_n_tokens immediately if there is no token to lookup
                 if len(hashes) == 0:
-                    return skip_n_tokens
+                    return result
 
                 # Call LMCacheEngine lookup with hashes and offsets
-                result = self.lmcache_engine.lookup(
+                result += self.lmcache_engine.lookup(
                     hashes=hashes,
                     offsets=offsets,
                     lookup_id=lookup_id,
