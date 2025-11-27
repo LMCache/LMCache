@@ -24,7 +24,12 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
-from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
+from lmcache.v1.rpc_utils import (
+    DEFAULT_SOCKET_RECV_TIMEOUT_MS,
+    DEFAULT_SOCKET_SEND_TIMEOUT_MS,
+    get_zmq_context,
+    get_zmq_socket_with_timeout,
+)
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.transfer_channel import CreateTransferChannel
@@ -99,10 +104,6 @@ P2PMsg = Union[
 
 # TODO(Jiayi): handle asymmetric TP.
 class P2PBackend(StorageBackendInterface):
-    # Default timeout constants for socket operations (in milliseconds)
-    DEFAULT_SOCKET_RECV_TIMEOUT_MS = 30000
-    DEFAULT_SOCKET_SEND_TIMEOUT_MS = 10000
-
     def __init__(
         self,
         config: LMCacheEngineConfig,
@@ -122,10 +123,10 @@ class P2PBackend(StorageBackendInterface):
         # Load timeout configurations from extra_config (in milliseconds)
         extra_config = config.extra_config or {}
         self.socket_recv_timeout_ms = extra_config.get(
-            "p2p_socket_recv_timeout_ms", self.DEFAULT_SOCKET_RECV_TIMEOUT_MS
+            "p2p_socket_recv_timeout_ms", DEFAULT_SOCKET_RECV_TIMEOUT_MS
         )
         self.socket_send_timeout_ms = extra_config.get(
-            "p2p_socket_send_timeout_ms", self.DEFAULT_SOCKET_SEND_TIMEOUT_MS
+            "p2p_socket_send_timeout_ms", DEFAULT_SOCKET_SEND_TIMEOUT_MS
         )
 
         # tp rank is worker id for now
@@ -213,26 +214,6 @@ class P2PBackend(StorageBackendInterface):
                 # Add small delay to prevent tight error loop
                 await asyncio.sleep(0.1)
 
-    def _create_socket_with_timeout(
-        self,
-        socket_url: str,
-        socket_type: int,
-        bind_or_connect: str,
-    ) -> zmq.asyncio.Socket:
-        """Create a ZMQ socket with timeout settings"""
-        socket = get_zmq_socket(
-            self.async_context,
-            socket_url,
-            "tcp",
-            socket_type,
-            bind_or_connect,
-        )
-        # Only set RCVTIMEO for client role connect sockets
-        if bind_or_connect == "connect":
-            socket.setsockopt(zmq.RCVTIMEO, self.socket_recv_timeout_ms)
-        socket.setsockopt(zmq.SNDTIMEO, self.socket_send_timeout_ms)
-        return socket
-
     async def batched_async_contains(
         self,
         lookup_id: str,
@@ -294,10 +275,14 @@ class P2PBackend(StorageBackendInterface):
             f"Starting P2P backend batched get handler at {self.peer_lookup_url}"
         )
         self.async_context = get_zmq_context()
-        self.async_peer_socket = self._create_socket_with_timeout(
+        self.async_peer_socket = get_zmq_socket_with_timeout(
+            self.async_context,
             self.peer_lookup_url,
+            "tcp",
             zmq.REP,
             "bind",
+            self.socket_recv_timeout_ms,
+            self.socket_send_timeout_ms,
         )
 
         while self.running.is_set():
@@ -423,10 +408,14 @@ class P2PBackend(StorageBackendInterface):
             peer_init_url,
         )
         try:
-            new_socket = self._create_socket_with_timeout(
+            new_socket = get_zmq_socket_with_timeout(
+                self.async_context,
                 peer_lookup_url,
+                "tcp",
                 zmq.REQ,
                 "connect",
+                self.socket_recv_timeout_ms,
+                self.socket_send_timeout_ms,
             )
             self.lookup_url_to_socket_mapping[peer_lookup_url] = new_socket
         except zmq.ZMQError as e:
@@ -470,10 +459,14 @@ class P2PBackend(StorageBackendInterface):
         peer_lookup_url = init_ret_msg.peer_lookup_url
         self.peer_id_to_lookup_url_mapping[peer_init_url] = peer_lookup_url
 
-        lookup_socket = self._create_socket_with_timeout(
+        lookup_socket = get_zmq_socket_with_timeout(
+            self.async_context,
             peer_lookup_url,
+            "tcp",
             zmq.REQ,
             "connect",
+            self.socket_recv_timeout_ms,
+            self.socket_send_timeout_ms,
         )
         self.lookup_url_to_socket_mapping[peer_lookup_url] = lookup_socket
         self.lookup_url_to_lock_mapping[peer_lookup_url] = asyncio.Lock()

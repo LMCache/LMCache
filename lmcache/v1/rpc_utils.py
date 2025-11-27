@@ -18,6 +18,10 @@ logger = init_logger(__name__)
 
 ServiceKind = Literal["lookup", "offload", "lookup_worker", "lookup_scheduler"]
 
+# Default timeout constants for socket operations (in milliseconds)
+DEFAULT_SOCKET_RECV_TIMEOUT_MS = 30000
+DEFAULT_SOCKET_SEND_TIMEOUT_MS = 10000
+
 
 def get_zmq_context(use_asyncio: bool = True):
     if use_asyncio:
@@ -41,6 +45,32 @@ def get_zmq_socket(
     else:
         raise ValueError(f"Invalid bind_or_connect: {bind_or_connect}")
 
+    return socket
+
+
+def get_zmq_socket_with_timeout(
+    context,
+    socket_path: str,
+    protocol: str,
+    role,
+    bind_or_connect: str,
+    recv_timeout_ms: int,
+    send_timeout_ms: int,
+) -> zmq.asyncio.Socket:
+    """
+    Create a ZeroMQ socket with timeout settings.
+    """
+    socket = get_zmq_socket(
+        context,
+        socket_path,
+        protocol,
+        role,
+        bind_or_connect,
+    )
+    # Only set RCVTIMEO for client role connect sockets
+    if bind_or_connect == "connect":
+        socket.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)
+    socket.setsockopt(zmq.SNDTIMEO, send_timeout_ms)
     return socket
 
 
