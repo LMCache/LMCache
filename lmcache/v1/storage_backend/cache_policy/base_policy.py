@@ -1,22 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections.abc import MutableMapping
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 import abc
 
-# First Party
-from lmcache.utils import CacheEngineKey
-
-TCache = TypeVar("TCache", bound=MutableMapping[CacheEngineKey, Any])
+KeyType = TypeVar("KeyType")
+MapType = TypeVar("MapType", bound=MutableMapping)
 
 
-class BaseCachePolicy(Generic[TCache], metaclass=abc.ABCMeta):
+class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
     """
     Interface for cache policy.
     """
 
     @abc.abstractmethod
-    def init_mutable_mapping(self) -> TCache:
+    def init_mutable_mapping(self) -> MapType:
         """
         Initialize a mutable mapping for cache storage.
 
@@ -29,14 +27,14 @@ class BaseCachePolicy(Generic[TCache], metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def update_on_hit(
         self,
-        key: CacheEngineKey,
-        cache_dict: TCache,
+        key: KeyType,
+        cache_dict: MapType,
     ) -> None:
         """
         Update cache_dict and internal states when a cache is used
 
         Input:
-            key: a CacheEngineKey
+            key: an object of KeyType
             cache_dict: a dict consists of current cache
         """
         raise NotImplementedError
@@ -45,13 +43,13 @@ class BaseCachePolicy(Generic[TCache], metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def update_on_put(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         """
         Update cache_dict and internal states when a cache is stored
 
         Input:
-            key: a CacheEngineKey
+            key: an object of KeyType
         """
         raise NotImplementedError
 
@@ -59,13 +57,13 @@ class BaseCachePolicy(Generic[TCache], metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def update_on_force_evict(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         """
         Update internal states when a cache is force evicted
 
         Input:
-            key: a CacheEngineKey
+            key: an object of KeyType
         """
         raise NotImplementedError
 
@@ -73,9 +71,9 @@ class BaseCachePolicy(Generic[TCache], metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def get_evict_candidates(
         self,
-        cache_dict: TCache,
+        cache_dict: MapType,
         num_candidates: int = 1,
-    ) -> list[CacheEngineKey]:
+    ) -> list[KeyType]:
         """
         Evict cache when a new cache comes and the storage is full
 
@@ -84,6 +82,6 @@ class BaseCachePolicy(Generic[TCache], metaclass=abc.ABCMeta):
             num_candidates: number of candidates to be evicted
 
         Return:
-            return a list of CacheEngineKeys
+            return a list of keys to be evicted
         """
         raise NotImplementedError
