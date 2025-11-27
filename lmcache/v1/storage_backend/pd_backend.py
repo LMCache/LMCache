@@ -13,6 +13,7 @@ import zmq
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -220,9 +221,18 @@ class PDBackend(AllocatorBackendInterface):
         logger.info(f"Setting cuda device to {corrected_device} ")
         torch.cuda.set_device(corrected_device)
 
+        # Adjust buffer size to be a multiple of align_bytes
+        align_bytes = get_size_bytes(torch.Size(metadata.kv_shape), metadata.kv_dtype)
+        adjusted_buffer_size = (config.pd_buffer_size // align_bytes) * align_bytes
+        if adjusted_buffer_size != config.pd_buffer_size:
+            logger.info(
+                f"Adjusted pd_buffer_size from {config.pd_buffer_size} "
+                f"to {adjusted_buffer_size} to align with chunk size {align_bytes}"
+            )
+
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         paged_mem_allocator.init_gpu_memory_allocator(
-            config.pd_buffer_size,
+            adjusted_buffer_size,
             torch.Size(metadata.kv_shape),
             metadata.kv_dtype,
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
