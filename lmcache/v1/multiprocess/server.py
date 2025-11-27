@@ -415,10 +415,14 @@ class MPCacheEngine:
                     _retrieve_loop(keys, memory_objs)
             except Exception as e:
                 logger.warning("Cannot retrieve keys: %s", str(e))
-                event.record()
                 return event.ipc_handle(), [False] * len(keys)
-
-            event.record()
+            finally:
+                # NOTE: the event.record() should be called before
+                # the event ipc handle is returned to the caller.
+                event.record()
+                gpu_context.cupy_stream.launch_host_func(
+                    self.storage_manager.on_retrieve_finished, keys
+                )
 
         tokens_retrieved = len(keys) * self.chunk_size
         ed = time.perf_counter()

@@ -342,17 +342,13 @@ class MPStorageManager:
         # models connecting to the same storage manager
         with self._allocator_lock, self._buffer_lock:
             while objects is None:
-                candidates = [
-                    c
-                    for c in self._cache_policy.get_evict_candidates(
-                        self._commited_memory_objects,
-                        num_objects_to_allocate,
-                    )
-                    if not self._obj_lock_manager.is_locked(c)
-                ]
+                candidates = self._cache_policy.get_evict_candidates(
+                    self._commited_memory_objects,
+                    num_objects_to_allocate,
+                )
 
                 # If the candidates are not enough, break
-                if len(candidates) == 0:
+                if not candidates:
                     break
 
                 for key in candidates:
@@ -473,8 +469,26 @@ class MPStorageManager:
         try:
             yield objs
         finally:
-            for key in keys:
-                self._obj_lock_manager.unlock(key)
+            # NOTE: unlock is being separated to another function because
+            # it should be a callback after the retrieve cuda kernel is
+            # done.
+            # That said, we still keep the context manager here fore the
+            # potential future use.
+            pass
+
+    @_lmcache_nvtx_annotate
+    def on_retrieve_finished(
+        self,
+        keys: list[IPCCacheEngineKey],
+    ) -> None:
+        """Callback function to be called after the retrieve operation is
+        finished. It will unlock the memory objects for the given keys.
+
+        Args:
+            keys: the list of keys to unlock
+        """
+        for key in keys:
+            self._obj_lock_manager.unlock(key)
 
     def prefetch(
         self,
