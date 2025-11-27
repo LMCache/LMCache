@@ -142,6 +142,8 @@ class LMCacheConnector:
         self.kvcaches = k_pool + v_pool
         self.num_layer = sgl_config.num_hidden_layers
 
+        self.lmcache_engine.post_init(kvcaches=self.kvcaches)
+
     ####################
     # Worker side APIs
     ####################
