@@ -624,8 +624,29 @@ class P2PBackend(StorageBackendInterface):
         """
         logger.info("Closing P2P backend")
         self.running.clear()
-        # TODO(baoloongmao): Close lookup sockets, async peer, socket,
-        #  context and transfer channel
+
+        # Close all lookup sockets
+        for socket in self.lookup_url_to_socket_mapping.values():
+            try:
+                socket.close(linger=0)
+            except Exception as e:
+                logger.warning("Failed to close lookup socket: %s", e)
+        self.lookup_url_to_socket_mapping.clear()
+
+        # Close async peer socket
+        if self.async_peer_socket is not None:
+            try:
+                self.async_peer_socket.close(linger=0)
+            except Exception as e:
+                logger.warning("Failed to close async peer socket: %s", e)
+            self.async_peer_socket = None
+
+        # Close transfer channel
+        if hasattr(self, "transfer_channel") and self.transfer_channel is not None:
+            try:
+                self.transfer_channel.close()
+            except Exception as e:
+                logger.warning("Failed to close transfer channel: %s", e)
 
     ############################################################
     # Not-supported functions

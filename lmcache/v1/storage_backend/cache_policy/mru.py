@@ -5,13 +5,12 @@ from typing import Any
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
+from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy, KeyType
 
 logger = init_logger(__name__)
 
 
-class MRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
+class MRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
     """
     MRU cache policy.
     """
@@ -19,27 +18,27 @@ class MRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
     def __init__(self):
         logger.info("Initializing MRUCachePolicy")
 
-    def init_mutable_mapping(self) -> OrderedDict[CacheEngineKey, Any]:
+    def init_mutable_mapping(self) -> OrderedDict[KeyType, Any]:
         return OrderedDict()
 
     def update_on_hit(
         self,
-        key: CacheEngineKey,
-        cache_dict: OrderedDict[CacheEngineKey, Any],
+        key: KeyType,
+        cache_dict: OrderedDict[KeyType, Any],
     ) -> None:
         # since MRU evicts from the back, the logic is same as LRU.
         cache_dict.move_to_end(key, last=True)
 
     def update_on_put(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         # No action needed for MRU on put, as the key is already at the back.
         pass
 
     def update_on_force_evict(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         pass
 
@@ -47,9 +46,9 @@ class MRUCachePolicy(BaseCachePolicy[OrderedDict[CacheEngineKey, Any]]):
     # of returned keys mignt be smaller than num_candidates.
     def get_evict_candidates(
         self,
-        cache_dict: OrderedDict[CacheEngineKey, Any],
+        cache_dict: OrderedDict[KeyType, Any],
         num_candidates: int = 1,
-    ) -> list[CacheEngineKey]:
+    ) -> list[KeyType]:
         evict_keys = []
         # Since the most recent object is at the end, we reverse the order here
         for key, cache in reversed(cache_dict.items()):
