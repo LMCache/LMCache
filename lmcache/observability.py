@@ -1317,7 +1317,7 @@ class PrometheusLogger:
         #    "PrometheusLogger instance already created with different metadata"
         if PrometheusLogger._instance.metadata != metadata:
             logger.error(
-                "PrometheusLogger instance already created with"
+                "PrometheusLogger instance already created with "
                 "different metadata. This should not happen except "
                 "in test"
             )
