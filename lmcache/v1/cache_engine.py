@@ -26,7 +26,7 @@ from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     SGLangLayerwiseGPUConnector,
@@ -120,7 +120,15 @@ class LMCacheEngine:
         from lmcache.v1.cache_controller import LMCacheWorker
 
         self.lmcache_worker: Optional[LMCacheWorker] = None
-        if self.enable_controller and self.metadata.role != "scheduler":
+        lmcache_worker_ids = config.get_lmcache_worker_ids(
+            metadata.use_mla, metadata.world_size
+        )
+        # lmcache_worker_ids is empty means start on all workers
+        if (
+            self.enable_controller
+            and self.metadata.role != "scheduler"
+            and (not lmcache_worker_ids or metadata.worker_id in lmcache_worker_ids)
+        ):
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
 
         self.async_loading = config.enable_async_loading
@@ -801,14 +809,12 @@ class LMCacheEngine:
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
 
-                batched_contains_res = self.storage_manager.batched_contains(
-                    keys, search_range, pin, True
+                # hit chunks by prefix matching
+                hit_chunks = self.storage_manager.batched_contains(
+                    keys, search_range, pin
                 )
-                assert len(batched_contains_res) == len(chunk_info_list)
-                for (start, end, key), exists in zip(
-                    chunk_info_list, batched_contains_res, strict=False
-                ):
-                    if exists:
+                for idx, (start, end, key) in enumerate(chunk_info_list):
+                    if idx < hit_chunks:
                         if pin:
                             assert lookup_id is not None, (
                                 "lookup_id is required when pin is True"
@@ -933,6 +939,42 @@ class LMCacheEngine:
             ),
             self.storage_manager.loop,
         )
+
+    def cleanup_memory_objs(self, lookup_id: str) -> None:
+        """
+        Cleanup memory objects allocated during prefetch for an aborted lookup.
+
+        Called by the scheduler when it determines that an aborted lookup
+        has finished its prefetch tasks.
+        """
+        try:
+            # Get the completed future from event_manager
+            if (
+                self.event_manager.get_event_status(EventType.LOADING, lookup_id)
+                != EventStatus.DONE
+            ):
+                logger.debug(
+                    "No completed event found for lookup_id=%s to clean up.", lookup_id
+                )
+                return
+            future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
+
+            # Get memory objects from the future result
+            memory_objs = future.result()
+            # Flatten nested lists (each backend returns a list of chunks)
+            memory_objs_flat = [mm for m in memory_objs for mm in m]
+
+            # Release each memory object
+            for memory_obj in memory_objs_flat:
+                try:
+                    logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
+                    memory_obj.ref_count_down()
+                except Exception as e:
+                    logger.error(f"Error releasing memory object: {e}")
+        except Exception as e:
+            logger.error(
+                f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
+            )
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
     # In this case, we compress all tokens.
@@ -1191,13 +1233,7 @@ class LMCacheEngine:
         assert self.storage_manager is not None
 
         tot_kv_size = 0
-        # location -> [(CacheEngineKey, start, end)]
-        block_mapping: dict[str, list[tuple[CacheEngineKey, int, int]]] = defaultdict(
-            list
-        )
-
         reordered_chunks: List[ProcessedChunk] = []
-
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
@@ -1210,39 +1246,24 @@ class LMCacheEngine:
         skip_contains_check = (
             kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
         )
+        chunk_infos = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
+            chunk_infos.append((key, start, end))
 
-            location = None
-            if key in self.lookup_cache:
-                # TODO(Jiayi): we can reduce the number of `contains` calls
-                # by checking the lookup cache first (should be updated in `lookup`)
-                pass
-            else:
-                # NOTE: key should always be in the lookup cache once we support it.
-                # TODO: use lookup_cache to skip the contains
-                if (
-                    skip_contains_check
-                    and len(self.storage_manager.non_allocator_backends) == 1
-                ):
-                    location = self.storage_manager.non_allocator_backends[0]
-                else:
-                    location = self.storage_manager.contains(key)
-                if location is None:
-                    break
-
-                # NOTE: Here we make the assumption that the underlying
-                # storage backend support pin operation, and the memory
-                # object is already pinned in the storage backend.
-                ret_mask[start:end] = True
-
-            assert location is not None
-
-            block_mapping[location].append((key, start, end))
+        # block_mapping: location -> [(CacheEngineKey, start, end)]
+        if (
+            skip_contains_check
+            and len(self.storage_manager.non_allocator_backends) == 1
+        ):
+            location = self.storage_manager.non_allocator_backends[0]
+            block_mapping = {location: chunk_infos}
+        else:
+            block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
 
         last_failed_block_start = None
         for location, blocks in block_mapping.items():
@@ -1268,6 +1289,7 @@ class LMCacheEngine:
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
+                ret_mask[start:end] = True
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False

@@ -77,6 +77,7 @@ Documentation
    getting_started/kv_cache_calculator
    getting_started/troubleshoot
    getting_started/faq
+   getting_started/quickstart/standalone_starter
    
 
 :raw-html:`<br />`
@@ -86,8 +87,10 @@ Documentation
    :caption: KV Cache offloading and sharing
 
    kv_cache/storage_backends/index
+   kv_cache/async_loading
    kv_cache/caching_policies
    kv_cache/p2p_sharing
+   kv_cache/multiprocess_mode
 
 :raw-html:`<br />`
 
@@ -167,4 +170,3 @@ Documentation
    community/blogs
 
 :raw-html:`<br />`
-   

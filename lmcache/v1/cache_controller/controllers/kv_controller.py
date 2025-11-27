@@ -23,6 +23,7 @@ from lmcache.v1.cache_controller.message import (
     PinMsg,
     PinRetMsg,
 )
+from lmcache.v1.cache_controller.observability import PrometheusLogger
 from lmcache.v1.token_database import ChunkedTokenDatabase
 
 
@@ -49,9 +50,14 @@ class KVController:
         # messages like `check_finish`. Or everything should be
         # written to redis.
         self.kv_pool: dict[int, list[KVChunkMetadata]] = {}
-
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
+        self._setup_metrics()
+
+    def _setup_metrics(self):
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.kv_pool_keys_count.set_function(lambda: len(self.kv_pool))
 
     def post_init(self, reg_controller, cluster_executor):
         """
@@ -216,7 +222,7 @@ class KVController:
             elif instance_id == "":
                 instance_id = matched_kv_chunk_meta.instance_id
                 location = matched_kv_chunk_meta.location
-                peer_init_url = self.reg_controller.get_distributed_url(
+                peer_init_url = self.reg_controller.get_peer_init_url(
                     instance_id, worker_id
                 )
                 assert peer_init_url is not None
