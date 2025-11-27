@@ -1,0 +1,10 @@
+local_cpu: False
+
+enable_pd: True
+transfer_channel: "nixl"
+pd_role: "sender"
+pd_proxy_host: "localhost"
+pd_proxy_port: 7500
+pd_buffer_size: 1073741824 # 1GB
+pd_buffer_device: "cuda"
+nixl_backends: [UCX]
