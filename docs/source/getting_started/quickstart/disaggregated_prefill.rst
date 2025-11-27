@@ -54,7 +54,7 @@ Configuration
        pd_proxy_host: "localhost" # Host where proxy server is running
        pd_proxy_port: 7500        # Port where proxy server is listening
        pd_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
-       nixl_buffer_device: "cuda"   # Use GPU memory for buffer
+       pd_buffer_device: "cuda"   # Use GPU memory for buffer
 
 2. **Decoder Server Configuration** (``lmcache-decoder-config.yaml``):
 
