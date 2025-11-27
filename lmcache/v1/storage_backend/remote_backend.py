@@ -357,6 +357,7 @@ class RemoteBackend(StorageBackendInterface):
             ]
             future_to_idx = {fut: i for i, fut in enumerate(futures)}
             memory_objs = [None] * len(keys)
+            done_objs = [False] * len(keys)
             index_failed = len(keys)
             try:
                 for fut in as_completed(futures, self.blocking_timeout_secs):
@@ -366,6 +367,7 @@ class RemoteBackend(StorageBackendInterface):
                     
                     try:
                         memory_objs[index] = fut.result()
+                        done_objs[index] = True
                     except Exception as e:
                         logger.warning(
                             f"Error occurred in get_blocking: {e}, returning None"
@@ -378,7 +380,7 @@ class RemoteBackend(StorageBackendInterface):
                 logger.warning(
                     "get blocking timeout, trigger cancel the future task"
                 )
-                index_failed = memory_objs.index(None)
+                index_failed = done_objs.index(False)
                 for fut in futures[index_failed:]:
                     fut.cancel()
 
