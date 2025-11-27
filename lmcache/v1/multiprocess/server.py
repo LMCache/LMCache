@@ -463,6 +463,13 @@ class MPCacheEngine:
         """
         # NOTE: we are doing per-request lookup, the caller need
         # to be aware of this! We need to add this to the doc!
+        if not lock:
+            logger.warning(
+                "MPCacheEngine.lookup called with lock=False, this is "
+                "not recommended and may cause memory object being pinned "
+                "for 5 minutes"
+            )
+
         found_count = self.storage_manager.lookup(keys)
         return [True] * found_count + [False] * (len(keys) - found_count)
 
