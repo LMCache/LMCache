@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future, TimeoutError
+from concurrent.futures import Future, TimeoutError, as_completed
 from typing import Any, List, Optional, Sequence, Set
 import asyncio
 import threading
@@ -355,28 +355,36 @@ class RemoteBackend(StorageBackendInterface):
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
                 for key in keys
             ]
-            memory_objs = []
-            failed = False
-            for fut in futures:
-                if not failed:
+            future_to_idx = {fut: i for i, fut in enumerate(futures)}
+            memory_objs = [None] * len(keys)
+            index_failed = len(keys)
+            try:
+                for fut in as_completed(futures, self.blocking_timeout_secs):
+                    index = future_to_idx[fut]
+                    if index > index_failed:
+                        continue
+                    
                     try:
-                        memory_obj = fut.result(self.blocking_timeout_secs)
+                        memory_objs[index] = fut.result()
                     except Exception as e:
-                        failed = True
-                        if isinstance(e, TimeoutError):
-                            logger.warning(
-                                "get blocking timeout, trigger cancel the future task"
-                            )
+                        logger.warning(
+                            f"Error occurred in get_blocking: {e}, returning None"
+                        )
+                        for fut in futures[index:]:
                             fut.cancel()
-                        else:
-                            logger.warning(
-                                f"Error occurred in get_blocking: {e}, returning None"
-                            )
-                        memory_obj = None
-                    memory_objs.append(memory_obj)
-                else:
-                    memory_objs.append(None)
+                        index_failed = index
+
+            except TimeoutError as e:
+                logger.warning(
+                    "get blocking timeout, trigger cancel the future task"
+                )
+                index_failed = memory_objs.index(None)
+                for fut in futures[index_failed:]:
                     fut.cancel()
+
+            if index_failed < len(keys):
+                for i in range(index_failed, len(keys)):
+                    memory_objs[i] = None
 
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
