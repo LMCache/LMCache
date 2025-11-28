@@ -11,7 +11,7 @@ import torch
 from lmcache.v1.memory_management import PinMemoryAllocator
 
 pytest.importorskip(
-    "lmc_ops",
+    "lmcache.c_ops",
     reason="TODO: require non CUDA implementations for CUDA enhanced functions",
 )
 
@@ -454,6 +454,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             True,
             token_major,
             True,
+            False,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -462,6 +463,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             False,
             token_major,
             True,
+            False,
         )
 
     check_paged_kv_cache_equal(
