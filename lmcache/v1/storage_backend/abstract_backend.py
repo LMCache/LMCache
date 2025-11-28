@@ -375,7 +375,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
         raise NotImplementedError
 
 
-class ConfigurableStorageBackendInterface(StorageBackendInterface):
+class StoragePluginInterface(StorageBackendInterface):
     """The Configurable Storage Backend Interface needs to be implemented
     when you want to add a storage backend in a configurable or plug and play
     fashion."""

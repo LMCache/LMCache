@@ -3,7 +3,7 @@ Extending LMCache
 
 LMCache is designed to be extensible, allowing integration of custom functionality without modifying the core. The main extension mechanisms are:
 
-- **External Storage Backend Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
+- **Storage Backend Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
 - **External Remote Connector Framework** – integrate new remote KV store connectors for external/distributed storage systems.
 - **Plugin Framework** – run custom scripts as separate processes alongside LMCache for added functionality.
 
@@ -23,7 +23,7 @@ LMCache is designed to be extensible, allowing integration of custom functionali
       backendMgr --> CPUBackend[["In-Memory CPU Backend"]]
       backendMgr --> DiskBackend[["Local Disk Backend"]]
       backendMgr --> NIXLBackend[["NIXL Peer Backend"]]
-      backendMgr --> CustomBackend[["External Backend"]]
+      backendMgr --> CustomBackend[["Custom Storage Backend"]]
       backendMgr --> RemoteBackend[["Remote connectors"]]
 
       RemoteBackend --> RedisConnector[["Redis Connector (built-in)"]]
@@ -31,22 +31,22 @@ LMCache is designed to be extensible, allowing integration of custom functionali
       RemoteBackend --> MooncakeConnector[["Mooncake Connector (built-in)"]]
       RemoteBackend --> CustomConnector[["External Connector"]]
 
-**External Storage Backends** (bottom section of diagram) enable LMCache to interface with new storage or transport systems. Developers can implement the standardized ``StorageBackendInterface`` to create a custom storage backend module. Such external backends are loaded by LMCache at runtime (via configuration) in addition to the built-in backends that ship with LMCache. Built-in backends include in-memory CPU caching, local disk storage, NVIDIA NIXL (GPU peer-to-peer), and remote stores like Redis, InfiniStore, Mooncake, etc.
+**Storage Backends** (bottom section of diagram) enable LMCache to interface with new storage or transport systems. Developers can implement the standardized ``StorageBackendInterface`` to create a custom storage backend module. Such backends are loaded by LMCache at runtime (via configuration) in addition to the built-in backends that ship with LMCache. Built-in backends include in-memory CPU caching, local disk storage, NVIDIA NIXL (GPU peer-to-peer), and remote stores like Redis, InfiniStore, Mooncake, etc.
 
-To add an external backend, you need to:
+To add an storage backend, you need to:
 
-1. **Implement** a Python class inheriting from the LMCache ``StorageBackendInterface``, overriding all required methods.
+1. **Implement** a Python class inheriting from the LMCache ``StoragePluginInterface``, overriding all required methods.
 2. **Install** this backend package in the LMCache environment (so that LMCache can import it).
-3. **Configure** LMCache to use it by adding an entry to the `external_backends` list and specifying the module path and class name in the configuration’s `extra_config`. For example:
+3. **Configure** LMCache to use it by adding an entry to the `storage_backends` list and specifying the module path and class name in the configuration’s `extra_config`. For example:
 
    .. code-block:: yaml
 
-      external_backends: ["my_custom_backend"]
+      storage_backends: ["my_custom_storage"]
       extra_config:
-         external_backend.my_custom_backend.module_path: my_package.my_backend_module
-         external_backend.my_custom_backend.class_name: MyCustomBackendClass
+         storage_backend.my_custom_storage.module_path: my_package.my_storage_module
+         storage_backend.my_custom_storage.class_name: MyCustomStorageClass
 
-Multiple external backends can be enabled simultaneously. They are initialized during LMCache startup. Note that the order of backends can matter: if multiple backends are used, earlier listed backends have higher priority for cache lookups (i.e. LMCache will check those backends first when retrieving KV entries).
+Multiple storage backends can be enabled simultaneously. They are initialized during LMCache startup. Note that the order of backends can matter: if multiple backends are used, earlier listed backends have higher priority for cache lookups (i.e. LMCache will check those backends first when retrieving KV entries).
 
 **External Remote Connectors** (middle section of diagram) allow LMCache’s remote storage layer to connect to new external KV storage systems. The LMCache `RemoteBackend` uses connector implementations to communicate with various external stores. For example, built-in connectors exist for Redis, InfiniStore, and MooncakeStore. To extend LMCache with a new remote connector, you should:
 

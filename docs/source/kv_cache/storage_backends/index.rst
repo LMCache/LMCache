@@ -20,6 +20,6 @@ Supported Backends
    valkey
    weka
    nixl
-   external_backend
+   storage_backend
    eic
    mock

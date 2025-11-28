@@ -40,7 +40,7 @@ def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
     return metadata.role != "scheduler" and torch.cuda.is_available()
 
 
-def create_dynamic_backends(
+def storage_plugins_loader(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
@@ -49,7 +49,7 @@ def create_dynamic_backends(
     storage_backends: OrderedDict[str, StorageBackendInterface],
 ) -> None:
     """
-    Dynamically create backends based on configuration.
+    Loads custom storage backends based on configuration.
 
     Looks for backend configurations in config.extra_config and instantiates
     them using the specified module and class names.
@@ -59,16 +59,16 @@ def create_dynamic_backends(
 
     # Get the list of allowed external backends if configured
     allowed_backends = (
-        set(config.external_backends) if config.external_backends else set()
+        set(config.storage_backends) if config.storage_backends else set()
     )
 
     for backend_name in allowed_backends:
         try:
             module_path = config.extra_config.get(
-                f"external_backend.{backend_name}.module_path"
+                f"storage_backend.{backend_name}.module_path"
             )
             class_name = config.extra_config.get(
-                f"external_backend.{backend_name}.class_name"
+                f"storage_backend.{backend_name}.class_name"
             )
 
             if not module_path or not class_name:
@@ -205,8 +205,8 @@ def CreateStorageBackends(
         storage_backends[backend_name] = remote_backend
 
     if not config.enable_pd or config.local_cpu:
-        # Create dynamic backends from configuration
-        create_dynamic_backends(
+        # Load storage backends from configuration
+        storage_plugins_loader(
             config,
             metadata,
             loop,

@@ -380,7 +380,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
     },
-    "external_backends": {
+    "storage_backends": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
