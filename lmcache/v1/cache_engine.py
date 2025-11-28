@@ -786,12 +786,10 @@ class LMCacheEngine:
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
-        # Skip the number of tokens that are already computed, align to chunk size
-        skip_n_tokens = (
-            num_computed_tokens // self.config.chunk_size * self.config.chunk_size
-        )
-
-        res = skip_n_tokens
+        # Skip the number of tokens that are already computed (aligned upstream to
+        # chunk size)
+        aligned_computed_tokens = num_computed_tokens
+        res = aligned_computed_tokens
         try:
             chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
@@ -803,7 +801,7 @@ class LMCacheEngine:
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
-                    if end <= skip_n_tokens:
+                    if end <= aligned_computed_tokens:
                         continue
                     assert isinstance(key, CacheEngineKey)
 
@@ -834,7 +832,7 @@ class LMCacheEngine:
                 for chunk_info in chunk_info_iterator:
                     assert isinstance(chunk_info[2], CacheEngineKey)
                     start, end, _ = chunk_info
-                    if end <= skip_n_tokens:
+                    if end <= aligned_computed_tokens:
                         continue
                     chunk_info_list.append(chunk_info)
                     keys.append(chunk_info[2])
@@ -861,7 +859,8 @@ class LMCacheEngine:
         finally:
             # When num_computed_tokens is greater than a chunk, we skip
             # some tokens to reduce the number of lookup requests.
-            # It is possible that res = skip_n_tokens and no lookup is performed.
+            # It is possible that res equals aligned_computed_tokens and no lookup is
+            # performed.
             # In this case, using res as the number of hit tokens will overcount
             # the number of hit tokens.
             # TODO deprecate this metric and use retrieve metrics instead.

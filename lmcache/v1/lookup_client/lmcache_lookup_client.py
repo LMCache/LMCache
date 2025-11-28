@@ -183,7 +183,7 @@ class LMCacheLookupClient(LookupClientInterface):
             request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
         num_computed_buf = num_computed_tokens.to_bytes(8, "big", signed=False)
-        skip_n_tokens = 0
+        aligned_computed_tokens = num_computed_tokens  # pre-aligned in adapter
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
@@ -193,20 +193,18 @@ class LMCacheLookupClient(LookupClientInterface):
 
             # We already have hashes here so we can skip the chunks that are already
             # in GPU cache. Don't pass num_computed_tokens to lookup server.
-            skip_n_tokens = (
-                num_computed_tokens // self.config.chunk_size * self.config.chunk_size
-            )
 
             for start, end, key in self.token_database.process_tokens(
                 token_ids, make_key=False
             ):
-                if end <= skip_n_tokens:
+                if end <= aligned_computed_tokens:
                     continue
                 hashes.append(key)
                 offsets.append(end - start)
-            # Return skip_n_tokens immediately if there is no token to lookup
+            # Return aligned_computed_tokens immediately if there is no token to
+            # lookup
             if len(hashes) == 0:
-                return skip_n_tokens
+                return aligned_computed_tokens
 
             hash_buf = self.encoder.encode(hashes)
             offset_buf = self.encoder.encode(offsets)
@@ -238,7 +236,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 failed_rank = i
                 resp = self.sockets[i].recv()
                 result = int.from_bytes(resp, "big")
-                results.append(result + skip_n_tokens)
+                results.append(result + aligned_computed_tokens)
         except zmq.Again as e:
             logger.error(
                 "Timeout occurred for rank %s, recreating all sockets. Error: %s",

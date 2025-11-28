@@ -69,20 +69,17 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                 offsets = []
                 # We already have hashes here so we can skip the chunks that are already
                 # in GPU cache. Don't pass num_computed_tokens to engine.
-                skip_n_tokens = (
-                    num_computed_tokens
-                    // self.config.chunk_size
-                    * self.config.chunk_size
-                )
-                result = skip_n_tokens
+                aligned_computed_tokens = num_computed_tokens  # pre-aligned in adapter
+                result = aligned_computed_tokens
                 for start, end, key in self.token_database.process_tokens(
                     token_ids, make_key=False
                 ):
-                    if end <= skip_n_tokens:
+                    if end <= aligned_computed_tokens:
                         continue
                     hashes.append(key)
                     offsets.append(end - start)
-                # Return skip_n_tokens immediately if there is no token to lookup
+                # Return aligned_computed_tokens immediately if there is no token to
+                # lookup
                 if len(hashes) == 0:
                     return result
 
