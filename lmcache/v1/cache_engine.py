@@ -130,6 +130,16 @@ class LMCacheEngine:
             and (not lmcache_worker_ids or metadata.worker_id in lmcache_worker_ids)
         ):
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
+        else:
+            self.lmcache_worker = None
+            logger.info(
+                "LMCacheWorker is not initialized (related configs: "
+                "enable_controller: %s, role: %s, worker_id: %s, worker_ids: %s).",
+                self.enable_controller,
+                self.metadata.role,
+                self.metadata.worker_id,
+                lmcache_worker_ids,
+            )
 
         self.async_loading = config.enable_async_loading
         self.event_manager = EventManager()

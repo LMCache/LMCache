@@ -1068,6 +1068,12 @@ class PrometheusMetrics:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
+        self.kv_msg_queue_size = self._gauge_cls(
+            name="lmcache:kv_msg_queue_size",
+            documentation="The size of the KV message queue in BatchedMessageSender",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
         self.remote_put_task_num = self._gauge_cls(
             name="lmcache:remote_put_task_num",
             documentation="The number of remote put tasks",
