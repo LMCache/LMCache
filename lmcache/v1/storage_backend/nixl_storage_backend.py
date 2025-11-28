@@ -149,7 +149,11 @@ class NixlFilePool(NixlDescPool):
 
         assert path is not None
 
-        flags = os.O_CREAT | os.O_RDWR | (os.O_DIRECT if use_direct_io else 0)
+        flags = (
+            os.O_CREAT
+            | os.O_RDWR
+            | (getattr(os, "O_DIRECT", 0) if use_direct_io else 0)
+        )
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
             tmp_path = os.path.join(path, filename)
