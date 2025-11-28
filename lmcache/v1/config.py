@@ -113,6 +113,7 @@ _CONFIG_ALIASES = {
     "nixl_role": "pd_role",
     "controller_url": "controller_pull_url",
     "lmcache_worker_port": "lmcache_worker_ports",
+    "plugin_locations": "runtime_plugin_locations",
 }
 
 _DEPRECATED_CONFIGS = {
@@ -375,7 +376,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
-    "plugin_locations": {
+    "runtime_plugin_locations": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
