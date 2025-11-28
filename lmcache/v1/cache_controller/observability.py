@@ -168,5 +168,7 @@ class SocketMetricsContext:
             getattr(self.manager, self.active_attr) - self.message_count,
         )
         if exc_type is not None:
-            logger.error(f"Controller Manager error: {exc_val}")
+            logger.error(
+                "Controller Manager error", exc_info=(exc_type, exc_val, exc_tb)
+            )
         return False
