@@ -155,8 +155,8 @@ class NixlFilePool(NixlDescPool):
                 flags |= os.O_DIRECT
             else:
                 logger.warning(
-                    "use_direct_io is True, but O_DIRECT is not available on this system. "
-                    "Falling back to buffered I/O."
+                    "use_direct_io is True, but O_DIRECT is not available on "
+                    "this system. Falling back to buffered I/O."
                 )
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
