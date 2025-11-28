@@ -195,19 +195,21 @@ __device__ __forceinline__ int64_t page_buffer_offset_unilateral(
   return token_idx * scalars_per_token + scalar_offset;
 }
 
+template <bool TRANSPOSE>
 __device__ __forceinline__ int64_t key_value_offset(
     const int k_or_v, const int layer_idx, const int token_idx,
     const int scalar_offset, const int scalars_per_token, const int num_tokens,
-    const int num_layers, const int k_or_v_size, const bool transpose) {
-  if (transpose) {
+    const int num_layers, const int k_or_v_size) {
+  if constexpr (TRANSPOSE) {
     // [2LTD->DT2L], T is full chunk size
     return scalar_offset * num_tokens * k_or_v_size * num_layers +
            token_idx * k_or_v_size * num_layers + k_or_v * num_layers +
            layer_idx;
+  } else {
+    return k_or_v * num_layers * num_tokens * scalars_per_token +
+           layer_idx * num_tokens * scalars_per_token +
+           token_idx * scalars_per_token + scalar_offset;
   }
-  return k_or_v * num_layers * num_tokens * scalars_per_token +
-         layer_idx * num_tokens * scalars_per_token +
-         token_idx * scalars_per_token + scalar_offset;
 }
 
 template <typename scalar_t>
@@ -266,7 +268,7 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
  * key_value[block.z, block.y, block.x, thread.x] <=> ptrs[block.y][block.z,
  * slot_id, thread.x]
  */
-template <typename scalar_t, bool DIRECTION>
+template <typename scalar_t, bool DIRECTION, bool TRANSPOSE>
 __global__ void load_and_reshape_multi_layer_kernel(
     scalar_t* __restrict__ key_value,           // [2, num_layer, num_tokens,
                                                 // scalars_per_token]
@@ -275,7 +277,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
                                                 // scalars_per_token]
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
-    const int page_buffer_size, bool transpose) {
+    const int page_buffer_size) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
   const int k_or_v = blockIdx.z;
@@ -292,14 +294,14 @@ __global__ void load_and_reshape_multi_layer_kernel(
 
   /** Copy the data from page buffer to key_value **/
   for (int i = tid; i < scalars_per_token; i += num_threads) {
-    const int64_t lmcache_offset =
-        key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
-                         num_tokens, num_layers, k_or_v_size, transpose);
+    const int64_t lmcache_offset = key_value_offset<TRANSPOSE>(
+        k_or_v, layer_id, token_id, i, scalars_per_token, num_tokens,
+        num_layers, k_or_v_size);
 
     const int64_t vllm_offset = page_buffer_offset(
         k_or_v, slot_idx, i, scalars_per_token, page_buffer_size);
 
-    if (DIRECTION)  // 1 is paged buffer to LMCache
+    if constexpr (DIRECTION)  // 1 is paged buffer to LMCache
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
     else  // 0 is LMCache to paged buffer
       paged_buffer_ptr[vllm_offset] = key_value[lmcache_offset];
@@ -336,9 +338,9 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
 
   /** Copy the data from page buffer to key_value **/
   for (int i = tid; i < scalars_per_token; i += num_threads) {
-    const int64_t lmcache_offset =
-        key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
-                         num_tokens, num_layers, k_or_v_size, false);
+    const int64_t lmcache_offset = key_value_offset<false>(
+        k_or_v, layer_id, token_id, i, scalars_per_token, num_tokens,
+        num_layers, k_or_v_size);
 
     const int64_t sgl_offset =
         page_buffer_offset_unilateral(slot_idx, i, scalars_per_token);
@@ -405,13 +407,12 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  */
 template <typename T>
 void multi_layer_kv_transfer_templated(
-    torch::Tensor&
-        key_value,  // key/value must be on gpu/pinned cpu.
-                    // [2, num_layer, num_tokens, num_heads*head_size] for
-                    // flash_attn.
-                    // [num_heads*head_size, num_tokens, 2,
-                    // num_layer] if transpose [1, num_layer,
-                    // num_tokens, aligned_head_size] for MLA.
+    torch::Tensor& key_value,  // key/value must be on gpu/pinned cpu.
+                               // [2, num_layer, num_tokens,
+                               // num_heads*head_size] for flash_attn.
+                               // [num_heads*head_size, num_tokens, 2,
+                               // num_layer] if transpose [1, num_layer,
+                               // num_tokens, aligned_head_size] for MLA.
 
     const torch::Tensor& key_value_ptrs,  // [num_layers]
     const torch::Tensor& slot_mapping,    // [num_tokens],
@@ -443,18 +444,34 @@ void multi_layer_kv_transfer_templated(
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (not direction) {
-    lmc::load_and_reshape_multi_layer_kernel<T, false>
-        <<<grid, block, 0, stream>>>(
-            key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords,
-            key_value_tokens, num_layers, page_buffer_size, transpose);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (transpose) {
+    if (not direction) {
+      lmc::load_and_reshape_multi_layer_kernel<T, false, true>
+          <<<grid, block, 0, stream>>>(
+              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords,
+              key_value_tokens, num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else {
+      lmc::load_and_reshape_multi_layer_kernel<T, true, true>
+          <<<grid, block, 0, stream>>>(
+              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords,
+              key_value_tokens, num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
   } else {
-    lmc::load_and_reshape_multi_layer_kernel<T, true>
-        <<<grid, block, 0, stream>>>(
-            key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords,
-            key_value_tokens, num_layers, page_buffer_size, transpose);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (not direction) {
+      lmc::load_and_reshape_multi_layer_kernel<T, false, false>
+          <<<grid, block, 0, stream>>>(
+              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords,
+              key_value_tokens, num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else {
+      lmc::load_and_reshape_multi_layer_kernel<T, true, false>
+          <<<grid, block, 0, stream>>>(
+              key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, num_xwords,
+              key_value_tokens, num_layers, page_buffer_size);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
   }
 }
 
