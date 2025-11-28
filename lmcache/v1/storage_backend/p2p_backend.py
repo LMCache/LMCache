@@ -121,11 +121,10 @@ class P2PBackend(StorageBackendInterface):
         assert config.p2p_lookup_ports is not None, "p2p_lookup_ports must be specified"
 
         # Load timeout configurations from extra_config (in milliseconds)
-        extra_config = config.extra_config or {}
-        self.socket_recv_timeout_ms = extra_config.get(
+        self.socket_recv_timeout_ms = config.get_extra_config_value(
             "p2p_socket_recv_timeout_ms", DEFAULT_SOCKET_RECV_TIMEOUT_MS
         )
-        self.socket_send_timeout_ms = extra_config.get(
+        self.socket_send_timeout_ms = config.get_extra_config_value(
             "p2p_socket_send_timeout_ms", DEFAULT_SOCKET_SEND_TIMEOUT_MS
         )
 

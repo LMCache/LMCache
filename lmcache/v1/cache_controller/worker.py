@@ -78,11 +78,10 @@ class LMCacheWorker:
         self.context = get_zmq_context()
 
         # Load timeout configurations from extra_config (in milliseconds)
-        extra_config = config.extra_config or {}
-        self.socket_recv_timeout_ms = extra_config.get(
+        self.socket_recv_timeout_ms = config.get_extra_config_value(
             "worker_socket_recv_timeout_ms", DEFAULT_SOCKET_RECV_TIMEOUT_MS
         )
-        self.socket_send_timeout_ms = extra_config.get(
+        self.socket_send_timeout_ms = config.get_extra_config_value(
             "worker_socket_send_timeout_ms", DEFAULT_SOCKET_SEND_TIMEOUT_MS
         )
 
@@ -99,15 +98,7 @@ class LMCacheWorker:
 
         if config.controller_reply_url is not None:
             self.controller_rep_url = config.controller_reply_url
-            self.req_socket = get_zmq_socket_with_timeout(
-                self.context,
-                self.controller_rep_url,
-                "tcp",
-                zmq.REQ,  # type: ignore[attr-defined]
-                "connect",
-                self.socket_recv_timeout_ms,
-                self.socket_send_timeout_ms,
-            )
+            self._create_req_socket()
 
         lmcache_worker_ids = config.get_lmcache_worker_ids(
             metadata.use_mla, metadata.world_size
@@ -198,17 +189,17 @@ class LMCacheWorker:
             return ret_msg
         except zmq.Again as e:
             logger.error("Timeout occurred, recreating socket. Error: %s", e)
-            return self._recreate_req_socket_and_ret_msg(msg)
+            self._recreate_req_socket()
+            return self._create_ret_msg(msg)
+        except zmq.ZMQError as e:
+            logger.error("ZMQ error occurred, recreating socket. Error: %s", e)
+            self._recreate_req_socket()
+            return self._create_ret_msg(msg)
         except Exception as e:
             logger.error("Error happens in lmcache worker req_socket. Error: %s", e)
-            return self._recreate_req_socket_and_ret_msg(msg)
+            return self._create_ret_msg(msg)
 
-    def _recreate_req_socket_and_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
-        # recreate the req socket
-        try:
-            self.req_socket.close(linger=0)
-        except Exception as e:
-            logger.error("Error closing req socket: %s", e)
+    def _create_req_socket(self):
         self.req_socket = get_zmq_socket_with_timeout(
             self.context,
             self.controller_rep_url,
@@ -218,7 +209,15 @@ class LMCacheWorker:
             self.socket_recv_timeout_ms,
             self.socket_send_timeout_ms,
         )
-        # return the ret msg
+
+    def _recreate_req_socket(self):
+        try:
+            self.req_socket.close(linger=0)
+        except Exception as e:
+            logger.error("Error closing req socket: %s", e)
+        self._create_req_socket()
+
+    def _create_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
         if isinstance(msg, BatchedP2PLookupMsg):
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
         else:
