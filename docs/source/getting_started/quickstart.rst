@@ -91,7 +91,7 @@ You should see logs like this:
 - **Total tokens 32**: The new prompt has 32 tokens after tokenization
 - **LMCache hit tokens: 24**: 24 tokens were found in the cache (24 is a multiple of 8, our chunk size in this example)
 - **Need to load: 8**: vLLM has automatic prefix caching enabled with block size 16. Although there are 24 hit tokens, 16 are already in GPU RAM managed by vLLM, so LMCache only needs to load 24-16=8 tokens
-- **Why 24 hit tokens instead of 27?** LMCache hashes every 8 tokens incrementally (8, 16, 24, 27). When the new request comes in, it checks every 8-token chunk, so it uses the 24-token hash instead of checking the 27-token hash
+- **Why 24 hit tokens instead of 27?** LMCache hashes tokens incrementally in complete 8-token chunks (8, 16, 24, ...). The first request had 27 tokens, but only chunks of 8, 16, and 24 tokens were hashed and stored. The 27 tokens don't form a complete chunk boundary, so they weren't cached as a separate hash. When the new request comes in, it can match up to the 24-token cached chunk
 - **Stored another 8 tokens**: The new 8 tokens form a complete chunk that gets hashed and stored in CPU RAM for future use
 
 🎉 **Congratulations!** You've just seen LMCache automatically cache and reuse KV caches, reducing computation for overlapping text.
