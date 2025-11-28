@@ -100,16 +100,15 @@ class BatchedMessageSender:
                 # Wait for timeout or notification from producer
                 self.cv.wait(timeout=self.batch_timeout)
 
-                # Check if we have messages to process while still holding the lock
-                # This prevents race conditions where producers add messages after
-                # we're notified but before we start processing
+                # Check if we have messages to process while holding the lock
+                # This prevents race conditions but we'll release lock
+                # before blocking operations
                 if self.message_queue.empty():
                     continue
 
-                # Drain the queue and send messages while still holding the lock
-                # This ensures strict ordering: no new messages can be added
-                # while we're processing the current batch
-                self._drain_and_send()
+            # Drain the queue without holding the lock to avoid blocking producers
+            # This improves performance during the actual message processing
+            self._drain_and_send()
 
     def _get_next_sequence_number(self) -> int:
         """Get next sequence number for message tracking.
@@ -152,19 +151,19 @@ class BatchedMessageSender:
         This method is called by the consumer thread to collect all pending
         operations from the queue and send them as a single batched message.
         """
-        if self.message_queue.empty():
-            return
-
         ops_to_send: List[KVOpEvent] = []
 
-        # Drain all messages from the queue
-        while not self.message_queue.empty():
+        # Drain all messages from the queue using blocking get with timeout
+        # This ensures we don't miss any messages due to race conditions
+        while True:
             try:
-                op = self.message_queue.get_nowait()
+                # Use a small timeout to avoid blocking indefinitely
+                op = self.message_queue.get(timeout=0.001)
                 ops_to_send.append(op)
                 # Mark task as done to maintain queue count accuracy
                 self.message_queue.task_done()
             except queue.Empty:
+                # Queue is empty, break the loop
                 break
 
         if not ops_to_send:
@@ -186,7 +185,29 @@ class BatchedMessageSender:
         self.lmcache_worker.put_msg(batched_msg)
 
     def flush(self):
-        """Manually flush all pending messages."""
+        """Manually flush all pending messages.
+
+        This method ensures all pending messages in the queue are processed
+        before returning. It repeatedly drains the queue until empty to handle
+        race conditions in high-throughput scenarios.
+        """
+        # Notify consumer thread to wake up and process messages
+        with self.cv:
+            self.cv.notify()
+
+        # Keep draining until queue is truly empty
+        # This handles the race condition where messages are being added
+        # while we're trying to flush
+        max_attempts = 10
+        for _ in range(max_attempts):
+            self._drain_and_send()
+            # Small sleep to allow any in-flight messages to be queued
+            if not self.message_queue.empty():
+                threading.Event().wait(0.001)
+            else:
+                break
+
+        # Final drain to ensure we got everything
         self._drain_and_send()
 
     def close(self):
