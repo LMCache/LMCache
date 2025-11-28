@@ -90,9 +90,13 @@ class BatchedLookupAndPutRetMsg(P2PMsgBase):
 
 
 class P2PErrorMsg(P2PMsgBase):
-    """Error message"""
+    """
+    Error message, return error code to client.
 
-    error: str
+    -1 represents unknown msg type;
+    """
+
+    error_code: int
 
 
 P2PMsg = Union[
@@ -330,7 +334,7 @@ class P2PBackend(StorageBackendInterface):
                 ret_msg = await self._handle_batched_lookup_and_put(msg)
             else:
                 logger.error("Unknown message type: %s", type(msg))
-                ret_msg = P2PErrorMsg(error="Unknown message type")
+                ret_msg = P2PErrorMsg(error_code=-1)
 
             logger.info(f"P2P transfer finished for request {monitor_req_id}")
             self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
