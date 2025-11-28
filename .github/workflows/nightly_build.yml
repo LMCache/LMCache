@@ -73,3 +73,16 @@ jobs:
         run: |
           docker push lmcache/vllm-openai:latest-nightly
           docker push lmcache/vllm-openai:nightly-${{ env.NOW }}
+
+      - name: Build lmcache/standalone container image
+        run: |
+          docker build \
+          --build-arg CUDA_VERSION=12.8 --build-arg UBUNTU_VERSION=24.04 \
+          --target lmcache-final \
+          --tag lmcache/standalone:nightly --tag lmcache/standalone:nightly-${{ env.NOW }} \
+          --file docker/Dockerfile.standalone .
+
+      - name: Push lmcache/standalone container image to DockerHub
+        run: |
+          docker push lmcache/standalone:nightly
+          docker push lmcache/standalone:nightly-${{ env.NOW }}
