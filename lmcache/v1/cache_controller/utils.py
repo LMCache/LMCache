@@ -10,6 +10,6 @@ class WorkerInfo:
     worker_id: int
     ip: str
     port: int
-    distributed_url: Optional[str]
+    peer_init_url: Optional[str]
     registration_time: float
     last_heartbeat_time: float

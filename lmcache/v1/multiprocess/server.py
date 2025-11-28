@@ -6,26 +6,27 @@
 #   - Thread safe (Read/Write lock)
 #   - Eviction policy
 # - Double buffer for store/retrieve (5% optimization)
-# - Integrate with vLLM
 # - Refactor and reuse the existing LMCache classes
 # - Lock and unlock
-# - BUG of memory allocation
 ###
 
 # Standard
 import argparse
 import array
+import threading
 import time
 
 # Third Party
+import cupy
 import torch
 import zmq
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MemoryObj, MixedMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -99,8 +100,19 @@ class GPUCacheContext:
             tmp_buffer_shape, dtype=self.dtype, device=self.device_
         )
 
-        # Cuda stream
+        # Cuda streams
         self.cuda_stream_ = torch.cuda.Stream(device=self.device_)
+        self.cupy_stream_ = cupy.cuda.ExternalStream(
+            self.cuda_stream_.cuda_stream, self.device_.index
+        )
+
+        # Extra initialization
+        self.cupy_stream_.launch_host_func(
+            lambda logger: logger.info(
+                "Initialized cuda stream on device %s", str(self.device_)
+            ),
+            logger,
+        )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -127,6 +139,10 @@ class GPUCacheContext:
         Returns the CUDA stream for KV cache operations
         """
         return self.cuda_stream_
+
+    @property
+    def cupy_stream(self) -> cupy.cuda.Stream:
+        return self.cupy_stream_
 
     @property
     def block_size(self) -> int:
@@ -192,17 +208,23 @@ class MPCacheEngine:
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
 
-        # Memory allocator
-        size_in_bytes = int(cpu_buffer_size * (1 << 30))  # Convert GB to bytes
-        self.memory_allocator = MixedMemoryAllocator(size_in_bytes)
-
         # chunk size
         self.chunk_size = chunk_size
 
-        # Temp CPU buffer for debug
-        self.hot_buffer: dict[IPCCacheEngineKey, MemoryObj] = {}
+        # thread lock to avoid tmp buffer conflicts
+        self.lock = threading.Lock()
+
+        # storage manager
+        self.storage_manager = MPStorageManager(cpu_buffer_size)
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
+        """
+        Registers the KV cache tensors for a given GPU instance ID.
+
+        Args:
+            instance_id (int): The GPU instance ID (such as PID).
+            kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
+        """
         gpu_context = GPUCacheContext(kv_caches)
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
@@ -212,6 +234,12 @@ class MPCacheEngine:
         )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
+        """
+        Unregisters the KV cache tensors for a given GPU instance ID.
+
+        Args:
+            instance_id (int): The GPU instance ID (such as PID).
+        """
         if instance_id in self.gpu_contexts:
             del self.gpu_contexts[instance_id]
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
@@ -227,6 +255,20 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
+        """
+        Stores the GPU KV cache blocks to CPU.
+
+        Args:
+            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            instance_id (int): The GPU instance ID (such as PID).
+            gpu_block_ids (list[int]): The GPU block IDs to store.
+            event_ipc_handle (bytes): The IPC handle of the event to wait on.
+
+        Returns:
+            tuple[bytes, bool]: The first element is the IPC handle of the event
+                that signals the completion of the store operation. The second
+                element indicates whether the store operation was successful.
+        """
         st = time.perf_counter()
 
         assert instance_id in self.gpu_contexts, (
@@ -247,47 +289,54 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            num_tokens = self.chunk_size
+            cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
+            fmt = (
+                MemoryFormat.KV_MLA_FMT if gpu_context.is_mla else MemoryFormat.KV_2LTD
+            )
+            reserve_handle, reserved_dict = self.storage_manager.reserve(
+                keys, cpu_shape, gpu_context.dtype, fmt=fmt
+            )
+
             for idx, key in enumerate(keys):
-                if key in self.hot_buffer:
-                    # Already stored
+                if key in reserved_dict:
+                    memory_obj = reserved_dict[key]
+                else:
                     continue
 
                 start = idx * self.chunk_size
                 end = start + self.chunk_size
                 slot_mapping = slot_mapping_tensor[start:end]
 
-                # cpu shape
-                num_tokens = len(slot_mapping)
-                cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-
-                # Allocate pinned memory
-                memory_obj = self.memory_allocator.allocate(
-                    cpu_shape, dtype=gpu_context.dtype
-                )
-
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_buffer,
-                    # memory_obj.tensor,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    True,
-                    gpu_context.is_mla,
-                )
+                with self.lock:
+                    lmc_ops.multi_layer_kv_transfer(
+                        tmp_buffer,
+                        # memory_obj.tensor,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        True,
+                        gpu_context.is_mla,
+                    )
 
-                memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
-                self.hot_buffer[key] = memory_obj
+                    assert memory_obj.tensor is not None
+                    memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
+
             event.record()
 
-        ed = time.perf_counter()
-        logger.info(
-            "Stored %d tokens in %.3f seconds",
-            len(slot_mapping_tensor),
-            ed - st,
+        self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
+            self.storage_manager.commit, reserve_handle
         )
+        ed = time.perf_counter()
+        if length := len(reserved_dict):
+            logger.info(
+                "Stored %d tokens in %.3f seconds",
+                length * self.chunk_size,
+                ed - st,
+            )
         return event.ipc_handle(), True
 
     @_lmcache_nvtx_annotate
@@ -298,64 +347,80 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, list[bool]]:
+        """
+        Retrieves the CPU KV cache and put into GPU blocks.
+
+        Args:
+            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            instance_id (int): The GPU instance ID (such as PID).
+            gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
+            event_ipc_handle (bytes): The IPC handle of the event to wait on.
+
+        Returns:
+            tuple[bytes, list[bool]]: The first element is the IPC handle of the event
+                that signals the completion of the retrieve operation. The second
+                element is a list indicating whether each key was successfully
+                retrieved.
+
+
+        Notes:
+            - The caller must ensure that all keys are present in the storage (i.e.,
+                a prior lookup should have been performed).
+        """
+        # NOTE: this function will only return all True or all False even if
+        # there is a partial hit. This is because we are requiring all the
+        # retrieves objects is pre-locked by the lookup function (so they
+        # must be all found)
         st = time.perf_counter()
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
         )
 
         gpu_context = self.gpu_contexts[instance_id]
-        results = []
+
+        def _retrieve_loop(keys: list[IPCCacheEngineKey], memory_objs: list[MemoryObj]):
+            for idx, (key, memory_obj) in enumerate(
+                zip(keys, memory_objs, strict=False)
+            ):
+                start = idx * self.chunk_size
+                end = start + self.chunk_size
+                slot_mapping = slot_mapping_tensor[start:end]
+
+                # Copy from CPU to GPU
+                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                with self.lock:
+                    tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
+
+                    lmc_ops.multi_layer_kv_transfer(
+                        # memory_obj.tensor,
+                        tmp_gpu_buffer_,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        False,
+                        gpu_context.is_mla,
+                    )
 
         with (
             torch.cuda.device(gpu_context.device),
             torch.cuda.stream(gpu_context.stream),
         ):
-            # vllm_event = torch.cuda.Event.from_ipc_handle(
-            #    gpu_context.device, event_ipc_handle
-            # )
-            # vllm_event.wait()
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
             event = torch.cuda.Event(interprocess=True)
 
-            skip_remaining = False
-            for idx, key in enumerate(keys):
-                if skip_remaining:
-                    results.append(False)
-                    continue
-
-                if key not in self.hot_buffer:
-                    results.append(False)
-                    skip_remaining = True
-                    continue
-
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
-
-                # cpu shape
-                num_tokens = len(slot_mapping)
-
-                # Copy from CPU to GPU
-                memory_obj = self.hot_buffer[key]
-                tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(num_tokens)
-                tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
-
-                lmc_ops.multi_layer_kv_transfer(
-                    # memory_obj.tensor,
-                    tmp_gpu_buffer_,
-                    gpu_context.kv_pointers,
-                    slot_mapping,
-                    gpu_context.device,
-                    gpu_context.block_size * gpu_context.num_blocks,
-                    False,
-                    gpu_context.is_mla,
-                )
-                results.append(True)
+            try:
+                with self.storage_manager.retrieve(keys) as memory_objs:
+                    _retrieve_loop(keys, memory_objs)
+            except Exception as e:
+                logger.warning("Cannot retrieve keys: %s", str(e))
+                event.record()
+                return event.ipc_handle(), [False] * len(keys)
 
             event.record()
 
-        tokens_retrieved = sum(results) * self.chunk_size
+        tokens_retrieved = len(keys) * self.chunk_size
         ed = time.perf_counter()
         logger.info(
             "Retrieved %d tokens in %.3f seconds",
@@ -363,65 +428,55 @@ class MPCacheEngine:
             ed - st,
         )
 
-        return event.ipc_handle(), results
+        return event.ipc_handle(), [True] * len(keys)
 
     def get_chunk_size(self) -> int:
+        """
+        Returns the chunk size used for KV cache operations.
+
+        Returns:
+            int: The chunk size.
+        """
         return self.chunk_size
 
-    @_lmcache_nvtx_annotate
     def lookup(
         self,
         keys: list[IPCCacheEngineKey],
         lock: bool | None = None,
     ) -> list[bool]:
-        results = []
-        for key in keys:
-            exists = key in self.hot_buffer
-            results.append(exists)
-        return results
+        """
+        Looks up the presence of keys in the storage. The keys
+        should belongs to a single request (same prompt).
+
+        Args:
+            keys (list[IPCCacheEngineKey]): The keys to look up.
+            lock (bool | None): Whether to lock the found keys.
+
+        Returns:
+            list[bool]: A list indicating whether each key was found.
+
+        Notes:
+            - `lock` is going to be always True in the future.
+            - The function does prefix-based lookup. Therefore, it
+                requires that the keys are from the same request and
+                are in order.
+        """
+        # NOTE: we are doing per-request lookup, the caller need
+        # to be aware of this! We need to add this to the doc!
+        found_count = self.storage_manager.lookup(keys)
+        return [True] * found_count + [False] * (len(keys) - found_count)
 
     def debug(self) -> str:
-        if not hasattr(self, "_checked_keys"):
-            self._checked_keys: set[IPCCacheEngineKey] = set()
-
-        def _display_memory_obj(mem_obj: MemoryObj) -> str:
-            # Print each layer of the memory object
-            num_layers = mem_obj.get_shape()[1]
-            logstr = ""
-            for i in range(num_layers):
-                layer_tensor = mem_obj.tensor[:, i, ...]  # type: ignore
-                # logstr += f"Layer {i:03d}: Mean={layer_tensor.mean().item():.6f}\n"
-                if layer_tensor.mean().abs() < 1e-6:
-                    logstr += (
-                        f"Layer {i:03d}: Mostly Zeros with mean = "
-                        + f"{layer_tensor.mean().item():.6f}\n"
-                    )
-            return logstr
-
-        logger.info("Received debug request!")
-        for key, mem_obj in self.hot_buffer.items():
-            if key in self._checked_keys:
-                continue
-            self._checked_keys.add(key)
-            logstr = _display_memory_obj(mem_obj)
-            if len(logstr) > 0:
-                logger.error("========================================")
-                logger.error("Key: %s", str(key))
-                logger.error(logstr)
-                logger.error("========================================")
-
         return "OK"
 
     def clear(self) -> None:
-        # self.debug()
-        logger.info("Received clear request!")
-        self.memory_allocator.memcheck()
-        length = len(self.hot_buffer)
-        for obj in self.hot_buffer.values():
-            obj.ref_count_down()
-        self.hot_buffer.clear()
-        logger.info("Cleared %d cached items", length)
-        self.memory_allocator.memcheck()
+        """
+        Clears all stored KV cache data from the storage manager.
+        """
+        with self.lock:
+            self.storage_manager.memcheck()
+            self.storage_manager.clear()
+            self.storage_manager.memcheck()
 
 
 def add_handler_helper(

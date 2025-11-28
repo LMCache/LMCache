@@ -6,10 +6,12 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Coroutine,
+    Dict,
     Generator,
     List,
     Optional,
     Sequence,
+    Tuple,
 )
 import asyncio
 import functools
@@ -735,9 +737,11 @@ class StorageManager:
 
             # NOTE(Jiayi): We do not pin for PDBackend
             if backend_name == "PDBackend":
-                pin = False
+                pin_in_backend = False
+            else:
+                pin_in_backend = pin
 
-            if backend.contains(key, pin):
+            if backend.contains(key, pin_in_backend):
                 return backend_name
 
         return None
@@ -747,8 +751,7 @@ class StorageManager:
         keys: List[CacheEngineKey],
         search_range: Optional[List[str]] = None,
         pin: bool = False,
-        stop_after_first_not_exits: bool = True,
-    ) -> List[bool]:
+    ) -> int:
         """
         Check whether the key exists in the storage backend.
 
@@ -761,47 +764,59 @@ class StorageManager:
 
         :param bool pin: Whether to pin the key.
 
-        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
-        all subsequent results will return False directly.
-
-        return: True if the key exists in the specified storage backends else False.
+        return: Return hit chunks by prefix match.
         """
+        total_keys = len(keys)
+        total_hit_chunks = 0
+        for backend_name, backend in self.storage_backends.items():
+            if search_range and backend_name not in search_range:
+                continue
 
-        # TODO: Only single-layer batched_contains is supported currently.
-        # Only allocate backend is LocalCPUBackend and do not enable hot cache,
-        # check another backend is supported batched_contains
-        if (
-            len(self.storage_backends) == 2
-            and not self.config.enable_pd
-            and not self.config.local_cpu
-            and (search_range is None or len(search_range) == 1)
-        ):
-            for backend_name, backend in self.storage_backends.items():
-                if backend_name == "LocalCPUBackend":
-                    continue
-                if (
-                    search_range is None or search_range[0] == backend_name
-                ) and backend.support_batched_contains():
-                    return backend.batched_contains(
-                        keys, pin, stop_after_first_not_exits
-                    )
-
-        # default implementation
-        contains_res = []
-        for key in keys:
-            res = self.contains(key, search_range, pin)
-            if res is not None:
-                contains_res.append(True)
+            # NOTE(Jiayi): We do not pin for PDBackend
+            if backend_name == "PDBackend":
+                pin_in_backend = False
             else:
-                if stop_after_first_not_exits:
-                    # fill the contains_res with None
-                    current_len = len(contains_res)
-                    contains_res.extend([False] * (len(keys) - current_len))
-                    break
-                else:
-                    contains_res.append(False)
+                pin_in_backend = pin
 
-        return contains_res
+            hit_chunks = backend.batched_contains(keys, pin_in_backend)
+            if hit_chunks == 0:
+                continue
+            total_hit_chunks += hit_chunks
+            if total_hit_chunks == total_keys:
+                break
+            keys = keys[hit_chunks:]
+
+        return total_hit_chunks
+
+    def get_block_mapping(
+        self, chunk_infos: List[Tuple[CacheEngineKey, int, int]]
+    ) -> Dict[str, List[Tuple[CacheEngineKey, int, int]]]:
+        """
+        Get block mapping for the given chunk infos, works by prefix match.
+
+        :param List[Tuple[CacheEngineKey, int, int]] chunk_infos:
+        List of chunk infos, each tuple contains (key, begin, end)
+
+        :return: Dict[str, List[Tuple[CacheEngineKey, int, int]]]:
+        Block mapping for the given chunk infos, each key is the backend name,
+        each value is a list of chunk infos in the backend.
+        """
+        keys = [chunk_info[0] for chunk_info in chunk_infos]
+        total_keys = len(keys)
+        block_mapping = {}
+        total_hit_chunks = 0
+        for backend_name, backend in self.storage_backends.items():
+            hit_chunks = backend.batched_contains(keys)
+            if hit_chunks == 0:
+                continue
+            block_mapping[backend_name] = chunk_infos[
+                total_hit_chunks : total_hit_chunks + hit_chunks
+            ]
+            total_hit_chunks += hit_chunks
+            if total_hit_chunks == total_keys:
+                break
+            keys = keys[hit_chunks:]
+        return block_mapping
 
     def touch_cache(self):
         for backend_name, backend in self.storage_backends.items():
@@ -945,14 +960,39 @@ class StorageManager:
         return storage_names
 
     def close(self):
-        for backend in self.storage_backends.values():
-            backend.close()
+        logger.info("Closing StorageManager...")
 
-        # using threadsafe method here as stop modifies
-        # the internal state of the loop (in another thread)
-        if self.loop.is_running():
-            self.loop.call_soon_threadsafe(self.loop.stop)
+        # Close all backends
+        for name, backend in self.storage_backends.items():
+            try:
+                logger.info(f"Closing storage backend: {name}")
+                backend.close()
+                logger.info(f"Storage backend {name} closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing backend {name}: {e}")
+
+        # Stop event loop
+        try:
+            if self.loop.is_running():
+                logger.info("Stopping event loop...")
+                self.loop.call_soon_threadsafe(self.loop.stop)
+                logger.info("Event loop stop signaled")
+        except Exception as e:
+            logger.error(f"Error stopping event loop: {e}")
+
+        # Wait for thread with timeout
         if self.thread.is_alive():
-            self.thread.join()
+            logger.info("Waiting for storage manager thread to finish...")
+            self.thread.join(timeout=10.0)
+
+            if self.thread.is_alive():
+                logger.warning(
+                    "Storage manager thread did not terminate within 10s timeout. "
+                    "Proceeding with shutdown anyway."
+                )
+            else:
+                logger.info("Storage manager thread terminated successfully")
+        else:
+            logger.info("Storage manager thread already stopped")
 
         logger.info("Storage manager closed.")

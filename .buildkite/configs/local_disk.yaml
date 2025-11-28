@@ -2,7 +2,7 @@ workload:
   type: long_doc_qa
   max-inflight-requests: 20
   sleep-time-after-warmup: 20
-  expected-latency-gain: 2
+  expected-latency-gain: true
 
 docker:
   env:

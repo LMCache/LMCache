@@ -47,17 +47,34 @@ class ZMQOffloadServer(OffloadServerInterface):
         self.running = True
 
         def process_request():
+            # First Party
+            from lmcache.logging import init_logger
+
+            logger = init_logger(__name__)
+
             while self.running:
-                frame = self.socket.recv(copy=False)
-                offload_msg = msgspec.msgpack.decode(frame, type=OffloadMsg)
-                result = self.offload(
-                    offload_msg.hashes,
-                    offload_msg.slot_mapping,
-                    offload_msg.offsets,
-                )
-                response = OffloadRetMsg(success=result)
-                response = msgspec.msgpack.encode(response)
-                self.socket.send(response)
+                try:
+                    frame = self.socket.recv(copy=False)
+                    offload_msg = msgspec.msgpack.decode(frame, type=OffloadMsg)
+                    result = self.offload(
+                        offload_msg.hashes,
+                        offload_msg.slot_mapping,
+                        offload_msg.offsets,
+                    )
+                    response = OffloadRetMsg(success=result)
+                    response = msgspec.msgpack.encode(response)
+                    self.socket.send(response)
+                except zmq.ZMQError as e:
+                    # Socket was closed, exit gracefully
+                    if not self.running:
+                        logger.info("ZMQ socket closed, exiting offload server thread")
+                        break
+                    logger.error(f"ZMQ error in offload server: {e}")
+                    break
+                except Exception as e:
+                    logger.error(f"Unexpected error in offload server: {e}")
+                    if not self.running:
+                        break
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
@@ -74,6 +91,33 @@ class ZMQOffloadServer(OffloadServerInterface):
         return True
 
     def close(self) -> None:
-        self.socket.close(linger=0)
+        # First Party
+        from lmcache.logging import init_logger
+
+        logger = init_logger(__name__)
+
+        logger.info("Closing ZMQOffloadServer...")
         self.running = False
-        self.thread.join()
+
+        # Close socket to interrupt blocking recv()
+        try:
+            self.socket.close(linger=0)
+            logger.info("ZMQ socket closed")
+        except Exception as e:
+            logger.warning(f"Error closing ZMQ socket: {e}")
+
+        # Wait for thread with timeout to prevent deadlock
+        if self.thread.is_alive():
+            logger.info("Waiting for offload server thread to finish...")
+            self.thread.join(timeout=5.0)
+
+            if self.thread.is_alive():
+                logger.warning(
+                    "Offload server thread did not terminate within timeout. "
+                    "Thread may be stuck in blocking recv(). "
+                    "Proceeding with shutdown anyway."
+                )
+            else:
+                logger.info("Offload server thread terminated successfully")
+        else:
+            logger.info("Offload server thread already stopped")

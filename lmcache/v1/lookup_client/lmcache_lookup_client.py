@@ -161,16 +161,15 @@ class LMCacheLookupClient(LookupClientInterface):
 
             self.sockets[rank_idx] = new_socket
 
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        return self.reqs_status.get(lookup_id, None)
+
     def lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        cached_num_hit_toks = self.reqs_status.get(lookup_id, None)
-        if cached_num_hit_toks is not None:
-            return cached_num_hit_toks
-
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:

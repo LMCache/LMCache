@@ -16,8 +16,6 @@ Two ways to configure LMCache Disk Offloading:
 
 **1. Environment Variables:**
 
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
-
 .. code-block:: bash
 
     # 256 Tokens per KV Chunk
@@ -37,8 +35,6 @@ Two ways to configure LMCache Disk Offloading:
 **2. Configuration File**:
 
 Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
-
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
 
 .. code-block:: yaml
 
@@ -143,7 +139,6 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_LOCAL_DISK="file://local/disk_test/local_disk/" \
     # LMCACHE_MAX_LOCAL_DISK_SIZE=5.0 \
     LMCACHE_CONFIG_FILE="disk-offload.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 16384 \

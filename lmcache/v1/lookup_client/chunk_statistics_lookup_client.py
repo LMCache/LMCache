@@ -60,6 +60,9 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         if config.chunk_statistics_auto_start_statistics:
             self.start_statistics()
 
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        return self.actual_lookup_client.lookup_cache(lookup_id)
+
     def start_statistics(self) -> None:
         with self.lock:
             self.enabled = True

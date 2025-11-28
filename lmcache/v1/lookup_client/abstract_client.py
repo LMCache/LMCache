@@ -14,6 +14,15 @@ if TYPE_CHECKING:
 class LookupClientInterface(metaclass=abc.ABCMeta):
     """Abstract interface for lookup clients."""
 
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        """
+        Lookup the cache for the given lookup ID.
+
+        Args:
+            lookup_id: The lookup ID to lookup
+        """
+        return None
+
     @abc.abstractmethod
     def lookup(
         self,
