@@ -21,7 +21,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
         ccache software-properties-common git curl sudo \
-        python3 python3-dev python3-venv python3-pip tzdata \
+        python3 python3-dev python3-venv tzdata \
+    && rm -rf /var/lib/apt/lists/* \
     && ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/ \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv ~/.local/bin/uv /usr/local/bin/ \
@@ -35,7 +36,7 @@ WORKDIR /workspace
 # Install runtime dependencies
 COPY ./requirements/common.txt common.txt
 COPY ./requirements/cuda.txt cuda.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
     uv pip install -r cuda.txt
 
@@ -59,7 +60,7 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
 
@@ -84,10 +85,10 @@ FROM base AS lmcache-final
 COPY --from=lmcache-build /workspace/LMCache/dist_lmcache/*.whl /tmp/
 
 # Install LMCache from wheel
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
     uv pip install /tmp/*.whl --verbose && \
-    rm -rf /tmp/*.whl && uv cache clean
+    rm -rf /tmp/*.whl 
 
 WORKDIR /workspace
 
