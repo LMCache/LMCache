@@ -1347,6 +1347,8 @@ class LMCacheStatsLogger:
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
         self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.is_running = True
+        # Event for interruptible sleep during shutdown
+        self.shutdown_event = threading.Event()
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
         self.thread.start()
@@ -1356,8 +1358,44 @@ class LMCacheStatsLogger:
             stats = self.monitor.get_stats_and_clear()
             self.prometheus_logger.log_prometheus(stats)
             self.lmc_usage_logger.incr_or_send_stats(stats)
-            time.sleep(self.log_interval)
+            # Use Event.wait() instead of time.sleep() for interruptible sleep
+            # Returns True if event was set, False if timeout occurred
+            self.shutdown_event.wait(self.log_interval)
 
     def shutdown(self):
+        """Shutdown the stats logger gracefully with immediate wake-up"""
+        logger.info("Shutting down LMCacheStatsLogger...")
+
+        # Signal the worker thread to stop
         self.is_running = False
-        self.thread.join()
+
+        # Signal the event to wake up the thread immediately from sleep
+        self.shutdown_event.set()
+
+        # Wait for thread with a reasonable timeout
+        if self.thread.is_alive():
+            # Since we wake up the thread immediately, use a shorter timeout
+            # Just enough time for the thread to finish its current iteration
+            timeout = 5.0
+            logger.info(
+                f"Waiting for stats logger thread to finish (timeout: {timeout}s)..."
+            )
+
+            try:
+                self.thread.join(timeout=timeout)
+
+                if self.thread.is_alive():
+                    logger.warning(
+                        f"Stats logger thread did not terminate "
+                        f"within {timeout}s timeout. "
+                        "Thread may be blocked in logging operations. "
+                        "Proceeding with shutdown anyway."
+                    )
+                else:
+                    logger.info("Stats logger thread terminated successfully")
+            except Exception as e:
+                logger.error(f"Error waiting for stats logger thread: {e}")
+        else:
+            logger.info("Stats logger thread already stopped")
+
+        logger.info("LMCacheStatsLogger shutdown complete")
