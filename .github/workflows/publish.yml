@@ -273,3 +273,16 @@ jobs:
               run: |
                 docker push lmcache/vllm-openai:lightweight
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight
+            
+            - name: Build lmcache/standalone container image
+              run: |
+                docker build \
+                --build-arg CUDA_VERSION=12.8 --build-arg UBUNTU_VERSION=24.04 \
+                --target lmcache-final \
+                --tag lmcache/standalone:latest --tag lmcache/standalone:${{ env.LATEST_TAG }} \
+                --file docker/Dockerfile.standalone .
+            
+            - name: Push lmcache/standalone container image to DockerHub
+              run: |
+                docker push lmcache/standalone:latest
+                docker push lmcache/standalone:${{ env.LATEST_TAG }}
