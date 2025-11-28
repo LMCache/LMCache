@@ -89,11 +89,22 @@ class BatchedLookupAndPutRetMsg(P2PMsgBase):
     num_read_chunks: int
 
 
+class P2PErrorMsg(P2PMsgBase):
+    """
+    Error message, return error code to client.
+
+    -1 represents unknown msg type;
+    """
+
+    error_code: int
+
+
 P2PMsg = Union[
     BatchedLookupAndGetMsg,
     BatchedLookupAndGetRetMsg,
     BatchedLookupAndPutMsg,
     BatchedLookupAndPutRetMsg,
+    P2PErrorMsg,
 ]
 
 
@@ -212,6 +223,16 @@ class P2PBackend(StorageBackendInterface):
                 # Fast failure: log error but continue running
                 # Add small delay to prevent tight error loop
                 await asyncio.sleep(0.1)
+                if self.async_peer_socket is not None:
+                    logger.warning("Closing async peer socket.")
+                    try:
+                        self.async_peer_socket.close(linger=0)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to close peer socket: %s",
+                            e,
+                            exc_info=True,
+                        )
 
     def _create_socket_with_timeout(
         self,
@@ -291,7 +312,7 @@ class P2PBackend(StorageBackendInterface):
         """
 
         logger.info(
-            f"Starting P2P backend batched get handler at {self.peer_lookup_url}"
+            "Starting P2P backend batched get handler at %s", self.peer_lookup_url
         )
         self.async_context = get_zmq_context()
         self.async_peer_socket = self._create_socket_with_timeout(
@@ -308,89 +329,118 @@ class P2PBackend(StorageBackendInterface):
             monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
 
             if isinstance(msg, BatchedLookupAndGetMsg):
-                logger.info("Received P2P batched get msg")
-
-                lookup_id = msg.lookup_id
-                receiver_id = msg.receiver_id
-                remote_mem_indexes = msg.mem_indexes
-                keys = [CacheEngineKey.from_string(key) for key in msg.keys]
-
-                # TODO(Jiayi): Optimally, there's no need to use async call
-                # for some backends (e.g., local cpu) as there's overhead for
-                # async function call.
-                num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
-                    lookup_id=lookup_id,
-                    keys=keys,
-                    pin=True,
-                )
-
-                mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
-                    lookup_id=lookup_id,
-                    keys=keys[:num_hit_chunks],
-                )
-
-                channel_transfer_spec = {
-                    "receiver_id": receiver_id,
-                    "remote_indexes": remote_mem_indexes[:num_hit_chunks],
-                }
-                await self.transfer_channel.async_batched_write(
-                    objects=mem_objs,
-                    transfer_spec=channel_transfer_spec,
-                )
-
-                ret_msg = BatchedLookupAndGetRetMsg(
-                    num_hit_chunks=num_hit_chunks,
-                )
-
-                for mem_obj in mem_objs:
-                    mem_obj.ref_count_down()
-                    mem_obj.unpin()
+                ret_msg = await self._handle_batched_lookup_and_get(msg)
             elif isinstance(msg, BatchedLookupAndPutMsg):
-                logger.info("Received P2P batched put msg")
-
-                sender_id = msg.sender_id
-                r_mem_indexes = msg.mem_indexes
-                keys = [CacheEngineKey.from_string(key) for key in msg.keys]
-                offsets = msg.offsets
-
-                # TODO(Jiayi): Need to support more backend
-                r_mem_indexes_to_read = []
-                keys_to_read = []
-                local_mem_objs = []
-                for idx, key in enumerate(keys):
-                    if self.local_cpu_backend.contains(key, pin=False):
-                        continue
-                    r_mem_indexes_to_read.append(r_mem_indexes[idx])
-                    shape = self.full_size_shape.copy()
-                    shape[self.fmt.token_dim()] = offsets[idx]
-                    local_mem_obj = self.local_cpu_backend.allocate(
-                        torch.Size(shape), self.dtype, self.fmt
-                    )
-                    local_mem_objs.append(local_mem_obj)
-                    keys_to_read.append(key)
-
-                channel_transfer_spec = {
-                    "sender_id": sender_id,
-                    "remote_indexes": r_mem_indexes_to_read,
-                }
-                await self.transfer_channel.async_batched_read(
-                    buffers=local_mem_objs,
-                    transfer_spec=channel_transfer_spec,
-                )
-
-                self.local_cpu_backend.batched_submit_put_task(
-                    keys=keys_to_read,
-                    memory_objs=local_mem_objs,
-                )
-
-                ret_msg = BatchedLookupAndPutRetMsg(
-                    num_read_chunks=len(local_mem_objs),
-                )
+                ret_msg = await self._handle_batched_lookup_and_put(msg)
+            else:
+                logger.error("Unknown message type: %s", type(msg))
+                ret_msg = P2PErrorMsg(error_code=-1)
 
             logger.info(f"P2P transfer finished for request {monitor_req_id}")
             self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
+
+    async def _handle_batched_lookup_and_get(
+        self, msg: BatchedLookupAndGetMsg
+    ) -> BatchedLookupAndGetRetMsg:
+        lookup_id = msg.lookup_id
+        mem_objs = None
+        try:
+            logger.info(
+                "Received P2P batched lookup and get msg, lookup_id: %s", lookup_id
+            )
+            receiver_id = msg.receiver_id
+            remote_mem_indexes = msg.mem_indexes
+            keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+
+            # TODO(Jiayi): Optimally, there's no need to use async call
+            # for some backends (e.g., local cpu) as there's overhead for
+            # async function call.
+            num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
+                lookup_id=lookup_id,
+                keys=keys,
+                pin=True,
+            )
+
+            mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
+                lookup_id=lookup_id,
+                keys=keys[:num_hit_chunks],
+            )
+
+            channel_transfer_spec = {
+                "receiver_id": receiver_id,
+                "remote_indexes": remote_mem_indexes[:num_hit_chunks],
+            }
+            await self.transfer_channel.async_batched_write(
+                objects=mem_objs,
+                transfer_spec=channel_transfer_spec,
+            )
+
+            return BatchedLookupAndGetRetMsg(num_hit_chunks=num_hit_chunks)
+        except Exception as e:
+            logger.error(
+                "Error during P2P batched lookup and get operation "
+                "for lookup_id %s: %s",
+                lookup_id,
+                e,
+                exc_info=True,
+            )
+            return BatchedLookupAndGetRetMsg(num_hit_chunks=0)
+        finally:
+            if mem_objs is not None:
+                for mem_obj in mem_objs:
+                    mem_obj.ref_count_down()
+                    mem_obj.unpin()
+
+    async def _handle_batched_lookup_and_put(
+        self, msg: BatchedLookupAndPutMsg
+    ) -> BatchedLookupAndPutRetMsg:
+        try:
+            logger.info("Received P2P batched lookup and put msg")
+            sender_id = msg.sender_id
+            r_mem_indexes = msg.mem_indexes
+            keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+            offsets = msg.offsets
+
+            # TODO(Jiayi): Need to support more backend
+            r_mem_indexes_to_read = []
+            keys_to_read = []
+            local_mem_objs = []
+            for idx, key in enumerate(keys):
+                if self.local_cpu_backend.contains(key, pin=False):
+                    continue
+                r_mem_indexes_to_read.append(r_mem_indexes[idx])
+                shape = self.full_size_shape.copy()
+                shape[self.fmt.token_dim()] = offsets[idx]
+                local_mem_obj = self.local_cpu_backend.allocate(
+                    torch.Size(shape), self.dtype, self.fmt
+                )
+                local_mem_objs.append(local_mem_obj)
+                keys_to_read.append(key)
+
+            channel_transfer_spec = {
+                "sender_id": sender_id,
+                "remote_indexes": r_mem_indexes_to_read,
+            }
+            await self.transfer_channel.async_batched_read(
+                buffers=local_mem_objs,
+                transfer_spec=channel_transfer_spec,
+            )
+
+            self.local_cpu_backend.batched_submit_put_task(
+                keys=keys_to_read,
+                memory_objs=local_mem_objs,
+            )
+
+            return BatchedLookupAndPutRetMsg(num_read_chunks=len(local_mem_objs))
+        except Exception as e:
+            logger.error(
+                "Error during P2P batched lookup and put operation: %s",
+                e,
+                exc_info=True,
+            )
+            return BatchedLookupAndPutRetMsg(num_read_chunks=0)
 
     def _recreate_lookup_socket(self, peer_lookup_url: str) -> None:
         """Recreate a lookup socket for a specific peer"""
