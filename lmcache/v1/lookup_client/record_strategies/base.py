@@ -135,13 +135,13 @@ class RecordStrategy(ABC):
         Args:
             prometheus_logger: Prometheus logger instance to register metrics with
         """
-        prometheus_logger.chunk_statistics_total_chunks.set_function(
+        prometheus_logger.metrics.chunk_statistics_total_chunks.set_function(
             lambda: self.total_chunks
         )
-        prometheus_logger.chunk_statistics_unique_chunks.set_function(
+        prometheus_logger.metrics.chunk_statistics_unique_chunks.set_function(
             lambda: self.unique_chunks_count
         )
-        prometheus_logger.chunk_statistics_reuse_rate.set_function(
+        prometheus_logger.metrics.chunk_statistics_reuse_rate.set_function(
             lambda: (self.total_chunks - self.unique_chunks_count) / self.total_chunks
             if self.total_chunks > 0
             else 0.0
