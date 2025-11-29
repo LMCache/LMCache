@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import os
 import threading
 import time
@@ -589,22 +589,16 @@ class LMCStatsMonitor:
                 pass
 
 
-class PrometheusLogger:
+class PrometheusMetrics:
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
-        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-            default_dir = "/tmp/lmcache_prometheus"
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
-            if not os.path.exists(default_dir):
-                os.makedirs(default_dir, exist_ok=True)
-
-        self.metadata = metadata
-
-        self.labels = self._metadata_to_labels(metadata)
+    def __init__(
+        self,
+        labels: dict[str, Any],
+    ):
+        self.labels = labels
         labelnames = list(self.labels.keys())
 
         self.counter_num_retrieve_requests = self._counter_cls(
@@ -1191,7 +1185,7 @@ class PrometheusLogger:
         for value in data:
             histogram.labels(**self.labels).observe(value)
 
-    def log_prometheus(self, stats: LMCacheStats):
+    def log_from_stats(self, stats: LMCacheStats):
         self._log_counter(
             self.counter_num_retrieve_requests, stats.interval_retrieve_requests
         )
@@ -1304,6 +1298,22 @@ class PrometheusLogger:
         self._log_gauge(
             self.gauge_pinned_memory_objs_count, stats.pinned_memory_objs_count
         )
+
+
+class PrometheusLogger:
+    def __init__(self, metadata: LMCacheEngineMetadata):
+        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            default_dir = "/tmp/lmcache_prometheus"
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
+            if not os.path.exists(default_dir):
+                os.makedirs(default_dir, exist_ok=True)
+
+        self.metadata = metadata
+        self.metrics = PrometheusMetrics(self._metadata_to_labels(metadata))
+
+    def log_prometheus(self, stats: LMCacheStats):
+        self.metrics.log_from_stats(stats)
 
     @staticmethod
     def _metadata_to_labels(metadata: LMCacheEngineMetadata):
