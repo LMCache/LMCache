@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Union
 import os
 import threading
 import time
@@ -569,23 +569,16 @@ class LMCStatsMonitor:
             except KeyError:
                 pass
 
-
-class PrometheusLogger:
+class PrometheusMetrics:
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
-        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-            default_dir = "/tmp/lmcache_prometheus"
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
-            if not os.path.exists(default_dir):
-                os.makedirs(default_dir, exist_ok=True)
-
-        self.metadata = metadata
-
-        self.labels = self._metadata_to_labels(metadata)
+    def __init__(
+        self,
+        labels: dict[str, Any],
+    ):
+        self.labels = labels
         labelnames = list(self.labels.keys())
 
         self.counter_num_retrieve_requests = self._counter_cls(
@@ -1015,7 +1008,7 @@ class PrometheusLogger:
             multiprocess_mode="livemostrecent",
         )
         self._dynamic_metrics(labelnames)
-
+    
     def _dynamic_metrics(self, labelnames):
         """
         Dynamically get value by lambda function while capture
@@ -1142,117 +1135,132 @@ class PrometheusLogger:
         for value in data:
             histogram.labels(**self.labels).observe(value)
 
-    def log_prometheus(self, stats: LMCacheStats):
+    def log_from_stats_dict(self, stats: dict[str, Any]) -> None:
         self._log_counter(
-            self.counter_num_retrieve_requests, stats.interval_retrieve_requests
+            self.counter_num_retrieve_requests, stats.get("interval_retrieve_requests")
         )
         self._log_counter(
-            self.counter_num_store_requests, stats.interval_store_requests
+            self.counter_num_store_requests, stats.get("interval_store_requests")
         )
         self._log_counter(
-            self.counter_num_lookup_requests, stats.interval_lookup_requests
+            self.counter_num_lookup_requests, stats.get("interval_lookup_requests")
         )
 
         self._log_counter(
-            self.counter_num_requested_tokens, stats.interval_requested_tokens
+            self.counter_num_requested_tokens, stats.get("interval_requested_tokens")
         )
-        self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
-        self._log_counter(self.counter_num_stored_tokens, stats.interval_stored_tokens)
-        self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
-        self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
-        self._log_counter(self.counter_num_prompt_tokens, stats.interval_prompt_tokens)
+        self._log_counter(self.counter_num_hit_tokens, stats.get("interval_hit_tokens"))
+        self._log_counter(self.counter_num_stored_tokens, stats.get("interval_stored_tokens"))
+        self._log_counter(self.counter_num_lookup_tokens, stats.get("interval_lookup_tokens"))
+        self._log_counter(self.counter_num_lookup_hits, stats.get("interval_lookup_hits"))
+        self._log_counter(self.counter_num_prompt_tokens, stats.get("interval_prompt_tokens"))
         self._log_counter(
-            self.counter_num_vllm_hit_tokens, stats.interval_vllm_hit_tokens
+            self.counter_num_vllm_hit_tokens, stats.get("interval_vllm_hit_tokens")
         )
 
         self._log_counter(
             self.counter_num_remote_read_requests,
-            stats.interval_remote_read_requests,
+            stats.get("interval_remote_read_requests"),
         )
         self._log_counter(
-            self.counter_num_remote_read_bytes, stats.interval_remote_read_bytes
+            self.counter_num_remote_read_bytes, stats.get("interval_remote_read_bytes")
         )
         self._log_counter(
             self.counter_num_remote_write_requests,
-            stats.interval_remote_write_requests,
+            stats.get("interval_remote_write_requests"),
         )
         self._log_counter(
             self.counter_num_remote_write_bytes,
-            stats.interval_remote_write_bytes,
+            stats.get("interval_remote_write_bytes"),
         )
         self._log_counter(
             self.counter_local_cpu_evict_count,
-            stats.interval_local_cpu_evict_count,
+            stats.get("interval_local_cpu_evict_count"),
         )
         self._log_counter(
             self.counter_local_cpu_evict_keys_count,
-            stats.interval_local_cpu_evict_keys_count,
+            stats.get("interval_local_cpu_evict_keys_count"),
         )
         self._log_counter(
             self.counter_local_cpu_evict_failed_count,
-            stats.interval_local_cpu_evict_failed_count,
+            stats.get("interval_local_cpu_evict_failed_count"),
         )
         self._log_counter(
             self.counter_lookup_0_hit_requests,
-            stats.interval_lookup_0_hit_requests,
+            stats.get("interval_lookup_0_hit_requests"),
         )
 
-        self._log_gauge(self.gauge_retrieve_hit_rate, stats.retrieve_hit_rate)
+        self._log_gauge(self.gauge_retrieve_hit_rate, stats.get("retrieve_hit_rate"))
 
-        self._log_gauge(self.gauge_lookup_hit_rate, stats.lookup_hit_rate)
+        self._log_gauge(self.gauge_lookup_hit_rate, stats.get("lookup_hit_rate"))
 
-        self._log_gauge(self.gauge_local_cache_usage, stats.local_cache_usage_bytes)
+        self._log_gauge(self.gauge_local_cache_usage, stats.get("local_cache_usage_bytes"))
 
-        self._log_gauge(self.gauge_remote_cache_usage, stats.remote_cache_usage_bytes)
+        self._log_gauge(self.gauge_remote_cache_usage, stats.get("remote_cache_usage_bytes"))
 
-        self._log_gauge(self.gauge_local_storage_usage, stats.local_storage_usage_bytes)
+        self._log_gauge(self.gauge_local_storage_usage, stats.get("local_storage_usage_bytes"))
 
-        self._log_histogram(self.histogram_time_to_retrieve, stats.time_to_retrieve)
+        self._log_histogram(self.histogram_time_to_retrieve, stats.get("time_to_retrieve"))
 
-        self._log_histogram(self.histogram_time_to_store, stats.time_to_store)
+        self._log_histogram(self.histogram_time_to_store, stats.get("time_to_store"))
 
-        self._log_histogram(self.histogram_retrieve_speed, stats.retrieve_speed)
+        self._log_histogram(self.histogram_retrieve_speed, stats.get("retrieve_speed"))
 
-        self._log_histogram(self.histogram_store_speed, stats.store_speed)
+        self._log_histogram(self.histogram_store_speed, stats.get("store_speed"))
 
         self._log_histogram(
-            self.histogram_p2p_time_to_transfer, stats.p2p_time_to_transfer
+            self.histogram_p2p_time_to_transfer, stats.get("p2p_time_to_transfer")
         )
 
-        self._log_histogram(self.histogram_p2p_transfer_speed, stats.p2p_transfer_speed)
+        self._log_histogram(self.histogram_p2p_transfer_speed, stats.get("p2p_transfer_speed"))
 
         self._log_histogram(
-            self.histogram_remote_time_to_get, stats.interval_remote_time_to_get
+            self.histogram_remote_time_to_get, stats.get("interval_remote_time_to_get")
         )
         self._log_histogram(
-            self.histogram_remote_time_to_put, stats.interval_remote_time_to_put
+            self.histogram_remote_time_to_put, stats.get("interval_remote_time_to_put")
         )
         self._log_histogram(
             self.histogram_remote_time_to_get_sync,
-            stats.interval_remote_time_to_get_sync,
+            stats.get("interval_remote_time_to_get_sync"),
         )
         self._log_histogram(
-            self.histogram_request_cache_hit_rate, stats.interval_lookup_hit_rates
+            self.histogram_request_cache_hit_rate, stats.get("interval_lookup_hit_rates")
         )
         self._log_gauge(
-            self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
+            self.gauge_remote_ping_latency, stats.get("interval_remote_ping_latency")
         )
         self._log_counter(
-            self.counter_remote_ping_errors, stats.interval_remote_ping_errors
+            self.counter_remote_ping_errors, stats.get("interval_remote_ping_errors")
         )
         self._log_counter(
-            self.counter_remote_ping_successes, stats.interval_remote_ping_success
+            self.counter_remote_ping_successes, stats.get("interval_remote_ping_success")
         )
         self._log_gauge(
-            self.gauge_remote_ping_error_code, stats.interval_remote_ping_error_code
+            self.gauge_remote_ping_error_code, stats.get("interval_remote_ping_error_code")
         )
         self._log_gauge(
-            self.gauge_active_memory_objs_count, stats.active_memory_objs_count
+            self.gauge_active_memory_objs_count, stats.get("active_memory_objs_count")
         )
         self._log_gauge(
-            self.gauge_pinned_memory_objs_count, stats.pinned_memory_objs_count
+            self.gauge_pinned_memory_objs_count, stats.get("pinned_memory_objs_count")
         )
 
+class PrometheusLogger:
+    def __init__(self, metadata: LMCacheEngineMetadata):
+        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            default_dir = "/tmp/lmcache_prometheus"
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
+            if not os.path.exists(default_dir):
+                os.makedirs(default_dir, exist_ok=True)
+
+        self.metadata = metadata
+        self.metrics = PrometheusMetrics(self._metadata_to_labels(metadata))
+
+    def log_prometheus(self, stats: LMCacheStats):
+        self.metrics.log_from_stats_dict(asdict(stats))
+        
     @staticmethod
     def _metadata_to_labels(metadata: LMCacheEngineMetadata):
         return {
