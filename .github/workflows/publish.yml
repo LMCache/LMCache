@@ -266,6 +266,7 @@ jobs:
             - name: Clean up Docker layers and cache
               run: |
                 docker system prune -f --all
+                docker builder prune -af
 
             - name: Build lmcache/vllm-openai:lightweight
               run: | 
@@ -281,7 +282,8 @@ jobs:
             - name: Clean up Docker layers and cache
               run: |
                 docker system prune -f --all
-                           
+                docker builder prune -af
+
             - name: Build lmcache/standalone container image
               run: |
                 docker build \
