@@ -25,11 +25,45 @@ class LoadFSChunksRequest(BaseModel):
     max_failed_keys: int = 10
 
 
+class LoadFSChunksResponse(BaseModel):
+    """Response model for load-fs-chunks endpoint."""
+
+    status: str
+    loaded_chunks: int
+    total_files: int
+    failed_keys: List[str]
+    config_path: str
+
+
+class ErrorResponse(BaseModel):
+    """Error response model for load-fs-chunks endpoint."""
+
+    error: str
+    message: str
+    config_path: Optional[str] = None
+
+
 router = APIRouter()
 logger = init_logger(__name__)
 
 
-@router.post("/cache/load-fs-chunks")
+@router.post(
+    "/cache/load-fs-chunks",
+    summary="Load chunks from FSConnector into hot cache",
+    description="""
+    Load chunk files from FSConnector storage into LocalCPUBackend's hot cache.
+    """,
+    responses={
+        200: {
+            "model": LoadFSChunksResponse,
+            "description": "Chunks loaded successfully",
+        },
+        400: {"model": ErrorResponse, "description": "Invalid configuration file"},
+        500: {"model": ErrorResponse, "description": "Internal server error"},
+        503: {"model": ErrorResponse, "description": "LMCache engine not configured"},
+    },
+    tags=["cache-management"],
+)
 async def load_fs_chunks(
     request: Request,
     request_body: LoadFSChunksRequest,
@@ -46,18 +80,47 @@ async def load_fs_chunks(
     5. Loading MemoryObj from files and putting into hot cache
 
     Args:
-        request: The FastAPI request object
-        request_body: Request body containing config_path, max_chunks,
-            and max_failed_keys
+        request: The FastAPI request object containing application state
+        request_body: Request body containing:
+            - config_path: Path to LMCache engine configuration file
+            - max_chunks: Optional limit on number of chunks to load
+            - max_failed_keys: Maximum failed keys to report (default: 10)
 
     Returns:
         PlainTextResponse: JSON response with loading statistics
 
-    Example:
+    Raises:
+        HTTPException: Various error conditions with appropriate status codes
+
+    Example Request:
         ```bash
         curl -X POST "http://localhost:8000/cache/load-fs-chunks" \
              -H "Content-Type: application/json" \
-             -d '{"config_path": "/path/to/config.json", "max_chunks": 100}'
+             -d '{
+                   "config_path": "/path/to/lmcache.yaml", 
+                   "max_chunks": 100,
+                   "max_failed_keys": 10
+                 }'
+        ```
+
+    Example Response (Success):
+        ```json
+        {
+          "status": "success",
+          "loaded_chunks": 95,
+          "total_files": 100,
+          "failed_keys": ["key1", "key2"],
+          "config_path": "/path/to/lmcache.yaml"
+        }
+        ```
+
+    Example Response (Error):
+        ```json
+        {
+          "error": "Failed to load chunks from FSConnector",
+          "message": "Configuration file not found",
+          "config_path": "/path/to/lmcache.yaml"
+        }
         ```
     """
     lmcache_adapter = request.app.state.lmcache_adapter
@@ -109,7 +172,7 @@ async def load_fs_chunks(
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
-        logger.error(f"Unexpected error in load_fs_chunks: {e}", exc_info=True)
+        logger.error("Unexpected error in load_fs_chunks: %s", e, exc_info=True)
         error_info = {
             "error": "Failed to load chunks from FSConnector",
             "message": str(e),
@@ -130,9 +193,9 @@ async def _load_config_from_file(config_path: str) -> LMCacheEngineConfig:
     try:
         return LMCacheEngineConfig.from_file(config_path)
     except Exception as e:
-        logger.error(f"Failed to load config from {config_path}: {e}")
+        logger.error("Failed to load config from %s: %s", config_path, e)
         raise HTTPException(
-            status_code=400, detail=f"Invalid configuration file: {str(e)}"
+            status_code=400, detail="Invalid configuration file: %s" % str(e)
         ) from e
 
 
@@ -151,9 +214,9 @@ async def _initialize_remote_backend(
         remote_backend.init_connection()
         return remote_backend
     except Exception as e:
-        logger.error(f"Failed to initialize RemoteBackend: {e}")
+        logger.error("Failed to initialize RemoteBackend: %s", e)
         raise HTTPException(
-            status_code=500, detail=f"Failed to initialize RemoteBackend: {str(e)}"
+            status_code=500, detail="Failed to initialize RemoteBackend: %s" % str(e)
         ) from e
 
 
@@ -175,7 +238,7 @@ async def _load_chunks_from_fs_connector(
         if max_chunks:
             chunk_files = chunk_files[:max_chunks]
 
-        logger.info("Found {} chunk files to load".format(len(chunk_files)))
+        logger.info("Found %d chunk files to load", len(chunk_files))
 
         loaded_chunks = 0
         failed_keys: List[str] = []
@@ -184,7 +247,25 @@ async def _load_chunks_from_fs_connector(
         semaphore = asyncio.Semaphore(10)
 
         async def process_chunk(chunk_filename: str) -> bool:
-            """Process a single chunk file."""
+            """
+            Process a single chunk file from FSConnector.
+
+            This function is called for each chunk file and performs:
+            - Transforms filename to CacheEngineKey format
+            - Loads MemoryObj data from remote backend
+            - Places chunk into local CPU backend hot cache
+            - Handles errors and tracks failed keys
+
+            Args:
+                chunk_filename: Name of the chunk file from FSConnector
+
+            Returns:
+                bool: True if chunk was successfully loaded, False otherwise
+
+            Note:
+                This function runs with semaphore control to limit concurrency
+                and ensure system stability during bulk loading operations.
+            """
             async with semaphore:
                 key_str = chunk_filename.replace("-SEP-", "/")
                 try:
@@ -197,7 +278,7 @@ async def _load_chunks_from_fs_connector(
 
                     if memory_obj is None:
                         failed_keys.append(key_str)
-                        logger.warning("Failed to load chunk: {}".format(key_str))
+                        logger.warning("Failed to load chunk: %s", key_str)
                         return False
 
                     # Put into local cpu backend and immediately release reference
@@ -207,7 +288,7 @@ async def _load_chunks_from_fs_connector(
 
                 except Exception as e:
                     failed_keys.append(key_str)
-                    logger.warning("Error processing chunk {}: {}".format(key_str, e))
+                    logger.warning("Error processing chunk %s: %s", key_str, e)
                     return False
 
         # Process all chunks concurrently
@@ -218,12 +299,12 @@ async def _load_chunks_from_fs_connector(
         loaded_chunks = sum(1 for result in results if result is True)
 
         if loaded_chunks > 0 and loaded_chunks % 100 == 0:
-            logger.info("Loaded {} chunks...".format(loaded_chunks))
+            logger.info("Loaded %d chunks...", loaded_chunks)
 
         logger.info(
-            "Successfully loaded {} chunks from {} files".format(
-                loaded_chunks, total_files
-            )
+            "Successfully loaded %d chunks from %d files",
+            loaded_chunks,
+            total_files,
         )
 
         return {
@@ -233,7 +314,7 @@ async def _load_chunks_from_fs_connector(
         }
 
     except Exception as e:
-        logger.error("Error in chunk loading process: {}".format(e))
+        logger.error("Error in chunk loading process: %s", e)
         raise HTTPException(
-            status_code=500, detail="Chunk loading failed: {}".format(str(e))
+            status_code=500, detail="Chunk loading failed: %s" % str(e)
         ) from e
