@@ -1367,7 +1367,12 @@ class LMCacheStatsLogger:
         self.shutdown_event = threading.Event()
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
-        self.thread.start()
+        if bool(os.environ.get("LMCACHE_DISABLE_STATS_LOGGER_THREAD", False)):
+            logger.info(
+                "LMCacheStatsLogger thread is disabled via environment variable."
+            )
+        else:
+            self.thread.start()
 
     def log_worker(self):
         while self.is_running:
