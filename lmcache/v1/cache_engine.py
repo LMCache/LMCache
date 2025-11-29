@@ -835,9 +835,11 @@ class LMCacheEngine:
                     if end <= aligned_computed_tokens:
                         continue
                     chunk_info_list.append(chunk_info)
+                    # chunk_info contains (start, end, key)
+                    # chunk_info[2] is the key
                     keys.append(chunk_info[2])
                 # If no tokens to lookup, return immediately
-                if len(keys) == 0:
+                if not keys:
                     return res
                 # hit chunks by prefix matching
                 hit_chunks, block_mapping = self.storage_manager.batched_contains(

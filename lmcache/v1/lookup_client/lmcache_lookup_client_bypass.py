@@ -80,7 +80,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     offsets.append(end - start)
                 # Return aligned_computed_tokens immediately if there is no token to
                 # lookup
-                if len(hashes) == 0:
+                if not hashes:
                     return result
 
                 # Call LMCacheEngine lookup with hashes and offsets

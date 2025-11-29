@@ -203,7 +203,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 offsets.append(end - start)
             # Return aligned_computed_tokens immediately if there is no token to
             # lookup
-            if len(hashes) == 0:
+            if not hashes:
                 return aligned_computed_tokens
 
             hash_buf = self.encoder.encode(hashes)
