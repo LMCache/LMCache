@@ -74,7 +74,7 @@ class LMCBaseModel(nn.Module, ABC):
             hidden_states = self.vllm_model.get_input_embeddings(input_ids)
         else:  # vllm>=0.11.1 (commit 97d1c9)
             hidden_states = self.vllm_model.embed_input_ids(input_ids)
-    
+
         residual = None
 
         attn_output = None
