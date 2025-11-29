@@ -83,7 +83,7 @@ class BatchedMessageSender:
         """Setup metrics for monitoring queue size."""
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
-            prometheus_logger.kv_msg_queue_size.set_function(
+            prometheus_logger.metrics.kv_msg_queue_size.set_function(
                 lambda: self.message_queue.qsize()
             )
 

@@ -820,7 +820,7 @@ class LMCacheConnectorV1Impl:
 
         for attr_name, metric_name in metrics_map.items():
             if hasattr(self, attr_name):
-                metric = getattr(prometheus_logger, metric_name)
+                metric = getattr(prometheus_logger.metrics, metric_name)
                 # Use a default argument in the lambda to capture
                 # the current value of `attr_name`
                 # to avoid issues with late binding in closures.

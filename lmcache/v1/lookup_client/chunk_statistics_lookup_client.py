@@ -187,10 +187,10 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
-            prometheus_logger.chunk_statistics_enabled.set_function(
+            prometheus_logger.metrics.chunk_statistics_enabled.set_function(
                 lambda: 1.0 if self.enabled else 0.0
             )
-            prometheus_logger.chunk_statistics_total_requests.set_function(
+            prometheus_logger.metrics.chunk_statistics_total_requests.set_function(
                 lambda: len(self.request_seen)
             )
             self.recorder.strategy.setup_metrics(prometheus_logger)

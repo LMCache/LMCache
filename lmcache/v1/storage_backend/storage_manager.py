@@ -259,7 +259,7 @@ class StorageManager:
         }
 
         for metric_name, status in metric_map.items():
-            metric = getattr(prometheus_logger, metric_name)
+            metric = getattr(prometheus_logger.metrics, metric_name)
             metric.set_function(
                 lambda s=status: self.event_manager.get_events_count_by_status(
                     EventType.LOADING, s

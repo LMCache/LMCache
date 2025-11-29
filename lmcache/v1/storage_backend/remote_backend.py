@@ -93,7 +93,7 @@ class RemoteBackend(StorageBackendInterface):
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
-            prometheus_logger.remote_put_task_num.set_function(
+            prometheus_logger.metrics.remote_put_task_num.set_function(
                 lambda: len(self.put_tasks)
             )
 
