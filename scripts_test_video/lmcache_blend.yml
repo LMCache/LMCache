@@ -1,5 +1,5 @@
 local_cpu: True
-max_local_cpu_size: 15
+max_local_cpu_size: 30
 enable_blending: True
 use_layerwise: True
 blend_special_str: "<<SEG>>"

@@ -157,10 +157,15 @@ class LMCBaseModel(nn.Module, ABC):
         q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
         return q, k, v
 
+    def rope_cache_to_device(self, device: torch.device):
+        self.fused_rotary_emb.rope_cache_to_device(device)
+
     @torch.compile
     def compute_layer(
         self,
         input_ids: torch.Tensor,
+        page_stream=None,
+        **kwargs,
     ):
         input_ids = input_ids.cuda()
 
@@ -175,53 +180,56 @@ class LMCBaseModel(nn.Module, ABC):
             input_ids=input_ids,
         )
 
+        stream = page_stream if page_stream is not None else torch.cuda.current_stream()
+
         for layer_idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
             # Self Attention 前的 LN/残差
-            if residual is None:
-                residual = hidden_states
-                hidden_states = layer.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+            with torch.cuda.stream(stream):
+                if residual is None:
+                    residual = hidden_states
+                    hidden_states = layer.input_layernorm(hidden_states)
+                else:
+                    hidden_states, residual = layer.input_layernorm(hidden_states, residual)
 
-            # QKV 投影（兼容多实现）
-            q, k, v = self._project_qkv(layer, hidden_states)
+                # QKV 投影（兼容多实现）
+                q, k, v = self._project_qkv(layer, hidden_states)
 
-            # Model-specific QKV processing（如 Qwen3 的 q_norm/k_norm）
-            q, k, v = self._process_qkv(q, k, v, layer)
+                # Model-specific QKV processing（如 Qwen3 的 q_norm/k_norm）
+                q, k, v = self._process_qkv(q, k, v, layer)
 
-            # 交给 blender
-            q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
-                q, k, v, residual, self.start_layer + layer_idx, attn_output, attn_metadata
-            )
+                # 交给 blender
+                q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
+                    q, k, v, residual, self.start_layer + layer_idx, attn_output, attn_metadata
+                )
 
-            # 取本层注意力维度（从 vllm_attn_layers 提取，已在 __init__ 存好）
-            attn_core = self.vllm_attn_layers[self.start_layer + layer_idx]
-            num_heads = _pick(attn_core, "num_heads")
-            num_kv_heads = _pick(attn_core, "num_kv_heads", "num_key_value_heads")
-            head_size = _pick(attn_core, "head_size", "head_dim")
+                # 取本层注意力维度（从 vllm_attn_layers 提取，已在 __init__ 存好）
+                attn_core = self.vllm_attn_layers[self.start_layer + layer_idx]
+                num_heads = _pick(attn_core, "num_heads")
+                num_kv_heads = _pick(attn_core, "num_kv_heads", "num_key_value_heads")
+                head_size = _pick(attn_core, "head_size", "head_dim")
 
-            # 变形并前向
-            q = q.view(-1, num_heads, head_size)
-            k = k.view(-1, num_kv_heads, head_size)
-            v = v.view(-1, num_kv_heads, head_size)
-            attn_output = (attn_output if attn_output is not None else torch.zeros_like(q)).view(
-                -1, num_heads, head_size
-            )
+                # 变形并前向
+                q = q.view(-1, num_heads, head_size)
+                k = k.view(-1, num_kv_heads, head_size)
+                v = v.view(-1, num_kv_heads, head_size)
+                attn_output = (attn_output if attn_output is not None else torch.zeros_like(q)).view(
+                    -1, num_heads, head_size
+                )
 
-            attn_output = self.lmc_attn_layers[self.start_layer + layer_idx].forward_contiguous(
-                q, k, v, attn_output, attn_metadata
-            )
+                attn_output = self.lmc_attn_layers[self.start_layer + layer_idx].forward_contiguous(
+                    q, k, v, attn_output, attn_metadata
+                )
 
-            attn_output = attn_output.view(-1, num_heads * head_size)
-            # K/V reshape 回平面以便下游（即便未直接使用，也保持与原实现一致）
-            _ = k.view(-1, num_kv_heads * head_size)
-            _ = v.view(-1, num_kv_heads * head_size)
+                attn_output = attn_output.view(-1, num_heads * head_size)
+                # K/V reshape 回平面以便下游（即便未直接使用，也保持与原实现一致）
+                _ = k.view(-1, num_kv_heads * head_size)
+                _ = v.view(-1, num_kv_heads * head_size)
 
-            # 输出投影
-            hidden_states, _ = layer.self_attn.o_proj(attn_output)
+                # 输出投影
+                hidden_states, _ = layer.self_attn.o_proj(attn_output)
 
-            # FFN
-            hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
-            hidden_states = layer.mlp(hidden_states)
+                # FFN
+                hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+                hidden_states = layer.mlp(hidden_states)
 
             yield

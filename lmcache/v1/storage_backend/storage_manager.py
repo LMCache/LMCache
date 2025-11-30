@@ -497,6 +497,30 @@ class StorageManager:
             )
             task = asyncio.run_coroutine_threadsafe(coro, self.loop)
             yield task
+            
+    def layerwise_batched_get_sync(
+        self,
+        keys: List[List[CacheEngineKey]],
+        location: Optional[str] = None,
+    ) -> Generator[Future, None, None]:
+        """
+        Non-blocking function to get the memory objects into the storages
+        in a layerwise manner.
+        Do not store if the same object is being stored (handled here by
+        storage manager) or has been stored (handled by storage backend).
+        :param List[List[CacheEngineKey]] keys: The keys to get. The first
+            dimension corresponds to the number of layers, and the second
+            dimension corresponds to the number of chunks.
+        :return: A generator that yields a future for each layer.
+        """
+        if location is None:
+            location = "LocalCPUBackend"
+
+        for keys_multi_chunk in keys:
+            # Retrieve all chunks for one layer
+            backend = self.storage_backends[location]
+            task = backend.batched_get_blocking(keys_multi_chunk)
+            yield task            
 
     def prefetch_single_done_callback(
         self,

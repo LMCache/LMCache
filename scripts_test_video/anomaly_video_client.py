@@ -137,6 +137,7 @@ def iter_videos(dataset_root: str, pattern: str) -> Iterable[str]:
     """Yield absolute paths of videos matching pattern under dataset_root."""
     glob_pattern = os.path.join(dataset_root, pattern)
     for path in sorted(glob.glob(glob_pattern, recursive=True)):
+        print(f"path={path}")
         if path.lower().endswith(".mp4"):
             yield path
 
@@ -150,126 +151,221 @@ def infer_category(video_path: str, dataset_root: str) -> str:
 
 def run(args):
     client = OpenAI(api_key="EMPTY", base_url=args.base_url)
-    request_timings = []
+    total_requests = 0
     overall_start = time.perf_counter()
+    # Normalize prompt keys to lower-case so dataset folder casing doesn't matter
+    prompts = {k.lower(): v for k, v in args.prompts.items()}
+    category_filter = args.category.lower() if args.category else ""
 
+    # Root output directory (category subdirectories will be created inside)
     if args.use_sliding_window:
-        responses_dir = args.output_dir or os.path.join(
+        responses_root = os.path.join(
             os.getcwd(),
-            "responses",
+            args.output_dir,
             f"anomaly_win{int(round(args.window_seconds))}s_stride{int(round(args.stride_ratio*100))}pct_fps{args.sample_fps}"
         )
     else:
-        responses_dir = args.output_dir or os.path.join(
+        responses_root = os.path.join(
             os.getcwd(),
-            "responses",
+            args.output_dir,
             f"anomaly_full_fps{args.sample_fps}"
         )
-    os.makedirs(responses_dir, exist_ok=True)
-    csv_path = args.csv_path or os.path.join(responses_dir, "request_times.csv")
+    os.makedirs(responses_root, exist_ok=True)
 
-    prompt = args.prompt_text
+    fieldnames = [
+        "video_path",
+        "category",
+        "window_index",
+        "start_frame",
+        "end_frame",
+        "num_frames",
+        "mode",
+        "duration_seconds",
+        "output_path",
+    ]
 
-    for video_path in iter_videos(args.dataset_root, args.pattern):
-        try:
-            category = infer_category(video_path, args.dataset_root)
-            duration_s, total_frames, video_fps = probe_video_opencv(video_path)
-            print(f"[INFO] Video: {video_path}")
-            print(f"       category={category} duration={duration_s:.2f}s frames={total_frames} src_fps={video_fps:.3f}")
+    # One CSV writer per category
+    csv_files = {}
+    csv_writers = {}
 
-            base_frames = sample_frames_at_fps(video_path, fps=args.sample_fps)
-            n_base = len(base_frames)
-            print(f"[INFO] Sampled {n_base} frames @ {args.sample_fps} FPS")
-            if n_base == 0:
-                print(f"[WARN] No frames sampled for {video_path}, skip.")
-                continue
+    # Per-category timing stats
+    cat_stats = {}  # {category: {"count": int, "sum_dur": float}}
 
-            if args.use_sliding_window:
-                win_frames = max(1, int(round(args.window_seconds * args.sample_fps)))
-                stride_frames = max(1, int(round(win_frames * args.stride_ratio)))
-                windows = generate_windows_by_frames(n_base, win_frames, stride_frames)
-            else:
-                windows = [(0, n_base)]
+    try:
+        for video_path in iter_videos(args.dataset_root, args.pattern):
+            try:
+                category = infer_category(video_path, args.dataset_root)
+                category_key = category.lower()
+                print(f"[INFO] Processing video in category: {category}")
 
-            if args.max_windows > 0:
-                windows = windows[:args.max_windows]
+                # If --category is set (not "" or "all"), only process that category
+                if category_filter and category_filter != "all":
+                    if category_key != category_filter:
+                        continue
 
-            for widx, (s_idx, e_idx) in enumerate(windows):
-                sub_frames = base_frames[s_idx:e_idx]
-                messages = build_messages_from_frames(sub_frames, prompt, args.blend_special_str)
+                duration_s, total_frames, video_fps = probe_video_opencv(video_path)
+                print(f"[INFO] Probed video: duration={duration_s:.2f}s total_frames={total_frames} fps={video_fps:.3f}")
 
-                req_start = time.perf_counter()
-                resp = client.chat.completions.create(
-                    model=args.model,
-                    messages=messages,
-                    max_tokens=args.max_tokens if args.max_tokens > 0 else None,
-                    temperature=0.01,
-                    top_p=1.0,
-                )
-                req_dur = time.perf_counter() - req_start
+                # Skip short videos or categories without prompts
+                if duration_s < args.window_seconds or category_key not in prompts:
+                    continue
 
-                try:
-                    resp_obj = resp.model_dump()
-                except Exception:
-                    resp_obj = str(resp)
+                print(f"[INFO] Video: {video_path}")
+                print(f"       category={category} duration={duration_s:.2f}s frames={total_frames} src_fps={video_fps:.3f}")
 
-                out_name = f"{category}_{os.path.splitext(os.path.basename(video_path))[0]}_w{widx:03d}_{s_idx}-{e_idx}.json"
-                out_path = os.path.join(responses_dir, out_name)
+                prompt = prompts[category_key]
+                category_dirname = category_key or "unknown"
+                print(f"[INFO] Using prompt: {prompt}")
 
-                meta = {
-                    "dataset": "Anomaly-Detection-Dataset",
-                    "category": category,
-                    "video_path": video_path,
-                    "mode": "sliding" if args.use_sliding_window else "full",
-                    "sample_fps": args.sample_fps,
-                    "window_seconds": args.window_seconds if args.use_sliding_window else None,
-                    "stride_ratio": args.stride_ratio if args.use_sliding_window else None,
-                    "start_frame_idx": s_idx,
-                    "end_frame_idx": e_idx,
-                    "num_frames": e_idx - s_idx,
-                    "total_sampled_frames": n_base,
-                    "prompt": prompt,
-                }
-                with open(out_path, "w") as f:
-                    json.dump({"meta": meta, "response": resp_obj}, f, indent=2, ensure_ascii=False)
-                print(f"[SAVE] {out_path}")
-                print(f"[STATS] request {widx} for {video_path} took {req_dur:.3f}s")
-                request_timings.append(
-                    {
+                # Create per-category output directory
+                category_dir = os.path.join(responses_root, category_dirname)
+                os.makedirs(category_dir, exist_ok=True)
+            
+                # Initialize a CSV file for this category (only once)
+                if category_dirname not in csv_writers:
+                    csv_path = os.path.join(
+                        category_dir,
+                        args.csv_name if args.csv_name else "request_times.csv"
+                    )
+                    need_header = (not os.path.exists(csv_path)) or os.path.getsize(csv_path) == 0
+                    csv_file = open(csv_path, "a", newline="")
+                    writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                    if need_header:
+                        writer.writeheader()
+                        csv_file.flush()
+                    csv_files[category_dirname] = csv_file
+                    csv_writers[category_dirname] = writer
+
+                writer = csv_writers[category_dirname]
+                csv_file = csv_files[category_dirname]
+
+                # Sample frames at fixed FPS
+                base_frames = sample_frames_at_fps(video_path, fps=args.sample_fps)
+                n_base = len(base_frames)
+                print(f"[INFO] Sampled {n_base} frames @ {args.sample_fps} FPS")
+                if n_base == 0:
+                    print(f"[WARN] No frames sampled for {video_path}, skip.")
+                    continue
+
+                # Generate sliding windows
+                if args.use_sliding_window:
+                    win_frames = max(1, int(round(args.window_seconds * args.sample_fps)))
+                    stride_frames = max(1, int(round(win_frames * args.stride_ratio)))
+                    windows = generate_windows_by_frames(n_base, win_frames, stride_frames)
+                else:
+                    windows = [(0, n_base)]
+
+                # Optional window limit
+                if args.max_windows > 0:
+                    windows = windows[:args.max_windows]
+
+                for widx, (s_idx, e_idx) in enumerate(windows):
+                    sub_frames = base_frames[s_idx:e_idx]
+                    messages = build_messages_from_frames(sub_frames, prompt, args.blend_special_str)
+
+                    # Send request
+                    req_start = time.perf_counter()
+                    resp = client.chat.completions.create(
+                        model=args.model,
+                        messages=messages,
+                        max_tokens=args.max_tokens if args.max_tokens > 0 else None,
+                        temperature=0.01,
+                        top_p=1.0,
+                    )
+                    req_dur = time.perf_counter() - req_start
+
+                    try:
+                        resp_obj = resp.model_dump()
+                    except Exception:
+                        resp_obj = str(resp)
+
+                    # Save JSON response under category directory
+                    out_name = f"{category_dirname}_{os.path.splitext(os.path.basename(video_path))[0]}_w{widx:03d}_{s_idx}-{e_idx}.json"
+                    out_path = os.path.join(category_dir, out_name)
+
+                    meta = {
+                        "dataset": "Anomaly-Detection-Dataset",
+                        "category": category or category_dirname,
                         "video_path": video_path,
-                        "category": category,
-                        "window_index": widx,
-                        "start_frame": s_idx,
-                        "end_frame": e_idx,
-                        "num_frames": e_idx - s_idx,
                         "mode": "sliding" if args.use_sliding_window else "full",
-                        "duration_seconds": f"{req_dur:.6f}",
-                        "output_path": out_path,
+                        "sample_fps": args.sample_fps,
+                        "window_seconds": args.window_seconds if args.use_sliding_window else None,
+                        "stride_ratio": args.stride_ratio if args.use_sliding_window else None,
+                        "start_frame_idx": s_idx,
+                        "end_frame_idx": e_idx,
+                        "num_frames": e_idx - s_idx,
+                        "total_sampled_frames": n_base,
+                        "prompt": prompt,
+                    }
+                    with open(out_path, "w") as f:
+                        json.dump({"meta": meta, "response": resp_obj}, f, indent=2, ensure_ascii=False)
+
+                    print(f"[SAVE] {out_path}")
+                    print(f"[STATS] request {widx} for {video_path} took {req_dur:.3f}s")
+
+                    # Write per-category CSV record
+                    writer.writerow(
+                        {
+                            "video_path": video_path.split(os.sep)[-1],
+                            "category": category or category_dirname,
+                            "window_index": widx,
+                            "start_frame": s_idx,
+                            "end_frame": e_idx,
+                            "num_frames": e_idx - s_idx,
+                            "mode": "sliding" if args.use_sliding_window else "full",
+                            "duration_seconds": f"{req_dur:.6f}",
+                            "output_path": out_path.split(os.sep)[-1],
+                        }
+                    )
+                    csv_file.flush()
+                    total_requests += 1
+
+                    # Update per-category stats
+                    if category_dirname not in cat_stats:
+                        cat_stats[category_dirname] = {"count": 0, "sum_dur": 0.0}
+                    cat_stats[category_dirname]["count"] += 1
+                    cat_stats[category_dirname]["sum_dur"] += req_dur
+
+            except Exception as e:
+                print(f"[ERROR] {video_path}: {e}")
+
+    finally:
+        # Close all CSV files
+        for f in csv_files.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+
+    # Write summary CSV by category
+    if cat_stats:
+        summary_path = os.path.join(responses_root, "summary_by_category.csv")
+        with open(summary_path, "w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "category",
+                    "num_requests",
+                    "total_duration_seconds",
+                    "avg_duration_seconds",
+                ],
+            )
+            writer.writeheader()
+            for cat, st in sorted(cat_stats.items()):
+                count = st["count"]
+                total_dur = st["sum_dur"]
+                avg_dur = total_dur / count if count > 0 else 0.0
+                writer.writerow(
+                    {
+                        "category": cat,
+                        "num_requests": count,
+                        "total_duration_seconds": f"{total_dur:.6f}",
+                        "avg_duration_seconds": f"{avg_dur:.6f}",
                     }
                 )
-
-        except Exception as e:
-            print(f"[ERROR] {video_path}: {e}")
+        print(f"[STATS] summary by category saved to {summary_path}")
 
     total_elapsed = time.perf_counter() - overall_start
-    total_requests = len(request_timings)
-    if request_timings:
-        fieldnames = [
-            "video_path",
-            "category",
-            "window_index",
-            "start_frame",
-            "end_frame",
-            "num_frames",
-            "mode",
-            "duration_seconds",
-            "output_path",
-        ]
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(request_timings)
-        print(f"[STATS] wrote per-request timings to {csv_path}")
     if total_requests:
         avg = total_elapsed / total_requests
         print(
@@ -296,11 +392,19 @@ def build_argparser():
     ap.add_argument("--max-windows", type=int, default=0, help="Optional cap on number of windows per video (0 = all).")
     ap.add_argument("--blend-special-str", type=str, default="<<SEG>>", help="Segment token inserted before each frame.")
     ap.add_argument("--base-url", type=str, default="http://localhost:8000/v1", help="OpenAI-compatible base URL.")
-    ap.add_argument("--prompt-text", type=str,
-                    default="Analyze the video and determine if any anomalous or violent behavior occurs. Answer with \"Yes\" or \"No\" and briefly explain.",
-                    help="Prompt sent with each window.")
-    ap.add_argument("--max-tokens", type=int, default=1, help="Max tokens for the response (<=0 to disable).")
-    ap.add_argument("--csv-path", type=str, default="", help="Where to save per-request timing stats (default: responses/request_times.csv).")
+    ap.add_argument("--prompts", type=json.loads,
+                    default={
+                        "abuse": "Describe the frames and determine if they show any abuse. Start your response with 'Yes' or 'No'.",
+                        "arson": "Describe the frames and determine if they show arson. Start your response with 'Yes' or 'No'.",
+                        "fighting": "Describe the frames and determine if they show people fighting. Start your response with 'Yes' or 'No'.",
+                        "shooting": "Describe the frames and determine if they show a shooting. Start your response with 'Yes' or 'No'.",
+                        "shoplifting": "Describe the frames and determine if they show shoplifting. Start your response with 'Yes' or 'No'.",
+                        "stealing": "Describe the frames and determine if they show stealing. Start your response with 'Yes' or 'No'.",
+                        "vandalism": "Describe the frames and determine if they show vandalism. Start your response with 'Yes' or 'No'."
+                    }, help="Prompt sent with each window.")
+    ap.add_argument("--category", type=str, default="", help="If set (and not 'all'), only process this category (case-insensitive).")               
+    ap.add_argument("--max-tokens", type=int, default=10, help="Max tokens for the response (<=0 to disable).")
+    ap.add_argument("--csv-name", type=str, default="", help="Where to save per-request timing stats (default: responses/request_times.csv).")
     return ap
 
 

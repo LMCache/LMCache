@@ -625,10 +625,11 @@ class LMCacheEngine:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
-            get_generator = self.storage_manager.layerwise_batched_get(
-                keys_layer_major,
-                location=location,
-            )
+            # get_generator = self.storage_manager.layerwise_batched_get(
+            #     keys_layer_major,
+            #     location=location,
+            # )
+            get_generator = self.storage_manager.layerwise_batched_get_sync(keys_layer_major)
 
             assert isinstance(
                 self.gpu_connector,
@@ -654,7 +655,7 @@ class LMCacheEngine:
                 else:
                     yield None
 
-                mem_objs_layer = task.result()
+                mem_objs_layer = task
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
 
@@ -738,7 +739,7 @@ class LMCacheEngine:
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
-                    # if start == 0: continue
+                    if start == 0: continue
                     logger.info(f"Looking up start={start}, end={end}, key={key}")
                     assert isinstance(key, CacheEngineKey)
 

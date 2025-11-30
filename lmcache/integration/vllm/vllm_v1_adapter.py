@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
+import time
 
 # Third Party
 from vllm.config import (
@@ -883,11 +884,19 @@ class LMCacheConnectorV1Impl:
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
+                    start_blending = time.perf_counter()
+                    page_stream = self.lmcache_engine.gpu_connector.get_page_stream()
                     self.blender.blend(
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        page_stream=page_stream,
+                    )
+                    end_blending = time.perf_counter()
+                    logger.info(
+                        f"Blending time for request {request.req_id}: "
+                        f"{end_blending - start_blending:.4f} seconds"
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(

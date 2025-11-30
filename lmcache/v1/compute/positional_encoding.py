@@ -64,6 +64,10 @@ class FusedRope:
         self.head_size = rope.head_size
         self.cos_sin_cache = rope.cos_sin_cache
 
+    def rope_cache_to_device(self, device: torch.device):
+        self.cos_sin_cache = self.cos_sin_cache.to(device)
+        logger.info(f"Move RoPE cache to device: {device}")
+        
     def fused_encode(self, old_positions, new_positions, k):
         num_tokens = k.shape[0]
         k = k.view(num_tokens, -1, self.head_size)

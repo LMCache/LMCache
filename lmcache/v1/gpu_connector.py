@@ -354,6 +354,15 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         self.load_stream = torch.cuda.Stream()
         self.store_stream = torch.cuda.Stream()
 
+        self.rope_stream = torch.cuda.Stream()
+        self.to_page_mem_stream = torch.cuda.Stream()
+
+        self.load_done_event_list = []
+        self.rope_done_event_list = []
+        for _ in range(self.num_layers):
+            self.load_done_event_list.append(torch.cuda.Event())
+            self.rope_done_event_list.append(torch.cuda.Event())    
+
         self.buffer_mapping: dict[int, MemoryObj] = {}
 
         # track gap positions between blended chunks
@@ -363,6 +372,9 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         self.gpu_buffer_allocator = None
         self.element_size = torch.tensor([], dtype=self.dtype).element_size()
 
+    def get_page_stream(self):
+        return self.to_page_mem_stream
+    
     def _lazy_initialize_buffer(self, kv_caches):
         """
         Lazily initialize the GPU buffer allocator if it is not initialized yet.
@@ -452,6 +464,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # TODO(Jiayi): Make this more elegant
             self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
             self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
+            self.lmc_model.rope_cache_to_device(self.device)
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 

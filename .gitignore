@@ -1,6 +1,9 @@
 */responses/*
 *.jsonl
 *.json
+*.pdf
+*.png
+scripts*/*.csv
 
 
 # Byte-compiled / optimized / DLL files
