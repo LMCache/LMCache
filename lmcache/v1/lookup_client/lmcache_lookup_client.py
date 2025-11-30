@@ -255,6 +255,13 @@ class LMCacheLookupClient(LookupClientInterface):
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
         return True
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def close(self):
         for socket in self.sockets:
             try:
@@ -288,6 +295,8 @@ class LMCacheLookupServer:
             zmq.REP,  # type: ignore[attr-defined]
             "bind",
         )
+        # Set socket timeout to allow periodic check of running flag
+        self.socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout
 
         self.lmcache_engine = lmcache_engine
         self.running = True
@@ -296,7 +305,11 @@ class LMCacheLookupServer:
 
         def process_request():
             while self.running:
-                frames = self.socket.recv_multipart(copy=False)
+                try:
+                    frames = self.socket.recv_multipart(copy=False)
+                except zmq.Again:
+                    # Timeout occurred, check running flag and continue
+                    continue
                 lookup_id = frames[-2].bytes.decode("utf-8")
                 request_configs_str = frames[-1].bytes.decode("utf-8")
                 request_configs = None
@@ -330,6 +343,23 @@ class LMCacheLookupServer:
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def close(self):
+        # Stop the processing thread first
+        self.running = False
+
+        # Wait for thread to finish with timeout
+        # Thread will exit within 1 second due to socket RCVTIMEO
+        if self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+            if self.thread.is_alive():
+                logger.warning("Lookup server thread did not terminate gracefully")
+
+        # Close the socket after thread is stopped
         self.socket.close(linger=0)
-        # TODO: close the thread!
