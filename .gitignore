@@ -1,4 +1,6 @@
 */responses/*
+*.jsonl
+*.json
 
 
 # Byte-compiled / optimized / DLL files
