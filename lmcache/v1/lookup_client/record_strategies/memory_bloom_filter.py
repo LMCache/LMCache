@@ -66,10 +66,10 @@ class MemoryBloomFilterStrategy(RecordStrategy):
     def setup_metrics(self, prometheus_logger) -> None:
         """Setup bloom filter specific metrics."""
         super().setup_metrics(prometheus_logger)
-        prometheus_logger.chunk_statistics_bloom_filter_size_mb.set_function(
+        prometheus_logger.metrics.chunk_statistics_bloom_filter_size_mb.set_function(
             lambda: self.global_bloom.get_memory_usage_bytes() / (1024 * 1024)
         )
-        prometheus_logger.chunk_statistics_bloom_filter_fill_rate.set_function(
+        prometheus_logger.metrics.chunk_statistics_bloom_filter_fill_rate.set_function(
             lambda: self.global_bloom.get_fill_rate()
         )
 
