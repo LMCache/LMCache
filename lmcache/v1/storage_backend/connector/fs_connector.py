@@ -71,16 +71,35 @@ class FSConnector(RemoteConnector):
             else config.get_extra_config_value("fs_connector_read_ahead_size", None)
         )
 
+        self.path_fanout_num = (
+            None
+            if config is None
+            else config.get_extra_config_value("fs_connector_path_fanout_num", None)
+        )
+
         logger.info(
             f"Initialized FSConnector with base paths {self.base_paths}, "
             f"relative tmp dir: {self.relative_tmp_dir}, "
-            f"read ahead size: {self.read_ahead_size}"
+            f"read ahead size: {self.read_ahead_size}, "
+            f"path fanout num: {self.path_fanout_num}"
         )
         # Create directories for all paths
         for path in self.base_paths:
             path.mkdir(parents=True, exist_ok=True)
             if self.relative_tmp_dir is not None:
                 (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
+        # Create fanout tree if set
+        if self.path_fanout_num:
+            self._create_fanout_tree()
+
+    def _create_fanout_tree(self):
+        for base_path in self.base_paths:
+            for i in range(self.path_fanout_num):
+                level1 = str(hex(i)[2:])
+                for j in range(self.path_fanout_num):
+                    level2 = str(hex(j)[2:])
+                    path = base_path / level1 / level2
+                    path.mkdir(parents=True, exist_ok=True)
 
     def _get_base_path(self, key: CacheEngineKey) -> Path:
         """Get file base path for the given key"""
@@ -94,20 +113,33 @@ class FSConnector(RemoteConnector):
 
         return base_path
 
+    def _get_real_path(self, base_path: Path, key: CacheEngineKey) -> Path:
+        real_path = base_path
+        if self.path_fanout_num:
+            hash_val = abs(key.chunk_hash)
+            mask = self.path_fanout_num - 1
+            level1 = f"{(hash_val >> 8) & mask:x}"
+            level2 = f"{hash_val & mask:x}"
+            real_path = base_path / level1 / level2
+
+        return real_path
+
     def _get_file_name(self, key: CacheEngineKey) -> str:
         return key.to_string().replace("/", "-SEP-") + ".data"
 
     def _get_file_path(self, key: CacheEngineKey) -> Path:
         """Get file path for the given key"""
         base_path = self._get_base_path(key)
+        real_path = self._get_real_path(base_path, key)
         file_name = self._get_file_name(key)
-        return base_path / file_name
+        return real_path / file_name
 
     def _get_file_and_tmp_path(self, key: CacheEngineKey) -> Tuple[Path, Path]:
         """Get file and tmp path for the given key"""
         base_path = self._get_base_path(key)
+        real_path = self._get_real_path(base_path, key)
         file_name = self._get_file_name(key)
-        file_path = base_path / file_name
+        file_path = real_path / file_name
         if self.relative_tmp_dir is not None:
             tmp_path = base_path / self.relative_tmp_dir / file_name
         else:
@@ -256,7 +288,15 @@ class FSConnector(RemoteConnector):
         """List all keys in file system"""
         keys = []
         for base_path in self.base_paths:
-            keys.extend([f.stem for f in base_path.glob("*.data")])
+            if self.path_fanout_num:
+                for i in range(self.path_fanout_num):
+                    level1 = str(hex(i)[2:])
+                    for j in range(self.path_fanout_num):
+                        level2 = str(hex(j)[2:])
+                        path = base_path / level1 / level2
+                        keys.extend([f.stem for f in path.glob("*.data")])
+            else:
+                keys.extend([f.stem for f in base_path.glob("*.data")])
         return keys
 
     async def close(self):
