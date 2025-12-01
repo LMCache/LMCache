@@ -166,7 +166,6 @@ class LocalDiskBackend(StorageBackendInterface):
                 lmcache_worker=lmcache_worker,
             )
         else:
-            self.batched_msg_sender = None
             logger.warning("Controller message sender is not initialized")
 
     def __str__(self):

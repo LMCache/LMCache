@@ -99,7 +99,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 lmcache_worker=lmcache_worker,
             )
         else:
-            self.batched_msg_sender = None
             logger.warning("Controller message sender is not initialized")
 
         self._setup_metrics()
