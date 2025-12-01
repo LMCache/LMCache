@@ -1,0 +1,112 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vllm-secrets
+  namespace: multi-process
+type: Opaque
+data:
+  # Base64 encoded Hugging Face token
+  # Replace with: echo -n "your_hf_token_here" | base64
+  hf_token: YOUR_BASE64_ENCODED_HF_TOKEN_HERE
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-process-deployment
+  namespace: multi-process
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multi-process-deployment
+  template:
+    metadata:
+      labels:
+        app: multi-process-deployment
+    spec:
+      hostIPC: true
+      containers:
+        # Sidecar container: LMCache server. The vLLM container will wait for it to be ready.
+        - name: lmcache-server
+          image: lmcache/standalone:nightly
+          command:
+            - /opt/venv/bin/python3
+            - -m
+            - lmcache.v1.multiprocess.server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "6555"
+            - --cpu-buffer-size
+            - "60"
+            - --max-workers
+            - "4"
+          resources:
+            requests:
+              memory: "10Gi"
+              cpu: "4"
+            limits:
+              memory: "120Gi"
+              cpu: "8"
+          env:
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"
+            # Make all GPUs visible to allow for inter-process communication across devices.
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3"
+          ports:
+            - containerPort: 6555
+              name: lmcache
+              protocol: TCP
+
+        # Main container: vLLM
+        - name: vllm
+          image: lmcache/vllm-openai:latest-nightly
+          args:
+            - meta-llama/Llama-3.1-8B-Instruct
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --no-enable-prefix-caching
+            - --max-model-len
+            - "32768"
+            - --gpu-memory-utilization
+            - "0.85"
+            - --tensor-parallel-size
+            - "4"
+            - --kv-transfer-config
+            - '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.port": 6555}}'
+          resources:
+            limits:
+              # Allocate all 4 GPUs at pod level
+              nvidia.com/gpu: "4"
+            requests:
+              nvidia.com/gpu: "4"
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /health
+              port: 8000
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: hf_token
+                  name: vllm-secrets
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: "/tmp"
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"
+            # See all 4 GPUs and use all for TP=4
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3"

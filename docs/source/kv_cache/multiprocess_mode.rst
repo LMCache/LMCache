@@ -140,6 +140,138 @@ Once both containers are running, you can send requests to vLLM the same way as 
         \"max_tokens\": 10
     }"
 
+Kubernetes Deployment
+---------------------
+
+You can deploy LMCache and vLLM on Kubernetes using a sidecar container pattern. This approach is suitable for production deployments where you want to leverage Kubernetes orchestration.
+
+.. note::
+    The Kubernetes deployment requires special configuration due to GPU allocation differences from Docker. Both containers must see all GPUs to avoid device ID mismatches in IPC-based GPU memory operations.
+
+Prerequisites
+~~~~~~~~~~~~~
+
+- Kubernetes cluster with GPU support (NVIDIA GPU Operator installed)
+- At least 4 GPUs per node
+- ``kubectl`` configured to access your cluster
+- Hugging Face token (for gated models like Llama)
+
+**Step 1: Create Namespace**
+
+.. code-block:: bash
+
+    kubectl create namespace multi-process
+
+**Step 2: Configure Hugging Face Token**
+
+Edit ``examples/multi_process/multi_process.yaml`` and replace the placeholder token. The `data` field in the Secret requires the token to be base64 encoded. You can generate it using `echo -n "your_hf_token_here" | base64`.
+
+.. code-block:: yaml
+
+    data:
+      hf_token: YOUR_BASE64_ENCODED_HF_TOKEN_HERE
+
+Alternatively, create the secret separately:
+
+.. code-block:: bash
+
+    kubectl create secret generic vllm-secrets \
+      --from-literal=hf_token=your_hf_token_here \
+      -n multi-process
+
+**Step 3: Deploy the Application**
+
+.. code-block:: bash
+
+    kubectl apply -f examples/multi_process/multi_process.yaml
+
+**Step 4: Monitor Deployment**
+
+Check pod status:
+
+.. code-block:: bash
+
+    kubectl get pods -n multi-process -w
+
+Check LMCache server logs:
+
+.. code-block:: bash
+
+    kubectl logs -n multi-process -l app=multi-process-deployment -c lmcache-server -f
+
+Check vLLM server logs:
+
+.. code-block:: bash
+
+    kubectl logs -n multi-process -l app=multi-process-deployment -c vllm -f
+
+Wait for the pod to be ready (this may take several minutes for model loading).
+
+**Step 5: Send Test Requests**
+
+Forward the port to your local machine:
+
+.. code-block:: bash
+
+    kubectl port-forward -n multi-process deployment/multi-process-deployment 8000:8000
+
+Send a test request with repeated prompts:
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:8000/v1/completions \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"model\": \"meta-llama/Llama-3.1-8B-Instruct\",
+        \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+        \"max_tokens\": 10
+      }"
+
+On the first request, check LMCache server logs for:
+
+.. code-block:: text
+
+    [LMCache INFO] Stored X tokens in Y seconds
+
+On subsequent identical requests, you should see:
+
+.. code-block:: text
+
+    [LMCache INFO] Retrieved X tokens in Y seconds
+
+Kubernetes Configuration Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Kubernetes deployment differs from Docker in several important ways:
+
+**GPU Allocation:**
+
+- Both containers must see all GPUs via pod-level allocation
+- Uses ``hostIPC: true`` for shared memory access required by IPC operations
+- ``CUDA_VISIBLE_DEVICES`` is set to ``0,1,2,3`` for both containers
+- This avoids device ID mismatches that occur with per-container GPU allocation
+
+**Why LMCache Server Needs GPU Access:**
+
+The LMCache server requires GPU access because it:
+
+- Receives GPU tensor IPC handles from vLLM workers
+- Directly accesses vLLM's GPU memory to perform GPU-to-CPU transfers
+- Uses CUDA operations for efficient memory copying
+
+The term "CPU offloading" refers to where KV cache is **stored** (CPU memory), not where the server runs.
+
+**Health Checks:**
+
+The LMCache server does not have health probes because it uses ZMQ sockets, which don't support standard TCP health checks. The vLLM container will fail to start if LMCache is not working properly.
+
+**Cleanup:**
+
+.. code-block:: bash
+
+    kubectl delete -f examples/multi_process/multi_process.yaml
+    kubectl delete namespace multi-process
+
 Detailed Configuration
 ----------------------
 
