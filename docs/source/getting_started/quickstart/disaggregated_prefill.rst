@@ -154,7 +154,7 @@ Send requests to the proxy server (port 9000) using either the completions or ch
 
 .. code-block:: bash
 
-    curl http://localhost:9000/v1/completions \
+    curl http://localhost:9100/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
             "model": "meta-llama/Llama-3.1-8B-Instruct",
@@ -168,7 +168,7 @@ You can also test the setup with the following command, which runs vLLM's servin
 
     git clone https://github.com/vllm-project/vllm.git
     cd vllm/benchmarks
-    vllm bench serve --port 9000 --seed $(date +%s) \
+    vllm bench serve --port 9100 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 5000 --random-output-len 200 \
         --num-prompts 50 --burstiness 100 --request-rate 1
