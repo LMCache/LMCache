@@ -40,14 +40,14 @@ To add a custom storage backend, you need to:
 
 1. **Implement** a Python class inheriting from the LMCache ``StoragePluginInterface``, overriding all required methods.
 2. **Install** this backend package in the LMCache environment (so that LMCache can import it).
-3. **Configure** LMCache to use it by adding an entry to the `storage_backends` list and specifying the module path and class name in the configuration’s `extra_config`. For example:
+3. **Configure** LMCache to use it by adding an entry to the `storage_plugins` list and specifying the module path and class name in the configuration’s `extra_config`. For example:
 
    .. code-block:: yaml
 
-      storage_backends: ["my_custom_storage"]
+      storage_plugins: ["my_custom_storage"]
       extra_config:
-         storage_backend.my_custom_storage.module_path: my_package.my_storage_module
-         storage_backend.my_custom_storage.class_name: MyCustomStorageClass
+         storage_plugin.my_custom_storage.module_path: my_package.my_storage_module
+         storage_plugin.my_custom_storage.class_name: MyCustomStorageClass
 
 Multiple storage backends can be enabled simultaneously. They are initialized during LMCache startup. Note that the order of backends can matter: if multiple backends are used, earlier listed backends have higher priority for cache lookups (i.e. LMCache will check those backends first when retrieving KV entries).
 

@@ -18,17 +18,17 @@ Backend Definition Requirements
 How to Integrate the Backend with LMCache
 -----------------------------------------
 1. Install your backend package in the LMCache environment
-2. Add ``storage_backends`` and its related ``module_path`` and ``class_name`` to ``extra_config`` section of LMCache configuration as follows:
+2. Add ``storage_plugins`` and its related ``module_path`` and ``class_name`` to ``extra_config`` section of LMCache configuration as follows:
 
 .. code-block:: yaml
 
     chunk_size: 64
     local_cpu: False
     max_local_cpu_size: 5
-    storage_backends: <backend_name>
+    storage_plugins: <backend_name>
     extra_config:
-      storage_backend.<backend_name>.module_path: <module_path>
-      storage_backend.<backend_name>.class_name: <class_name>
+      storage_plugin.<backend_name>.module_path: <module_path>
+      storage_plugin.<backend_name>.class_name: <class_name>
 
 An example configuration for a logging backend is as follows:
 
@@ -37,15 +37,15 @@ An example configuration for a logging backend is as follows:
     chunk_size: 64
     local_cpu: False
     max_local_cpu_size: 5
-    storage_backends: "log_backend"
+    storage_plugins: "log_backend"
     extra_config:
-      storage_backend.log_backend.module_path: lmc_external_log_backend.lmc_external_log_backend
-      storage_backend.log_backend.class_name: LogBackend
+      storage_plugin.log_backend.module_path: lmc_external_log_backend.lmc_external_log_backend
+      storage_plugin.log_backend.class_name: ExternalLogBackend
 
 .. note::
 
    - Storage backends are initialized in order during LMCache startup - earlier backends have higher priority during cache lookups
-   - ``storage_backend.<backend_name>`` distinguishes the different dynamic loaded backends
+   - ``storage_plugin.<backend_name>`` distinguishes the different dynamic loaded backends
 
 Backend Implementation Example
 ------------------------------

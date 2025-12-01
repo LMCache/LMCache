@@ -40,7 +40,7 @@ def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
     return metadata.role != "scheduler" and torch.cuda.is_available()
 
 
-def storage_plugins_loader(
+def storage_plugin_launcher(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
@@ -58,22 +58,20 @@ def storage_plugins_loader(
         return
 
     # Get the list of allowed external backends if configured
-    allowed_backends = (
-        set(config.storage_backends) if config.storage_backends else set()
-    )
+    storage_plugins = set(config.storage_plugins) if config.storage_plugins else set()
 
-    for backend_name in allowed_backends:
+    for storage_plugin in storage_plugins:
         try:
             module_path = config.extra_config.get(
-                f"storage_backend.{backend_name}.module_path"
+                f"storage_plugin.{storage_plugin}.module_path"
             )
             class_name = config.extra_config.get(
-                f"storage_backend.{backend_name}.class_name"
+                f"storage_plugin.{storage_plugin}.class_name"
             )
 
             if not module_path or not class_name:
                 logger.warning(
-                    f"Backend {backend_name} missing module_path or class_name"
+                    f"Backend {storage_plugin} missing module_path or class_name"
                 )
                 continue
 
@@ -99,11 +97,11 @@ def storage_plugins_loader(
             )
 
             # Add to storage backends
-            storage_backends[backend_name] = backend_instance
-            logger.info(f"Created dynamic backend: {backend_name}")
+            storage_backends[storage_plugin] = backend_instance
+            logger.info(f"Created dynamic backend: {storage_plugin}")
 
         except Exception as e:
-            logger.error(f"Failed to create backend {backend_name}: {str(e)}")
+            logger.error(f"Failed to create backend {storage_plugin}: {str(e)}")
 
 
 def CreateStorageBackends(
@@ -206,7 +204,7 @@ def CreateStorageBackends(
 
     if not config.enable_pd or config.local_cpu:
         # Load storage backends from configuration
-        storage_plugins_loader(
+        storage_plugin_launcher(
             config,
             metadata,
             loop,

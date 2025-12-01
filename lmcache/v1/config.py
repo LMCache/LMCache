@@ -119,6 +119,9 @@ _CONFIG_ALIASES = {
 _DEPRECATED_CONFIGS = {
     # Maps deprecated names to warning messages
     "nixl_peer_port": "nixl_peer_port is deprecated, use nixl_receiver_port instead",
+    "plugin_locations": (
+        "plugin_locations is deprecated, use runtime_plugin_locations instead",
+    ),
 }
 
 # Single configuration definition center - add new config items only here
@@ -381,7 +384,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
     },
-    "storage_backends": {
+    "storage_plugins": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
