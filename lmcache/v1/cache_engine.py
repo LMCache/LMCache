@@ -1238,11 +1238,11 @@ class LMCacheEngine:
         """Get list of available local cache pool names (LocalCPUBackend/ LocalDiskBackend)."""
         if self.storage_manager is None:
             return []
-        local_pools = []
-        # Filter local backends from storage managers
-        for backend_name in self.storage_manager.storage_backends:
-            if backend_name in ["LocalCPUBackend", "LocalDiskBackend"]:
-                local_pools.append(backend_name)
+        local_pools = [
+            backend_name
+            for backend_name in self.storage_manager.storage_backends
+            if backend_name in ["LocalCPUBackend", "LocalDiskBackend"]
+        ]
         return local_pools
 
     def _process_tokens_internal(
