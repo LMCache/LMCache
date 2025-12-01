@@ -60,13 +60,7 @@ def create_test_config(
         max_local_cpu_size=max_local_cpu_size,
         lmcache_instance_id=instance_id,
     )
-    if extra_config:
-        if config.extra_config is None:
-            config.extra_config = {}
-        config.extra_config.update(extra_config)
-    else:
-        if config.extra_config is None:
-            config.extra_config = {}
+    config.extra_config = extra_config.copy() if extra_config else {}
     config.extra_config["lmcache_rpc_port"] = rpc_port
     return config
 
@@ -203,7 +197,9 @@ class TestLMCacheLookupClientServer:
         vllm_config = create_mock_vllm_config(rank=0, world_size=1)
         with LMCacheLookupServer(lmcache_engine, vllm_config):
             time.sleep(0.5)
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 lookup_id = "test_request_1"
                 result = client.lookup(tokens.tolist(), lookup_id)
 
@@ -251,7 +247,9 @@ class TestLMCacheLookupClientServer:
         vllm_config = create_mock_vllm_config(rank=0, world_size=1)
         with LMCacheLookupServer(lmcache_engine, vllm_config):
             time.sleep(0.5)
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 # Perform multiple lookups
                 for i, tokens in enumerate(stored_tokens):
                     lookup_id = f"test_request_{i}"
@@ -290,7 +288,9 @@ class TestLMCacheLookupClientServer:
         vllm_config = create_mock_vllm_config(rank=0, world_size=1)
         with LMCacheLookupServer(lmcache_engine, vllm_config):
             time.sleep(0.5)
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 # Test 1: Lookup with same tag (user_a) should hit cache
                 lookup_id_1 = "test_user_a_match"
                 result_1 = client.lookup(
@@ -398,7 +398,9 @@ class TestLMCacheLookupClientServer:
         server = LMCacheLookupServer(lmcache_engine, vllm_config)
         time.sleep(0.5)
 
-        with LMCacheLookupClient(vllm_config) as client:
+        with LMCacheLookupClient(
+            vllm_config, lmcache_engine.config, lmcache_engine.metadata
+        ) as client:
             # Close server to simulate timeout
             server.close()
             time.sleep(0.5)
@@ -436,7 +438,9 @@ class TestLMCacheLookupClientServer:
         with LMCacheLookupServer(lmcache_engine, vllm_config) as server:
             time.sleep(0.5)
 
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 # First lookup - should hit cache
                 token_ids = tokens.tolist()
                 result1 = client.lookup(token_ids, "test_1")
@@ -465,7 +469,9 @@ class TestLMCacheLookupClientServer:
         with LMCacheLookupServer(lmcache_engine, vllm_config) as server:
             time.sleep(0.5)
 
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 # Perform a lookup
                 token_ids = list(range(256))
                 result = client.lookup(token_ids, "test_close")
@@ -479,9 +485,6 @@ class TestLMCacheLookupClientServer:
 
         # After exiting context, verify server thread is stopped
         assert server.running is False
-
-        # Wait for thread to finish
-        time.sleep(2.0)
         assert not server.thread.is_alive()
 
     def test_concurrent_lookups(self, lmcache_engine):
@@ -490,7 +493,9 @@ class TestLMCacheLookupClientServer:
 
         with LMCacheLookupServer(lmcache_engine, vllm_config):
             time.sleep(0.5)
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 # Perform rapid consecutive lookups
                 results = []
                 for i in range(10):
@@ -509,7 +514,9 @@ class TestLMCacheLookupClientServer:
 
         with LMCacheLookupServer(lmcache_engine, vllm_config):
             time.sleep(0.5)
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 # Empty token list
                 token_ids = []
                 lookup_id = "test_empty"
@@ -540,7 +547,9 @@ class TestLMCacheLookupClientServer:
         vllm_config = create_mock_vllm_config(rank=0, world_size=1)
         with LMCacheLookupServer(lmcache_engine, vllm_config):
             time.sleep(0.5)
-            with LMCacheLookupClient(vllm_config) as client:
+            with LMCacheLookupClient(
+                vllm_config, lmcache_engine.config, lmcache_engine.metadata
+            ) as client:
                 lookup_id = "test_large"
                 result = client.lookup(tokens.tolist(), lookup_id)
                 assert result == num_tokens, f"Expected {num_tokens}, got {result}"
