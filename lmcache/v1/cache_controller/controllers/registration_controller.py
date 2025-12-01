@@ -119,59 +119,69 @@ class RegistrationController:
         instance_id = msg.instance_id
         worker_id = msg.worker_id
         key = (instance_id, worker_id)
+        ip = msg.ip
+        port = msg.port
+        url = f"{ip}:{port}"
+        peer_init_url = msg.peer_init_url
 
+        # Create socket outside of lock to avoid holding lock during I/O
+        context = get_zmq_context()
+        socket = get_zmq_socket(
+            context,
+            url,
+            protocol="tcp",
+            role=zmq.REQ,  # type: ignore[attr-defined]
+            bind_or_connect="connect",
+        )
+
+        socket_to_close = None
         with self._lock:
-            # prevent duplicate registration
+            # Re-check for duplicates that may have occurred during socket creation
             if key in self.socket_mapping and key in self.worker_info_mapping:
                 logger.warning(
-                    "Instance-worker %s already registered, skip registration", key
+                    "Instance-worker %s already registered by another thread, "
+                    "skip registration",
+                    key,
                 )
-                return
-
-            # register the instance-worker
-            assert key not in self.peer_init_url_mapping
-            assert key not in self.socket_mapping
-            assert key not in self.worker_info_mapping
-
-            ip = msg.ip
-            port = msg.port
-            url = f"{ip}:{port}"
-
-            peer_init_url = msg.peer_init_url
-            if peer_init_url is not None:
-                self.peer_init_url_mapping[key] = peer_init_url
+                # Mark socket for closing outside the lock
+                socket_to_close = socket
             else:
-                logger.info(
-                    "peer init url of %s is None, only register when p2p is used.", key
+                # register the instance-worker
+                assert key not in self.peer_init_url_mapping
+                assert key not in self.socket_mapping
+                assert key not in self.worker_info_mapping
+
+                if peer_init_url is not None:
+                    self.peer_init_url_mapping[key] = peer_init_url
+                else:
+                    logger.info(
+                        "peer init url of %s is None, only register when p2p is used.",
+                        key,
+                    )
+
+                self.instance_mapping[ip] = instance_id
+
+                self.socket_mapping[key] = socket
+                self.worker_info_mapping[key] = WorkerInfo(
+                    instance_id,
+                    worker_id,
+                    ip,
+                    port,
+                    peer_init_url,
+                    time.time(),
+                    time.time(),
                 )
+                if instance_id not in self.worker_mapping:
+                    self.worker_mapping[instance_id] = []
 
-            self.instance_mapping[ip] = instance_id
+                # TODO(Jiayi): Use more efficient data structures
+                self.worker_mapping[instance_id].append(worker_id)
+                self.worker_mapping[instance_id].sort()
 
-            context = get_zmq_context()
-            socket = get_zmq_socket(
-                context,
-                url,
-                protocol="tcp",
-                role=zmq.REQ,  # type: ignore[attr-defined]
-                bind_or_connect="connect",
-            )
-
-            self.socket_mapping[key] = socket
-            self.worker_info_mapping[key] = WorkerInfo(
-                instance_id,
-                worker_id,
-                ip,
-                port,
-                peer_init_url,
-                time.time(),
-                time.time(),
-            )
-            if instance_id not in self.worker_mapping:
-                self.worker_mapping[instance_id] = []
-
-            # TODO(Jiayi): Use more efficient data structures
-            self.worker_mapping[instance_id].append(worker_id)
-            self.worker_mapping[instance_id].sort()
+        # Close the unused socket outside the lock
+        if socket_to_close is not None:
+            close_zmq_socket(socket_to_close)
+            return
 
         logger.info("Registered instance-worker %s with URL %s", key, url)
 
