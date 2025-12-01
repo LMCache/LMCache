@@ -116,6 +116,12 @@ class RegistryTree:
             self.instance_id_index[instance_id] = instance_node
         else:
             instance_node = self.instances[ip]
+            if instance_node.instance_id != instance_id:
+                raise ValueError(
+                    f"IP {ip} is already registered with instance "
+                    f"'{instance_node.instance_id}', but a new registration "
+                    f"arrived for instance '{instance_id}'."
+                )
 
         # Create and add worker
         worker_node = WorkerNode(
@@ -131,7 +137,7 @@ class RegistryTree:
         return worker_node
 
     def deregister_worker(
-        self, instance_id: str, worker_id: int, ip: str
+        self, instance_id: str, worker_id: int
     ) -> Optional[WorkerNode]:
         """Deregister a worker and clean up empty instances."""
         instance_node = self.instance_id_index.get(instance_id)
@@ -142,7 +148,7 @@ class RegistryTree:
 
         # Clean up empty instance
         if not instance_node.has_workers():
-            self.instances.pop(ip, None)
+            self.instances.pop(instance_node.ip, None)
             self.instance_id_index.pop(instance_id, None)
 
         return worker_node

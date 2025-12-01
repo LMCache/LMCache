@@ -152,9 +152,8 @@ class RegistrationController:
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
-        ip = msg.ip
 
-        worker_node = self.registry.deregister_worker(instance_id, worker_id, ip)
+        worker_node = self.registry.deregister_worker(instance_id, worker_id)
         if worker_node is None:
             logger.warning(
                 "Instance-worker %s not registered", (instance_id, worker_id)

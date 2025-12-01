@@ -190,8 +190,6 @@ class KVController:
         if report_id in self.kv_pool:
             del self.kv_pool[report_id]
 
-        # NOTE: Sequence tracker cleanup is handled by RegistryTree.deregister_worker
-
     # TODO(Jiayi): The current implementation does not handle
     # the case where the prefix chunks are evicted while the
     # suffix chunk is still in the system. LMCache should guarantee
