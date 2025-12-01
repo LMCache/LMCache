@@ -36,7 +36,7 @@ The disaggregated prefill setup consists of three main components:
 
 1. **Prefiller Server (Port 8100)**: Handles the prefill phase of LLM inference
 2. **Decoder Server (Port 8200)**: Manages the decoding/generation phase
-3. **Proxy Server (Port 9000)**: Coordinates between prefiller and decoder
+3. **Proxy Server (Port 9100)**: Coordinates between prefiller and decoder
 
 Configuration
 -------------
