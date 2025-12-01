@@ -196,6 +196,29 @@ class TestReserve:
                 test_keys[:10], large_shape, test_dtype, MemoryFormat.KV_2LTD
             )
 
+    def test_reserve_memory_eviction(
+        self, small_storage_manager, test_keys, test_shape, test_dtype, test_format
+    ):
+        # Try to reserve and commit a lot of small tensors (total size is large)
+        large_shape = (2, 50, 50, 256)  # Moderate size
+        small_shape = (2, 5, 50, 256)  # Small size (1/10 of large)
+
+        # First, reserve a single key with large shape should fail
+        with pytest.raises(MemoryExhaustedError):
+            small_storage_manager.reserve(
+                test_keys[:1], large_shape, test_dtype, test_format
+            )
+
+        # Now, reserve and commit multiple small tensors to fill up memory
+        for i in range(10):
+            keys = [test_keys[i]]
+            handle, _ = small_storage_manager.reserve(
+                keys, small_shape, test_dtype, test_format
+            )
+            small_storage_manager.commit(handle)
+
+        assert small_storage_manager.memcheck()
+
 
 # Tests for commit()
 class TestCommit:
@@ -312,6 +335,56 @@ class TestLookup:
         # Lookup just first 2 keys
         found = storage_manager.lookup(test_keys[:2])
         assert found == 2
+
+    def test_lookup_lock_objects(
+        self, small_storage_manager, test_keys, test_shape, test_dtype, test_format
+    ):
+        """Test that lookup locks the objects so they cannot be evicted."""
+        small_shape = (2, 4, 50, 256)  # Small size
+        # Reserve and commit multiple small tensors to fill up memory
+        target_keys = test_keys[:1]
+        handle, _ = small_storage_manager.reserve(
+            target_keys, small_shape, test_dtype, test_format
+        )
+        small_storage_manager.commit(handle)
+
+        # Now try to reserve and commit other objects
+        for key in test_keys[1:]:
+            handle, _ = small_storage_manager.reserve(
+                [key], small_shape, test_dtype, test_format
+            )
+            small_storage_manager.commit(handle)
+
+        assert small_storage_manager.memcheck()
+
+        # Should not be able to retrieve the first object
+        # because it's evicted
+        with pytest.raises(RuntimeError):
+            with small_storage_manager.retrieve(target_keys) as _:
+                pass
+
+        # Now reserve and commit the first object again
+        handle, _ = small_storage_manager.reserve(
+            target_keys, small_shape, test_dtype, test_format
+        )
+        small_storage_manager.commit(handle)
+
+        # Now lookup
+        found = small_storage_manager.lookup(target_keys)
+        assert found == 1
+
+        # Try to store more objects to force eviction
+        for key in test_keys[1:]:
+            handle, _ = small_storage_manager.reserve(
+                [key], small_shape, test_dtype, test_format
+            )
+            small_storage_manager.commit(handle)
+        assert small_storage_manager.memcheck()
+
+        # Now retrieving the first object should work
+        with small_storage_manager.retrieve(target_keys) as objects:
+            assert len(objects) == 1
+            assert objects[0] is not None
 
 
 # Tests for retrieve()

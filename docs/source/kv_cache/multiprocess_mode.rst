@@ -89,6 +89,57 @@ If you send the same request again, you should see the following logs, indicatin
 
     [2025-11-19 23:24:47,312] LMCache INFO: Retrieved 768 tokens in 0.001 seconds (server.py:370:__main__)
 
+Docker Deployment
+-----------------
+
+You can also run LMCache and vLLM in separate Docker containers. This approach is useful for deployment scenarios where you want to isolate the LMCache server from vLLM instances.
+
+**Step 1: Start the LMCache standalone container**
+
+Run the LMCache server in a Docker container:
+
+.. code-block:: bash
+
+    docker run --runtime nvidia --gpus all \
+        --network host \
+        --ipc host \
+        lmcache/standalone:nightly \
+        /opt/venv/bin/python3 -m lmcache.v1.multiprocess.server \
+        --cpu-buffer-size 60 --max-workers 4 --port 6555
+
+.. note::
+    We use ``--network host`` to allow the vLLM container to connect to the LMCache server on localhost. The ``--ipc host`` flag is needed for shared memory access.
+
+**Step 2: Start the vLLM container with LMCache connector**
+
+In a new terminal, start vLLM with the LMCache multi-process connector:
+
+.. code-block:: bash
+
+    docker run --runtime nvidia --gpus all \
+        --network host \
+        --ipc host \
+        lmcache/vllm-openai:latest-nightly \
+        Qwen/Qwen3-14B \
+        --kv-transfer-config '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.port": 6555}}'
+
+.. note::
+    It is recommended to use the nightly builds (``lmcache/standalone:nightly`` and ``lmcache/vllm-openai:latest-nightly``) as the multi-process mode interfaces are actively evolving.
+
+**Step 3: Send requests to the vLLM instance**
+
+Once both containers are running, you can send requests to vLLM the same way as in the local deployment:
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"model\": \"Qwen/Qwen3-14B\",
+        \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+        \"max_tokens\": 10
+    }"
+
 Detailed Configuration
 ----------------------
 

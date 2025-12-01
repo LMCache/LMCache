@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import random
+import socket
 import string
 import threading
 
@@ -53,6 +54,40 @@ def close_asyncio_loop(async_loop, async_thread):
         async_loop.call_soon_threadsafe(async_loop.stop)
     if async_thread.is_alive():
         async_thread.join()
+
+
+def get_available_port(host: str = "127.0.0.1") -> int:
+    """
+    Get an available port dynamically by binding to port 0.
+
+    Args:
+        host: The host address to bind to. Default is "127.0.0.1".
+
+    Returns:
+        An available port number.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
+
+
+def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
+    """
+    Get multiple available ports dynamically.
+
+    Args:
+        count: Number of ports to get.
+        host: The host address to bind to. Default is "127.0.0.1".
+
+    Returns:
+        A list of available port numbers.
+    """
+    ports = []
+    for _ in range(count):
+        ports.append(get_available_port(host))
+    return ports
 
 
 def generate_kv_cache(num_tokens, fmt, device):
