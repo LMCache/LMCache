@@ -14,6 +14,7 @@ export LMCACHE_VERBOSE=1
 export LMCACHE_CONFIG_FILE=lmcache_blend.yml
 export LM_CACHE_CONFIG_FILE=lmcache_blend.yml   
 model=Qwen/Qwen2.5-VL-7B-Instruct
+model_name="Qwen2.5-VL-7B-Instruct"
 SERVER_LOG=server_log.log     
 
 
@@ -39,10 +40,11 @@ for category in "${categorys[@]}"; do
   vllm serve $model \
     --host 0.0.0.0 \
     --port 8000 \
+    --trust-remote-code \
     --disable-log-requests \
     --max-num-batched-tokens 204800 \
     --gpu-memory-utilization 0.9 \
-    --max-model-len 128000 \
+    --max-model-len 65536 \
     --disable-chunked-mm-input \
     --enforce-eager \
     --no-enable-prefix-caching \
@@ -61,7 +63,7 @@ for category in "${categorys[@]}"; do
       echo "Running win=${WIN}s, stride=${STRIDE}"
       python3 anomaly_video_client.py \
         --dataset-root /root/workspace/dataset/Anomaly-Detection-Dataset \
-        --output-dir results_analysis/logs \
+        --output-dir results_analysis/logs/${model_name} \
         --csv-name request_times_win${WIN}_stride${STRIDE}.csv \
         --model $model \
         --sample-fps 1.0 \

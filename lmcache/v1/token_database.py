@@ -402,7 +402,7 @@ class SegmentTokenDatabase(TokenDatabase):
             for idx, token_chunk in enumerate(token_chunks):
                 token_chunk_len = len(token_chunk)
                 end_idx = start_idx + token_chunk_len
-                logger.info(f"token_chunk_len: {token_chunk_len}, start_idx: {start_idx}, end_idx: {end_idx}, mask num_falses: {num_falses}, mask {mask}")  # noqa: E501
+                logger.info(f"token_chunk_len: {token_chunk_len}, start_idx: {start_idx}, end_idx: {end_idx}, mask num_falses: {num_falses}") 
                 if idx > 0:
                     start_idx += self.sep_len
                     end_idx += self.sep_len

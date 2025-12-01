@@ -217,6 +217,8 @@ class LMCacheEngine:
         if self._is_passive():
             logger.debug(f"rank={self.metadata.worker_id} ignore store")
             return
+        # Drop stale caches when both storage and GPU memory are tight.
+        self.storage_manager.maybe_discard_stale_cache(reason="store")
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -361,6 +363,9 @@ class LMCacheEngine:
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
+
+        # Drop stale caches when both storage and GPU memory are tight.
+        self.storage_manager.maybe_discard_stale_cache(reason="store_layer")
 
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask, request_configs=request_configs
@@ -739,8 +744,8 @@ class LMCacheEngine:
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
-                    if start == 0: continue
-                    logger.info(f"Looking up start={start}, end={end}, key={key}")
+                    # if start == 0: continue
+                    # logger.info(f"Looking up start={start}, end={end}, key={key}")
                     assert isinstance(key, CacheEngineKey)
 
                     # TODO(Jiayi): Optimize by checking only the existence of the key

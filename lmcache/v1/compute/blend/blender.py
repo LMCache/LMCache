@@ -82,7 +82,18 @@ class LMCBlender:
         layer_id 为全局层号（与 layerwise_model 内部一致），支持 Qwen2.5-VL。
         """
         logger.debug(f"Blender is processing KV for layer {layer_id}")
-        old_k, old_v = self.gpu_connector.get_kv(layer_id)
+        try:
+            old_k, old_v = self.gpu_connector.get_kv(layer_id)
+        except ValueError:
+            # When the layerwise retriever finds no cached KV for this layer,
+            # the GPU buffer mapping will be empty. Instead of crashing the
+            # engine, fall back to the original QKV so the request can
+            # continue without blending.
+            logger.warning(
+                "KV cache for layer %s is not loaded into GPU buffer, skip blending.",
+                layer_id,
+            )
+            return q, k, v, residual, attn_output, attn_metadata
 
         if attn_output is None:
             attn_output = torch.empty(

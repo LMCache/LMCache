@@ -39,6 +39,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -239,6 +240,22 @@ class StorageManager:
         else:
             self.internal_copy_stream = None
 
+        # Proactive eviction thresholds (defaults can be overridden via extra_config)
+        get_extra = config.get_extra_config_value
+        self.enable_proactive_eviction = get_extra("enable_proactive_eviction", True)
+        self.cpu_usage_high_watermark = (
+            get_extra("proactive_cpu_usage_threshold", 0.9) or 0.9
+        )
+        self.disk_usage_high_watermark = (
+            get_extra("proactive_disk_usage_threshold", 0.9) or 0.9
+        )
+        self.gpu_free_low_watermark = (
+            get_extra("proactive_gpu_free_ratio", 0.1) or 0.1
+        )
+        self.proactive_evict_batch_size = int(
+            get_extra("proactive_evict_batch_size", 8) or 8
+        )
+
         self._setup_metrics()
 
     def _setup_metrics(self):
@@ -287,6 +304,124 @@ class StorageManager:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
         assert isinstance(allocator_backend, AllocatorBackendInterface)
         return allocator_backend
+
+    def _get_cpu_usage_ratio(self) -> Optional[float]:
+        backend = self.storage_backends.get("LocalCPUBackend")
+        if backend is None or not isinstance(backend, LocalCPUBackend):
+            return None
+
+        allocator = backend.memory_allocator
+        total_bytes = getattr(allocator, "size", None)
+        pin_allocator = getattr(allocator, "pin_allocator", None)
+        allocated_bytes = getattr(pin_allocator, "total_allocated_size", None)
+        if total_bytes is None or allocated_bytes is None or total_bytes == 0:
+            return None
+        return min(1.0, allocated_bytes / total_bytes)
+
+    def _get_disk_usage_ratio(self) -> Optional[float]:
+        backend = self.storage_backends.get("LocalDiskBackend")
+        if backend is None or not isinstance(backend, LocalDiskBackend):
+            return None
+        if backend.max_cache_size <= 0:
+            return None
+        return backend.current_cache_size / backend.max_cache_size
+
+    def _get_gpu_free_ratio(self) -> Optional[float]:
+        if not torch.cuda.is_available():
+            return None
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        if total_bytes == 0:
+            return None
+        return free_bytes / total_bytes
+
+    def _is_under_pressure(self) -> tuple[bool, Optional[float], Optional[float], Optional[float]]:
+        cpu_ratio = self._get_cpu_usage_ratio()
+        disk_ratio = self._get_disk_usage_ratio()
+        gpu_ratio = self._get_gpu_free_ratio()
+
+        storage_pressure = (cpu_ratio is not None and cpu_ratio >= self.cpu_usage_high_watermark) or (
+            disk_ratio is not None and disk_ratio >= self.disk_usage_high_watermark
+        )
+        gpu_pressure = (
+            gpu_ratio is None or gpu_ratio <= self.gpu_free_low_watermark
+        )
+        return storage_pressure and gpu_pressure, cpu_ratio, disk_ratio, gpu_ratio
+
+    def _evict_from_cpu_cache(self, budget: int) -> int:
+        backend = self.storage_backends.get("LocalCPUBackend")
+        if (
+            budget <= 0
+            or backend is None
+            or not isinstance(backend, LocalCPUBackend)
+            or not backend.use_hot
+        ):
+            return 0
+
+        evicted = 0
+        with backend.cpu_lock:
+            candidates = backend.cache_policy.get_evict_candidates(
+                backend.hot_cache, num_candidates=budget
+            )
+            for key in candidates:
+                evicted += backend.remove(key, force=False)
+        return evicted
+
+    def _evict_from_disk_cache(self, budget: int) -> int:
+        backend = self.storage_backends.get("LocalDiskBackend")
+        if budget <= 0 or backend is None or not isinstance(backend, LocalDiskBackend):
+            return 0
+
+        evicted = 0
+        with backend.disk_lock:
+            candidates = backend.cache_policy.get_evict_candidates(
+                backend.dict, num_candidates=budget
+            )
+            for key in candidates:
+                evicted += backend.remove(key, force=False)
+        return evicted
+
+    def maybe_discard_stale_cache(self, reason: str = "resource_pressure") -> int:
+        """
+        Proactively discard least recently used caches when both storage and
+        GPU memory are under pressure.
+        """
+        if not self.enable_proactive_eviction:
+            return 0
+
+        under_pressure, cpu_ratio, disk_ratio, gpu_ratio = self._is_under_pressure()
+        if not under_pressure:
+            return 0
+
+        remaining_budget = self.proactive_evict_batch_size
+        evicted = self._evict_from_cpu_cache(remaining_budget)
+        remaining_budget -= evicted
+        evicted += self._evict_from_disk_cache(remaining_budget)
+
+        ratio_str = (
+            f"cpu={cpu_ratio:.3f}" if cpu_ratio is not None else "cpu=n/a"
+        )
+        ratio_str += (
+            f", disk={disk_ratio:.3f}" if disk_ratio is not None else ", disk=n/a"
+        )
+        ratio_str += (
+            f", gpu_free={gpu_ratio:.3f}" if gpu_ratio is not None else ", gpu_free=n/a"
+        )
+
+        if evicted > 0:
+            logger.warning(
+                "Proactive LRU eviction triggered (%s): evicted %d keys (%s)",
+                reason,
+                evicted,
+                ratio_str,
+            )
+        else:
+            logger.warning(
+                "Proactive LRU eviction triggered (%s) but found no candidates (%s)",
+                reason,
+                ratio_str,
+            )
+
+        return evicted
 
     @_lmcache_nvtx_annotate
     def allocate(

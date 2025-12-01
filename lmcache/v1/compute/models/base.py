@@ -27,9 +27,9 @@ def _get_attr_rec(obj, dotted: str) -> Optional[object]:
 def _resolve_decoder_layers(vllm_model: nn.Module) -> Tuple[nn.Module, nn.ModuleList]:
     """
     Return (decoder_root, layers) where `layers` is the ModuleList of transformer blocks.
-    Compatible with LLaMA/Qwen3 和 Qwen2.5-VL 等结构。
+    Compatible with LLaMA/Qwen3 and Qwen2.5-VL structures.
     """
-    # 常见路径优先
+    # Common paths first
     candidates = [
         "model.layers",
         "language_model.model.layers",   # Qwen2.5-VL
@@ -41,12 +41,12 @@ def _resolve_decoder_layers(vllm_model: nn.Module) -> Tuple[nn.Module, nn.Module
     for path in candidates:
         layers = _get_attr_rec(vllm_model, path)
         if isinstance(layers, nn.ModuleList):
-            # decoder_root = path 的上一级
+            # decoder_root = path without final .layers
             parent_path = ".".join(path.split(".")[:-1]) or ""
             decoder_root = _get_attr_rec(vllm_model, parent_path) if parent_path else vllm_model
             return decoder_root, layers
 
-    # 兜底：广搜 named_children，找到带 layers 的模块
+    # Fallback: breadth-first search named_children to find module with layers attribute
     for name, mod in vllm_model.named_modules():
         if hasattr(mod, "layers") and isinstance(mod.layers, nn.ModuleList):
             return mod, mod.layers
@@ -71,35 +71,37 @@ class LMCBaseModel(nn.Module, ABC):
         enable_sparse: bool = False,
     ):
         super().__init__()
+        # Allow subclasses to patch/monkeypatch external deps before heavy init.
+        self._maybe_patch_mm_inputs()
         self.vllm_model = vllm_model
 
-        # --- 解码器与层解析（兼容 Qwen2.5-VL） ---
+        # --- decoder layers extraction ---
         self.decoder_root, self.layers = _resolve_decoder_layers(vllm_model)
         self.num_layers = len(self.layers)
 
-        # vLLM 里有些 wrapper 会在 decoder_root 挂 start_layer/end_layer
+        # vLLM sometimes has wrappers that attach start_layer/end_layer to decoder_root
         self.start_layer = getattr(self.decoder_root, "start_layer", 0)
         self.end_layer = getattr(self.decoder_root, "end_layer", self.num_layers)
 
-        # --- 注意力后端解析 ---
+        # --- attention backend parsing ---
         self.vllm_attn_layers = []
         self.lmc_attn_layers = []
         for i in range(self.num_layers):
             block = self.layers[i]
             self_attn = block.self_attn
-            # vLLM 常见为 self_attn.attn；若无则用 self_attn 自身
+            # vLLM common pattern is self_attn.attn; if not present, use self_attn itself
             vllm_attn_mod = getattr(self_attn, "attn", self_attn)
             self.vllm_attn_layers.append(vllm_attn_mod)
             self.lmc_attn_layers.append(
                 infer_attn_backend_from_vllm(vllm_attn_mod, enable_sparse)
             )
 
-        # --- Rotary Embedding（字段名兼容） ---
-        # 取第0层 rotary_emb
+        # --- Rotary Embedding (field name compatibility) ---
+        # Take rotary_emb from the 0th layer
         rotary = self.layers[0].self_attn.rotary_emb
         head_dim = _pick(rotary, "head_size", "head_dim")
         max_position_embeddings = _pick(rotary, "max_position_embeddings", "max_seq_len_cached", default=8192)
-        # Qwen 系常见 base 字段也可能叫 rope_theta
+        # Qwen common base field may also be called rope_theta
         base = _pick(rotary, "base", "rope_theta", default=10000.0)
         is_neox_style = getattr(rotary, "is_neox_style", True)
         dtype = getattr(rotary, "dtype", torch.get_default_dtype())
@@ -126,17 +128,18 @@ class LMCBaseModel(nn.Module, ABC):
 
     def _project_qkv(self, layer, hidden_states: torch.Tensor):
         """
-        统一执行 qkv 投影，兼容不同返回签名与 size 字段。
-        返回 (q, k, v) in last-dim concat space。
+        Args:
+            layer:  The transformer block/module that owns self_attn.
+            hidden_states: [*, hidden_size] input to the QKV projection.
         """
         out = layer.self_attn.qkv_proj(hidden_states)
-        # 兼容 (tensor, None) 或 仅 tensor
+        # Compatible with (tensor, None) or just tensor
         if isinstance(out, tuple):
             qkv = out[0]
         else:
             qkv = out
 
-        # 优先用显式 size
+        # Prefer explicit size
         q_size = getattr(layer.self_attn, "q_size", None)
         kv_size = getattr(layer.self_attn, "kv_size", None)
 
@@ -148,7 +151,7 @@ class LMCBaseModel(nn.Module, ABC):
                           "head_size", "head_dim", default=None)
 
         if q_size is None or kv_size is None:
-            # 退化：从 heads 推导
+            # Fallback: infer from heads
             assert num_heads is not None and num_kv_heads is not None and head_size is not None, \
                 "Cannot infer Q/K/V split sizes; missing heads/head_size info."
             q_size = num_heads * head_size
@@ -156,6 +159,13 @@ class LMCBaseModel(nn.Module, ABC):
 
         q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
         return q, k, v
+
+    def _maybe_patch_mm_inputs(self):
+        """
+        Hook for subclasses that need to patch vLLM multimodal helpers
+        before initialization (no-op by default).
+        """
+        return
 
     def rope_cache_to_device(self, device: torch.device):
         self.fused_rotary_emb.rope_cache_to_device(device)
@@ -169,7 +179,7 @@ class LMCBaseModel(nn.Module, ABC):
     ):
         input_ids = input_ids.cuda()
 
-        # 某些集成里 get_input_embeddings 可直接接收 ids；保持现有调用方式
+        # Some integrations allow get_input_embeddings to accept ids directly; keep existing call style
         hidden_states = self.vllm_model.get_input_embeddings(input_ids)
 
         residual = None
@@ -183,7 +193,7 @@ class LMCBaseModel(nn.Module, ABC):
         stream = page_stream if page_stream is not None else torch.cuda.current_stream()
 
         for layer_idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
-            # Self Attention 前的 LN/残差
+            # Pre-LN/residual before Self Attention
             with torch.cuda.stream(stream):
                 if residual is None:
                     residual = hidden_states
@@ -191,24 +201,24 @@ class LMCBaseModel(nn.Module, ABC):
                 else:
                     hidden_states, residual = layer.input_layernorm(hidden_states, residual)
 
-                # QKV 投影（兼容多实现）
+                # QKV projection (compatible with multiple implementations)
                 q, k, v = self._project_qkv(layer, hidden_states)
 
-                # Model-specific QKV processing（如 Qwen3 的 q_norm/k_norm）
+                # Model-specific QKV processing (e.g., q_norm/k_norm in Qwen3)
                 q, k, v = self._process_qkv(q, k, v, layer)
 
-                # 交给 blender
+                # Pass to blender
                 q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
                     q, k, v, residual, self.start_layer + layer_idx, attn_output, attn_metadata
                 )
 
-                # 取本层注意力维度（从 vllm_attn_layers 提取，已在 __init__ 存好）
+                # Take attention dimensions for this layer (extracted from vllm_attn_layers, stored in __init__)
                 attn_core = self.vllm_attn_layers[self.start_layer + layer_idx]
                 num_heads = _pick(attn_core, "num_heads")
                 num_kv_heads = _pick(attn_core, "num_kv_heads", "num_key_value_heads")
                 head_size = _pick(attn_core, "head_size", "head_dim")
 
-                # 变形并前向
+                # Reshape and forward
                 q = q.view(-1, num_heads, head_size)
                 k = k.view(-1, num_kv_heads, head_size)
                 v = v.view(-1, num_kv_heads, head_size)
@@ -221,11 +231,11 @@ class LMCBaseModel(nn.Module, ABC):
                 )
 
                 attn_output = attn_output.view(-1, num_heads * head_size)
-                # K/V reshape 回平面以便下游（即便未直接使用，也保持与原实现一致）
+                # K/V reshape back to flat for downstream (even if not directly used, keep consistent with original implementation)
                 _ = k.view(-1, num_kv_heads * head_size)
                 _ = v.view(-1, num_kv_heads * head_size)
 
-                # 输出投影
+                # Output projection
                 hidden_states, _ = layer.self_attn.o_proj(attn_output)
 
                 # FFN

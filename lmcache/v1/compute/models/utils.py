@@ -11,6 +11,50 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def patch_vllm_dummy_video_inputs() -> bool:
+    """
+    vLLM <=0.11 builds dummy videos for MM profiling with numpy's default int64 dtype,
+    which Pillow rejects in `Image.fromarray` (see server_log.log error).
+    Patch vLLM's BaseDummyInputsBuilder to emit uint8 video tensors so InternVL
+    preprocessing succeeds during profiling.
+    """
+    try:
+        from vllm.multimodal import profiling as mm_profiling
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning(
+            "Failed to import vllm.multimodal.profiling for dummy video patch: %s", exc
+        )
+        return False
+
+    orig_fn = getattr(mm_profiling.BaseDummyInputsBuilder, "_get_dummy_videos", None)
+    if orig_fn is None:
+        logger.warning("BaseDummyInputsBuilder has no _get_dummy_videos; skip patch.")
+        return False
+
+    if getattr(orig_fn, "_lmcache_patched", False):
+        return True
+
+    import numpy as np
+
+    def _get_dummy_videos(self, *, width, height, num_frames, num_videos):
+        if num_videos == 0:
+            return []
+        # Use uint8 and (frames, height, width, channels) so PIL can decode.
+        video = np.full((num_frames, height, width, 3), 255, dtype=np.uint8)
+        return [video] * num_videos
+
+    _get_dummy_videos._lmcache_patched = True  # type: ignore[attr-defined]
+    mm_profiling.BaseDummyInputsBuilder._get_dummy_videos = _get_dummy_videos
+    logger.info("Patched vLLM dummy video generator to return uint8 arrays.")
+    return True
+
+# Apply patch eagerly on import to avoid profiler crashes before model init.
+try:
+    patch_vllm_dummy_video_inputs()
+except Exception as exc:  # pragma: no cover - defensive
+    logger.debug("Dummy video patch failed to apply on import: %s", exc)
+
+
 def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
     model_name = type(vllm_model).__name__
     if model_name == "LlamaForCausalLM":
@@ -22,12 +66,17 @@ def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
         # First Party
         from lmcache.v1.compute.models.qwen2 import LMCQwen2Model
 
-        return LMCQwen2Model(vllm_model, blender, enable_sparse)    
+        return LMCQwen2Model(vllm_model, blender, enable_sparse)
     elif model_name == "Qwen3ForCausalLM":
         # First Party
         from lmcache.v1.compute.models.qwen3 import LMCQwen3Model
 
         return LMCQwen3Model(vllm_model, blender, enable_sparse)
+    elif model_name == "InternVLChatModel":
+        # First Party
+        from lmcache.v1.compute.models.internvl import LMCInternVLModel
+
+        return LMCInternVLModel(vllm_model, blender, enable_sparse)
     else:
         # TODO(Jiayi): Add support for more models
         raise NotImplementedError(

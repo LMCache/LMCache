@@ -106,8 +106,9 @@ def generate_windows_by_frames(num_frames: int, win_frames: int, stride_frames: 
     return uniq
 
 
-def frames_to_user_content(frames: List[Image.Image], prompt_text: str, segment_token: str) -> List[dict]:
+def frames_to_user_content_qwen(frames: List[Image.Image], prompt_text: str, segment_token: str) -> List[dict]:
     """
+    Qwen family keeps original chat.completions input scheme: text + image_url.
     Build content list: segment token before each frame, frames as base64 PNG, then prompt text.
     Matches the format used in scripts_test_video/video_client.py.
     """
@@ -126,10 +127,42 @@ def frames_to_user_content(frames: List[Image.Image], prompt_text: str, segment_
     return content
 
 
-def build_messages_from_frames(frames: List[Image.Image], prompt_text: str, segment_token: str) -> List[dict]:
+def build_messages_from_frames_qwen(frames: List[Image.Image], prompt_text: str, segment_token: str) -> List[dict]:
     return [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": frames_to_user_content(frames, prompt_text, segment_token)},
+        {"role": "user", "content": frames_to_user_content_qwen(frames, prompt_text, segment_token)},
+    ]
+
+
+def frames_to_user_content_internvl(
+    frames: List[Image.Image],
+    prompt_text: str,
+    segment_token: str,
+) -> List[dict]:
+    """
+    InternVL via /v1/chat/completions: use text + image_url schema,
+    same as Qwen-style multimodal messages.
+    """
+    content = []
+    for img in frames:
+        content.append({"type": "text", "text": segment_token})
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        image_data_url = f"data:image/png;base64,{b64}"
+        content.append({"type": "image_url", "image_url": {"url": image_data_url, "detail": "auto"}})
+    content.append({"type": "text", "text": segment_token})
+    content.append({"type": "text", "text": prompt_text})
+    return content
+
+
+def build_messages_from_frames_internvl(
+    frames: List[Image.Image],
+    prompt_text: str,
+    segment_token: str,
+) -> List[dict]:
+    return [
+        {"role": "user", "content": frames_to_user_content_internvl(frames, prompt_text, segment_token)},
     ]
 
 
@@ -259,19 +292,34 @@ def run(args):
                 if args.max_windows > 0:
                     windows = windows[:args.max_windows]
 
+                is_internvl = "internvl" in args.model.lower()
+
                 for widx, (s_idx, e_idx) in enumerate(windows):
                     sub_frames = base_frames[s_idx:e_idx]
-                    messages = build_messages_from_frames(sub_frames, prompt, args.blend_special_str)
 
-                    # Send request
-                    req_start = time.perf_counter()
-                    resp = client.chat.completions.create(
-                        model=args.model,
-                        messages=messages,
-                        max_tokens=args.max_tokens if args.max_tokens > 0 else None,
-                        temperature=0.01,
-                        top_p=1.0,
-                    )
+                    if is_internvl:
+                        # Use chat.completions with OpenAI multimodal content; avoid /v1/responses to skip 400s.
+                        messages = build_messages_from_frames_internvl(
+                            sub_frames, prompt, args.blend_special_str
+                        )
+                        req_start = time.perf_counter()
+                        resp = client.chat.completions.create(
+                            model=args.model,
+                            messages=messages,
+                            max_tokens=args.max_tokens if args.max_tokens > 0 else None,
+                            temperature=0.01,
+                            top_p=1.0,
+                        )
+                    else:
+                        messages = build_messages_from_frames_qwen(sub_frames, prompt, args.blend_special_str)
+                        req_start = time.perf_counter()
+                        resp = client.chat.completions.create(
+                            model=args.model,
+                            messages=messages,
+                            max_tokens=args.max_tokens if args.max_tokens > 0 else None,
+                            temperature=0.01,
+                            top_p=1.0,
+                        )
                     req_dur = time.perf_counter() - req_start
 
                     try:
