@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
@@ -16,6 +17,7 @@ from lmcache.v1.cache_controller.message import (
     DecompressRetMsg,
     KVAdmitMsg,
     KVEvictMsg,
+    KVOperationMsg,
     LookupMsg,
     LookupRetMsg,
     MoveMsg,
@@ -25,6 +27,8 @@ from lmcache.v1.cache_controller.message import (
 )
 from lmcache.v1.cache_controller.observability import PrometheusLogger
 from lmcache.v1.token_database import ChunkedTokenDatabase
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -52,12 +56,55 @@ class KVController:
         self.kv_pool: dict[int, list[KVChunkMetadata]] = {}
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
+
+        # Track sequence numbers for each (instance_id, worker_id, location) tuple
+        # Key: (instance_id, worker_id, location), Value: last_seq_num
+        self.seq_tracker: dict[tuple[str, int, str], int] = {}
+        self.seq_discontinuity_count = 0
+
         self._setup_metrics()
 
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
             prometheus_logger.kv_pool_keys_count.set_function(lambda: len(self.kv_pool))
+            prometheus_logger.kv_op_seq_discontinuity_count.set_function(
+                lambda: self.seq_discontinuity_count
+            )
+
+    def check_sequence_number(self, msg: KVOperationMsg) -> None:
+        """
+        Check if the sequence number is continuous for the given source.
+
+        Args:
+            msg: KVOperationMsg
+        """
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        location = msg.location
+        seq_num = msg.seq_num
+        key = (instance_id, worker_id, location)
+
+        if key not in self.seq_tracker:
+            # First message from this source
+            self.seq_tracker[key] = seq_num
+            return
+
+        expected_seq = self.seq_tracker[key] + 1
+        if seq_num != expected_seq:
+            # Sequence number discontinuity detected
+            self.seq_discontinuity_count += 1
+            logger.warning(
+                "KV operation sequence discontinuity detected: "
+                "key=%s, expected_seq=%s, actual_seq=%s, gap=%s",
+                key,
+                expected_seq,
+                seq_num,
+                seq_num - expected_seq,
+            )
+
+        # Update tracker with current sequence number
+        self.seq_tracker[key] = seq_num
 
     def post_init(self, reg_controller, cluster_executor):
         """
@@ -74,6 +121,7 @@ class KVController:
         worker_id = msg.worker_id
         key = msg.key
         location = msg.location
+
         if key not in self.kv_pool:
             self.kv_pool[key] = []
         self.kv_pool[key].append(KVChunkMetadata(instance_id, worker_id, location))
@@ -153,6 +201,15 @@ class KVController:
             ]
             if not self.kv_pool[key]:
                 del self.kv_pool[key]
+
+        # Clean up sequence tracker for this instance-worker
+        keys_to_remove = [
+            k
+            for k in self.seq_tracker.keys()
+            if k[0] == instance_id and k[1] == worker_id
+        ]
+        for k in keys_to_remove:
+            del self.seq_tracker[k]
 
     # TODO(Jiayi): The current implementation does not handle
     # the case where the prefix chunks are evicted while the
