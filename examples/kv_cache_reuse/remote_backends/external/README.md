@@ -29,7 +29,7 @@ extra_config:
 
 ```shell
 VLLM_USE_V1=0 \
-LMCACHE_USE_EXPERIMENTAL=True LMCACHE_TRACK_USAGE=false \
+LMCACHE_TRACK_USAGE=false \
 LMCACHE_CONFIG_FILE=backend_type.yaml \
 vllm serve /disc/f/models/opt-125m/ \
            --served-model-name "facebook/opt-125m" \

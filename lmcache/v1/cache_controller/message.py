@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from enum import Enum
 from typing import Dict, Optional, Tuple, Union
 
 # Third Party
@@ -69,28 +70,43 @@ class DeRegisterMsg(WorkerMsg):
         )
 
 
-class KVAdmitMsg(WorkerMsg):
-    """Message for KV chunk admission"""
+class KVOperationMsg(WorkerMsg):
+    """Base class for KV operation messages (admit/evict) with full context"""
 
     instance_id: str
     worker_id: int
     key: int
     location: str
+    seq_num: int = 0
+
+
+class KVAdmitMsg(KVOperationMsg):
+    """Message for KV chunk admission"""
 
     def describe(self) -> str:
         return f"kv_admit {self.key} to {self.instance_id}"
 
 
-class KVEvictMsg(WorkerMsg):
+class KVEvictMsg(KVOperationMsg):
     """Message for KV chunk eviction"""
-
-    instance_id: str
-    worker_id: int
-    key: int
-    location: str
 
     def describe(self) -> str:
         return f"kv_evict {self.key} from {self.instance_id}"
+
+
+class OpType(Enum):
+    """Enum for KV operation types"""
+
+    ADMIT = "admit"
+    EVICT = "evict"
+
+
+class KVOpEvent(msgspec.Struct):
+    """Lightweight KV operation event for queue storage (without common fields)"""
+
+    op_type: OpType
+    key: int
+    seq_num: int
 
 
 class HeartbeatMsg(RegisterMsg):
@@ -100,6 +116,26 @@ class HeartbeatMsg(RegisterMsg):
 
     def describe(self) -> str:
         return f"Heartbeat from instance {self.instance_id}, worker {self.worker_id}"
+
+
+class BatchedKVOperationMsg(WorkerMsg):
+    """Batched KV operation message with common fields and lightweight operations
+
+    Design: Common fields (instance_id, worker_id, location) are stored once
+    at the batch level, while individual operations only contain the varying
+    fields (op_type, key, seq_num). This reduces memory and network overhead.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
+    operations: list[KVOpEvent]
+
+    def describe(self) -> str:
+        return (
+            f"Batched KV operations with {len(self.operations)} messages "
+            f"from {self.instance_id}:{self.worker_id}"
+        )
 
 
 """Worker Request (requiring an reply) Message from LMcache to Controller"""
@@ -568,6 +604,7 @@ Msg = Union[
     DeRegisterMsg,
     KVAdmitMsg,
     KVEvictMsg,
+    BatchedKVOperationMsg,
     ClearWorkerMsg,
     ClearWorkerRetMsg,
     PinWorkerMsg,
