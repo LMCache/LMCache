@@ -156,7 +156,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "auto_store_remote_to_local": {
         "type": bool,
-        "default": False,
+        "default": True,
         "env_converter": _to_bool,
         "description": "Automatically store remote cached data to local pools (LocalCPUBackend/ LocalDiskBackend) when retrieved, to avoid repeated remote fetching in multi-turn scenarios.",
     },
