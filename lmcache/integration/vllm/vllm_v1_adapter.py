@@ -1342,6 +1342,87 @@ class LMCacheConnectorV1Impl:
         self._invalid_block_ids.clear()
         return invalid_blocks
 
+    @_lmcache_nvtx_annotate
+    def shutdown(self):
+        # Standard
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        import time
+
+        logger.info("Starting LMCacheConnector shutdown...")
+        start_time = time.time()
+
+        errors = []
+
+        def _safe_close(name: str, close_fn, timeout: float = 10.0):
+            """Helper to close a resource with timeout protection"""
+            try:
+                logger.info(f"Closing {name}...")
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(close_fn)
+                    try:
+                        future.result(timeout=timeout)
+                        logger.info(f"{name} closed successfully")
+                    except TimeoutError:
+                        logger.error(
+                            f"{name} close operation timed out after {timeout}s. "
+                            "Continuing with shutdown..."
+                        )
+                        errors.append((name, "Timeout"))
+            except Exception as e:
+                logger.error(f"Error closing {name}: {e}")
+                errors.append((name, e))
+
+        # Close offload server
+        if hasattr(self, "offload_server") and self.offload_server:
+            _safe_close("offload_server", self.offload_server.close, timeout=10.0)
+
+        # Stop plugins
+        if hasattr(self, "plugin_launcher") and self.plugin_launcher:
+            _safe_close(
+                "plugin_launcher", self.plugin_launcher.stop_plugins, timeout=10.0
+            )
+
+        # Stop API server
+        if hasattr(self, "api_server") and self.api_server:
+            _safe_close("api_server", self.api_server.stop, timeout=10.0)
+
+        # Close lookup server
+        if hasattr(self, "lookup_server") and self.lookup_server:
+            _safe_close("lookup_server", self.lookup_server.close, timeout=10.0)
+
+        # Close lookup client
+        if hasattr(self, "lookup_client") and self.lookup_client:
+            _safe_close("lookup_client", self.lookup_client.close, timeout=10.0)
+
+        # Destroy cache engine
+        try:
+            logger.info(f"Destroying LMCache engine: {ENGINE_NAME}")
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(LMCacheEngineBuilder.destroy, ENGINE_NAME)
+                try:
+                    future.result(timeout=15.0)
+                    logger.info("LMCache engine destroyed successfully")
+                except TimeoutError:
+                    logger.error(
+                        "Cache engine destroy timed out after 15s. "
+                        "Continuing with shutdown..."
+                    )
+                    errors.append(("cache_engine", "Timeout"))
+        except Exception as e:
+            logger.error(f"Error destroying cache engine: {e}")
+            errors.append(("cache_engine", e))
+
+        elapsed = time.time() - start_time
+        if errors:
+            logger.warning(
+                f"Shutdown completed with {len(errors)} errors "
+                f"in {elapsed:.2f}s: {errors}"
+            )
+        else:
+            logger.info(
+                f"LMCacheConnector shutdown completed successfully in {elapsed:.2f}s"
+            )
+
     ###################
     # Scheduler side APIs
     ####################

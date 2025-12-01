@@ -415,10 +415,14 @@ class MPCacheEngine:
                     _retrieve_loop(keys, memory_objs)
             except Exception as e:
                 logger.warning("Cannot retrieve keys: %s", str(e))
-                event.record()
                 return event.ipc_handle(), [False] * len(keys)
-
-            event.record()
+            finally:
+                # NOTE: the event.record() should be called before
+                # the event ipc handle is returned to the caller.
+                event.record()
+                gpu_context.cupy_stream.launch_host_func(
+                    self.storage_manager.on_retrieve_finished, keys
+                )
 
         tokens_retrieved = len(keys) * self.chunk_size
         ed = time.perf_counter()
@@ -463,6 +467,13 @@ class MPCacheEngine:
         """
         # NOTE: we are doing per-request lookup, the caller need
         # to be aware of this! We need to add this to the doc!
+        if not lock:
+            logger.warning(
+                "MPCacheEngine.lookup called with lock=False, this is "
+                "not recommended and may cause memory object being pinned "
+                "for 5 minutes"
+            )
+
         found_count = self.storage_manager.lookup(keys)
         return [True] * found_count + [False] * (len(keys) - found_count)
 

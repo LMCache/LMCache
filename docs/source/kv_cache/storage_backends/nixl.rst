@@ -25,8 +25,6 @@ Ways to configure LMCache NIXL Offloading
 
 Passed in through ``LMCACHE_CONFIG_FILE=lmcache-config.yaml``
 
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set.
-
 Example ``lmcache-config.yaml`` for POSIX backend:
 
 .. code-block:: yaml

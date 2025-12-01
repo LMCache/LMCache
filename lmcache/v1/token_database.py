@@ -83,6 +83,16 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         logger.info(f"Using hash algorithm: {hash_algorithm}")
         self.metadata = metadata
+        # Whether only the first rank should save cache. This flag is also used
+        # to control the logical world_size embedded into CacheEngineKey.
+        self.save_only_first_rank = False
+        if config is not None and metadata is not None:
+            # save_only_first_rank only works when use MLA, follow the same
+            # semantics as LMCacheEngine and memory allocator.
+            self.save_only_first_rank = (
+                config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+                and metadata.use_mla
+            )
 
     def _get_vllm_hash_func(self, hash_algorithm: str):
         """Get hash function from vLLM with version compatibility.
@@ -198,10 +208,13 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         self, chunk_hash: int, request_configs: Optional[dict] = None
     ):
         assert self.metadata is not None
+        # When save_only_first_rank is enabled (for MLA), we deliberately
+        # collapse the CacheEngineKey.world_size to 1 so that cache keys
+        # become world-size agnostic across compatible deployments.
         return CacheEngineKey(
             self.metadata.fmt,
             self.metadata.model_name,
-            self.metadata.world_size,
+            self.metadata.world_size if not self.save_only_first_rank else 1,
             self.metadata.worker_id,
             chunk_hash,
             self.metadata.kv_dtype,
