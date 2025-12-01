@@ -150,7 +150,7 @@ Step-by-Step Setup
 Usage
 -----
 
-Send requests to the proxy server (port 9000) using either the completions or chat completions endpoint:
+Send requests to the proxy server (port 9100) using either the completions or chat completions endpoint:
 
 .. code-block:: bash
 
