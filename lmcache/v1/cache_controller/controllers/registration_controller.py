@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Optional
+import threading
 import time
 
 # Third Party
@@ -50,6 +51,10 @@ class RegistrationController:
 
         # Mapping from `(instance_id, worker_id)` -> `WorkerInfo`
         self.worker_info_mapping: dict[tuple[str, int], WorkerInfo] = {}
+
+        # Lock for thread-safe access to shared data structures
+        self._lock = threading.Lock()
+
         self._setup_metrics()
 
     def _setup_metrics(self):
@@ -115,51 +120,58 @@ class RegistrationController:
         worker_id = msg.worker_id
         key = (instance_id, worker_id)
 
-        # prevent duplicate registration
-        if key in self.socket_mapping and key in self.worker_info_mapping:
-            logger.warning(
-                "Instance-worker %s already registered, skip registration", key
+        with self._lock:
+            # prevent duplicate registration
+            if key in self.socket_mapping and key in self.worker_info_mapping:
+                logger.warning(
+                    "Instance-worker %s already registered, skip registration", key
+                )
+                return
+
+            # register the instance-worker
+            assert key not in self.peer_init_url_mapping
+            assert key not in self.socket_mapping
+            assert key not in self.worker_info_mapping
+
+            ip = msg.ip
+            port = msg.port
+            url = f"{ip}:{port}"
+
+            peer_init_url = msg.peer_init_url
+            if peer_init_url is not None:
+                self.peer_init_url_mapping[key] = peer_init_url
+            else:
+                logger.info(
+                    "peer init url of %s is None, only register when p2p is used.", key
+                )
+
+            self.instance_mapping[ip] = instance_id
+
+            context = get_zmq_context()
+            socket = get_zmq_socket(
+                context,
+                url,
+                protocol="tcp",
+                role=zmq.REQ,  # type: ignore[attr-defined]
+                bind_or_connect="connect",
             )
-            return
 
-        # register the instance-worker
-        assert key not in self.peer_init_url_mapping
-        assert key not in self.socket_mapping
-        assert key not in self.worker_info_mapping
-
-        ip = msg.ip
-        port = msg.port
-        url = f"{ip}:{port}"
-
-        peer_init_url = msg.peer_init_url
-        if peer_init_url is not None:
-            self.peer_init_url_mapping[key] = peer_init_url
-        else:
-            logger.info(
-                "peer init url of %s is None, only register when p2p is used.", key
+            self.socket_mapping[key] = socket
+            self.worker_info_mapping[key] = WorkerInfo(
+                instance_id,
+                worker_id,
+                ip,
+                port,
+                peer_init_url,
+                time.time(),
+                time.time(),
             )
+            if instance_id not in self.worker_mapping:
+                self.worker_mapping[instance_id] = []
 
-        self.instance_mapping[ip] = instance_id
-
-        context = get_zmq_context()
-        socket = get_zmq_socket(
-            context,
-            url,
-            protocol="tcp",
-            role=zmq.REQ,  # type: ignore[attr-defined]
-            bind_or_connect="connect",
-        )
-
-        self.socket_mapping[key] = socket
-        self.worker_info_mapping[key] = WorkerInfo(
-            instance_id, worker_id, ip, port, peer_init_url, time.time(), time.time()
-        )
-        if instance_id not in self.worker_mapping:
-            self.worker_mapping[instance_id] = []
-
-        # TODO(Jiayi): Use more efficient data structures
-        self.worker_mapping[instance_id].append(worker_id)
-        self.worker_mapping[instance_id].sort()
+            # TODO(Jiayi): Use more efficient data structures
+            self.worker_mapping[instance_id].append(worker_id)
+            self.worker_mapping[instance_id].sort()
 
         logger.info("Registered instance-worker %s with URL %s", key, url)
 
@@ -171,29 +183,46 @@ class RegistrationController:
         worker_id = msg.worker_id
         ip = msg.ip
 
-        self.instance_mapping.pop(ip, None)
+        with self._lock:
+            self.instance_mapping.pop(ip, None)
 
-        if instance_id in self.worker_mapping:
-            self.worker_mapping[instance_id].remove(worker_id)
-            if not self.worker_mapping[instance_id]:
-                del self.worker_mapping[instance_id]
-        else:
-            logger.warning(f"Instance {instance_id} not registered")
+            if instance_id in self.worker_mapping:
+                try:
+                    self.worker_mapping[instance_id].remove(worker_id)
+                    if not self.worker_mapping[instance_id]:
+                        del self.worker_mapping[instance_id]
+                except ValueError:
+                    # Worker already removed, this is fine (idempotent operation)
+                    logger.debug(
+                        "Worker %s already removed from instance %s",
+                        worker_id,
+                        instance_id,
+                    )
+            else:
+                logger.warning("Instance %s not registered", instance_id)
 
-        self.peer_init_url_mapping.pop((instance_id, worker_id), None)
+            self.peer_init_url_mapping.pop((instance_id, worker_id), None)
 
-        if (instance_id, worker_id) in self.socket_mapping:
-            socket = self.socket_mapping.pop((instance_id, worker_id))
+            socket = None
+            if (instance_id, worker_id) in self.socket_mapping:
+                socket = self.socket_mapping.pop((instance_id, worker_id))
+                logger.info("Deregistered instance-worker %s", (instance_id, worker_id))
+            else:
+                logger.warning(
+                    "Instance-worker %s not registered", (instance_id, worker_id)
+                )
+
+            if (instance_id, worker_id) in self.worker_info_mapping:
+                self.worker_info_mapping.pop((instance_id, worker_id))
+            else:
+                logger.warning(
+                    "Instance-worker %s not registered", (instance_id, worker_id)
+                )
+
+        # Close socket and call kv_controller outside the lock to avoid deadlock
+        if socket is not None:
             close_zmq_socket(socket)
             await self.kv_controller.deregister(instance_id, worker_id)
-            logger.info(f"Deregistered instance-worker {(instance_id, worker_id)}")
-        else:
-            logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
-
-        if (instance_id, worker_id) in self.worker_info_mapping:
-            self.worker_info_mapping.pop((instance_id, worker_id))
-        else:
-            logger.warning(f"Instance-worker {(instance_id, worker_id)} not registered")
 
     async def health(self, msg: HealthMsg) -> HealthRetMsg:
         """
@@ -212,15 +241,18 @@ class RegistrationController:
         instance_id = msg.instance_id
         worker_id = msg.worker_id
         worker_key = (instance_id, worker_id)
-        if worker_key not in self.worker_info_mapping:
-            logger.warning(
-                f"{worker_key} has not been registered, re-register the worker."
-            )
-            # re-register the worker
-            await self.register(msg)
+
+        # Fast path: check without lock first (common case)
+        worker_info = self.worker_info_mapping.get(worker_key)
+        if worker_info is not None:
+            # Just update timestamp - no lock needed for single field update
+            worker_info.last_heartbeat_time = time.time()
         else:
-            # update worker info
-            self.worker_info_mapping[worker_key].last_heartbeat_time = time.time()
+            # Slow path: need to register
+            logger.warning(
+                "%s has not been registered, re-register the worker.", worker_key
+            )
+            await self.register(msg)
 
     async def query_worker_info(self, msg: QueryWorkerInfoMsg) -> QueryWorkerInfoRetMsg:
         """
@@ -228,17 +260,19 @@ class RegistrationController:
         """
         event_id = msg.event_id
         worker_infos = []
-        if msg.instance_id not in self.worker_mapping:
-            logger.warning(f"instance {msg.instance_id} not registered.")
-        else:
-            worker_ids = msg.worker_ids
-            if worker_ids is None or len(worker_ids) == 0:
-                worker_ids = self.worker_mapping[msg.instance_id]
-            for worker_id in worker_ids:
-                worker_key = (msg.instance_id, worker_id)
-                if worker_key in self.worker_info_mapping:
-                    worker_infos.append(self.worker_info_mapping[worker_key])
-                else:
-                    logger.warning(f"worker {worker_key} not registered.")
+
+        with self._lock:
+            if msg.instance_id not in self.worker_mapping:
+                logger.warning(f"instance {msg.instance_id} not registered.")
+            else:
+                worker_ids = msg.worker_ids
+                if worker_ids is None or len(worker_ids) == 0:
+                    worker_ids = self.worker_mapping[msg.instance_id]
+                for worker_id in worker_ids:
+                    worker_key = (msg.instance_id, worker_id)
+                    if worker_key in self.worker_info_mapping:
+                        worker_infos.append(self.worker_info_mapping[worker_key])
+                    else:
+                        logger.warning(f"worker {worker_key} not registered.")
 
         return QueryWorkerInfoRetMsg(event_id=event_id, worker_infos=worker_infos)

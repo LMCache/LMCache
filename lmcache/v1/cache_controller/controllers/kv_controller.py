@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import threading
 from collections import defaultdict
 from typing import Optional
 
@@ -54,6 +55,9 @@ class KVController:
         # Key: (instance_id, worker_id, location), Value: last_seq_num
         self.seq_tracker: dict[tuple[str, int, str], int] = {}
         self.seq_discontinuity_count = 0
+
+        # Lock for thread-safe access to shared data structures
+        self._lock = threading.Lock()
 
         self._setup_metrics()
 
@@ -154,7 +158,8 @@ class KVController:
         Admit a new kv chunk.
         """
         report_id = (msg.instance_id, msg.worker_id)
-        self.kv_pool[report_id][msg.location].add(msg.key)
+        with self._lock:
+            self.kv_pool[report_id][msg.location].add(msg.key)
 
     async def evict(self, msg: KVEvictMsg) -> None:
         """
@@ -164,35 +169,37 @@ class KVController:
         location = msg.location
         key = msg.key
 
-        if (
-            report_id not in self.kv_pool
-            or location not in self.kv_pool[report_id]
-            or key not in self.kv_pool[report_id][location]
-        ):
-            return
+        with self._lock:
+            if (
+                report_id not in self.kv_pool
+                or location not in self.kv_pool[report_id]
+                or key not in self.kv_pool[report_id][location]
+            ):
+                return
 
-        self.kv_pool[report_id][location].remove(key)
-        if not self.kv_pool[report_id][location]:
-            del self.kv_pool[report_id][location]
-        if not self.kv_pool[report_id]:
-            del self.kv_pool[report_id]
+            self.kv_pool[report_id][location].remove(key)
+            if not self.kv_pool[report_id][location]:
+                del self.kv_pool[report_id][location]
+            if not self.kv_pool[report_id]:
+                del self.kv_pool[report_id]
 
     async def deregister(self, instance_id: str, worker_id: int) -> None:
         """
         Deregister all kv chunks of an instance-worker.
         """
-        report_id = (instance_id, worker_id)
-        if report_id in self.kv_pool:
-            del self.kv_pool[report_id]
+        with self._lock:
+            report_id = (instance_id, worker_id)
+            if report_id in self.kv_pool:
+                del self.kv_pool[report_id]
 
-        # Clean up sequence tracker for this instance-worker
-        keys_to_remove = [
-            k
-            for k in self.seq_tracker.keys()
-            if k[0] == instance_id and k[1] == worker_id
-        ]
-        for k in keys_to_remove:
-            del self.seq_tracker[k]
+            # Clean up sequence tracker for this instance-worker
+            keys_to_remove = [
+                k
+                for k in self.seq_tracker.keys()
+                if k[0] == instance_id and k[1] == worker_id
+            ]
+            for k in keys_to_remove:
+                del self.seq_tracker[k]
 
     # TODO(Jiayi): The current implementation does not handle
     # the case where the prefix chunks are evicted while the
@@ -203,6 +210,9 @@ class KVController:
     # `instance_id` with longest prefix.
     # TODO(Jiayi): Need to get rid of the hash somehow
     async def lookup(self, msg: LookupMsg) -> LookupRetMsg:
+        """
+        Lookup KV cache for given tokens.
+        """
         tokens = msg.tokens
         layout_info = {}
         for start, end, key in self.token_database.process_tokens(
