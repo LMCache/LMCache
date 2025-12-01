@@ -1,8 +1,8 @@
-Custom Storage Backends
-=============================
+Storage Plugins
+===============
 
-LMCache supports out of the box storgae backends like Mooncake, S3 and NIXL.
-It also supports integrating custom storage backends through dynamic loading or plug and play capability. This allows extending cache storage capabilities without modifying core code.
+LMCache supports out of the box storage backends like Mooncake, S3 and NIXL.
+The LMCache storage plugin system provides the ability to add custom storage backends through dynamic loading or plug and play capability. In other words, extending cache storage capabilities without modifying core code.
 
 Backend Definition Requirements
 -------------------------------
@@ -49,5 +49,5 @@ An example configuration for a logging backend is as follows:
 
 Backend Implementation Example
 ------------------------------
-A sample backend implementation can be viewed at https://github.com/opendataio/lmc_external_log_backend/
+A sample custom backend implementation can be viewed at https://github.com/opendataio/lmc_external_log_backend/
 

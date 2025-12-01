@@ -3,7 +3,7 @@ Extending LMCache
 
 LMCache is designed to be extensible, allowing integration of custom functionality without modifying the core. The main extension mechanisms are:
 
-- **Storage Backend Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
+- **Storage Plugin Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
 - **External Remote Connector Framework** – integrate new remote KV store connectors for external/distributed storage systems.
 - **Runtime Plugin Framework** – run custom scripts as separate processes alongside LMCache for added functionality.
 
@@ -13,17 +13,17 @@ LMCache is designed to be extensible, allowing integration of custom functionali
       subgraph "LMCache Process"
          direction TB
          core["LMCache Core Engine (Cache Manager & APIs)"]
-         pluginMgr["Runtime Plugin Launcher"]
+         runtimePluginMgr["Runtime Plugin Launcher"]
          backendMgr["Storage Backend Interface"]
+         storagePluginMgr["Storage Plugin Launcher"]
       end
 
-      pluginMgr -->|"launch"| plugin1["Custom Plugin Script 1"]
-      pluginMgr -->|"launch"| plugin2["Custom Plugin Script 2"]
+      runtimePluginMgr -->|"launch"| plugin1["Custom Plugin Script 1"]
+      runtimePluginMgr -->|"launch"| plugin2["Custom Plugin Script 2"]
 
       backendMgr --> CPUBackend[["In-Memory CPU Backend"]]
       backendMgr --> DiskBackend[["Local Disk Backend"]]
       backendMgr --> NIXLBackend[["NIXL Peer Backend"]]
-      backendMgr --> CustomBackend[["Custom Storage Backend"]]
       backendMgr --> RemoteBackend[["Remote connectors"]]
 
       RemoteBackend --> RedisConnector[["Redis Connector (built-in)"]]
@@ -31,9 +31,12 @@ LMCache is designed to be extensible, allowing integration of custom functionali
       RemoteBackend --> MooncakeConnector[["Mooncake Connector (built-in)"]]
       RemoteBackend --> CustomConnector[["External Connector"]]
 
-**Storage Backends** (bottom section of diagram) enable LMCache to interface with new storage or transport systems. Developers can implement the standardized ``StorageBackendInterface`` to create a custom storage backend module. Such backends are loaded by LMCache at runtime (via configuration) in addition to the built-in backends that ship with LMCache. Built-in backends include in-memory CPU caching, local disk storage, NVIDIA NIXL (GPU peer-to-peer), and remote stores like Redis, InfiniStore, Mooncake, etc.
+      storagePluginMgr --> |"StoragePluginInterface"| strplugin1["Custom Storage Backend 1"]
+      storagePluginMgr --> |"StoragePluginInterface"| strplugin2["Custom Storage Backend 2"]
 
-To add an storage backend, you need to:
+**Storage Plugin Framework**  enable LMCache to interface with new storage or transport systems. Developers can implement the standardized ``StoragePluginInterface`` to create a custom storage backend module. Such backends are loaded by LMCache at runtime (via configuration) in addition to the built-in backends that ship with LMCache. Built-in backends include in-memory CPU caching, local disk storage, NVIDIA NIXL (GPU peer-to-peer), and remote stores like Redis, InfiniStore, Mooncake, etc.
+
+To add a custom storage backend, you need to:
 
 1. **Implement** a Python class inheriting from the LMCache ``StoragePluginInterface``, overriding all required methods.
 2. **Install** this backend package in the LMCache environment (so that LMCache can import it).
@@ -109,4 +112,7 @@ Together, these extension points – custom storage backends, remote connectors,
    :maxdepth: 1
    :caption: Extending LMCache
 
-   runtime_plugin
+   runtime_plugins
+   storage_plugins
+
+
