@@ -88,8 +88,9 @@ class MockLMCacheWorker:
             self.context = zmq.asyncio.Context()
             self.socket = self.context.socket(zmq.REQ)
             self.socket.connect(self.controller_url)
-            self.socket.setsockopt(zmq.RCVTIMEO, 5000)
-            self.socket.setsockopt(zmq.SNDTIMEO, 5000)
+            self.socket.setsockopt(zmq.RCVTIMEO, 3000)
+            self.socket.setsockopt(zmq.SNDTIMEO, 3000)
+            self.socket.setsockopt(zmq.LINGER, 0)
 
     async def async_put_and_wait_msg(self, msg):
         """Send message to controller and wait for response"""
@@ -116,9 +117,11 @@ class MockLMCacheWorker:
     def close(self):
         """Close socket and context"""
         if self.socket is not None:
-            self.socket.close()
+            self.socket.close(linger=0)
+            self.socket = None
         if self.context is not None:
             self.context.term()
+            self.context = None
 
     def __enter__(self):
         return self
@@ -138,7 +141,9 @@ def run_mock_controller(
     context = zmq.Context()
     socket = context.socket(zmq.REP)
     socket.bind(controller_url)
-    socket.setsockopt(zmq.RCVTIMEO, 1000)
+    socket.setsockopt(zmq.RCVTIMEO, 500)
+    socket.setsockopt(zmq.SNDTIMEO, 500)
+    socket.setsockopt(zmq.LINGER, 0)
 
     logger.info(f"Mock controller started at {controller_url}")
     ready_event.set()  # Signal that the controller is ready
@@ -163,7 +168,7 @@ def run_mock_controller(
             if not stop_event.is_set():
                 time.sleep(0.01)
 
-    socket.close()
+    socket.close(linger=0)
     context.term()
     logger.info("Mock controller stopped")
 
@@ -230,27 +235,28 @@ def async_loop():
 
     yield loop
 
-    # Stop the loop first to prevent new tasks from being scheduled
+    # Cancel all pending tasks first
+    try:
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            if not task.done():
+                loop.call_soon_threadsafe(task.cancel)
+    except Exception as e:
+        logger.warning("Error cancelling tasks: %s", e)
+
+    # Give tasks a moment to cancel
+    time.sleep(0.1)
+
+    # Stop the loop
     loop.call_soon_threadsafe(loop.stop)
-    thread.join(timeout=3)
+    thread.join(timeout=2)
 
     # Force terminate if thread is still alive
     if thread.is_alive():
         logger.warning("Event loop thread did not stop gracefully")
 
-    # Clean up remaining tasks without recursion
+    # Close the loop
     if not loop.is_closed():
-        try:
-            # Get all pending tasks
-            pending = asyncio.all_tasks(loop)
-            for task in pending:
-                if not task.done():
-                    # Cancel without waiting to avoid recursion
-                    task.cancel()
-        except Exception as e:
-            logger.warning("Error cancelling tasks: %s", e)
-
-        # Close the loop
         try:
             loop.close()
         except Exception as e:
@@ -306,16 +312,26 @@ def mock_controller_context(peer_mappings: dict):
 
     # Wait for the controller to signal it's ready
     if not ready_event.wait(timeout=5.0):
+        stop_event.set()
+        process.terminate()
+        process.join(timeout=2)
+        if process.is_alive():
+            process.kill()
         raise RuntimeError("Mock controller failed to start within 5 seconds")
 
     try:
         yield controller_url
     finally:
         stop_event.set()
-        process.join(timeout=5)
+        process.join(timeout=2)
         if process.is_alive():
+            logger.warning("Mock controller did not stop gracefully, terminating")
             process.terminate()
-            process.join()
+            process.join(timeout=1)
+            if process.is_alive():
+                logger.warning("Mock controller did not terminate, killing")
+                process.kill()
+                process.join()
 
 
 @contextlib.contextmanager
@@ -335,8 +351,12 @@ def p2p_backend_context(config, metadata, async_loop, local_backend, mock_worker
             backend.close()
         except Exception as e:
             logger.warning("Error closing P2P backend: %s", e)
+        try:
+            local_backend.close()
+        except Exception as e:
+            logger.warning("Error closing local backend: %s", e)
         # Give some time for cleanup
-        time.sleep(0.1)
+        time.sleep(0.05)
 
 
 class TestP2PBackendWithController:
