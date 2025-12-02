@@ -56,6 +56,17 @@ class BaseTransferChannel(metaclass=abc.ABCMeta):
 
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def remote_xfer_handler_exists(self, receiver_or_sender_id: str) -> bool:
+        """
+        Check if the remote transfer handler exists.
+
+        :param receiver_or_sender_id: The ID of the receiver or sender.
+
+        :return: True if the remote transfer handler exists, False otherwise.
+        """
+        raise NotImplementedError
+
     def handle_init_side_msg(
         self,
         req: InitSideMsgBase,
