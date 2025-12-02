@@ -4,6 +4,7 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Exception.h>
+#include "mem_descs.h"
 
 // #ifndef MEM_KERNELS_CUH
 // #define MEM_KERNELS_CUH
@@ -43,3 +44,10 @@ void reshape_and_cache_back_flash(torch::Tensor& key_value,
                                   torch::Tensor& value_cache,
                                   torch::Tensor& slot_mapping,
                                   const int layer_idx);
+
+void batched_kv_transfer(std::vector<uintptr_t>& paged_buffers,
+                         std::vector<uintptr_t>& obj_buffers,
+                         const std::vector<size_t>& page_indices,
+                         const PageBufferShapeDesc& page_shape,
+                         const ObjBufferShapeDesc& obj_shape,
+                         const int element_size, const bool page_to_obj = true);

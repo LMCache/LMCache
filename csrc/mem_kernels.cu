@@ -3,12 +3,25 @@
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "mem_kernels.cuh"
+#include "mem_descs.h"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
 #else
   #include <cuda_fp8.h>
+#endif
+
+#ifndef CHECK_CUDA
+  #define CHECK_CUDA(call)                                                    \
+    do {                                                                      \
+      cudaError_t err = call;                                                 \
+      if (err != cudaSuccess) {                                               \
+        std::cerr << "CUDA Error: " << cudaGetErrorString(err) << " at line " \
+                  << __LINE__ << std::endl;                                   \
+        exit(1);                                                              \
+      }                                                                       \
+    } while (0)
 #endif
 
 namespace lmc {
@@ -798,4 +811,129 @@ void single_layer_kv_transfer_sgl(
       lmc_key_value_cache_ptr, sgl_key_cache_ptr, sgl_value_cache_ptr,
       slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
       num_heads, head_size_in_64bit, block_size, direction);
+}
+
+/**
+ * Get the offset in bytes for the paged buffer
+ *
+ * Params:
+ * - desc: the shape descriptor of the vllm paged buffer
+ * - page_idx: the page index
+ * - element_size: the size of each element in bytes
+ * - kv_offset: the offset for key/value dimension (0 or 1)
+ */
+inline size_t get_paged_buffer_bytes_offset(const PageBufferShapeDesc& desc,
+                                            const size_t page_idx,
+                                            const size_t element_size,
+                                            const size_t kv_offset = 0) {
+  return page_idx * desc.page_size * desc.hidden_dim * element_size +
+         kv_offset * desc.num_pages * desc.page_size * desc.hidden_dim *
+             element_size;
+}
+
+/**
+ * Get the offset in bytes for the object buffer
+ *
+ * Params:
+ * - desc: the shape descriptor of the object buffer
+ * - layer_idx: the layer index
+ * - slot_idx: the slot index within the chunk (i.e., offset of the token)
+ * - element_size: the size of each element in bytes
+ * - kv_offset: the offset for key/value dimension (0 or 1)
+ */
+inline size_t get_obj_buffer_bytes_offset(const ObjBufferShapeDesc& desc,
+                                          const size_t layer_idx,
+                                          const size_t slot_idx,
+                                          const size_t element_size,
+                                          const size_t kv_offset = 0) {
+  return slot_idx * (desc.hidden_dim * element_size) +
+         layer_idx * (desc.chunk_size * desc.hidden_dim * element_size) +
+         kv_offset * desc.num_layers * desc.chunk_size * desc.hidden_dim *
+             element_size;
+}
+
+/**
+ * Quickly transfer KV cache between vLLM paged memory and the offloading buffer
+ * in batches.
+ *
+ * Params:
+ * - paged_buffers: vector of pointers to paged buffers for each layer.
+ *                  The shape should be [2, num pages, page size, hidden_dim]
+ *
+ * - obj_buffers: vector of pointers to each memory object.
+ *                The shape should be [2, num layers, chunk size, hidden_dim]
+ *
+ * - page_indices: vector of page indices to transfer (i.e., gpu_block_ids)
+ *
+ * - page_shape: shape descriptor of the paged buffer
+ * - obj_shape: shape descriptor of the object buffer
+ *
+ * - element_size: size of each element in bytes
+ *
+ * - page_to_obj: direction of transfer, true for paged buffer to object buffer
+ * (store), false for object buffer to paged buffer (retrieve)
+ */
+void batched_kv_transfer(std::vector<uintptr_t>& paged_buffers,
+                         std::vector<uintptr_t>& obj_buffers,
+                         const std::vector<size_t>& page_indices,
+                         const PageBufferShapeDesc& page_shape,
+                         const ObjBufferShapeDesc& obj_shape,
+                         const int element_size, const bool page_to_obj) {
+  auto num_layers = obj_shape.num_layers;
+  auto num_pages = page_indices.size();
+  auto num_copies = num_pages * num_layers * page_shape.kv_dim;
+  auto pages_per_object = obj_shape.chunk_size / page_shape.page_size;
+  size_t copy_size =
+      page_shape.page_size * page_shape.hidden_dim * element_size;
+
+  std::vector<void*> dst_ptrs(num_copies);
+  std::vector<void*> src_ptrs(num_copies);
+  std::vector<size_t> sizes(num_copies, copy_size);
+
+  // Prepare the copy attrs
+  cudaMemcpyAttributes attr = {};
+  attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+  std::vector<size_t> attrsIdxs(1, 0);  // all use the same attribute
+  size_t failIdx = 0;
+
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // Prepare src and dst pointers
+  size_t copy_idx = 0;
+  for (size_t kv_offset = 0; kv_offset < page_shape.kv_dim; ++kv_offset) {
+    for (size_t i = 0; i < page_indices.size(); ++i) {
+      size_t page_idx = page_indices[i];
+      size_t obj_chunk_idx = i / pages_per_object;
+      for (size_t layer = 0; layer < obj_shape.num_layers; ++layer) {
+        size_t page_buffer_offset = get_paged_buffer_bytes_offset(
+            page_shape, page_idx, element_size, kv_offset);
+        size_t obj_buffer_offset = get_obj_buffer_bytes_offset(
+            obj_shape, layer, (i % pages_per_object) * page_shape.page_size,
+            element_size, kv_offset);
+
+        void* page_buffer_ptr = static_cast<void*>(
+            reinterpret_cast<uint8_t*>(paged_buffers[layer]) +
+            page_buffer_offset);
+
+        void* obj_buffer_ptr = static_cast<void*>(
+            reinterpret_cast<uint8_t*>(obj_buffers[obj_chunk_idx]) +
+            obj_buffer_offset);
+
+        if (page_to_obj) {
+          src_ptrs[copy_idx] = page_buffer_ptr;
+          dst_ptrs[copy_idx] = obj_buffer_ptr;
+        } else {
+          src_ptrs[copy_idx] = obj_buffer_ptr;
+          dst_ptrs[copy_idx] = page_buffer_ptr;
+        }
+        ++copy_idx;
+      }
+    }
+  }
+
+  CHECK_CUDA(cudaMemcpyBatchAsync(
+      dst_ptrs.data(), src_ptrs.data(), sizes.data(), num_copies, &attr,
+      attrsIdxs.data(),  // all use the same attribute
+      1,                 // only one attribute struct
+      &failIdx, stream));
 }
