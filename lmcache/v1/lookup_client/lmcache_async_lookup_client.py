@@ -159,8 +159,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             )
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        with self.lock:
-            return self.reqs_status.get(lookup_id, None)
+        # with self.lock:
+        #     return self.reqs_status.get(lookup_id, None)
+        # NOTE: we cannot implement lookup_cache in async lookup client since
+        # get_num_new_matched_tokens is non-idempotent under repeated calls
+        # w/o calling update_state_after_alloc (None, None, None, ..., hit_tokens)
+        pass
 
     # TODO(Jiayi): Consider batching here
     def lookup(
