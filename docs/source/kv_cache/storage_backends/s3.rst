@@ -78,7 +78,7 @@ S3-Specific (in extra_config)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 * **s3_region**: AWS region for S3 client (required)
-* **s3_num_io_threads**: Number of IO threads for the AWS CRT client to spawn. Benefits taper out after exceeding the number of CPU cores.
+* **s3_num_io_threads**: Number of IO threads for the AWS CRT client to spawn. Benefits taper out after exceeding the number of CPU cores. This is also a way to restrict the number of outgoing requests in case your S3-compatible object store has a rate-limiting gateway.
 * **s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation (["h2", "http/1.1"])
 * **s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT client
 * **save_chunk_meta**: Whether to save chunk metadata in the object store along with your data (False required for S3)
