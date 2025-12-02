@@ -808,10 +808,8 @@ class LMCacheEngine:
                             assert lookup_id is not None, (
                                 "lookup_id is required when pin is True"
                             )
-                            for location, keys in block_mapping.items():
-                                self.lookup_pins[lookup_id][location].extend(  # type: ignore
-                                    key_all_layers
-                                )
+                            location = next(iter(block_mapping.keys()))
+                            self.lookup_pins[lookup_id][location].extend(key_all_layers)
                         res = end
                         continue
                     return res
