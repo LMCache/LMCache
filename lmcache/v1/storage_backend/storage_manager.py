@@ -751,7 +751,7 @@ class StorageManager:
         keys: List[CacheEngineKey],
         search_range: Optional[List[str]] = None,
         pin: bool = False,
-    ) -> int:
+    ) -> tuple[int, dict]:
         """
         Check whether the key exists in the storage backend.
 
@@ -764,10 +764,11 @@ class StorageManager:
 
         :param bool pin: Whether to pin the key.
 
-        return: Return hit chunks by prefix match.
+        return: Return hit chunks and block mapping by prefix match.
         """
         total_keys = len(keys)
         total_hit_chunks = 0
+        block_mapping = {}
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
@@ -781,12 +782,13 @@ class StorageManager:
             hit_chunks = backend.batched_contains(keys, pin_in_backend)
             if hit_chunks == 0:
                 continue
+            block_mapping[backend_name] = keys[:hit_chunks]
             total_hit_chunks += hit_chunks
             if total_hit_chunks == total_keys:
                 break
             keys = keys[hit_chunks:]
 
-        return total_hit_chunks
+        return total_hit_chunks, block_mapping
 
     def get_block_mapping(
         self, chunk_infos: List[Tuple[CacheEngineKey, int, int]]
