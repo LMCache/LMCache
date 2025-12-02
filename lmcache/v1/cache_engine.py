@@ -887,7 +887,7 @@ class LMCacheEngine:
         offsets = [m.meta.shape[token_dim] for m in memory_objs]  # type: ignore
 
         transfer_spec = {
-            "peer_init_url": new_position[0],
+            "target_peer_init_url": new_position[0],
             "offsets": offsets,
         }
 
