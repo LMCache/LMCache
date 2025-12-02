@@ -510,6 +510,7 @@ class TensorMemoryObj(MemoryObj):
         """
         return not self.is_pinned and self.get_ref_count() == 1
 
+
 class BytesBufferMemoryObj(MemoryObj):
     """
     Wraps a raw flat tensor with some metadata
@@ -613,6 +614,8 @@ class BytesBufferMemoryObj(MemoryObj):
         A buffer memory obj can be evicted if it is not pinned.
         """
         return not self.is_pinned
+
+
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def allocate(

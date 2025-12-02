@@ -374,7 +374,7 @@ class S3Connector(RemoteConnector):
             self.meta_dtype,
             self.meta_fmt,
         )
-        
+
         if memory_obj is None:
             return None
 
