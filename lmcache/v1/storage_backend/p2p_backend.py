@@ -2,6 +2,7 @@
 # Standard
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import asyncio
+import enum
 
 # Third Party
 import msgspec
@@ -94,6 +95,14 @@ class BatchedLookupAndPutRetMsg(P2PMsgBase):
     num_read_chunks: int
 
 
+class P2PErrorCode(enum.Enum):
+    """P2P error codes enumeration"""
+
+    P2P_SERVER_ERROR = enum.auto()
+    UNKNOWN_MSG_TYPE = enum.auto()
+    REMOTE_XFER_HANDLER_NOT_INITIALIZED = enum.auto()
+
+
 class P2PErrorMsg(P2PMsgBase):
     """
     Error message, return error code to client.
@@ -104,7 +113,7 @@ class P2PErrorMsg(P2PMsgBase):
     -3 represents p2p peer_request_handler error;
     """
 
-    error_code: int
+    error_code: P2PErrorCode
 
 
 P2PMsg = Union[
@@ -322,7 +331,7 @@ class P2PBackend(StorageBackendInterface):
                 ret_msg = await self._handle_batched_lookup_and_put(msg)
             else:
                 logger.error("Unknown message type: %s", type(msg))
-                ret_msg = P2PErrorMsg(error_code=-1)
+                ret_msg = P2PErrorMsg(error_code=P2PErrorCode.UNKNOWN_MSG_TYPE)
 
             logger.info(f"P2P transfer finished for request {monitor_req_id}")
             self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
@@ -344,7 +353,9 @@ class P2PBackend(StorageBackendInterface):
                     "Receiver %s does not exist in transfer channel",
                     receiver_id,
                 )
-                return P2PErrorMsg(error_code=-2)
+                return P2PErrorMsg(
+                    error_code=P2PErrorCode.REMOTE_XFER_HANDLER_NOT_INITIALIZED
+                )
 
             remote_mem_indexes = msg.mem_indexes
             keys = [CacheEngineKey.from_string(key) for key in msg.keys]
@@ -381,7 +392,7 @@ class P2PBackend(StorageBackendInterface):
                 e,
                 exc_info=True,
             )
-            return P2PErrorMsg(error_code=-3)
+            return P2PErrorMsg(error_code=P2PErrorCode.P2P_SERVER_ERROR)
         finally:
             if mem_objs is not None:
                 for mem_obj in mem_objs:
@@ -551,7 +562,11 @@ class P2PBackend(StorageBackendInterface):
                     await lookup_socket.send(msgspec.msgpack.encode(msg))
                     ret_msg_bytes = await lookup_socket.recv()
                     ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
-                    if isinstance(ret_msg, P2PErrorMsg) and ret_msg.error_code == -2:
+                    if (
+                        isinstance(ret_msg, P2PErrorMsg)
+                        and ret_msg.error_code
+                        == P2PErrorCode.REMOTE_XFER_HANDLER_NOT_INITIALIZED
+                    ):
                         logger.warning(
                             "Peer connection not initialized for lookup_id %s, "
                             "ensure peer connection first, retry count: %s",
