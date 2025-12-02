@@ -471,3 +471,79 @@ def test_single_layer_kernel(num_tokens, token_major):
         kv_cache_new,
         slot_mapping,
     )
+
+
+@pytest.mark.parametrize("kv_dim", [1, 2])
+@pytest.mark.parametrize("lmcache_chunk_size", [256, 512])
+def test_batched_copy_kernel_new(kv_dim, lmcache_chunk_size):
+    kv_dim = 2
+    num_layers = 32
+    num_pages = 1000
+    page_size = 16
+    hidden_dim = 1024
+    dtype = torch.bfloat16
+
+    lmcache_chunk_size = 256
+    num_lmache_chunks = 10
+    num_pages_to_copy = num_lmache_chunks * lmcache_chunk_size // page_size
+
+    # GPU KV caches (2, pages, page size, hidden dim)
+    gpu_kv_shape = (kv_dim, num_pages, page_size, hidden_dim)
+    gpu_kv_caches = [
+        torch.randn(gpu_kv_shape, device="cuda", dtype=dtype) for _ in range(num_layers)
+    ]
+    gpu_kv_caches_new = [
+        torch.empty(gpu_kv_shape, device="cuda", dtype=dtype) for _ in range(num_layers)
+    ]
+    gpu_kv_pointers = [t.data_ptr() for t in gpu_kv_caches]
+    gpu_kv_pointers_new = [t.data_ptr() for t in gpu_kv_caches_new]
+
+    # CPU KV caches
+    # (2, layer, chunk size, hidden dim)
+    cpu_kv_shape = (kv_dim, num_layers, lmcache_chunk_size, hidden_dim)
+    cpu_kv_caches = [
+        torch.empty(cpu_kv_shape, device="cpu", pin_memory=True, dtype=dtype)
+        for _ in range(num_lmache_chunks)
+    ]
+    cpu_kv_pointers = [t.data_ptr() for t in cpu_kv_caches]
+
+    # block ids
+    # gpu_block_ids = list(range(num_pages_to_copy))
+    gpu_block_ids = random.sample(range(0, num_pages), num_pages_to_copy)
+
+    # descs
+    page_buffer_desc = lmc_ops.PageBufferShapeDesc(
+        kv_dim, num_pages, page_size, hidden_dim
+    )
+    obj_buffer_desc = lmc_ops.ObjBufferShapeDesc(
+        kv_dim, num_layers, lmcache_chunk_size, hidden_dim
+    )
+
+    stream = torch.cuda.Stream()
+
+    with torch.cuda.stream(stream):
+        lmc_ops.batched_kv_transfer(
+            gpu_kv_pointers,
+            cpu_kv_pointers,
+            gpu_block_ids,
+            page_buffer_desc,
+            obj_buffer_desc,
+            dtype.itemsize,
+            True,
+        )
+
+        lmc_ops.batched_kv_transfer(
+            gpu_kv_pointers_new,
+            cpu_kv_pointers,
+            gpu_block_ids,
+            page_buffer_desc,
+            obj_buffer_desc,
+            dtype.itemsize,
+            False,
+        )
+
+    stream.synchronize()
+    for i in range(num_layers):
+        g_old = gpu_kv_caches[i][:, gpu_block_ids, :, :]
+        g_new = gpu_kv_caches_new[i][:, gpu_block_ids, :, :]
+        assert (g_old == g_new).all(), "Layer {} mismatch".format(i)
