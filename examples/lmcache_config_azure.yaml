@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+# LMCache Configuration with Azure Blob Storage Backend
+#
+# This configuration demonstrates how to use LMCache with Azure Blob Storage
+# for KV cache storage in long-context LLM serving scenarios.
+#
+# Usage:
+#   export LMCACHE_CONFIG_FILE=$(pwd)/lmcache_config_azure.yaml
+#   export AZURE_STORAGE_ACCOUNT=your_account_name
+#   python your_vllm_script.py
+
+# Global cache configuration
+cache_config:
+  # KV chunk size (128KB)
+  chunk_size: 131072
+  
+  # Local GPU cache size (4GB) - for hot data
+  local_gpu_size: 4294967296
+  
+  # Local CPU cache size (8GB) - for warm data
+  local_cpu_size: 8589934592
+  
+  # Remote storage backends configuration
+  remote_backends:
+    - name: "azure_blob"
+      priority: 100
+      enabled: true
+
+# Backend-specific configuration
+backend_config:
+  # Azure Blob Storage backend settings
+  azure_blob:
+    # Azure Storage account URL
+    # Either set this explicitly or use AZURE_STORAGE_ACCOUNT env var
+    account_url: "https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net"
+    
+    # Container name for KV cache storage
+    container_name: "lmcache-kv-cache"
+    
+    # Authentication mode
+    # Options: "account_key", "connection_string", "managed_identity", "sas_token"
+    # Recommended: "managed_identity" for AKS deployments
+    credential_mode: "managed_identity"
+    
+    # Account key (only needed if credential_mode=account_key)
+    # account_key: ${AZURE_STORAGE_ACCOUNT_KEY}
+    
+    # Connection string (only needed if credential_mode=connection_string)
+    # connection_string: ${AZURE_STORAGE_CONNECTION_STRING}
+    
+    # SAS token (only needed if credential_mode=sas_token)
+    # sas_token: ${AZURE_STORAGE_SAS_TOKEN}
+    
+    # Performance tuning
+    max_concurrency: 8          # Max concurrent uploads/downloads
+    chunk_upload_size: 4194304  # 4MB upload chunks
+    
+    # Blob naming and organization
+    blob_prefix: "lmcache-kv/"  # Prefix for all blob names
+    
+    # TTL and eviction
+    ttl_hours: 24               # Keep cached blobs for 24 hours
+    enable_compression: true    # Enable gzip compression for blobs
+
+# Logging configuration
+logging:
+  level: "INFO"
+  file: "/var/log/lmcache/azure_backend.log"
+
+# Example usage with vLLM:
+# 
+# from lmcache.lmcache import LMCache
+# from vllm import LLM, SamplingParams
+# 
+# # Initialize LMCache with Azure Blob backend
+# lmcache = LMCache.load_from_config(
+#     config_file="lmcache_config_azure.yaml"
+# )
+# 
+# # Create vLLM engine
+# llm = LLM(
+#     model="meta-llama/Llama-2-70b-hf",
+#     tensor_parallel_size=4,
+#     lmcache=lmcache,
+# )
+# 
+# # Make requests - KV cache will be stored in Azure Blob Storage
+# outputs = llm.generate(
+#     prompts=["What is machine learning?"],
+#     sampling_params=SamplingParams(temperature=0.7),
+# )
