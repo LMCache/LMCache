@@ -166,12 +166,18 @@ Settings for enabling and configuring peer-to-peer CPU KV cache sharing and glob
    * - enable_p2p
      - LMCACHE_ENABLE_P2P
      - Whether to enable peer-to-peer sharing. Values: true/false. Default: false
-   * - lookup_url
-     - LMCACHE_LOOKUP_URL
-     - URL of the lookup server. Required if enable_p2p is true
-   * - distributed_url
-     - LMCACHE_DISTRIBUTED_URL
-     - URL of the distributed server. Required if enable_p2p is true
+   * - p2p_host
+     - LMCACHE_P2P_HOST
+     - Ip address. Required if enable_p2p is true
+   * - peer_init_ports
+     - LMCACHE_PEER_INIT_PORTS
+     - Ports for p2p peer init. Required if enable_p2p is true
+   * - peer_lookup_ports
+     - LMCACHE_PEER_lookup_PORTS
+     - Ports for p2p peer lookup. Required if enable_p2p is true
+   * - transfer_channel
+     - LMCACHE_TRANSFER_CHANNEL
+     - Such as `nixl`. Required if enable_p2p is true
 
 Controller Configurations
 -------------------------
@@ -251,6 +257,31 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_proxy_port
      - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+
+P2P Backend Configurations
+--------------------------
+
+Settings for P2P (peer-to-peer) backend timeout behavior. These configurations are specified through ``extra_config``.
+
+.. code-block:: yaml
+
+    extra_config:
+      p2p_socket_recv_timeout_ms: 30000
+      p2p_socket_send_timeout_ms: 10000
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Configuration Key
+     - Default
+     - Description
+   * - p2p_socket_recv_timeout_ms
+     - 30000
+     - Timeout in milliseconds for socket receive operations
+   * - p2p_socket_send_timeout_ms
+     - 10000
+     - Timeout in milliseconds for socket send operations
 
 Nixl (as a storage backend) Configurations
 ------------------------------------------

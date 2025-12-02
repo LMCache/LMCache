@@ -243,6 +243,11 @@ class UsageContext:
             gpu_count = torch.cuda.device_count()
             gpu_type = device_property.name
             gpu_memory_per_device = device_property.total_memory
+        elif torch.xpu.is_available():
+            device_property = torch.xpu.get_device_properties(0)
+            gpu_count = torch.xpu.device_count()
+            gpu_type = device_property.name
+            gpu_memory_per_device = device_property.total_memory
         else:
             gpu_count = psutil.cpu_count(logical=False)
             gpu_type = platform.processor()

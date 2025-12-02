@@ -7,6 +7,9 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
+    ChunkStatisticsLookupClient,
+)
 from lmcache.v1.lookup_client.hit_limit_lookup_client import HitLimitLookupClient
 from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
     LMCacheBypassLookupClient,
@@ -42,6 +45,8 @@ class LookupClientFactory:
             vllm_config: The vLLM configuration
             config: The LMCache engine configuration
             lmcache_engine: Optional LMCacheEngine instance for bypass lookup client
+            instance_id: Optional instance ID to retrieve stats logger for
+                        chunk statistics registration
 
         Returns:
             A lookup client instance
@@ -75,7 +80,14 @@ class LookupClientFactory:
                 client = LMCacheLookupClient(vllm_config)
 
         if config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1:
-            return HitLimitLookupClient(client, config)
+            client = HitLimitLookupClient(client, config)
+
+        # Wrap with ChunkStatisticsLookupClient if enabled
+        if config.enable_chunk_statistics:
+            client = ChunkStatisticsLookupClient(
+                client,
+                config,
+            )
         return client
 
     @staticmethod

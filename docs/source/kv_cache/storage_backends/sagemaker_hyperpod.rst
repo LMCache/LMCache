@@ -1,5 +1,5 @@
-SageMaker Hyperpod Backend
-===========================
+SageMaker Hyperpod
+==================
 
 Prerequisites
 -------------
