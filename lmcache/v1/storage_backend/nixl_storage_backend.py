@@ -166,6 +166,7 @@ class NixlFilePool(NixlDescPool):
         self.fds: List[int] = []
 
         assert path is not None
+        os.makedirs(path, exist_ok=True)
 
         flags = os.O_CREAT | os.O_RDWR
         if use_direct_io:
