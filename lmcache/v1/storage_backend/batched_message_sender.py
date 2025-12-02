@@ -146,8 +146,8 @@ class BatchedMessageSender:
             op_type: Operation type (ADMIT or EVICT)
             key: Chunk hash key
         """
-        seq_num = self._get_next_sequence_number()
-        op = KVOpEvent(op_type=op_type, key=key, seq_num=seq_num)
+        # Create operation without sequence number (will be assigned during drain)
+        op = KVOpEvent(op_type=op_type, key=key, seq_num=-1)
 
         # Thread-safe queue put
         self.message_queue.put(op)
@@ -174,7 +174,12 @@ class BatchedMessageSender:
                 try:
                     # Use a small timeout to avoid blocking indefinitely
                     op = self.message_queue.get(timeout=0.001)
-                    ops_to_send.append(op)
+                    # Assign sequence number at drain time to ensure strict ordering
+                    seq_num = self._get_next_sequence_number()
+                    op_with_seq = KVOpEvent(
+                        op_type=op.op_type, key=op.key, seq_num=seq_num
+                    )
+                    ops_to_send.append(op_with_seq)
                     # Mark task as done to maintain queue count accuracy
                     self.message_queue.task_done()
                 except queue.Empty:

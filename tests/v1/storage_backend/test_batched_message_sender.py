@@ -257,12 +257,11 @@ class TestBatchedMessageSender:
         # Verify total number of operations
         assert len(all_ops) == num_threads * ops_per_thread
 
-        # In concurrent scenarios, sequence numbers may not be globally consecutive
-        # due to race conditions between sequence number assignment and queue insertion.
-        # However, we can verify:
-        # 1. All sequence numbers are unique (no duplicates)
-        # 2. All sequence numbers are present (no messages lost)
-        # 3. Sequence numbers are strictly increasing within each batch
+        # Verify sequence numbers are strictly increasing within each batch
+        # Since sequence numbers are assigned during drain (not add_kv_op),
+        # the order in which operations are dequeued determines their
+        # sequence numbers. This guarantees that within each batch,
+        # sequence numbers are strictly increasing.
         seq_nums = [op.seq_num for op in all_ops]
 
         # Verify no duplicate sequence numbers
