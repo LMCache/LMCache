@@ -26,7 +26,7 @@
 
 | [**Blog**](https://blog.lmcache.ai/)
 | [**Documentation**](https://docs.lmcache.ai/)
-| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3bgx768yd-H8WkOTmPtbxVYJ5nuZ4dmA)
+| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3g8e6xzz8-KzS_HI8bPERGFK5PTB~MYg)
 | [**Interest Form**](https://forms.gle/MHwLiYDU6kcW3dLj7)
 | [**Roadmap**](https://github.com/LMCache/LMCache/issues/1253)
 
@@ -47,6 +47,7 @@ By combining LMCache with vLLM, developers achieve 3-10x delay savings and GPU c
   * High performance CPU KVCache offloading
   * Disaggregated prefill
   * P2P KVCache sharing
+- [x] Integration with SGLang for KV cache offloading
 - [x] LMCache is supported in the [vLLM production stack](https://github.com/vllm-project/production-stack/), [llm-d](https://github.com/llm-d/llm-d/), and [KServe](https://github.com/kserve/kserve) 
 - [x] Stable support for non-prefix KV caches
 - [x] Storage support as follows:
@@ -84,7 +85,7 @@ demonstrating how to address different use cases with LMCache.
 
 ## Interested in Connecting?
 
-Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), [join LMCache slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ), [check out LMCache website](https://lmcache.ai/), or [drop an email](mailto:contact@lmcache.ai), and our team will reach out to you!
+Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), [join LMCache slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3g8e6xzz8-KzS_HI8bPERGFK5PTB~MYg), or [drop an email](mailto:contact@lmcache.ai), and our team will reach out to you!
 
 ## Community meeting
 
@@ -130,6 +131,13 @@ If you use LMCache for your research, please cite our papers:
   doi = {10.1145/3689031.3696098},
   booktitle = {Proceedings of the Twentieth European Conference on Computer Systems},
   pages = {94–109},
+}
+
+@article{cheng2025lmcache,
+  title={LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference},
+  author={Cheng, Yihua and Liu, Yuhan and Yao, Jiayi and An, Yuwei and Chen, Xiaokun and Feng, Shaoting and Huang, Yuyang and Shen, Samuel and Du, Kuntai and Jiang, Junchen},
+  journal={arXiv preprint arXiv:2510.09665},
+  year={2025}
 }
 ```
 

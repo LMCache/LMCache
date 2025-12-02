@@ -13,7 +13,6 @@ This will use the port 8000 for 1 vllm.
 
 ```bash
 VLLM_USE_V1=1 \
-LMCACHE_USE_EXPERIMENTAL=True \
 LMCACHE_TRACK_USAGE=false \
 LMCACHE_CONFIG_FILE=example.yaml \
 vllm serve /disc/f/models/opt-125m/ \

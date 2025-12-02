@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Optional, Union
+import ast
 import json
 import os
 import re
+import uuid
 
 # Third Party
 import yaml
@@ -71,6 +73,33 @@ def _to_bool(
     return str(value).strip().lower() in ["true", "1"]
 
 
+def _parse_quoted_string(value: str) -> str:
+    """Parse a string that may be surrounded by quotes and handle escape characters.
+
+    Args:
+        value: The input string that may be quoted
+
+    Returns:
+        The unquoted string with escape characters properly handled
+    """
+    if not value:
+        return value
+
+    value = value.strip()
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        try:
+            evaluated = ast.literal_eval(value)
+            if isinstance(evaluated, str):
+                return evaluated
+        except (ValueError, SyntaxError):
+            # If ast.literal_eval fails, it's not a valid Python literal.
+            # Fall back to simply stripping the outer quotes.
+            return value[1:-1]
+
+    return value
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -101,6 +130,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
+    "reserve_local_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
     "local_disk": {
         "type": Optional[str],
         "default": None,
@@ -176,8 +206,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "lmcache_instance_id": {
-        "type": str,
-        "default": "lmcache_default_instance",
+        "type": Optional[str],
+        "default": None,
         "env_converter": str,
     },
     "controller_pull_url": {
@@ -191,6 +221,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
     },
     "lmcache_worker_ports": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
+    "lmcache_worker_ids": {
         "type": Optional[list[int]],
         "default": None,
         "env_converter": _to_int_list,
@@ -361,6 +396,101 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": float,
     },
+    "lookup_server_worker_ids": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
+    "enable_scheduler_bypass_lookup": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
+    "script_allowed_imports": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
+    },
+    # Lazy memory allocator configurations
+    "enable_lazy_memory_allocator": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable lazy memory allocator to reduce initial memory footprint. "
+            "Memory is allocated on-demand and expanded automatically when needed."
+        ),
+    },
+    "lazy_memory_initial_ratio": {
+        "type": float,
+        "default": 0.2,
+        "env_converter": float,
+        "description": (
+            "Initial memory allocation ratio (0.0-1.0). "
+            "Determines the percentage of target memory size to allocate at startup. "
+            "Default is 0.2 (20%)."
+        ),
+    },
+    "lazy_memory_expand_trigger_ratio": {
+        "type": float,
+        "default": 0.5,
+        "env_converter": float,
+        "description": (
+            "Memory usage ratio (0.0-1.0) that triggers automatic expansion. "
+            "When memory usage exceeds this threshold, expansion is triggered. "
+            "Default is 0.5 (50%)."
+        ),
+    },
+    "lazy_memory_step_ratio": {
+        "type": float,
+        "default": 0.1,
+        "env_converter": float,
+        "description": (
+            "Memory expansion step ratio (0.0-1.0). "
+            "Determines the percentage of target memory size to add in each expansion. "
+            "Default is 0.1 (10%)."
+        ),
+    },
+    "lazy_memory_safe_size": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+        "description": (
+            "Safe threshold size in GB. Lazy allocator is only enabled when "
+            "max_local_cpu_size exceeds this value. Default is 0.0 GB (always enabled)."
+        ),
+    },
+    # Chunk statistics configurations
+    "enable_chunk_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Enable chunk statistics tracking.",
+    },
+    "chunk_statistics_auto_start_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Auto-start statistics on init.",
+    },
+    "chunk_statistics_auto_exit_timeout_hours": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+        "description": "Auto-stop timeout in hours (0=disabled).",
+    },
+    "chunk_statistics_auto_exit_target_unique_chunks": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": "Auto-stop at target unique chunks.",
+    },
+    "chunk_statistics_strategy": {
+        "type": str,
+        "default": "memory_bloom_filter",
+        "env_converter": str,
+        "description": "Recording strategy: memory_bloom_filter or file_hash.",
+    },
 }
 
 
@@ -404,7 +534,9 @@ def _create_config_class():
     from dataclasses import make_dataclass
 
     def _post_init(self):
-        self.validate()
+        # Generate random instance ID if not set
+        if not self.lmcache_instance_id:
+            self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
 
     cls = make_dataclass(
         "LMCacheEngineConfig",
@@ -415,6 +547,8 @@ def _create_config_class():
             "log_config": _log_config,
             "to_original_config": _to_original_config,
             "get_extra_config_value": _get_extra_config_value,
+            "get_lmcache_worker_ids": _get_lmcache_worker_ids,
+            "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
             "from_defaults": classmethod(_from_defaults),
             "from_legacy": classmethod(_from_legacy),
             "from_file": classmethod(_from_file),
@@ -434,14 +568,23 @@ def _create_config_class():
 
 def _validate_config(self):
     """Validate configuration"""
+
     # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading or self.use_layerwise:
+    if self.enable_async_loading:
         logger.warning(
             "Automatically setting save_unfull_chunk=False because "
             "enable_async_loading=True or use_layerwise=True to prevent "
             "CPU memory fragmentation"
         )
         self.save_unfull_chunk = False
+
+    if self.enable_blending:
+        if not self.save_unfull_chunk:
+            logger.warning(
+                "Automatically setting save_unfull_chunk=True because "
+                "enable_blending=True"
+            )
+            self.save_unfull_chunk = True
 
     if self.enable_p2p:
         assert self.enable_controller
@@ -469,8 +612,7 @@ def _validate_config(self):
 
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
-        assert self.extra_config.get("nixl_path") is not None
-        assert self.extra_config.get("nixl_file_pool_size") is not None
+        assert self.extra_config.get("nixl_pool_size") is not None
         assert self.nixl_buffer_size is not None
         assert self.nixl_buffer_device is not None
 
@@ -513,6 +655,34 @@ def _get_extra_config_value(self, key, default_value=None):
         return self.extra_config.get(key, default_value)
     else:
         return default_value
+
+
+def _get_lmcache_worker_ids(self, use_mla, world_size):
+    if not self.lmcache_worker_ids:
+        # if mla is not enabled, return all worker ids, which means start
+        # lmcache worker on all ranks as default;
+        # if mla is enabled, return [0], which means start lmcache
+        # worker on worker 0 as default.
+        return [0] if use_mla else list(range(world_size))
+
+    # check the input
+    for worker_id in self.lmcache_worker_ids:
+        assert -1 < worker_id < world_size
+    return self.lmcache_worker_ids
+
+
+def _get_lookup_server_worker_ids(self, use_mla, world_size):
+    if not self.lookup_server_worker_ids:
+        # if mla is not enabled, return all worker ids, which means start
+        # lookup server on all worker as default;
+        # if mla is enabled, return [0], which means start lookup
+        # server on worker 0 as default.
+        return [0] if use_mla else list(range(world_size))
+
+    # check the input
+    for worker_id in self.lookup_server_worker_ids:
+        assert -1 < worker_id < world_size
+    return self.lookup_server_worker_ids
 
 
 def _from_defaults(cls, **kwargs):
@@ -586,6 +756,7 @@ def _from_legacy(cls, **kwargs):
             config_values[name] = config["default"]
 
     instance = cls(**config_values)
+    instance.validate()
     return instance
 
 
@@ -646,13 +817,17 @@ def _update_config_from_env(self):
     for name, config in _CONFIG_DEFINITIONS.items():
         if name in resolved_config:
             try:
-                value = resolved_config[name]
+                # Parse quoted strings and handle escape characters
+                raw_value = resolved_config[name]  # Keep original value for logging
+                value = _parse_quoted_string(raw_value)
                 converted_value = config["env_converter"](value)
                 setattr(self, name, converted_value)
             except (ValueError, json.JSONDecodeError) as e:
-                logger.warning(f"Failed to parse {get_env_name(name)}: {e}")
+                logger.warning(
+                    f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
+                )
                 # Keep existing value if conversion fails
-
+    self.validate()
     return self
 
 

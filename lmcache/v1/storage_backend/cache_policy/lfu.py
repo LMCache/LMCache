@@ -8,13 +8,12 @@ from sortedcontainers import SortedDict
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
+from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy, KeyType
 
 logger = init_logger(__name__)
 
 
-class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
+class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
     """
     LFU cache policy.
     """
@@ -33,13 +32,13 @@ class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
 
         logger.info("Initializing LFUCachePolicy")
 
-    def init_mutable_mapping(self) -> dict[CacheEngineKey, Any]:
+    def init_mutable_mapping(self) -> dict[KeyType, Any]:
         return {}
 
     def update_on_hit(
         self,
-        key: CacheEngineKey,
-        cache_dict: dict[CacheEngineKey, Any],
+        key: KeyType,
+        cache_dict: dict[KeyType, Any],
     ) -> None:
         curr_freq = self.key_to_freq[key]
         self.freq_to_keys[curr_freq].pop(key)
@@ -56,7 +55,7 @@ class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
 
     def update_on_put(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         # Initialize the frequency for the new key.
         self.key_to_freq[key] = 1
@@ -67,7 +66,7 @@ class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
 
     def update_on_force_evict(
         self,
-        key: CacheEngineKey,
+        key: KeyType,
     ) -> None:
         freq = self.key_to_freq.pop(key, None)
         if not freq:
@@ -80,9 +79,9 @@ class LFUCachePolicy(BaseCachePolicy[dict[CacheEngineKey, Any]]):
     # of returned keys mignt be smaller than num_candidates.
     def get_evict_candidates(
         self,
-        cache_dict: dict[CacheEngineKey, Any],
+        cache_dict: dict[KeyType, Any],
         num_candidates: int = 1,
-    ) -> list[CacheEngineKey]:
+    ) -> list[KeyType]:
         evict_keys = []
         evict_freqs = []
         for curr_min_freq, fifo_keys in self.freq_to_keys.items():

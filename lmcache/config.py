@@ -33,6 +33,8 @@ class LMCacheEngineMetadata:
     kv_shape: tuple[int, int, int, int, int]
     """ whether use MLA"""
     use_mla: bool = False
+    """ the role of the current instance (e.g., 'scheduler', 'worker') """
+    role: Optional[str] = None
     """ the first rank of the distributed setting """
     # TODO(baoloongmao): first_rank should be configurable
     first_rank = 0

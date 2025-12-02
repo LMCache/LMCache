@@ -35,16 +35,26 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     PinRetMsg,
     QueryInstMsg,
     QueryInstRetMsg,
+    QueryWorkerInfoMsg,
+    QueryWorkerInfoRetMsg,
 )
+from lmcache.v1.cache_controller.utils import WorkerInfo
+from lmcache.v1.internal_api_server.api_registry import APIRegistry
 
 logger = init_logger(__name__)
 
 
-def create_app(controller_urls: dict[str, str]) -> FastAPI:
+def create_app(
+    controller_urls: dict[str, str],
+    health_check_interval: int,
+    lmcache_worker_timeout: int,
+) -> FastAPI:
     """
     Create a FastAPI application with endpoints for LMCache operations.
     """
-    lmcache_controller_manager = LMCacheControllerManager(controller_urls)
+    lmcache_controller_manager = LMCacheControllerManager(
+        controller_urls, health_check_interval, lmcache_worker_timeout
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -61,6 +71,11 @@ def create_app(controller_urls: dict[str, str]) -> FastAPI:
             pass
 
     app = FastAPI(lifespan=lifespan)
+    app.state.lmcache_controller_manager = lmcache_controller_manager
+
+    # Register internal APIs (only common APIs, not vllm-specific ones)
+    registry = APIRegistry(app)
+    registry.register_all_apis(categories=["common", "controller"])
 
     class QueryInstRequest(BaseModel):
         event_id: str
@@ -300,6 +315,32 @@ def create_app(controller_urls: dict[str, str]) -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
+    class QueryWorkerInfoRequest(BaseModel):
+        instance_id: str
+        worker_ids: Optional[list[int]]
+
+    class QueryWorkerInfoResponse(BaseModel):
+        event_id: str
+        worker_infos: list[WorkerInfo]
+
+    @app.post("/query_worker_info", response_model=QueryWorkerInfoResponse)
+    async def query_worker_info(req: QueryWorkerInfoRequest):
+        try:
+            event_id = "QueryWorkerInfo" + str(uuid.uuid4())
+            msg = QueryWorkerInfoMsg(
+                event_id=event_id,
+                instance_id=req.instance_id,
+                worker_ids=req.worker_ids,
+            )
+            ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
+            assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
+            assert isinstance(ret_msg, QueryWorkerInfoRetMsg)
+            return QueryWorkerInfoResponse(
+                event_id=ret_msg.event_id, worker_infos=ret_msg.worker_infos
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
     return app
 
 
@@ -319,6 +360,18 @@ def main():
         default=9001,
         help="The controller pull port to maintain backward compatibility.",
     )
+    parser.add_argument(
+        "--health-check-interval",
+        type=int,
+        default=-1,
+        help="Health check interval in secs, default is -1, which means disabled.",
+    )
+    parser.add_argument(
+        "--lmcache-worker-timeout",
+        type=int,
+        default=300,
+        help="The lmcache worker timeout in seconds.",
+    )
 
     args = parser.parse_args()
 
@@ -337,7 +390,9 @@ def main():
                 "pull": f"{args.host}:{args.monitor_port}",
                 "reply": None,
             }
-        app = create_app(controller_urls)
+        app = create_app(
+            controller_urls, args.health_check_interval, args.lmcache_worker_timeout
+        )
 
         logger.info(f"Starting LMCache controller at {args.host}:{args.port}")
         logger.info(f"Monitoring lmcache workers at ports {args.monitor_ports}")

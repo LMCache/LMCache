@@ -130,8 +130,13 @@ def create_lmcache_metadata(
         tuple: (LMCacheEngineMetadata, LMCacheEngineConfig)
     """
     # Third Party
-    from vllm.utils import get_kv_cache_torch_dtype
-
+    # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
+    try:
+        # Third Party
+        from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+    except ImportError:
+        # Third Party
+        from vllm.utils import get_kv_cache_torch_dtype
     # First Party
     from lmcache.config import LMCacheEngineMetadata
 
@@ -213,3 +218,10 @@ def extract_mm_features(
             return (request.mm_hashes, request.mm_positions)
     else:
         return ([], [])
+
+
+def get_size_bytes(shape: torch.Size, kv_dtype: torch.dtype):
+    """
+    Calculate the size in bytes with the given shape and dtype.
+    """
+    return shape.numel() * kv_dtype.itemsize

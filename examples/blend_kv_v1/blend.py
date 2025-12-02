@@ -69,7 +69,7 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
         model=model,
         kv_transfer_config=ktc,
         max_model_len=32648,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.7,
         enable_prefix_caching=False,
         enforce_eager=True,
     )
@@ -145,11 +145,15 @@ def main():
     with build_llm_with_lmcache(lmcache_connector, model) as llm:
         # Define the shared prompt and specific prompts
         warmup_prompt = tokenizer.encode("Nice to meet you" * 500)[1:]
-        sys_prompt = tokenizer.encode("You are a very helpful assistant.")
+        sys_prompt = [1, 733, 16289, 28793] + tokenizer.encode(
+            "You are a very helpful assistant. "
+            "Please answer the question with instructions."
+        )
         chunk1_prompt = tokenizer.encode("Hello, how are you?" * 500)[1:]
         chunk2_prompt = tokenizer.encode("Hello, what's up?" * 500)[1:]
         chunk3_prompt = tokenizer.encode("Hi, what are you up to?" * 500)[1:]
         blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))[1:]
+
         first_prompt = (
             sys_prompt
             + blend_special_str
@@ -160,6 +164,7 @@ def main():
             + chunk3_prompt
             + blend_special_str
             + tokenizer.encode("Hello, my name is")[1:]
+            + [733, 28748, 16289, 28793]
         )
 
         second_prompt = (
@@ -172,18 +177,20 @@ def main():
             + chunk3_prompt
             + blend_special_str
             + tokenizer.encode("Hello, how are you?")[1:]
+            + [733, 28748, 16289, 28793]
         )
 
         third_prompt = (
             sys_prompt
             + blend_special_str
-            + chunk3_prompt
+            + chunk2_prompt
             + blend_special_str
             + chunk1_prompt
             + blend_special_str
-            + chunk2_prompt
+            + chunk3_prompt
             + blend_special_str
             + tokenizer.encode("Hello, what's up?")[1:]
+            + [733, 28748, 16289, 28793]
         )
 
         sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)

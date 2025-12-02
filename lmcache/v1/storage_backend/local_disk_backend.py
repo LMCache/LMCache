@@ -248,17 +248,20 @@ class LocalDiskBackend(StorageBackendInterface):
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat,
+        cached_positions: Optional[torch.Tensor] = None,
     ) -> None:
         path = self._key_to_path(key)
 
         has_stored = False
         with self.disk_lock:
-            # Need to do reinsert to update cache recency
             if key in self.dict:
-                self.dict.pop(key)
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
                 has_stored = True
-
-            self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, False)
+            else:
+                self.dict[key] = DiskCacheMetadata(
+                    path, size, shape, dtype, cached_positions, fmt, 0
+                )
 
         # push kv admit msg
         if self.lmcache_worker is not None and not has_stored:
@@ -343,11 +346,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.disk_lock.release()
             return None
 
-        self.cache_policy.update_on_hit(key, self.dict)
-
-        self.disk_lock.release()
-
-        self.disk_lock.acquire()
         # Update cache recency
         self.cache_policy.update_on_hit(key, self.dict)
 
@@ -375,13 +373,10 @@ class LocalDiskBackend(StorageBackendInterface):
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
-        logger.info(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
+        logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
-
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            self.cache_policy.update_on_hit(key, self.dict)
 
             path = self.dict[key].path
             dtype = self.dict[key].dtype
@@ -403,6 +398,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
             self.dict[key].pin()
 
+            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
             self.cache_policy.update_on_hit(key, self.dict)
 
@@ -463,13 +459,16 @@ class LocalDiskBackend(StorageBackendInterface):
         # `submit_put_task` above.
         # Ref count down better be before `insert_key` for testing
         # purposes (e.g., testing mem_leak).
+        # TODO(Jiayi): This could be problematic if the
+        # freed memory object is immediately reused.
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
+        cached_positions = memory_obj.metadata.cached_positions
         memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt)
+        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
 
         self.disk_worker.remove_put_task(key)
 
@@ -489,6 +488,11 @@ class LocalDiskBackend(StorageBackendInterface):
         for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
             buffer = mem_obj.byte_array
             self.read_file(key, buffer, path)
+
+            # TODO(Jiayi): Please recover the metadata in a more
+            # elegant way in the future.
+            cached_positions = self.dict[key].cached_positions
+            mem_obj.metadata.cached_positions = cached_positions
 
             self.disk_lock.acquire()
             self.dict[key].unpin()
@@ -513,6 +517,12 @@ class LocalDiskBackend(StorageBackendInterface):
 
         buffer = memory_obj.byte_array
         self.read_file(key, buffer, path)
+
+        # TODO(Jiayi): Please recover the metadata in a more
+        # elegant way in the future.
+        cached_positions = self.dict[key].cached_positions
+        memory_obj.metadata.cached_positions = cached_positions
+
         return memory_obj
 
     def write_file(self, buffer, path):
@@ -550,6 +560,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     fdo.readinto(buffer)
         except FileNotFoundError:
+            logger.warning(f"File not found on disk: {path}")
             if self.dict.get(key, None):
                 self.dict.pop(key)
             return

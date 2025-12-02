@@ -114,6 +114,18 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         """
         return self._lmcache_engine.get_finished(finished_req_ids)
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return block IDs that failed to load during the last interval."""
+        return self._lmcache_engine.get_block_ids_with_load_errors()
+
+    def shutdown(self):
+        """
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return self._lmcache_engine.shutdown()
+
     # ==============================
     # Scheduler-side methods
     # ==============================

@@ -54,7 +54,7 @@ Configuration
        pd_proxy_host: "localhost" # Host where proxy server is running
        pd_proxy_port: 7500        # Port where proxy server is listening
        pd_buffer_size: 1073741824  # 1GB buffer for KV cache transfer
-       nixl_buffer_device: "cuda"   # Use GPU memory for buffer
+       pd_buffer_device: "cuda"   # Use GPU memory for buffer
 
 2. **Decoder Server Configuration** (``lmcache-decoder-config.yaml``):
 
@@ -162,13 +162,13 @@ Send requests to the proxy server (port 9000) using either the completions or ch
             "max_tokens": 100
         }'
 
-You can also test the setup with the following command, which runs the `benchmark_serving.py <https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/benchmark_serving.py>`_ from vLLM. 
+You can also test the setup with the following command, which runs vLLM's serving benchmark:
 
 .. code-block:: bash
 
     git clone https://github.com/vllm-project/vllm.git
     cd vllm/benchmarks
-    python benchmark_serving.py --port 9000 --seed $(date +%s) \
+    vllm bench serve --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 5000 --random-output-len 200 \
         --num-prompts 50 --burstiness 100 --request-rate 1

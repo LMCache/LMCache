@@ -36,6 +36,7 @@ extensions = [
     "sphinxcontrib.mermaid",
     # "sphinx_copybutton",
     "sphinx_multiversion",
+    "sphinxcontrib.images",
 ]
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"
@@ -73,6 +74,7 @@ html_title = project
 html_theme = "sphinxawesome_theme"
 html_static_path = ["_static"]
 html_css_files = ["custom.css", "scroll.css"]
+html_js_files = ["custom.js"]
 html_favicon = "assets/lmcache-logo.png"
 html_permalinks_icon = "<span>#</span>"
 pygments_style = "sphinx"
@@ -114,6 +116,11 @@ theme_options = ThemeOptions(  # Add your theme options.
         }
     },
 )
+
+images_config = {
+    "default_image_width": "80%",
+    "default_image_target": "_blank",
+}
 
 html_theme_options = asdict(theme_options)
 

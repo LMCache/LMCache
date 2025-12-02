@@ -33,6 +33,9 @@ class HitLimitLookupClient(LookupClientInterface):
             f"is {self.hit_ratio_upper}, chunk size is {self.chunk_size}"
         )
 
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        return self.actual_lookup_client.lookup_cache(lookup_id)
+
     def lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
@@ -65,6 +68,9 @@ class HitLimitLookupClient(LookupClientInterface):
                     f"the new result is {new_result}, the final result is {result}"
                 )
         return result
+
+    def clear_lookup_status(self, lookup_id: str) -> None:
+        self.actual_lookup_client.clear_lookup_status(lookup_id)
 
     def supports_producer_reuse(self) -> bool:
         return self.actual_lookup_client.supports_producer_reuse()
