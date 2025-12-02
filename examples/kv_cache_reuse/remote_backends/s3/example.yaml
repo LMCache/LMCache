@@ -13,4 +13,5 @@ extra_config:
   s3_prefer_http2: True
   s3_region: "{REGION}"
   s3_enable_s3express: True
-  save_chunk_meta: False
+  aws_access_key_id: "{AWS_ACCESS_KEY_ID}"
+  aws_secret_access_key: "{AWS_SECRET_ACCESS_KEY}"

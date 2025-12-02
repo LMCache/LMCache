@@ -82,6 +82,8 @@ class S3Connector(RemoteConnector):
         s3_region: str,
         s3_enable_s3express: bool,
         disable_tls: bool,
+        aws_access_key_id: Optional[str] = None,
+        aws_secret_access_key: Optional[str] = None,
     ):
         # TODO: these can be removed after we support unfull_chunk
         # full_chunk_size
@@ -112,9 +114,19 @@ class S3Connector(RemoteConnector):
         event_loop_group = io.EventLoopGroup(s3_num_io_threads)
         host_resolver = io.DefaultHostResolver(event_loop_group)
         client_bootstrap = io.ClientBootstrap(event_loop_group, host_resolver)
-        self.credentials_provider = auth.AwsCredentialsProvider.new_default_chain(
-            client_bootstrap
-        )
+        if aws_access_key_id and aws_secret_access_key:
+            logger.info("Using explicit AWS credentials passed to S3Connector")
+            self.credentials_provider = auth.AwsCredentialsProvider.new_static(
+                aws_access_key_id,
+                aws_secret_access_key,
+            )
+        else:
+            logger.info(
+                "No credentials provider, trying to use credentials from environment"
+            )
+            self.credentials_provider = auth.AwsCredentialsProvider.new_default_chain(
+                client_bootstrap
+            )
 
         self.meta_shape = meta_shape
         self.meta_dtype = meta_dtype

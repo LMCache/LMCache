@@ -56,6 +56,8 @@ CoreWeave (S3-compatible)
      s3_enable_s3express: False
      save_chunk_meta: False
      disable_tls: True
+     aws_access_key_id: "your-access-key-id"
+     aws_secret_access_key: "your-secret-access-key"
 
 **Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that caches for GPU locality. You can set `disable_tls: True` for non-AWS services.
 
@@ -78,7 +80,8 @@ S3-Specific (in extra_config)
 * **s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation (["h2", "http/1.1"])
 * **s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT client
 * **save_chunk_meta**: Whether to save chunk metadata with data (set False for performance)
-
+* **aws_access_key_id**: AWS access key ID (or log in with `aws configure` in your environment)
+* **aws_secret_access_key**: AWS secret access key (or log in with `aws configure` in your environment)
 
 **Tips:**::
 

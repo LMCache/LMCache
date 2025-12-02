@@ -37,6 +37,8 @@ class S3ConnectorAdapter(ConnectorAdapter):
         self.s3_region = str(self.s3_region)
         self.s3_enable_s3express = bool(extra_config.get("s3_enable_s3express", False))
         self.disable_tls = bool(extra_config.get("disable_tls", False))
+        self.aws_access_key_id = extra_config.get("aws_access_key_id", None)
+        self.aws_secret_access_key = extra_config.get("aws_secret_access_key", None)
         if context.metadata is None:
             raise ValueError("metadata is required for S3Connector")
         self.meta_shape = context.metadata.kv_shape
@@ -59,4 +61,6 @@ class S3ConnectorAdapter(ConnectorAdapter):
             s3_region=self.s3_region,
             s3_enable_s3express=self.s3_enable_s3express,
             disable_tls=self.disable_tls,
+            aws_access_key_id=self.aws_access_key_id,
+            aws_secret_access_key=self.aws_secret_access_key,
         )
