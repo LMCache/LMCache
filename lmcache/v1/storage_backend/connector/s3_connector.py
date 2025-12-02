@@ -4,6 +4,7 @@ from enum import IntEnum, auto
 from typing import List, Optional
 from urllib.parse import quote as url_quote
 import asyncio
+import ctypes
 
 # Third Party
 from awscrt import auth, io, s3
@@ -302,6 +303,9 @@ class S3Connector(RemoteConnector):
             return True
         return False
 
+    def _write_mem_obj(self, mem_obj: MemoryObj, data: bytes, offset: int):
+        ctypes.memmove(mem_obj.data_ptr + offset, data, len(data))
+
     def _s3_download(
         self,
         key_str: str,
@@ -321,7 +325,7 @@ class S3Connector(RemoteConnector):
 
         def on_body(chunk, offset, **kwargs):
             # Directly write chunk to the memory object at the correct offset
-            mem_obj.write_bytes(chunk, offset)
+            self._write_mem_obj(mem_obj, chunk, offset)
 
         # NOTE(Jiayi): Run in crt threads (not this thread) with GIL
         # See https://github.com/awslabs/aws-crt-python/blob/4250709624119de1af3ca86816e1a154fcac7cc8/source/common.c#L51
@@ -370,6 +374,9 @@ class S3Connector(RemoteConnector):
             self.meta_dtype,
             self.meta_fmt,
         )
+        
+        if memory_obj is None:
+            return None
 
         # Check if stored size matches expected size
         if obj_size != memory_obj.get_size():

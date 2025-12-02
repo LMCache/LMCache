@@ -298,13 +298,6 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
-    def write_bytes(self, data: bytes, offset: int):
-        """
-        Write bytes directly into the memory object.
-        """
-        raise NotImplementedError
-
 
 def _allocate_cpu_memory(
     size: int,
@@ -517,13 +510,6 @@ class TensorMemoryObj(MemoryObj):
         """
         return not self.is_pinned and self.get_ref_count() == 1
 
-    def write_bytes(self, data: bytes, offset: int):
-        """
-        Write bytes directly into the memory object.
-        """
-        ctypes.memmove(self.data_ptr + offset, data, len(data))
-
-
 class BytesBufferMemoryObj(MemoryObj):
     """
     Wraps a raw flat tensor with some metadata
@@ -627,15 +613,6 @@ class BytesBufferMemoryObj(MemoryObj):
         A buffer memory obj can be evicted if it is not pinned.
         """
         return not self.is_pinned
-
-    def write_bytes(self, data: bytes, offset: int):
-        """
-        Write bytes directly into the memory object.
-        """
-        end = offset + len(data)
-        self.raw_data[offset:end] = data
-
-
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def allocate(
