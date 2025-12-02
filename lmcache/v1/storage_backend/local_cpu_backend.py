@@ -611,7 +611,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return memory_objs
 
     def get_full_chunk_size(self) -> int:
-        logger.debug("Attempting to calculate chunk budget for async loading")
+        logger.info("Calculating the size of a single LMCache chunk")
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
         )
@@ -623,6 +623,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         )  # [num_layers, kv_size, chunk_size, num_heads, head_size]
         num_layers = kv_shape[0]
         kv_size = kv_shape[1]  # 1 for MLA, 2 for regular
+        # per gpu
         num_heads = kv_shape[3]
         head_size = kv_shape[4]
         hidden_dim = num_heads * head_size

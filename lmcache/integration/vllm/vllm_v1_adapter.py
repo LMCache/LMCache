@@ -497,10 +497,14 @@ def _init_lmcache_engine(
     num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
     num_layer += num_draft_layers
     chunk_size = lmcache_config.chunk_size
+    # this is per gpu
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
     logger.info(
+        f"num_layer: {num_layer}, chunk_size: {chunk_size}, "
+        f"num_kv_head (per gpu): {num_kv_head}, head_size: {head_size}, "
+        f"hidden_dim (D) for KV (per gpu): {num_kv_head * head_size}, "
         f"use mla: {use_mla}, kv shape: {kv_shape}, num_draft_layers:{num_draft_layers}"
     )
 

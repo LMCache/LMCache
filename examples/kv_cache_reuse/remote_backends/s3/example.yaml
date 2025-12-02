@@ -9,6 +9,7 @@ remote_serde: "naive"
 blocking_timeout_secs: 100
 
 extra_config:
+  save_chunk_meta: False
   s3_num_io_threads: 64
   s3_prefer_http2: True
   s3_region: "{REGION}"

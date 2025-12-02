@@ -23,13 +23,12 @@ class S3ConnectorAdapter(ConnectorAdapter):
         config = context.config
         assert config is not None
 
-        # Get full_chunk_size from context
-        full_chunk_size = context.get_full_chunk_size()
-
         # Get config from extra_config with defaults
         extra_config = config.extra_config if config.extra_config is not None else {}
 
-        self.s3_part_size = int(extra_config.get("s3_part_size", full_chunk_size))
+        self.save_chunk_meta = bool(extra_config.get("save_chunk_meta", False))
+        assert not self.save_chunk_meta, "save_chunk_meta must be False for S3"
+
         self.s3_num_io_threads = int(extra_config.get("s3_num_io_threads", 64))
         self.s3_prefer_http2 = bool(extra_config.get("s3_prefer_http2", True))
         self.s3_region = extra_config.get("s3_region", None)
@@ -41,8 +40,6 @@ class S3ConnectorAdapter(ConnectorAdapter):
         self.aws_secret_access_key = extra_config.get("aws_secret_access_key", None)
         if context.metadata is None:
             raise ValueError("metadata is required for S3Connector")
-        self.meta_shape = context.metadata.kv_shape
-        self.meta_dtype = context.metadata.kv_dtype
 
         logger.info(f"Creating S3 connector for URL: {context.url}")
 
@@ -52,10 +49,6 @@ class S3ConnectorAdapter(ConnectorAdapter):
             s3_endpoint=s3_endpoint,
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
-            meta_shape=self.meta_shape,
-            meta_dtype=self.meta_dtype,
-            full_chunk_size=full_chunk_size,
-            s3_part_size=self.s3_part_size,
             s3_num_io_threads=self.s3_num_io_threads,
             s3_prefer_http2=self.s3_prefer_http2,
             s3_region=self.s3_region,

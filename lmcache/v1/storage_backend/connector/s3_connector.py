@@ -10,7 +10,6 @@ import ctypes
 from awscrt import auth, io, s3
 from awscrt.http import HttpHeaders, HttpRequest
 from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
-import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -73,10 +72,6 @@ class S3Connector(RemoteConnector):
         s3_endpoint: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        meta_shape: torch.Size,
-        meta_dtype: torch.dtype,
-        full_chunk_size: int,
-        s3_part_size: Optional[int],
         s3_num_io_threads: int,
         s3_prefer_http2: bool,
         s3_region: str,
@@ -85,26 +80,15 @@ class S3Connector(RemoteConnector):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
     ):
-        # TODO: these can be removed after we support unfull_chunk
-        # full_chunk_size
-        # meta_shape (need to store the chunk meta in s3 probably)
-        # meta_dtype (need to store the chunk meta in s3 probably)
-
         if not s3_endpoint.startswith("s3://"):
             raise ValueError("S3 url must start with 's3://'")
+
+        # post initialized
+        self.s3_part_size = None
 
         self.s3_endpoint = s3_endpoint.removeprefix("s3://")
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
-        self.full_chunk_size = full_chunk_size
-
-        self.s3_part_size = s3_part_size
-
-        # TODO(Jiayi): Now we only assume S3 part size = chunk size
-        logger.info(f"S3 part size is set to {self.s3_part_size} bytes")
-        assert self.s3_part_size == self.full_chunk_size, (
-            "S3 part size must be equal to chunk size in S3Connector"
-        )
 
         self.s3_num_io_threads = s3_num_io_threads
         self.s3_prefer_http2 = s3_prefer_http2
@@ -127,9 +111,6 @@ class S3Connector(RemoteConnector):
             self.credentials_provider = auth.AwsCredentialsProvider.new_default_chain(
                 client_bootstrap
             )
-
-        self.meta_shape = meta_shape
-        self.meta_dtype = meta_dtype
 
         tls_opts = None
 
@@ -189,6 +170,8 @@ class S3Connector(RemoteConnector):
         assert self.s3_part_size == self.full_chunk_size, (
             "S3 part size must be equal to chunk size in S3Connector"
         )
+        logger.info(f"s3 connector meta_shape: {self.meta_shape}")
+        logger.info(f"s3 connector meta_dtype: {self.meta_dtype}")
 
     def _format_safe_path(self, key_str: str) -> str:
         """

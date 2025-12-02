@@ -18,6 +18,7 @@ Basic S3 Configuration
    extra_config:
      s3_region: "us-east-1"
      s3_num_io_threads: 64
+     save_chunk_meta: False
 
 S3 Express One Zone
 ~~~~~~~~~~~~~~~~~~~
@@ -31,6 +32,7 @@ S3 Express One Zone
    remote_serde: "naive"
    blocking_timeout_secs: 10
    extra_config:
+     save_chunk_meta: False
      s3_num_io_threads: 64
      s3_prefer_http2: True
      s3_region: "{REGION}"
@@ -79,7 +81,7 @@ S3-Specific (in extra_config)
 * **s3_num_io_threads**: Number of IO threads for the AWS CRT client to spawn. Benefits taper out after exceeding the number of CPU cores.
 * **s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation (["h2", "http/1.1"])
 * **s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT client
-* **save_chunk_meta**: Whether to save chunk metadata with data (set False for performance)
+* **save_chunk_meta**: Whether to save chunk metadata in the object store along with your data (False required for S3)
 * **aws_access_key_id**: AWS access key ID (or log in with `aws configure` in your environment)
 * **aws_secret_access_key**: AWS secret access key (or log in with `aws configure` in your environment)
 
