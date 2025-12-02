@@ -258,6 +258,7 @@ The LMCache server requires GPU access because it:
 - Receives GPU tensor IPC handles from vLLM workers
 - Directly accesses vLLM's GPU memory to perform GPU-to-CPU transfers
 - Uses CUDA operations for efficient memory copying
+- Potentially allocates intermediate GPU buffers
 
 The term "CPU offloading" refers to where KV cache is **stored** (CPU memory), not where the server runs.
 
