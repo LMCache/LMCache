@@ -87,26 +87,49 @@ class TestWorkerInfoAPI:
 
     def _send_message(self, worker_socket, msg_type, instance_id, worker_id, ip, port):
         """Send message to controller via ZMQ"""
-        if msg_type == "register":
-            msg = RegisterMsg(
-                instance_id=instance_id,
-                worker_id=worker_id,
-                ip=ip,
-                port=port,
-                peer_init_url=None,
-            )
-        else:
-            msg = HeartbeatMsg(
-                instance_id=instance_id,
-                worker_id=worker_id,
-                ip=ip,
-                port=port,
-                peer_init_url=None,
-            )
+        msg_classes = {
+            "register": RegisterMsg,
+            "heartbeat": HeartbeatMsg,
+        }
+
+        if msg_type not in msg_classes:
+            raise ValueError(f"Unsupported message type: {msg_type}")
+
+        msg_cls = msg_classes[msg_type]
+        msg = msg_cls(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            ip=ip,
+            port=port,
+            peer_init_url=None,
+        )
 
         message_data = msgspec.msgpack.encode(msg)
         worker_socket.send(message_data)
-        time.sleep(0.1)
+
+    def _wait_for_workers(self, client, expected_count, timeout=5):
+        """Wait for expected number of workers to be registered"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            response = client.get("/controller/workers")
+            if response.status_code == 200:
+                data = json.loads(response.text)
+                if data.get("total_count") == expected_count:
+                    return
+            time.sleep(0.1)
+        pytest.fail(f"Timed out waiting for {expected_count} workers.")
+
+    def _wait_for_specific_worker(self, client, instance_id, worker_id, timeout=5):
+        """Wait for specific worker to be available"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            response = client.get(
+                f"/controller/workers?instance_id={instance_id}&worker_id={worker_id}"
+            )
+            if response.status_code == 200:
+                return
+            time.sleep(0.1)
+        pytest.fail(f"Timed out waiting for worker ({instance_id}, {worker_id}).")
 
     def _assert_worker_fields(self, worker_data):
         required_fields = {
@@ -145,6 +168,9 @@ class TestWorkerInfoAPI:
         self._send_message(worker_socket, "register", "instance1", 1, "127.0.0.1", 8001)
         self._send_message(worker_socket, "register", "instance2", 0, "127.0.0.2", 8002)
 
+        # Wait for workers to be registered
+        self._wait_for_workers(client_with_real_controller, 3)
+
         # Send heartbeats to update last_heartbeat_time
         self._send_message(
             worker_socket, "heartbeat", "instance1", 0, "127.0.0.1", 8000
@@ -168,12 +194,15 @@ class TestWorkerInfoAPI:
 
         for worker in workers:
             self._assert_worker_fields(worker)
-            assert time.time() - worker["registration_time"] < 10
-            assert time.time() - worker["last_heartbeat_time"] < 10
+            assert worker["registration_time"] == pytest.approx(time.time(), abs=2)
+            assert worker["last_heartbeat_time"] == pytest.approx(time.time(), abs=2)
 
     def test_real_workers_by_instance(self, client_with_real_controller, worker_socket):
         self._send_message(worker_socket, "register", "instance1", 0, "127.0.0.1", 8000)
         self._send_message(worker_socket, "register", "instance2", 0, "127.0.0.2", 8002)
+
+        # Wait for workers to be registered
+        self._wait_for_workers(client_with_real_controller, 2)
 
         response = client_with_real_controller.get(
             "/controller/workers?instance_id=instance1"
@@ -193,6 +222,9 @@ class TestWorkerInfoAPI:
             worker_socket, "heartbeat", "instance1", 0, "127.0.0.1", 8000
         )
 
+        # Wait for worker to be available
+        self._wait_for_specific_worker(client_with_real_controller, "instance1", 0)
+
         response = client_with_real_controller.get(
             "/controller/workers?instance_id=instance1&worker_id=0"
         )
@@ -201,7 +233,7 @@ class TestWorkerInfoAPI:
         assert data["ip"] == "127.0.0.1"
         assert data["port"] == 8000
         assert data["peer_init_url"] is None
-        assert time.time() - data["last_heartbeat_time"] < 10
+        assert data["last_heartbeat_time"] == pytest.approx(time.time(), abs=2)
 
     def test_real_nonexistent_worker(self, client_with_real_controller):
         response = client_with_real_controller.get(
