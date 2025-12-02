@@ -469,19 +469,16 @@ class P2PBackend(StorageBackendInterface):
             peer_init_url, None
         )
         self.peer_id_to_lookup_url_mapping[peer_init_url] = new_peer_lookup_url
-        if (
-            old_peer_lookup_url is not None
-            and old_peer_lookup_url != new_peer_lookup_url
-        ):
-            logger.info(
-                "Peer %s lookup URL changed from %s to %s",
-                peer_init_url,
-                old_peer_lookup_url,
-                new_peer_lookup_url,
-            )
-
-        # update lookup_socket, lookup_socket must be updated
         if old_peer_lookup_url is not None:
+            if old_peer_lookup_url != new_peer_lookup_url:
+                logger.info(
+                    "Peer %s lookup URL changed from %s to %s",
+                    peer_init_url,
+                    old_peer_lookup_url,
+                    new_peer_lookup_url,
+                )
+
+            # close old lookup socket
             old_lookup_socket = self.lookup_url_to_socket_mapping.pop(
                 old_peer_lookup_url, None
             )
@@ -490,6 +487,17 @@ class P2PBackend(StorageBackendInterface):
                     old_lookup_socket.close(linger=0)
                 except Exception as e:
                     logger.error("Error closing old lookup socket", e)
+
+            # get lookup lock
+            lookup_lock = self.lookup_url_to_lock_mapping.pop(
+                old_peer_lookup_url, asyncio.Lock()
+            )
+        else:
+            lookup_lock = asyncio.Lock()
+
+        # update lookup_lock, note that we don't need to create a new lookup_lock
+        # even if the lookup_url changes
+        self.lookup_url_to_lock_mapping[new_peer_lookup_url] = lookup_lock
         new_lookup_socket = get_zmq_socket_with_timeout(
             self.async_context,
             new_peer_lookup_url,
@@ -500,16 +508,6 @@ class P2PBackend(StorageBackendInterface):
             self.socket_send_timeout_ms,
         )
         self.lookup_url_to_socket_mapping[new_peer_lookup_url] = new_lookup_socket
-
-        # update lookup_lock, note that we don't need to create a new lookup_lock
-        # even if the lookup_url changes
-        if old_peer_lookup_url is not None:
-            lookup_lock = self.lookup_url_to_lock_mapping.pop(
-                old_peer_lookup_url, asyncio.Lock()
-            )
-        else:
-            lookup_lock = asyncio.Lock()
-        self.lookup_url_to_lock_mapping[new_peer_lookup_url] = lookup_lock
         logger.info(
             f"Established connection to peer_init_url {peer_init_url}."
             f" The peer_lookup_url: {new_peer_lookup_url}"
