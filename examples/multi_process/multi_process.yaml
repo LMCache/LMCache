@@ -1,16 +1,4 @@
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: vllm-secrets
-  namespace: multi-process
-type: Opaque
-data:
-  # Base64 encoded Hugging Face token
-  # Replace with: echo -n "your_hf_token_here" | base64
-  hf_token: YOUR_BASE64_ENCODED_HF_TOKEN_HERE
-
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,9 +41,6 @@ spec:
           env:
             - name: LMCACHE_LOG_LEVEL
               value: "DEBUG"
-            # Make all GPUs visible to allow for inter-process communication across devices.
-            - name: CUDA_VISIBLE_DEVICES
-              value: "0,1,2,3"
           ports:
             - containerPort: 6555
               name: lmcache
@@ -65,7 +50,7 @@ spec:
         - name: vllm
           image: lmcache/vllm-openai:latest-nightly
           args:
-            - meta-llama/Llama-3.1-8B-Instruct
+            - Qwen/Qwen2.5-1.5B
             - --host
             - "0.0.0.0"
             - --port
@@ -81,7 +66,10 @@ spec:
             - '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.port": 6555}}'
           resources:
             limits:
-              # Allocate all 4 GPUs at pod level
+              # Note: GPU allocation in Kubernetes is pod-level, not container-level.
+              # Even though specified here on the vLLM container, all 4 GPUs are mounted
+              # to the pod's device namespace, making them accessible to ALL containers
+              # (including lmcache-server).
               nvidia.com/gpu: "4"
             requests:
               nvidia.com/gpu: "4"
@@ -96,17 +84,9 @@ spec:
             successThreshold: 1
             timeoutSeconds: 1
           env:
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  key: hf_token
-                  name: vllm-secrets
             - name: PYTHONHASHSEED
               value: "0"
             - name: PROMETHEUS_MULTIPROC_DIR
               value: "/tmp"
             - name: LMCACHE_LOG_LEVEL
               value: "DEBUG"
-            # See all 4 GPUs and use all for TP=4
-            - name: CUDA_VISIBLE_DEVICES
-              value: "0,1,2,3"

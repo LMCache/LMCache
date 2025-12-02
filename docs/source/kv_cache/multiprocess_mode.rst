@@ -154,7 +154,6 @@ Prerequisites
 - Kubernetes cluster with GPU support (NVIDIA GPU Operator installed)
 - At least 4 GPUs per node
 - ``kubectl`` configured to access your cluster
-- Hugging Face token (for gated models like Llama)
 
 **Step 1: Create Namespace**
 
@@ -162,30 +161,37 @@ Prerequisites
 
     kubectl create namespace multi-process
 
-**Step 2: Configure Hugging Face Token**
-
-Edit ``examples/multi_process/multi_process.yaml`` and replace the placeholder token. The `data` field in the Secret requires the token to be base64 encoded. You can generate it using `echo -n "your_hf_token_here" | base64`.
-
-.. code-block:: yaml
-
-    data:
-      hf_token: YOUR_BASE64_ENCODED_HF_TOKEN_HERE
-
-Alternatively, create the secret separately:
-
-.. code-block:: bash
-
-    kubectl create secret generic vllm-secrets \
-      --from-literal=hf_token=your_hf_token_here \
-      -n multi-process
-
-**Step 3: Deploy the Application**
+**Step 2: Deploy the Application**
 
 .. code-block:: bash
 
     kubectl apply -f examples/multi_process/multi_process.yaml
 
-**Step 4: Monitor Deployment**
+.. note::
+    The default model is ``Qwen/Qwen2.5-1.5B``, which does not require a Hugging Face token. If you want to use a gated model (like Llama), you need to:
+    
+    1. Add a Secret with your Hugging Face token:
+    
+    .. code-block:: bash
+    
+        kubectl create secret generic vllm-secrets \
+          --from-literal=hf_token=your_hf_token_here \
+          -n multi-process
+    
+    2. Add the HF_TOKEN environment variable to the vLLM container in the YAML:
+    
+    .. code-block:: yaml
+    
+        env:
+          - name: HF_TOKEN
+            valueFrom:
+              secretKeyRef:
+                key: hf_token
+                name: vllm-secrets
+    
+    3. Update the model name in the args section to your desired gated model.
+
+**Step 3: Monitor Deployment**
 
 Check pod status:
 
@@ -207,7 +213,7 @@ Check vLLM server logs:
 
 Wait for the pod to be ready (this may take several minutes for model loading).
 
-**Step 5: Send Test Requests**
+**Step 4: Send Test Requests**
 
 Forward the port to your local machine:
 
@@ -222,9 +228,9 @@ Send a test request with repeated prompts:
     curl -X POST http://localhost:8000/v1/completions \
       -H "Content-Type: application/json" \
       -d "{
-        \"model\": \"meta-llama/Llama-3.1-8B-Instruct\",
+        \"model\": \"Qwen/Qwen2.5-1.5B\",
         \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
-        \"max_tokens\": 10
+        \"max_tokens\": 100
       }"
 
 On the first request, check LMCache server logs for:
@@ -246,10 +252,9 @@ The Kubernetes deployment differs from Docker in several important ways:
 
 **GPU Allocation:**
 
-- Both containers must see all GPUs via pod-level allocation
+- GPU resources are allocated at the pod level in Kubernetes, even when specified on a single container
+- All GPUs are automatically visible to all containers in the pod
 - Uses ``hostIPC: true`` for shared memory access required by IPC operations
-- ``CUDA_VISIBLE_DEVICES`` is set to ``0,1,2,3`` for both containers
-- This avoids device ID mismatches that occur with per-container GPU allocation
 
 **Why LMCache Server Needs GPU Access:**
 
