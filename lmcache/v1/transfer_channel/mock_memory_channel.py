@@ -96,6 +96,9 @@ class MockMemoryChannel(PySocketChannel):
     ############################################################
     # Data plane: Read/Write functions (global dict simulation)
     ############################################################
+    def remote_xfer_handler_exists(self, receiver_or_sender_id: str) -> bool:
+        return True
+
     def batched_write(
         self,
         objects: Union[list[bytes], list[MemoryObj]],
