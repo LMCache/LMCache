@@ -8,6 +8,7 @@ import time
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
@@ -39,7 +40,7 @@ class LMCacheEngine:
         self.hit_rate = 0.0
 
         self.engine_ = CreateStorageBackend(
-            config, metadata, "cuda" if torch.cuda.is_available() else "cpu"
+            config, metadata, accelerator.name if accelerator else "cpu"
         )
         logger.debug(f"Current storage backend type {type(self.engine_)}")
 

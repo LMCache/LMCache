@@ -616,7 +616,7 @@ class NixlAgentWrapper:
         # https://github.com/ai-dynamo/nixl/blob/main/src/api/cpp/nixl_descriptors.h#L152
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
         # TODO(Jiayi): remove hardcode `mem_type`
-        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
+        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="VRAM")
         nixl_agent.register_memory(reg_descs)
 
         # Create xfer handlers
@@ -624,8 +624,8 @@ class NixlAgentWrapper:
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
             xfer_desc.append((base_addr, page_size, tp_rank))
 
-        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
-        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")
+        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="VRAM")
+        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="VRAM")
 
         self.agent = nixl_agent
         self.reg_descs = reg_descs

@@ -10,7 +10,7 @@
 
 #ifndef USE_XPU
 
-#include <cuda_runtime.h>
+  #include <cuda_runtime.h>
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
   void* ptr = nullptr;
   cudaError_t err = cudaHostAlloc(&ptr, size, flags);
@@ -85,7 +85,5 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
 }
 
 #else
-
-
 
 #endif

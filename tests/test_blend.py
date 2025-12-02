@@ -8,12 +8,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.blend.executor import CacheBlendImpl
 from lmcache.blend.retriever import SPTBlendRetriever
 from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
-DEVICE_TYPE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE_TYPE = accelerator.name if accelerator else "cpu"
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):

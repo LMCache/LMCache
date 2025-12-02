@@ -32,7 +32,8 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         Initialize the storage backend.
 
         :param dst_device: the device where the blocking retrieved KV is stored,
-            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
+            could be either "cpu", "xpu", "cuda", or "cuda:0", "cuda:1", "xpu:0",
+            "xpu:1" etc.
 
         :raise: RuntimeError if the device is not valid
         """
@@ -393,7 +394,7 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
         when loading the configurable storage backends from the configuration file.
 
         :param str dst_device: The target device for tensor operations
-            (e.g., "cuda" or "cpu").
+            (e.g., "cuda", "xpu", or "cpu").
         :param LMCacheEngineConfig config: Optional configuration object for the
             cache engine.
         :param LMCacheEngineMetadata metadata: Optional metadata describing the cache

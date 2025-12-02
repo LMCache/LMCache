@@ -6,6 +6,9 @@ import threading
 # Third Party
 import torch
 
+# First Party
+from lmcache.accelerator import accelerator
+
 T = TypeVar("T")
 
 
@@ -67,52 +70,52 @@ class MessagingFuture(Generic[T]):
         self.result_ = result
         self.is_done_.set()
 
-    def to_cuda_future(
+    def to_future(
         self,
-        device: torch.cuda.device | None = None,
-    ) -> "CUDAMessagingFuture":
+        device: torch.device | None = None,
+    ) -> "GPUMessagingFuture":
         # TODO: need extra type checking for the future type
-        return CUDAMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
+        return GPUMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
 
 
-class CUDAMessagingFuture(MessagingFuture[T]):
+class GPUMessagingFuture(MessagingFuture[T]):
     """
-    The future class that wraps both result and a CUDA IPC event.
+    The future class that wraps both result and a GPU IPC event.
     The `query`, `wait`, and `result` methods will pend on both the
-    original future and the CUDA event.
+    original future and the GPU event.
     The original future should return tuple[bytes, T], where the first
-    element is the serialized CUDA event.
+    element is the serialized GPU event.
     """
 
     def __init__(
         self,
         raw_future: MessagingFuture[tuple[bytes, T]],
-        device: torch.cuda.device | None = None,
+        device: torch.device | None = None,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
-        self.event_: torch.cuda.Event | None = None
+        self.event_: torch.Event | None = None
         self.result_: T | None = None
-        self.device_ = device if device is not None else torch.cuda.current_device()
+        self.device_ = device if device is not None else accelerator.current_device()
 
     def _on_raw_future_complete(self):
         """
-        Update the CUDA event and result when the raw future is complete.
+        Update the GPU event and result when the raw future is complete.
         """
         event_bytes, result = self.raw_future_.result()
         self.result_ = result
 
-        # Deserialize the CUDA event
-        self.event_ = torch.cuda.Event.from_ipc_handle(self.device_, event_bytes)
+        # Deserialize the GPU event
+        self.event_ = accelerator.Event.from_ipc_handle(self.device_, event_bytes)
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
-        Wait for the future to be done, with the CUDA stream.
+        Wait for the future to be done, with the GPU stream.
 
         Args:
             timeout (Optional[float]): Maximum time to wait for the UNDERLYING
                 RAW FUTURE in seconds. The exact timeout is not guaranteed
-                when waiting on the CUDA event. (NOTE: this could be improved
+                when waiting on the GPU event. (NOTE: this could be improved
                 with careful threading management)
 
         Returns:
@@ -146,7 +149,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         Args:
             timeout (Optional[float]): Maximum time to wait for the UNDERLYING
                 RAW FUTURE in seconds. The exact timeout is not guaranteed
-                when waiting on the CUDA event. (NOTE: this could be improved
+                when waiting on the GPU event. (NOTE: this could be improved
                 with careful threading management)
 
         Returns:
@@ -157,9 +160,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         """
         flag = self.wait(timeout)
         if not flag:
-            raise TimeoutError(
-                "CUDAMessagingFuture result not available within timeout"
-            )
+            raise TimeoutError("GPUMessagingFuture result not available within timeout")
 
         assert self.result_ is not None
         return self.result_
@@ -183,12 +184,12 @@ class CUDAMessagingFuture(MessagingFuture[T]):
 
     def set_result(self, result: T) -> None:
         raise NotImplementedError(
-            "CUDAMessagingFuture does not support set_result directly"
+            "GPUMessagingFuture does not support set_result directly"
         )
 
     @staticmethod
     def FromMessagingFuture(
         raw_future: MessagingFuture[tuple[bytes, T]],
-        device: torch.cuda.device | None = None,
-    ) -> "CUDAMessagingFuture[T]":
-        return CUDAMessagingFuture(raw_future, device)
+        device: torch.device | None = None,
+    ) -> "GPUMessagingFuture[T]":
+        return GPUMessagingFuture(raw_future, device)

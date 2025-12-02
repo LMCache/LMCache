@@ -14,6 +14,7 @@ from safetensors.torch import save_file
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineConfig, LMCacheMemPoolMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.abstract_backend import LMCBackendInterface
@@ -78,7 +79,7 @@ class LMCLocalBackend(LMCBackendInterface):
         self.mpool: LocalPool
         if self.device == "cpu":
             self.mpool = LocalCPUPool(metadata)
-        elif self.device == "cuda":
+        elif self.device == accelerator.name:
             self.mpool = LocalGPUPool(metadata)
 
         # TODO(Jiayi): A gpu buffer could speed up `get`
@@ -151,13 +152,13 @@ class LMCLocalBackend(LMCBackendInterface):
         if kv_obj is None:
             return
 
-        put_stream = torch.cuda.Stream()
+        put_stream = accelerator.Stream()
         if kv_chunk.device != torch.cpu:
             # wait operation in main stream to finish
             # e.g., view operations on kv_chunk
-            put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
+            put_stream.wait_stream(accelerator.default_stream(kv_chunk.device))
 
-        with torch.cuda.stream(put_stream):
+        with accelerator.stream(put_stream):
             kv_obj.data.copy_(kv_chunk, non_blocking=True)
             kv_chunk.record_stream(put_stream)
         put_stream.synchronize()
@@ -450,9 +451,9 @@ class LMCLocalDiskBackend(LMCBackendInterface):
                 # TODO(Jiayi): Please tune the sleep time for better performance
                 time.sleep(0.01)
 
-        put_stream = torch.cuda.Stream()
-        put_stream.wait_stream(torch.cuda.default_stream(kv_chunk.device))
-        with torch.cuda.stream(put_stream):
+        put_stream = accelerator.Stream()
+        put_stream.wait_stream(accelerator.default_stream(kv_chunk.device))
+        with accelerator.stream(put_stream):
             kv_obj.data.copy_(kv_chunk, non_blocking=True)
             kv_chunk.record_stream(put_stream)
         put_stream.synchronize()

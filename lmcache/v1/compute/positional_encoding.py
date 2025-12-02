@@ -7,9 +7,10 @@ from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rop
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.logging import init_logger
 
-if torch.cuda.is_available() or torch.xpu.is_available():
+if accelerator:
     # First Party
     import lmcache.c_ops as lmc_ops
 
@@ -110,7 +111,7 @@ def validate_rope_params(
 
 
 def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> bool:
-    device = device = "xpu" if torch.xpu.is_available() else "cuda"
+    device = accelerator.name
     hidden_dim = head_size * 8
     num_tokens = 10
 

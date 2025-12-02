@@ -10,6 +10,7 @@ import sortedcontainers
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.config import LMCacheEngineConfig
 
-if torch.cuda.is_available():
+if accelerator.name == "cuda":
     # First Party
     import lmcache.c_ops as lmc_ops
 else:
@@ -422,8 +423,8 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
             self.async_expander.stop()
 
         if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if accelerator:
+                accelerator.synchronize()
 
             if hasattr(self, "composite_buffer"):
                 for segment in self.composite_buffer.segments:

@@ -8,11 +8,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.memory_management import PinMemoryAllocator
 
 pytest.importorskip(
     "lmcache.c_ops",
-    reason="TODO: require non CUDA implementations for CUDA enhanced functions",
+    reason=(
+        "TODO: require other accelerator implementations for these enhanced functions"
+    ),
 )
 
 # First Party
@@ -65,7 +68,7 @@ def _slice_kv_at(
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_extract_and_load_back(num_tokens):
-    device = "cuda"
+    device = accelerator.name
 
     num_blocks = 1000
     block_size = 16
@@ -84,8 +87,8 @@ def test_extract_and_load_back(num_tokens):
     kv_tuple_list = []
     memory_obj_old_list = []
     chunk_size = 256
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = accelerator.Event(enable_timing=True)
+    end_event = accelerator.Event(enable_timing=True)
     start_event.record()
     for layer_id in range(32):
         key_cache = kv_cache[layer_id][0].reshape(-1, num_heads, head_size)
@@ -107,14 +110,14 @@ def test_extract_and_load_back(num_tokens):
             )
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
-    torch.cuda.synchronize()
+    accelerator.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
     # New extract (zero-copy kernels)
     memory_obj_new_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = accelerator.Event(enable_timing=True)
+    end_event = accelerator.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -132,7 +135,7 @@ def test_extract_and_load_back(num_tokens):
         memory_obj_new_list.append(memory_obj_new)
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    accelerator.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
     check_mem_obj_equal(
@@ -165,7 +168,7 @@ def test_extract_and_load_back(num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_multi_layer_kernel(num_tokens):
-    device = "cuda"
+    device = accelerator.name
 
     num_blocks = 1000
     block_size = 16
@@ -192,8 +195,8 @@ def test_multi_layer_kernel(num_tokens):
 
     # layer by layer extract
     memory_obj_old_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = accelerator.Event(enable_timing=True)
+    end_event = accelerator.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -211,7 +214,7 @@ def test_multi_layer_kernel(num_tokens):
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    accelerator.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
@@ -223,8 +226,8 @@ def test_multi_layer_kernel(num_tokens):
         kv_cache_pointers.numpy()[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = accelerator.Event(enable_timing=True)
+    end_event = accelerator.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -244,7 +247,7 @@ def test_multi_layer_kernel(num_tokens):
 
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    accelerator.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
 
@@ -287,7 +290,7 @@ def test_multi_layer_kernel(num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_multi_layer_kernel_use_mla(num_tokens):
-    device = "cuda"
+    device = accelerator.name
 
     num_blocks = 1000
     block_size = 64
@@ -307,8 +310,8 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 
     # layer by layer extract
     memory_obj_old_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = accelerator.Event(enable_timing=True)
+    end_event = accelerator.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -329,7 +332,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    accelerator.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
@@ -341,8 +344,8 @@ def test_multi_layer_kernel_use_mla(num_tokens):
         kv_cache_pointers.numpy()[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = accelerator.Event(enable_timing=True)
+    end_event = accelerator.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -362,7 +365,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    accelerator.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
 
@@ -419,7 +422,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 @pytest.mark.parametrize("token_major", [True, False])
 def test_single_layer_kernel(num_tokens, token_major):
-    device = "cuda"
+    device = accelerator.name
 
     num_layers = 32
     num_blocks = 1000

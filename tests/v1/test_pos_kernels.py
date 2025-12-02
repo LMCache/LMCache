@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+import sys
+
 # Third Party
 import pytest
 import torch
 
-import sys
-print("PYTEST sys.path:", sys.path)
-
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.compute.positional_encoding import get_fused_rope
+
+print("PYTEST sys.path:", sys.path)
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() and not torch.xpu.is_available(),
-    reason="TODO: Add non CUDA implementations for CUDA enhanced functions",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementations for these enhanced functions",
 )
 def test_rope():
     head_dim = 128

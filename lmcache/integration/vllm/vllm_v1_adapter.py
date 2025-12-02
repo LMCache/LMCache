@@ -70,7 +70,6 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
-from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
 
 if TYPE_CHECKING:
     # Third Party
@@ -571,10 +570,8 @@ def _init_lmcache_engine(
             )
         tpg = get_tp_group()
     else:
-        if current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             connector_cls = VLLMPagedMemGPUConnectorV2
-        elif current_platform.is_xpu():
-            connector_cls = VLLMPagedMemXPUConnectorV2
         else:
             raise RuntimeError("No supported connector found for the current platform.")
 

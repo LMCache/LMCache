@@ -11,6 +11,7 @@ import time
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
@@ -98,10 +99,10 @@ class LocalDiskBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
         lmcache_worker: Optional["LMCacheWorker"] = None,
     ):
-        if torch.cuda.is_available():
+        if accelerator and dst_device == accelerator.name:
             super().__init__(dst_device)
         else:
             super().__init__("cpu")

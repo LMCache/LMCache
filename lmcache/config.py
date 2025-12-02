@@ -10,6 +10,7 @@ import torch
 import yaml
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -119,7 +120,7 @@ class LMCacheEngineConfig:
         remote_url: Optional[str] = None
 
         match backend:
-            case "cpu" | "cuda":
+            case "cpu" | accelerator.name:
                 local_device = backend
                 remote_url = None
             case path if re.match(r"file://(.*)/", path):  # local disk directory
@@ -165,7 +166,7 @@ class LMCacheEngineConfig:
         blend_add_special_in_precomp = config.get("blend_add_special_in_precomp", False)
 
         match local_device:
-            case "cpu" | "cuda" | None:
+            case "cpu" | accelerator.name | None:
                 pass
             case path if re.match(r"file://(.*)/", path):  # local disk directory
                 local_device = path[7:]

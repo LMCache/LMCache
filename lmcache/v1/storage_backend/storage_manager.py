@@ -21,6 +21,7 @@ import threading
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
@@ -35,7 +36,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
+from lmcache.v1.storage_backend import CreateStorageBackends, is_gpu_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
@@ -62,7 +63,7 @@ def allocate_and_copy_objects(
     allocator_backend: AllocatorBackendInterface,
     keys: Sequence[CacheEngineKey],
     src_memory_objs: list[MemoryObj],
-    stream: torch.cuda.Stream,
+    stream: torch.Stream,
 ) -> tuple[Sequence[CacheEngineKey], list[MemoryObj]]:
     """
     Allocate the memory objects and copy the data from src_memory_objs to
@@ -95,7 +96,7 @@ def allocate_and_copy_objects(
         if memory_obj is None or memory_obj.tensor is None:
             break
 
-        with torch.cuda.stream(stream):
+        with accelerator.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
@@ -199,8 +200,8 @@ class StorageManager:
         self.thread.start()
 
         # For scheduler role, always use CPU device
-        if is_cuda_worker(metadata):
-            dst_device = "cuda"
+        if is_gpu_worker(metadata):
+            dst_device = accelerator.name
         else:
             dst_device = "cpu"
         self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
@@ -236,8 +237,8 @@ class StorageManager:
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
-        if is_cuda_worker(metadata):
-            self.internal_copy_stream = torch.cuda.Stream()
+        if is_gpu_worker(metadata):
+            self.internal_copy_stream = accelerator.Stream()
         else:
             self.internal_copy_stream = None
 

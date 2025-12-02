@@ -9,6 +9,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
@@ -26,7 +27,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda",  # Assuming we are using CUDA for the test
+        device=accelerator.name,  # Assuming we are using CUDA for the test
     )
     for i in range(num_objs):
         keys.append(
@@ -94,7 +95,7 @@ if __name__ == "__main__":
 
     # Common configuration
     buffer_size = 2**32  # 4GB
-    buffer_device = get_correct_device("cuda", 0)  # Use first GPU
+    buffer_device = get_correct_device(accelerator.name, 0)  # Use first GPU
 
     # Get buffer pointer from first object
     buffer_ptr = objs[0].metadata.address

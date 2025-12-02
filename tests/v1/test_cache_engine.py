@@ -13,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.utils import (
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
@@ -34,11 +35,11 @@ from .utils import (
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_same_retrieve_store(autorelease_v1):
-    device = "cuda"
+    device = accelerator.name
     fmt = "vllm"
     num_tokens = 2000
     num_blocks = 1000
@@ -117,8 +118,8 @@ def test_paged_same_retrieve_store(autorelease_v1):
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_retrieve_prefix(
     fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
@@ -134,7 +135,7 @@ def test_paged_retrieve_prefix(
             check_equality = False
         else:
             remote_serde = "naive"
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 2000
     new_num_tokens = 1000
     kv_shape = (32, 2, chunk_size, 8, 128)
@@ -233,8 +234,8 @@ def test_paged_retrieve_prefix(
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_store_offset(
     fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
@@ -242,7 +243,7 @@ def test_paged_store_offset(
     url = None
     if backend == "remote":
         url = lmserver_v1_process.server_url
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 2000
     num_suffix_tokens = 500
     num_total_tokens = 3000
@@ -341,11 +342,11 @@ def test_paged_store_offset(
     ],
 )
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 2000
     new_num_tokens = 1000
     num_blocks = 1000
@@ -479,11 +480,11 @@ def test_paged_mixed_retrieve(fmt, chunk_size, backend, autorelease_v1):
 
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 1000
     new_num_tokens = 2000
     num_blocks = 1000
@@ -639,8 +640,8 @@ def test_paged_store_kv_tensors_mask(fmt, autorelease_v1):
 )
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_hierarchy_retrieve(
     fmt, chunk_size, backend, retrieve_from, lmserver_v1_process, autorelease_v1
@@ -648,7 +649,7 @@ def test_paged_hierarchy_retrieve(
     url = None
     if backend == "local_cpu_disk_remote":
         url = lmserver_v1_process.server_url
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 2000
     new_num_tokens = 1000
     kv_shape = (32, 2, chunk_size, 8, 128)
@@ -775,11 +776,11 @@ def test_paged_hierarchy_retrieve(
     ],
 )
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 2000
     new_num_tokens = 1000
     num_blocks = 1000
@@ -907,15 +908,15 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
 @pytest.mark.no_shared_allocator
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1):
     url = None
     if "remote" in backend:
         url = lmserver_v1_process.server_url
 
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 2000
     kv_shape = (32, 2, chunk_size, 8, 128)
     num_blocks = 1000
@@ -997,11 +998,11 @@ def test_paged_mem_leak(fmt, chunk_size, backend, lmserver_v1_process, autorelea
 )
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_retrieve_after_eviction(fmt, chunk_size, backend, autorelease_v1):
-    device = "cuda"
+    device = accelerator.name
     # NOTE: The default backend cache size is 2 GB.
     # 10000 tokens ia around 1.3 GB so a second retrieve will cause an eviction.
     num_tokens = 10000
@@ -1139,11 +1140,11 @@ def test_builder(autorelease_v1):
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_force_store_wait(autorelease_v1):
-    device = "cuda"
+    device = accelerator.name
     fmt = "vllm"
     num_tokens = 10000
     num_blocks = 5000
@@ -1207,8 +1208,8 @@ def test_force_store_wait(autorelease_v1):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_builder_destroy(autorelease_v1):
     """Test the destroy method of LMCacheEngineBuilder"""
@@ -1259,8 +1260,8 @@ def test_builder_destroy(autorelease_v1):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_builder_destroy_multiple_instances(autorelease_v1):
     """Test destroying one instance doesn't affect others"""
@@ -1323,7 +1324,7 @@ def test_multi_device_backends(autorelease_v1):
     """Test running GPU-related backend with local CPU backends
     together
     """
-    device = "cuda"
+    device = accelerator.name
     num_tokens = 2000
     num_blocks = 1000
     block_size = 16

@@ -9,6 +9,7 @@ import time
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
@@ -47,11 +48,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheEngineMetadata] = None,
-        dst_device: str = "cuda",
+        dst_device: str = accelerator.name,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
     ):
-        if torch.cuda.is_available():
+        if accelerator and dst_device == accelerator.name:
             super().__init__(dst_device)
         else:
             super().__init__("cpu")

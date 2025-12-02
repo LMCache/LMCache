@@ -16,6 +16,7 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -35,7 +36,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=accelerator.name if accelerator else "cpu",
     )
     for i in range(num_objs):
         keys.append(

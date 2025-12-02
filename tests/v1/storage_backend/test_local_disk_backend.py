@@ -10,6 +10,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -116,7 +117,7 @@ def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
         config=config,
         loop=async_loop,
         local_cpu_backend=local_cpu_backend,
-        dst_device="cuda",
+        dst_device=accelerator.name,
     )
 
 
@@ -130,10 +131,10 @@ class TestLocalDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
+            dst_device=accelerator.name,
         )
 
-        assert backend.dst_device == "cuda"
+        assert backend.dst_device == accelerator.name
         assert backend.local_cpu_backend == local_cpu_backend
         assert backend.path == temp_disk_path
         assert os.path.exists(temp_disk_path)
@@ -155,7 +156,7 @@ class TestLocalDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
+            dst_device=accelerator.name,
             lmcache_worker=lmcache_worker,
         )
 

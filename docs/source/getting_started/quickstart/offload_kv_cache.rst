@@ -180,6 +180,7 @@ Save the following script as ``cpu-offloading.py``:
     import torch
     import argparse
     import time
+    from lmcache.accelerator import accelerator
     from lmcache.v1.cache_engine import LMCacheEngineBuilder
     from lmcache.integration.vllm.utils import ENGINE_NAME
     from vllm import LLM, SamplingParams
@@ -223,10 +224,10 @@ Save the following script as ``cpu-offloading.py``:
         Raises:
             RuntimeError: If GPU memory is less than target_memory_gb
         """
-        if not torch.cuda.is_available():
+        if accelerator.name == "cpu":
             raise RuntimeError("No GPU available")
         
-        total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # Convert to GB
+        total_memory = accelerator.get_device_properties(0).total_memory / (1024**3)  # Convert to GB
         if total_memory < target_memory_gb:
             raise RuntimeError(f"GPU memory ({total_memory:.1f}GB) is less than required memory ({target_memory_gb}GB)")
         

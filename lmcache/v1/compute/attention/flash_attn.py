@@ -9,6 +9,7 @@ from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
 
@@ -34,8 +35,8 @@ class LMCFlashAttnBackend(AttentionInterface):
         # TODO(Jiayi): remove this hardcode
         self.aot_schedule = False
 
-        idx = torch.cuda.current_device()
-        self.device = torch.device(f"cuda:{idx}")
+        idx = accelerator.current_device()
+        self.device = accelerator.device(idx)
 
     def forward_contiguous(
         self,

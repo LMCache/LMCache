@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# Third Party
-import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import (
     LMCacheEngineConfig,
     LMCacheEngineMetadata,
@@ -28,8 +27,8 @@ def CreateStorageBackend(
     dst_device: str = "cuda",
 ) -> LMCBackendInterface:
     # Replace 'cuda' with 'cuda:<device id>'
-    if dst_device == "cuda":
-        dst_device = f"cuda:{torch.cuda.current_device()}"
+    if dst_device == accelerator.name:
+        dst_device = accelerator.current_device_name()
 
     mpool_metadata = LMCacheMemPoolMetadata(
         metadata.kv_shape, metadata.kv_dtype, config.max_local_cache_size
@@ -47,7 +46,7 @@ def CreateStorageBackend(
         ):
             # local only
             match config.local_device:
-                case "cpu" | "cuda":
+                case "cpu" | accelerator.name:
                     logger.info(
                         f"Initializing local-only ({config.local_device}) backend"
                     )

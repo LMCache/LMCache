@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.cache_engine import LMCacheEngine
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 
@@ -73,16 +74,16 @@ def get_tensor_size(tensor):
     return size_in_bytes
 
 
-@pytest.mark.parametrize("dst_device", ["cuda:0"])
-@pytest.mark.parametrize("backend", ["cuda", "cpu", "file://local_disk/"])
+@pytest.mark.parametrize("dst_device", [accelerator.current_device_name()])
+@pytest.mark.parametrize("backend", [accelerator.name, "cpu", "file://local_disk/"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Requires CUDA for test_lru",
+    accelerator.name == "cpu",
+    reason="Requires Accelerator for test_lru",
 )
 def test_lru(backend, dst_device, autorelease):
     fmt = "vllm"
     num_tokens = 256
-    src_device = "cuda:0"
+    src_device = accelerator.current_device_name()
     """ initialize the engine """
     tokens_1 = generate_tokens(num_tokens, src_device)
     kv_cache_1 = generate_kv_cache(num_tokens, fmt, src_device)
@@ -127,16 +128,16 @@ def test_lru(backend, dst_device, autorelease):
 
 # Local cpu use and gpu use mempool which allocates a 256-token buffer
 # no matter how big the cache is.
-@pytest.mark.parametrize("dst_device", ["cuda:0"])
-@pytest.mark.parametrize("backend", ["cuda", "cpu"])
+@pytest.mark.parametrize("dst_device", [accelerator.current_device_name])
+@pytest.mark.parametrize("backend", [accelerator.name, "cpu"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Requires CUDA for test_lru_fragmentation",
+    accelerator.name == "cpu",
+    reason="Requires accelerator for test_lru_fragmentation",
 )
 def test_lru_fragmentation(backend, dst_device, autorelease):
     fmt = "vllm"
     num_tokens = 1
-    src_device = "cuda:0"
+    src_device = accelerator.current_device_name()
     """ initialize the engine """
     tokens_1 = generate_tokens(num_tokens, src_device)
     kv_cache_1 = generate_kv_cache(num_tokens, fmt, src_device)

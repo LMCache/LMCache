@@ -33,6 +33,7 @@ from nixl._api import (
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -242,7 +243,7 @@ class NixlStorageAgent:
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
         self.nixl_agent.create_backend(backend, backend_params)
 
-        device_id = torch.cuda.current_device()
+        device_id = accelerator.current_device()
         self.init_mem_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
 
         if isinstance(pool, NixlFilePool):
@@ -370,7 +371,8 @@ class NixlStorageBackend(AllocatorBackendInterface):
         Initialize the Nixl storage backend.
 
         :param dst_device: the device where the blocking retrieved KV is stored,
-            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
+            could be either "cpu", "xpu", "cuda", or "cuda:0", "cuda:1", "xpu:0",
+            "xpu:1" etc.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
 
@@ -624,7 +626,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
             base_buffer, self.buffer = _allocate_gpu_memory(
                 config.nixl_buffer_size, corrected_device
             )
-            torch.cuda.set_device(corrected_device)
+            accelerator.set_device(corrected_device)
             self.base_buffer = base_buffer  # Prevents early GC of the aligned tensor.
             self.free_pinned_buffer = False
 

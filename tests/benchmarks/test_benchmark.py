@@ -13,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -84,8 +85,8 @@ def create_config():
 @pytest.mark.benchmark(group="store")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
     """
@@ -116,7 +117,7 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
     dtype = torch.bfloat16
 
     # lmcache and vllm configs
-    device = "cuda"
+    device = accelerator.name
     fmt = "vllm"
     num_tokens = 2000
 
@@ -186,8 +187,8 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
 @pytest.mark.benchmark(group="retrieve")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
     """
@@ -218,7 +219,7 @@ def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
     dtype = torch.bfloat16
 
     # lmcache and vllm configs
-    device = "cuda"
+    device = accelerator.name
     fmt = "vllm"
     num_tokens = 2000
 
@@ -297,8 +298,8 @@ def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
 @pytest.mark.benchmark(group="lookup")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+    accelerator.name == "cpu",
+    reason="TODO: Add other accelerator implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
     """
@@ -325,7 +326,7 @@ def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
     dtype = torch.bfloat16
 
     # lmcache and vllm configs
-    device = "cuda"
+    device = accelerator.name
     fmt = "vllm"
     num_tokens = 2000
 

@@ -6,24 +6,24 @@ import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
-from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
+from lmcache.accelerator import accelerator
+from lmcache.v1.multiprocess.futures import GPUMessagingFuture, MessagingFuture
 
 # ==============================================================================
-# Helper Functions for CUDAMessagingFuture Tests
+# Helper Functions for GPUMessagingFuture Tests
 # ==============================================================================
 
 
-def _create_cuda_event_in_process(event_queue: mp.Queue, delay: float = 0.0):
-    """Helper process that creates a CUDA event and sends the IPC handle."""
-    torch.cuda.init()
+def _create_gpu_event_in_process(event_queue: mp.Queue, delay: float = 0.0):
+    """Helper process that creates a GPU event and sends the IPC handle."""
+    accelerator.init()
     if delay > 0:
         time.sleep(delay)
 
-    # Create and record a CUDA event with interprocess flag
-    event = torch.cuda.Event(interprocess=True)
+    # Create and record a GPU event with interprocess flag
+    event = accelerator.Event(interprocess=True)
     event.record()
     event_bytes = event.ipc_handle()
 
@@ -174,22 +174,22 @@ def test_messaging_future_complex_type():
 
 
 # ==============================================================================
-# CUDAMessagingFuture Tests
+# GPUMessagingFuture Tests
 # ==============================================================================
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_basic_usage():
-    """Test basic usage of CUDAMessagingFuture: create, wait, and get result."""
-    torch.cuda.init()
+def test_gpu_messaging_future_basic_usage():
+    """Test basic usage of GPUMessagingFuture: create, wait, and get result."""
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -199,39 +199,39 @@ def test_cuda_messaging_future_basic_usage():
     # Create the raw future that will return (event_bytes, result_value)
     raw_future = MessagingFuture[tuple[bytes, int]]()
 
-    # Create CUDAMessagingFuture from raw future
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    # Create GPUMessagingFuture from raw future
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     # Initially, future should not be done
-    assert not cuda_future.query(), "CUDAMessagingFuture should not be done initially"
+    assert not gpu_future.query(), "GPUMessagingFuture should not be done initially"
 
     # Set result in raw future
     raw_future.set_result((event_bytes, 42))
 
-    # Wait for CUDA future to complete
-    success = cuda_future.wait()
+    # Wait for GPU future to complete
+    success = gpu_future.wait()
     assert success, "Wait should return True when result is available"
 
     # Get result
-    result = cuda_future.result()
+    result = gpu_future.result()
     assert result == 42, f"Expected result 42, got {result}"
 
     # Query should return True after completion
-    assert cuda_future.query(), "CUDAMessagingFuture should be done after wait"
+    assert gpu_future.query(), "GPUMessagingFuture should be done after wait"
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_with_thread():
-    """Test CUDAMessagingFuture with result set from another thread."""
-    torch.cuda.init()
+def test_gpu_messaging_future_with_thread():
+    """Test GPUMessagingFuture with result set from another thread."""
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -239,45 +239,43 @@ def test_cuda_messaging_future_with_thread():
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, str]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     def set_future_result():
         time.sleep(0.5)
-        raw_future.set_result((event_bytes, "Hello CUDA"))
+        raw_future.set_result((event_bytes, "Hello GPU"))
 
     # Start thread that will set the result
     thread = threading.Thread(target=set_future_result)
     thread.start()
 
     # Initially should not be done
-    assert not cuda_future.query(), (
-        "Future should not be done before thread sets result"
-    )
+    assert not gpu_future.query(), "Future should not be done before thread sets result"
 
     # Wait for result
-    result = cuda_future.result()
-    assert result == "Hello CUDA", f"Expected 'Hello CUDA', got {result}"
+    result = gpu_future.result()
+    assert result == "Hello GPU", f"Expected 'Hello GPU', got {result}"
 
     # Should be done now
-    assert cuda_future.query(), "Future should be done after getting result"
+    assert gpu_future.query(), "Future should be done after getting result"
 
     thread.join()
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_wait_no_timeout():
+def test_gpu_messaging_future_wait_no_timeout():
     """Test wait method without timeout (waits indefinitely
     until result is set).
     """
-    torch.cuda.init()
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -285,7 +283,7 @@ def test_cuda_messaging_future_wait_no_timeout():
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, float]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     def set_future_result():
         time.sleep(0.3)
@@ -295,25 +293,25 @@ def test_cuda_messaging_future_wait_no_timeout():
     thread.start()
 
     # Wait without timeout should wait until result is available
-    success = cuda_future.wait()  # No timeout parameter
+    success = gpu_future.wait()  # No timeout parameter
     assert success, "Wait should return True when result is set"
-    assert cuda_future.result() == 3.14, "Result should be accessible after wait"
+    assert gpu_future.result() == 3.14, "Result should be accessible after wait"
 
     thread.join()
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_wait_with_timeout_success():
+def test_gpu_messaging_future_wait_with_timeout_success():
     """Test that wait method works correctly with timeout when result is available."""
-    torch.cuda.init()
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -321,7 +319,7 @@ def test_cuda_messaging_future_wait_with_timeout_success():
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     def set_future_result():
         time.sleep(0.3)
@@ -331,46 +329,46 @@ def test_cuda_messaging_future_wait_with_timeout_success():
     thread.start()
 
     # Wait with timeout should return True when result is available
-    success = cuda_future.wait(timeout=2.0)
+    success = gpu_future.wait(timeout=2.0)
     assert success, "Wait with timeout should return True when result is available"
-    assert cuda_future.result() == 123, "Result should be accessible after wait"
+    assert gpu_future.result() == 123, "Result should be accessible after wait"
 
     thread.join()
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_wait_timeout_reached():
+def test_gpu_messaging_future_wait_timeout_reached():
     """Test that wait method returns False when timeout is reached."""
-    torch.cuda.init()
+    accelerator.init()
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     # Wait with short timeout (result never set)
     start_time = time.time()
-    success = cuda_future.wait(timeout=0.2)
+    success = gpu_future.wait(timeout=0.2)
     elapsed = time.time() - start_time
 
     assert not success, "Wait should return False on timeout"
-    assert not cuda_future.query(), "Future should not be done after timeout"
+    assert not gpu_future.query(), "Future should not be done after timeout"
     assert 0.15 < elapsed < 0.4, f"Wait should respect timeout, elapsed: {elapsed}"
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_result_with_timeout_success():
+def test_gpu_messaging_future_result_with_timeout_success():
     """Test that result method works correctly with timeout when result is available."""
-    torch.cuda.init()
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -378,7 +376,7 @@ def test_cuda_messaging_future_result_with_timeout_success():
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     def set_future_result():
         time.sleep(0.3)
@@ -388,42 +386,42 @@ def test_cuda_messaging_future_result_with_timeout_success():
     thread.start()
 
     # Get result with timeout should succeed when result is available
-    result = cuda_future.result(timeout=2.0)
+    result = gpu_future.result(timeout=2.0)
     assert result == 456, f"Expected result 456, got {result}"
 
     thread.join()
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_result_timeout_reached():
+def test_gpu_messaging_future_result_timeout_reached():
     """Test that result method raises TimeoutError when timeout is reached."""
-    torch.cuda.init()
+    accelerator.init()
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     # Try to get result with timeout (result never set)
     with pytest.raises(
-        TimeoutError, match="CUDAMessagingFuture result not available within timeout"
+        TimeoutError, match="GPUMessagingFuture result not available within timeout"
     ):
-        cuda_future.result(timeout=0.2)
+        gpu_future.result(timeout=0.2)
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_multiple_result_calls():
+def test_gpu_messaging_future_multiple_result_calls():
     """Test that result can be retrieved multiple times after being set."""
-    torch.cuda.init()
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -431,32 +429,32 @@ def test_cuda_messaging_future_multiple_result_calls():
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, str]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
-    raw_future.set_result((event_bytes, "persistent cuda value"))
+    raw_future.set_result((event_bytes, "persistent gpu value"))
 
     # Get result multiple times
-    result1 = cuda_future.result()
-    result2 = cuda_future.result()
-    result3 = cuda_future.result()
+    result1 = gpu_future.result()
+    result2 = gpu_future.result()
+    result3 = gpu_future.result()
 
-    assert result1 == result2 == result3 == "persistent cuda value", (
+    assert result1 == result2 == result3 == "persistent gpu value", (
         "Result should be retrievable multiple times"
     )
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_query_before_and_after():
+def test_gpu_messaging_future_query_before_and_after():
     """Test query method returns False before completion and True after."""
-    torch.cuda.init()
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -464,35 +462,33 @@ def test_cuda_messaging_future_query_before_and_after():
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     # Query before setting result
-    assert not cuda_future.query(), "Query should return False before result is set"
+    assert not gpu_future.query(), "Query should return False before result is set"
 
     # Set result
     raw_future.set_result((event_bytes, 100))
 
     # Wait for completion
-    cuda_future.wait()
+    gpu_future.wait()
 
     # Query after setting result
-    assert cuda_future.query(), (
-        "Query should return True after result is set and waited"
-    )
+    assert gpu_future.query(), "Query should return True after result is set and waited"
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_complex_type():
-    """Test CUDAMessagingFuture with complex types like lists and dicts."""
-    torch.cuda.init()
+def test_gpu_messaging_future_complex_type():
+    """Test GPUMessagingFuture with complex types like lists and dicts."""
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -502,7 +498,7 @@ def test_cuda_messaging_future_complex_type():
     complex_data = {"key1": [1, 2, 3], "key2": {"nested": "value"}, "key3": 42}
 
     raw_future = MessagingFuture[tuple[bytes, dict]]()
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future)
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future)
 
     def set_future_result():
         time.sleep(0.2)
@@ -511,26 +507,26 @@ def test_cuda_messaging_future_complex_type():
     thread = threading.Thread(target=set_future_result)
     thread.start()
 
-    result = cuda_future.result()
+    result = gpu_future.result()
     assert result == complex_data, "Complex types should be preserved"
 
     thread.join()
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_messaging_future_to_cuda_future():
-    """Test converting MessagingFuture to CUDAMessagingFuture
-    using to_cuda_future method.
+def test_messaging_future_to_future():
+    """Test converting MessagingFuture to GPUMessagingFuture
+    using to_future method.
     """
-    torch.cuda.init()
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
@@ -539,48 +535,48 @@ def test_messaging_future_to_cuda_future():
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
 
-    # Convert to CUDA future
-    cuda_future = raw_future.to_cuda_future()
+    # Convert to GPU future
+    gpu_future = raw_future.to_future()
 
-    # Verify it's a CUDAMessagingFuture instance
-    assert isinstance(cuda_future, CUDAMessagingFuture), (
-        "to_cuda_future should return CUDAMessagingFuture instance"
+    # Verify it's a GPUMessagingFuture instance
+    assert isinstance(gpu_future, GPUMessagingFuture), (
+        "to_future should return GPUMessagingFuture instance"
     )
 
     # Set result and verify it works
     raw_future.set_result((event_bytes, 999))
 
-    result = cuda_future.result()
+    result = gpu_future.result()
     assert result == 999, f"Expected result 999, got {result}"
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
+    accelerator.name == "cpu",
+    reason="GPU is required for GPUMessagingFuture tests",
 )
-def test_cuda_messaging_future_with_explicit_device():
-    """Test CUDAMessagingFuture with explicit device parameter."""
-    torch.cuda.init()
+def test_gpu_messaging_future_with_explicit_device():
+    """Test GPUMessagingFuture with explicit device parameter."""
+    accelerator.init()
 
-    # Create CUDA event in a separate process
+    # Create GPU event in a separate process
     ctx = mp.get_context("spawn")
     event_queue = ctx.Queue()
-    process = ctx.Process(target=_create_cuda_event_in_process, args=(event_queue,))
+    process = ctx.Process(target=_create_gpu_event_in_process, args=(event_queue,))
     process.start()
 
     # Get event bytes from the process
     event_bytes = event_queue.get(timeout=5)
     process.join(timeout=2)
 
-    device = torch.cuda.current_device()
+    device = accelerator.current_device()
     raw_future = MessagingFuture[tuple[bytes, str]]()
 
-    # Create CUDA future with explicit device
-    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future, device=device)
+    # Create GPU future with explicit device
+    gpu_future = GPUMessagingFuture.FromMessagingFuture(raw_future, device=device)
 
     # Set result
     raw_future.set_result((event_bytes, "explicit device"))
 
     # Get result
-    result = cuda_future.result()
+    result = gpu_future.result()
     assert result == "explicit device", f"Expected 'explicit device', got {result}"

@@ -7,13 +7,20 @@ import os
 import pytest
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.config import LMCacheEngineConfig
 
 BASE_DIR = Path(__file__).parent
 
 
 def test_get_extra_config_from_file():
-    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_config.yaml")
+    if accelerator.name == "cuda":
+        cfg_file = "data/test_config.yaml"
+    elif accelerator.name == "xpu":
+        cfg_file = "data/test_config_xpu.yaml"
+    else:
+        raise AssertionError("No supported accelerator found!")
+    config = LMCacheEngineConfig.from_file(BASE_DIR / cfg_file)
     check_extra_config(config)
 
 

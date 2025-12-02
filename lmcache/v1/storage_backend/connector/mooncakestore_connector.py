@@ -12,6 +12,7 @@ import os
 import torch
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -166,7 +167,7 @@ class MooncakestoreConnector(RemoteConnector):
                     numa_mapping = NUMADetector.get_numa_mapping(lmcache_config)
 
                 if numa_mapping:
-                    current_device_id = torch.cuda.current_device()
+                    current_device_id = accelerator.current_device()
                     gpu_to_numa = getattr(numa_mapping, "gpu_to_numa_mapping", {})
                     numa_id = gpu_to_numa.get(current_device_id)
                     logger.info(

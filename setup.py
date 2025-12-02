@@ -149,6 +149,7 @@ def rocm_extension() -> tuple[list, dict]:
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
+
 def xpu_extension() -> tuple[list, dict]:
     # Third Party
     from torch.utils import cpp_extension  # Import here
@@ -176,10 +177,10 @@ def xpu_extension() -> tuple[list, dict]:
             include_dirs=include_dirs,
             library_dirs=library_dirs,
             extra_compile_args={
-                #"cxx": ["-g", "-lze_loader", "-lsycl"],
+                # "cxx": ["-g", "-lze_loader", "-lsycl"],
                 "icpx": ["-O2", "-D_GLIBCXX_USE_CXX11_ABI=1"],
             },
-            define_macros = [("USE_XPU", "1")]
+            define_macros=[("USE_XPU", "1")],
         ),
     ]
     cmdclass = {"build_ext": cpp_extension.BuildExtension}

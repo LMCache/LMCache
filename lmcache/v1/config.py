@@ -11,6 +11,7 @@ import uuid
 import yaml
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.logging import init_logger
 import lmcache.config as orig_config
 
@@ -636,7 +637,7 @@ def _to_original_config(self):
     """Convert to original configuration format"""
     return orig_config.LMCacheEngineConfig(
         chunk_size=self.chunk_size,
-        local_device="cpu" if self.local_cpu else "cuda",
+        local_device="cpu" if self.local_cpu else accelerator.name,
         max_local_cache_size=int(self.max_local_cpu_size),
         remote_url=None,
         remote_serde=None,

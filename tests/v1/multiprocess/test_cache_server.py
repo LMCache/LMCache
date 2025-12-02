@@ -11,6 +11,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.accelerator import accelerator
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -175,16 +176,16 @@ def client_context() -> Generator[ClientContext, None, None]:
     """
     Fixture that provides a client context with initialized KV cache.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
+    if not accelerator:
+        pytest.skip("Accelerator is not available")
 
-    device = torch.device("cuda:0")
+    device = accelerator.current_device()
     ctx = ClientContext(device=device)
     yield ctx
 
     # Cleanup GPU memory
     del ctx.gpu_kv_caches
-    torch.cuda.empty_cache()
+    accelerator.empty_cache()
 
 
 @pytest.fixture(scope="function")
@@ -236,8 +237,8 @@ def test_server_running(server_process: mp.Process):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Register/Unregister KV cache requires CUDA",
+    accelerator.name == "cpu",
+    reason="Register/Unregister KV cache requires supported accelerator devices",
 )
 def test_register_unregister_kv_cache(
     client: MessageQueueClient, client_context: ClientContext
@@ -267,8 +268,8 @@ def test_register_unregister_kv_cache(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Store and Lookup require CUDA",
+    accelerator.name == "cpu",
+    reason="Store and Lookup require accelerator",
 )
 def test_store_and_lookup(
     client: MessageQueueClient,
@@ -281,7 +282,7 @@ def test_store_and_lookup(
     num_keys = 10
     keys = [create_cache_key(i) for i in range(num_keys)]
     gpu_block_ids = list(range(0, 16 * num_keys))
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
 
     # Store
@@ -290,7 +291,7 @@ def test_store_and_lookup(
         [keys, registered_instance, gpu_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
-    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+    store_result = store_future.to_future().result(timeout=DEFAULT_TIMEOUT)
     assert store_result is True, "Store should succeed"
 
     # Lookup - keys that exist
@@ -316,8 +317,8 @@ def test_store_and_lookup(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Store, Retrieve, and Verify require CUDA",
+    accelerator.name == "cpu",
+    reason="Store, Retrieve, and Verify require accelerator",
 )
 def test_store_retrieve_verify(
     client: MessageQueueClient,
@@ -329,7 +330,7 @@ def test_store_retrieve_verify(
     """
     num_keys = 20
     keys = [create_cache_key(i) for i in range(num_keys)]
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
 
     # Store at the beginning of the cache
@@ -339,10 +340,10 @@ def test_store_retrieve_verify(
         [keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
-    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+    store_result = store_future.to_future().result(timeout=DEFAULT_TIMEOUT)
     assert store_result is True
 
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
 
     # Retrieve to a different location in the cache
@@ -354,7 +355,7 @@ def test_store_retrieve_verify(
         [keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
-    retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+    retrieve_result = retrieve_future.to_future().result(timeout=DEFAULT_TIMEOUT)
 
     assert len(retrieve_result) == num_keys
     assert all(retrieve_result), "All keys should be retrieved successfully"
@@ -378,8 +379,8 @@ def test_store_retrieve_verify(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Partial miss retrieval requires CUDA",
+    accelerator.name == "cpu",
+    reason="Partial miss retrieval requires accelerator",
 )
 def test_retrieve_partial_miss(
     client: MessageQueueClient,
@@ -394,7 +395,7 @@ def test_retrieve_partial_miss(
     num_stored = 30
     stored_keys = [create_cache_key(i) for i in range(num_stored)]
     store_block_ids = list(range(0, 16 * num_stored))
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
 
     store_future = client.submit_request(
@@ -402,7 +403,7 @@ def test_retrieve_partial_miss(
         [stored_keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
-    assert store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT) is True
+    assert store_future.to_future().result(timeout=DEFAULT_TIMEOUT) is True
 
     # Try to retrieve 60 keys (only first 30 exist)
     # Total pages needed: 60 * 16 = 960 (< 1024)
@@ -414,7 +415,7 @@ def test_retrieve_partial_miss(
         range(retrieve_offset_keys * 16, (retrieve_offset_keys + num_requested) * 16)
     )
 
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
 
     retrieve_future = client.submit_request(
@@ -422,7 +423,7 @@ def test_retrieve_partial_miss(
         [all_keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
-    retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+    retrieve_result = retrieve_future.to_future().result(timeout=DEFAULT_TIMEOUT)
 
     assert len(retrieve_result) == num_requested
     # assert all(retrieve_result[:num_stored]), "Stored keys should be retrieved"
@@ -433,23 +434,21 @@ def test_retrieve_partial_miss(
 
     # Try to retrieve the first 30 keys only (all exist)
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
     retrieve_future_2 = client.submit_request(
         RequestType.RETRIEVE,
         [stored_keys, registered_instance, retrieve_block_ids_2, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
-    retrieve_result_2 = retrieve_future_2.to_cuda_future().result(
-        timeout=DEFAULT_TIMEOUT
-    )
+    retrieve_result_2 = retrieve_future_2.to_future().result(timeout=DEFAULT_TIMEOUT)
     assert len(retrieve_result_2) == num_stored
     assert all(retrieve_result_2), "All stored keys should be retrieved successfully"
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Multiple retrieve operations require CUDA",
+    accelerator.name == "cpu",
+    reason="Multiple retrieve operations require accelerator",
 )
 def test_multiple_retrieve_operations(
     client: MessageQueueClient,
@@ -484,7 +483,7 @@ def test_multiple_retrieve_operations(
                 (batch_idx * keys_per_batch + keys_per_batch) * 16,
             )
         )
-        event = torch.cuda.Event(interprocess=True)
+        event = accelerator.Event(interprocess=True)
         event.record()
 
         store_result = (
@@ -493,7 +492,7 @@ def test_multiple_retrieve_operations(
                 [keys, registered_instance, blocks, event.ipc_handle()],
                 get_response_class(RequestType.STORE),
             )
-            .to_cuda_future()
+            .to_future()
             .result(timeout=DEFAULT_TIMEOUT)
         )
         assert store_result is True
@@ -501,7 +500,7 @@ def test_multiple_retrieve_operations(
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
     retrieve_futures = []
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
     for batch_idx in range(num_batches):
         keys = [
@@ -521,7 +520,7 @@ def test_multiple_retrieve_operations(
             [keys, registered_instance, blocks, event.ipc_handle()],
             get_response_class(RequestType.RETRIEVE),
         )
-        retrieve_futures.append(retrieve_future.to_cuda_future())
+        retrieve_futures.append(retrieve_future.to_future())
 
     for retrieve_future in retrieve_futures:
         retrieve_result = retrieve_future.result(timeout=DEFAULT_TIMEOUT)
@@ -543,8 +542,8 @@ def test_multiple_retrieve_operations(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="Multiple store operations require CUDA",
+    accelerator.name == "cpu",
+    reason="Multiple store operations require accelerator",
 )
 def test_multiple_store_operations(
     client: MessageQueueClient,
@@ -557,7 +556,7 @@ def test_multiple_store_operations(
     # Store batch 1
     keys1 = [create_cache_key(i) for i in range(30)]
     blocks1 = list(range(0, 16 * 30))
-    event = torch.cuda.Event(interprocess=True)
+    event = accelerator.Event(interprocess=True)
     event.record()
 
     result1 = (
@@ -566,7 +565,7 @@ def test_multiple_store_operations(
             [keys1, registered_instance, blocks1, event.ipc_handle()],
             get_response_class(RequestType.STORE),
         )
-        .to_cuda_future()
+        .to_future()
         .result(timeout=DEFAULT_TIMEOUT)
     )
     assert result1 is True
@@ -582,7 +581,7 @@ def test_multiple_store_operations(
             [keys2, registered_instance, blocks2, event.ipc_handle()],
             get_response_class(RequestType.STORE),
         )
-        .to_cuda_future()
+        .to_future()
         .result(timeout=DEFAULT_TIMEOUT)
     )
     assert result2 is True
@@ -600,7 +599,8 @@ def test_multiple_store_operations(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="Get chunk size requires CUDA"
+    accelerator.name == "cpu",
+    reason="Get chunk size requires accelerator",
 )
 def test_get_chunk_size(
     client: MessageQueueClient,
