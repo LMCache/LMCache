@@ -1462,33 +1462,38 @@ class LMCacheConnectorV1Impl:
 
         req_id = request.request_id
 
-        # consult the cache before any processing
-        if cached_num_hit_toks := self.lookup_client.lookup_cache(lookup_id=req_id):
-            return cached_num_hit_toks
+        if (
+            num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
+        ) != -1:
+            logger.debug(
+                f"Found {num_external_hit_tokens} hit tokens for request"
+                f" {req_id} in the lookup cache."
+            )
+        else:
+            logger.debug(f"Looking up cache for the first time for request {req_id}!")
+            self._requests_priority[req_id] = getattr(request, "priority", 0)
 
-        self._requests_priority[req_id] = getattr(request, "priority", 0)
+            # token_ids = request.prompt_token_ids
+            # all token ids covers the preemption case
+            token_ids = request.all_token_ids
 
-        # token_ids = request.prompt_token_ids
-        # all token ids covers the preemption case
-        token_ids = request.all_token_ids
+            # If the request has multimodal hashes, apply them to the token ids
+            mm_hashes, mm_positions = extract_mm_features(request)
+            if mm_hashes and mm_positions:
+                # TODO(Jiayi): Optimize this
+                token_ids = torch.tensor(request.prompt_token_ids)
+                apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
+                token_ids = token_ids.tolist()
 
-        # If the request has multimodal hashes, apply them to the token ids
-        mm_hashes, mm_positions = extract_mm_features(request)
-        if mm_hashes and mm_positions:
-            # TODO(Jiayi): Optimize this
-            token_ids = torch.tensor(request.prompt_token_ids)
-            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
-            token_ids = token_ids.tolist()
+            request_configs = extract_request_configs(request.sampling_params)
+            if self.skip_last_n_tokens > 0:
+                token_ids = token_ids[: -self.skip_last_n_tokens]
 
-        request_configs = extract_request_configs(request.sampling_params)
-        if self.skip_last_n_tokens > 0:
-            token_ids = token_ids[: -self.skip_last_n_tokens]
-
-        num_external_hit_tokens = self.lookup_client.lookup(
-            token_ids,
-            lookup_id=req_id,
-            request_configs=request_configs,
-        )
+            num_external_hit_tokens = self.lookup_client.lookup(
+                token_ids,
+                lookup_id=req_id,
+                request_configs=request_configs,
+            )
 
         if num_external_hit_tokens is None:
             logger.debug(

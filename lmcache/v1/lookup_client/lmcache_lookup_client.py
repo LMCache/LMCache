@@ -162,7 +162,12 @@ class LMCacheLookupClient(LookupClientInterface):
             self.sockets[rank_idx] = new_socket
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        return self.reqs_status.get(lookup_id, None)
+        """
+        "-1 means not found;
+        None means ongoing; (this semantic is not supported in sync lookup client)
+        int >= 0 means number of hit tokens
+        """
+        return self.reqs_status.get(lookup_id, -1)
 
     def lookup(
         self,

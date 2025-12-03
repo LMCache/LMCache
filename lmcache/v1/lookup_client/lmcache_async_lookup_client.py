@@ -159,20 +159,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             )
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        # with self.lock:
-        #     return self.reqs_status.get(lookup_id, None)
-        # NOTE: we cannot implement lookup_cache in async lookup client since
-        # get_num_new_matched_tokens is non-idempotent under repeated calls
-        # w/o calling update_state_after_alloc (None, None, None, ..., hit_tokens)
-        pass
-
-    # TODO(Jiayi): Consider batching here
-    def lookup(
-        self,
-        token_ids: Union[torch.Tensor, list[int]],
-        lookup_id: str,
-        request_configs: Optional[dict] = None,
-    ) -> Optional[int]:
+        """
+        -1 means not found;
+        None means ongoing;
+        int >= 0 means number of hit tokens
+        """
         # Check if any aborted lookups are finished, send cleanup messages
         self._cleanup_finished_aborted_lookups()
 
@@ -200,8 +191,16 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             elif req_status != -1:
                 return req_status
             self.reqs_status[lookup_id] = None
-            self.first_lookup_time[lookup_id] = time.time()
+        self.first_lookup_time[lookup_id] = time.time()
+        return None
 
+    # TODO(Jiayi): Consider batching here
+    def lookup(
+        self,
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
+    ) -> Optional[int]:
         hashes: list[int] = []
 
         offsets = []
