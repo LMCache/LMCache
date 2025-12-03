@@ -56,7 +56,7 @@ def init_lmcache_engine(
 ) -> LMCacheEngine:
     """
     Initialize LMCache engine for SGLang integration.
-    
+
     Args:
         model_config: SGLang model configuration
         tp_size: Tensor parallel size
