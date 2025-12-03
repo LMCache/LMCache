@@ -10,9 +10,10 @@ import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.async_lookup_message import (
     LookupCleanupMsg,
@@ -52,9 +53,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     def __init__(
         self,
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
     ):
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         # lookup_id -> first lookup time
         # this helps us support timeout semantics
         self.first_lookup_time: dict[str, float] = {}

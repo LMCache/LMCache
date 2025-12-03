@@ -11,9 +11,10 @@ import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.rpc_utils import (
     get_zmq_context,
@@ -46,9 +47,9 @@ class LMCacheLookupClient(LookupClientInterface):
     def __init__(
         self,
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
     ):
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
@@ -255,6 +256,13 @@ class LMCacheLookupClient(LookupClientInterface):
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
         return True
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def close(self):
         for socket in self.sockets:
             try:
@@ -335,6 +343,13 @@ class LMCacheLookupServer:
         logger.info("lmcache lookup server start on %s", socket_path)
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def close(self):
         # Stop the processing thread first
