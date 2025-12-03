@@ -274,9 +274,7 @@ class StorageManager:
             )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
         # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and (
-            self.config.enable_async_loading or self.config.use_layerwise
-        ):
+        if not self.enable_pd and self.config.enable_async_loading:
             assert self.allocator_backend is not None
             self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
 
@@ -489,14 +487,7 @@ class StorageManager:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
             # TODO(Jiayi): need to make async loading and layerwise compatible
-            assert self.async_serializer is not None, (
-                "Async serializer must be initialized via post_init before using "
-                "layerwise_batched_get."
-            )
-            coro = self.async_serializer.run(
-                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
-                len(keys_multi_chunk),
-            )
+            coro = backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk)
             task = asyncio.run_coroutine_threadsafe(coro, self.loop)
             yield task
 

@@ -141,8 +141,6 @@ class RequestTracker:
 
     # The block ids that has been allocated so far
     # NOTE: allocated blocks could be more than the number of tokens
-    # FIXME: need to check whether the block ids will be changed after
-    #        preemption
     allocated_block_ids: list[int]
 
     # The number of tokens that has been saved
@@ -256,6 +254,12 @@ class RequestTracker:
             # reset the number of saved tokens
             self.num_saved_tokens = lmcache_cached_tokens
             # we don't need to extend the token ids in the preempted case
+            # however, it is possible for the scheduled tokens of the request
+            # to be less than the total number of tokens (partial cache hit)
+            # so we may need to truncate
+            self.token_ids = self.token_ids[
+                : lmcache_cached_tokens + len(new_token_ids)
+            ]
         else:
             self.allocated_block_ids.extend(new_block_ids)
             self.token_ids.extend(new_token_ids)
@@ -379,8 +383,10 @@ class ReqMeta:
 
         if len(token_ids) > num_blocks * block_size:
             logger.error(
-                "The number of tokens is more than the number of blocks."
-                "Something might be wrong in scheduling logic!"
+                "The number of tokens is more than the number of blocks"
+                " for request %s. "
+                "Something might be wrong in scheduling logic!",
+                tracker.req_id,
             )
             logger.error(
                 "Num tokens: %d, num blocks: %d, block size: %d",
@@ -1738,6 +1744,16 @@ class LMCacheConnectorV1Impl:
                 raise AttributeError(
                     f"Unable to determine preemption status for request {req_id}. "
                     f"This might be due to an unsupported vLLM version."
+                )
+            if preempted:
+                # num_computed_tokens should be reset to 0 during preemption
+                # and then set to the number of external tokens (from vllm
+                # scheduler's perspective)
+                # this assumption is crucial for the update() call of RequestTracker
+                assert request.num_computed_tokens == lmcache_cached_tokens, (
+                    f"Preempted request {req_id} has "
+                    f"num_computed_tokens {request.num_computed_tokens} "
+                    f"but lmcache_cached_tokens {lmcache_cached_tokens}"
                 )
 
             request_tracker.update(

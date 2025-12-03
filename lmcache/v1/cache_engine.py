@@ -284,10 +284,10 @@ class LMCacheEngine:
 
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
-        starts = []
-        ends = []
-        keys = []
-        memory_objs = []
+        starts: List[int] = []
+        ends: List[int] = []
+        keys: List[CacheEngineKey] = []
+        memory_objs: List[MemoryObj] = []
 
         offload_time = 0.0
         put_time = 0.0
@@ -322,7 +322,9 @@ class LMCacheEngine:
             if memory_obj is None:
                 logger.warning(
                     "Local cpu memory under pressure so"
-                    " choosing to not store the KV cache."
+                    " choosing to store only "
+                    f" {len(memory_objs)}"
+                    " total chunks of KV cache."
                 )
                 break
 
@@ -342,6 +344,8 @@ class LMCacheEngine:
         t = time.perf_counter()
 
         transfer_spec = kwargs.get("transfer_spec", None)
+        # TODO: we implicitly rely on batched_put to call ref_count_down
+        # this management should be done in a cleaner way
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
@@ -563,6 +567,10 @@ class LMCacheEngine:
             _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
             self.gpu_connector.batched_to_gpu(
                 list(memory_objs), list(starts), list(ends), **kwargs
+            )
+        else:
+            logger.warning(
+                "No chunks found while retrieving request %s", kwargs["req_id"]
             )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
@@ -1205,7 +1213,11 @@ class LMCacheEngine:
 
         tot_kv_size = 0
         chunks: List[ProcessedChunk] = []
-        future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
+        try:
+            future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
+        except Exception as e:
+            logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
+            return [], 0
 
         memory_objs = future.result()
         memory_objs = [mm for m in memory_objs for mm in m]
