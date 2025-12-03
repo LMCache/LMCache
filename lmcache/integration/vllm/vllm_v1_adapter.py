@@ -1473,6 +1473,8 @@ class LMCacheConnectorV1Impl:
         if (
             num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
         ) != -1:
+            # -1 means no result cached
+            # None or int means ongoing (async) or cached result
             logger.debug(
                 f"Found {num_external_hit_tokens} hit tokens for request"
                 f" {req_id} in the lookup cache."
