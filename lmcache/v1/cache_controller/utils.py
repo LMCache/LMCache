@@ -89,12 +89,12 @@ class InstanceNode:
 class RegistryTree:
     """
     Central registry managing the tree structure of instances and workers.
-    Root structure: ip -> InstanceNode -> WorkerNode
+    Root structure: ip -> instance_id -> InstanceNode -> WorkerNode
     """
 
     def __init__(self):
-        # Root level: ip -> InstanceNode
-        self.instances: dict[str, InstanceNode] = {}
+        # Root level: ip -> instance_id -> InstanceNode
+        self.instances: dict[str, dict[str, InstanceNode]] = {}
         # Quick lookup: instance_id -> InstanceNode
         self.instance_id_index: dict[str, InstanceNode] = {}
 
@@ -111,17 +111,14 @@ class RegistryTree:
         """Register a new worker, creating instance if needed."""
         # Get or create instance
         if ip not in self.instances:
+            self.instances[ip] = {}
+
+        if instance_id not in self.instances[ip]:
             instance_node = InstanceNode(instance_id=instance_id, ip=ip)
-            self.instances[ip] = instance_node
+            self.instances[ip][instance_id] = instance_node
             self.instance_id_index[instance_id] = instance_node
         else:
-            instance_node = self.instances[ip]
-            if instance_node.instance_id != instance_id:
-                raise ValueError(
-                    f"IP {ip} is already registered with instance "
-                    f"'{instance_node.instance_id}', but a new registration "
-                    f"arrived for instance '{instance_id}'."
-                )
+            instance_node = self.instances[ip][instance_id]
 
         # Create and add worker
         worker_node = WorkerNode(
@@ -148,7 +145,12 @@ class RegistryTree:
 
         # Clean up empty instance
         if not instance_node.has_workers():
-            self.instances.pop(instance_node.ip, None)
+            ip = instance_node.ip
+            if ip in self.instances:
+                self.instances[ip].pop(instance_id, None)
+                # Clean up empty ip entry
+                if not self.instances[ip]:
+                    del self.instances[ip]
             self.instance_id_index.pop(instance_id, None)
 
         return worker_node
@@ -165,8 +167,18 @@ class RegistryTree:
         return self.instance_id_index.get(instance_id)
 
     def get_instance_by_ip(self, ip: str) -> Optional[InstanceNode]:
-        """Get an instance by IP address."""
-        return self.instances.get(ip)
+        """Get an instance by IP address. Returns first instance if multiple exist."""
+        ip_instances = self.instances.get(ip)
+        if ip_instances:
+            return next(iter(ip_instances.values()), None)
+        return None
+
+    def get_instances_by_ip(self, ip: str) -> list[InstanceNode]:
+        """Get all instances by IP address."""
+        ip_instances = self.instances.get(ip)
+        if ip_instances:
+            return list(ip_instances.values())
+        return []
 
     def get_worker_ids(self, instance_id: str) -> list[int]:
         """Get sorted list of worker IDs for an instance."""
@@ -178,8 +190,9 @@ class RegistryTree:
     def get_all_worker_infos(self) -> list[WorkerInfo]:
         """Get WorkerInfo for all workers across all instances."""
         result = []
-        for instance_node in self.instances.values():
-            result.extend(instance_node.get_all_worker_infos())
+        for ip_instances in self.instances.values():
+            for instance_node in ip_instances.values():
+                result.extend(instance_node.get_all_worker_infos())
         return result
 
     def update_heartbeat(
