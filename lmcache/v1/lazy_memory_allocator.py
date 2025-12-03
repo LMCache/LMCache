@@ -30,7 +30,10 @@ if TYPE_CHECKING:
 
 if torch.cuda.is_available():
     # First Party
-    import lmcache.c_ops as lmc_ops
+    try:
+        import lmcache.c_ops as lmc_ops
+    except:
+        lmc_ops = None
 else:
     # First Party
     import lmcache.non_cuda_equivalents as lmc_ops
@@ -422,10 +425,10 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
             self.async_expander.stop()
 
         if not self._unregistered:
-            if torch.cuda.is_available():
+            if lmc_ops and torch.cuda.is_available():
                 torch.cuda.synchronize()
 
-            if hasattr(self, "composite_buffer"):
+            if lmc_ops and hasattr(self, "composite_buffer"):
                 for segment in self.composite_buffer.segments:
                     ptr = segment.data_ptr()
                     if self.numa_mapping:
