@@ -48,12 +48,16 @@ def create_app(
     controller_urls: dict[str, str],
     health_check_interval: int,
     lmcache_worker_timeout: int,
+    enable_reverse_index: bool,
 ) -> FastAPI:
     """
     Create a FastAPI application with endpoints for LMCache operations.
     """
     lmcache_controller_manager = LMCacheControllerManager(
-        controller_urls, health_check_interval, lmcache_worker_timeout
+        controller_urls,
+        health_check_interval,
+        lmcache_worker_timeout,
+        enable_reverse_index,
     )
 
     @asynccontextmanager
@@ -372,6 +376,12 @@ def main():
         default=300,
         help="The lmcache worker timeout in seconds.",
     )
+    parser.add_argument(
+        "--enable-reverse-index",
+        type=bool,
+        default=False,
+        help="Enable reverse index in KVController.",
+    )
 
     args = parser.parse_args()
 
@@ -391,7 +401,10 @@ def main():
                 "reply": None,
             }
         app = create_app(
-            controller_urls, args.health_check_interval, args.lmcache_worker_timeout
+            controller_urls,
+            args.health_check_interval,
+            args.lmcache_worker_timeout,
+            args.enable_reverse_index,
         )
 
         logger.info(f"Starting LMCache controller at {args.host}:{args.port}")

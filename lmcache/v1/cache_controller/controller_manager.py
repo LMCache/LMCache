@@ -12,7 +12,11 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.controllers import KVController, RegistrationController
+from lmcache.v1.cache_controller.controllers import (
+    KVController,
+    RegistrationController,
+    ReverseIndexKVController,
+)
 from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
 from lmcache.v1.cache_controller.observability import (
     PrometheusLogger,
@@ -66,6 +70,7 @@ class LMCacheControllerManager:
         controller_urls: dict[str, str],
         health_check_interval: int,
         lmcache_worker_timeout: int,
+        enable_reverse_index: bool,
     ):
         # Initialize stats logger
         prometheus_labels = {
@@ -103,7 +108,9 @@ class LMCacheControllerManager:
                 role=zmq.REP,  # type: ignore[attr-defined]
                 bind_or_connect="bind",
             )
-        self.kv_controller = KVController()
+        self.kv_controller: KVController = (
+            ReverseIndexKVController() if enable_reverse_index else KVController()
+        )
         self.reg_controller = RegistrationController()
 
         # Cluster executor
