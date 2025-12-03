@@ -12,7 +12,6 @@ import zmq
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import create_lmcache_metadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -51,7 +50,6 @@ class LMCacheLookupClient(LookupClientInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ):
-        metadata, _ = create_lmcache_metadata(vllm_config)
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
