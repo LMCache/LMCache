@@ -21,19 +21,34 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-app = FastAPI()
 
-# Automatically register common, vllm, and controller APIs
-registry = APIRegistry(app)
-registry.register_all_apis(categories=["common", "vllm", "controller"])
+def create_app() -> FastAPI:
+    """Create a new FastAPI app instance with all routes registered.
+    
+    Each InternalAPIServer needs its own app instance to avoid
+    sharing state between worker and scheduler processes.
+    """
+    app = FastAPI()
+    registry = APIRegistry(app)
+    registry.register_all_apis(categories=["common", "vllm", "controller"])
+    return app
 
 
 class InternalAPIServer:
     def __init__(self, lmcache_adapter: "LMCacheConnectorV1Impl"):
         config = lmcache_adapter.config
         lmcache_engine = lmcache_adapter.lmcache_engine
-        # 0 for scheduler, 1 for worker 0, 2 for worker 1, ...
-        port_offset = 0 if not lmcache_engine else 1 + lmcache_engine.metadata.worker_id
+        # Use role to determine port offset, not engine existence
+        # (scheduler may reuse worker's engine when enable_scheduler_bypass_lookup=True)
+        role = getattr(lmcache_adapter, "role", None)
+        if role == "scheduler":
+            port_offset = 0
+        elif lmcache_engine:
+            # Worker: 1 for worker 0, 2 for worker 1, ...
+            port_offset = 1 + lmcache_engine.metadata.worker_id
+        else:
+            # Fallback: 0 for scheduler, 1 for worker 0
+            port_offset = 0
         self.port = config.internal_api_server_port_start + port_offset
         self.socket_path_prefix = config.internal_api_server_socket_path_prefix
         self.socket_path = (
@@ -56,8 +71,12 @@ class InternalAPIServer:
             self.enable = False
             return
 
+        # Create a new app instance for this server (don't share with other servers)
+        self.app = create_app()
+        self.app.state.lmcache_adapter = lmcache_adapter
+
         uvicorn_config = {
-            "app": app,
+            "app": self.app,
             "host": config.internal_api_server_host,
             "loop": "uvloop",
             "http": "httptools",
@@ -84,7 +103,6 @@ class InternalAPIServer:
             uvicorn_config["port"] = self.port
 
         self.server = uvicorn.Server(uvicorn.Config(**uvicorn_config))
-        app.state.lmcache_adapter = lmcache_adapter
 
     async def run(self):
         logger.info(f"Running LMCache internal API server on {self.server_log_info}")

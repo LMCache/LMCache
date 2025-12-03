@@ -596,13 +596,17 @@ def _init_lmcache_engine(
         tpg.broadcast,
         tpg.broadcast_object,
     )
+    
     if role == "scheduler" and lmcache_config.enable_scheduler_bypass_lookup:
-        assert engine.save_only_first_rank or lmcache_config.get_extra_config_value(
+        # NOTE: Relaxed assertion to allow scheduler-side engine access for export/import
+        # Original assertion required MLA config, but we need this for general KV cache access
+        if not (engine.save_only_first_rank or lmcache_config.get_extra_config_value(
             "remote_enable_mla_worker_id_as0", metadata.use_mla
-        ), (
-            "enable_scheduler_bypass_lookup is only supported with "
-            "save_only_first_rank or remote_enable_mla_worker_id_as0"
-        )
+        )):
+            logger.warning(
+                "enable_scheduler_bypass_lookup without save_only_first_rank or "
+                "remote_enable_mla_worker_id_as0 - KV cache may be incomplete for TP>1"
+            )
     return engine
 
 
@@ -652,6 +656,8 @@ class LMCacheConnectorV1Impl:
                         )
 
         self.config = config
+        # Store role string for InternalAPIServer port calculation
+        self.role = "scheduler" if role == KVConnectorRole.SCHEDULER else "worker"
 
         self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[
