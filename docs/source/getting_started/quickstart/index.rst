@@ -42,6 +42,18 @@ This architecture is particularly valuable in large-scale deployment scenarios w
 
 See :ref:`disaggregated_prefill` for more details.
 
+Standalone Starter
+------------------
+
+The LMCache Standalone Starter allows you to run LMCacheEngine as a standalone service without vLLM or GPU dependencies. This is particularly useful for:
+
+- Testing and development environments
+- CPU-only deployments
+- Distributed cache scenarios
+- Integration with custom applications
+
+See :ref:`standalone_starter` for more details.
+
 Detailed Examples
 -----------------
 
@@ -52,3 +64,4 @@ Detailed Examples
    share_kv_cache
    disaggregated_prefill 
    multimodality
+   standalone_starter

@@ -11,6 +11,14 @@ This example demonstrates how to run LMCache with disaggregated prefill using NI
 
 ### Usage
 
+Optionally set the visible devices for prefill and decoder instances through environment variable.
+By default they are set to 0 and 1 respectively.
+
+```bash
+export PREFILLER_DEVICE_ID="1"
+export DECODER_DEVICE_ID="0"
+```
+
 Run
 ```bash
 bash disagg_example_1p1d.sh
@@ -68,7 +76,7 @@ P99 ITL (ms):                            11.43
 #### Server Scripts
 - `disagg_vllm_launcher.sh` - Launches individual vLLM servers for prefill/decode, and also launches the proxy server.
 - `disagg_proxy_server.py` - FastAPI proxy server that coordinates between prefiller and decoder
-- `disagg_example_xpyd.sh` - Main script to run the example
+- `disagg_example_1p1d.sh` - Main script to run the example
 
 #### Configuration
 - `configs/lmcache-prefiller-config.yaml` - Configuration for prefiller server

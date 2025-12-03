@@ -96,6 +96,14 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         """
         self._lmcache_engine.wait_for_save()
 
+    def shutdown(self):
+        """
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return self._lmcache_engine.shutdown()
+
     # ==============================
     # Scheduler-side methods
     # ==============================

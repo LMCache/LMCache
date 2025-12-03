@@ -2,12 +2,14 @@
 # Standard
 from typing import List, Optional
 import abc
+import asyncio
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -66,11 +68,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         self.meta_fmt = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
-        dtype_size = torch.tensor([], dtype=metadata.kv_dtype).element_size()
-        num_elements = 1
-        for dim in metadata.kv_shape:
-            num_elements *= dim
-        self.full_chunk_size = dtype_size * num_elements
+        self.full_chunk_size = get_size_bytes(self.meta_shape, self.meta_dtype)
         assert self.full_chunk_size is not None
         assert self.full_chunk_size % metadata.kv_shape[2] == 0
         self.single_token_size = self.full_chunk_size // metadata.kv_shape[2]
@@ -92,7 +90,8 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         assert self.full_chunk_size is not None
         assert self.single_token_size is not None
         if (
-            bytes_read % self.single_token_size != 0
+            bytes_read == 0
+            or bytes_read % self.single_token_size != 0
             or bytes_read > self.full_chunk_size
         ):
             raise ValueError(
@@ -255,10 +254,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     def support_batched_async_contains(self) -> bool:
-        """
-        Connectors that support batched async contains should override this method.
-        """
-        return False
+        return True
 
     async def batched_async_contains(
         self,
@@ -266,26 +262,68 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
+        """Check how many keys exist in file system in batch
+
+        Args:
+            lookup_id: Identifier for this lookup operation
+            keys: List of keys to check
+            pin: Whether to pin the keys (not used in FS connector)
+
+        Returns:
+            Number of consecutive keys that exist, starting from the first key
         """
-        Check if the remote server contains the keys
-        """
-        raise NotImplementedError
+        tasks = [self.exists(key) for key in keys]
+        results = await asyncio.gather(*tasks)
+        if False in results:
+            return results.index(False)
+        return len(results)
 
     def support_batched_get_non_blocking(self) -> bool:
-        """
-        Connectors that support batched get non-blocking should override this method.
-        """
-        return False
+        return True
 
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
+        """Batched get the memory_objs of the corresponding keys (non-blocking)
+
+        This method returns only the consecutive prefix of successfully retrieved
+        memory objects. Once a key is not found (None) or an exception occurs,
+        all subsequent memory objects (even if successfully retrieved) will be
+        released to avoid memory leaks, and only the prefix before the first
+        failure will be returned.
+
+        Args:
+            lookup_id: Identifier for this lookup operation
+            keys: List of keys to get
+
+        Returns:
+            List of consecutive memory objects from the beginning until the first
+            failure (None or Exception). Empty list if the first key fails.
         """
-        Batched get the memory_objs of the corresponding keys
-        """
-        raise NotImplementedError
+        # Use asyncio.gather to fetch all keys concurrently
+        results = await asyncio.gather(
+            *(self.get(key) for key in keys), return_exceptions=True
+        )
+
+        # Only return consecutive prefix of valid memory objects
+        memory_objs = []
+        found_failure = False
+        for result in results:
+            if found_failure:
+                # Release subsequent memory objects to avoid memory leak
+                if isinstance(result, MemoryObj):
+                    result.ref_count_down()
+            elif isinstance(result, MemoryObj):
+                memory_objs.append(result)
+            else:
+                # First failure encountered (None or Exception)
+                if isinstance(result, Exception):
+                    logger.warning(f"Exception during batched get: {result}")
+                found_failure = True
+
+        return memory_objs
 
     def remove_sync(self, key: CacheEngineKey) -> bool:
         """
@@ -297,18 +335,13 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def batched_contains(
-        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
-    ) -> List[bool]:
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
         """
         Batched contains.
 
         :param List[CacheEngineKey] keys: The keys to check.
 
-        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
-        all subsequent results will return False directly.
-
-        :return: Return a bool list, True if the key exists, False otherwise.
+        :return: Return hit chunks by prefix match.
         """
         raise NotImplementedError
 

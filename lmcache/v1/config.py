@@ -225,6 +225,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
+    "lmcache_worker_ids": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+    },
     # LMCache Worker heartbeat
     # the lmcache_worker_heartbeat_delay_time means that delay a period of time
     # before starting, ensures that the heartbeat starts working only after the
@@ -401,6 +406,91 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
+    "script_allowed_imports": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
+    },
+    # Lazy memory allocator configurations
+    "enable_lazy_memory_allocator": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable lazy memory allocator to reduce initial memory footprint. "
+            "Memory is allocated on-demand and expanded automatically when needed."
+        ),
+    },
+    "lazy_memory_initial_ratio": {
+        "type": float,
+        "default": 0.2,
+        "env_converter": float,
+        "description": (
+            "Initial memory allocation ratio (0.0-1.0). "
+            "Determines the percentage of target memory size to allocate at startup. "
+            "Default is 0.2 (20%)."
+        ),
+    },
+    "lazy_memory_expand_trigger_ratio": {
+        "type": float,
+        "default": 0.5,
+        "env_converter": float,
+        "description": (
+            "Memory usage ratio (0.0-1.0) that triggers automatic expansion. "
+            "When memory usage exceeds this threshold, expansion is triggered. "
+            "Default is 0.5 (50%)."
+        ),
+    },
+    "lazy_memory_step_ratio": {
+        "type": float,
+        "default": 0.1,
+        "env_converter": float,
+        "description": (
+            "Memory expansion step ratio (0.0-1.0). "
+            "Determines the percentage of target memory size to add in each expansion. "
+            "Default is 0.1 (10%)."
+        ),
+    },
+    "lazy_memory_safe_size": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+        "description": (
+            "Safe threshold size in GB. Lazy allocator is only enabled when "
+            "max_local_cpu_size exceeds this value. Default is 0.0 GB (always enabled)."
+        ),
+    },
+    # Chunk statistics configurations
+    "enable_chunk_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Enable chunk statistics tracking.",
+    },
+    "chunk_statistics_auto_start_statistics": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Auto-start statistics on init.",
+    },
+    "chunk_statistics_auto_exit_timeout_hours": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+        "description": "Auto-stop timeout in hours (0=disabled).",
+    },
+    "chunk_statistics_auto_exit_target_unique_chunks": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": "Auto-stop at target unique chunks.",
+    },
+    "chunk_statistics_strategy": {
+        "type": str,
+        "default": "memory_bloom_filter",
+        "env_converter": str,
+        "description": "Recording strategy: memory_bloom_filter or file_hash.",
+    },
 }
 
 
@@ -447,7 +537,6 @@ def _create_config_class():
         # Generate random instance ID if not set
         if not self.lmcache_instance_id:
             self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
-        self.validate()
 
     cls = make_dataclass(
         "LMCacheEngineConfig",
@@ -458,6 +547,7 @@ def _create_config_class():
             "log_config": _log_config,
             "to_original_config": _to_original_config,
             "get_extra_config_value": _get_extra_config_value,
+            "get_lmcache_worker_ids": _get_lmcache_worker_ids,
             "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
             "from_defaults": classmethod(_from_defaults),
             "from_legacy": classmethod(_from_legacy),
@@ -480,13 +570,21 @@ def _validate_config(self):
     """Validate configuration"""
 
     # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading or self.use_layerwise:
+    if self.enable_async_loading:
         logger.warning(
             "Automatically setting save_unfull_chunk=False because "
             "enable_async_loading=True or use_layerwise=True to prevent "
             "CPU memory fragmentation"
         )
         self.save_unfull_chunk = False
+
+    if self.enable_blending:
+        if not self.save_unfull_chunk:
+            logger.warning(
+                "Automatically setting save_unfull_chunk=True because "
+                "enable_blending=True"
+            )
+            self.save_unfull_chunk = True
 
     if self.enable_p2p:
         assert self.enable_controller
@@ -559,13 +657,27 @@ def _get_extra_config_value(self, key, default_value=None):
         return default_value
 
 
+def _get_lmcache_worker_ids(self, use_mla, world_size):
+    if not self.lmcache_worker_ids:
+        # if mla is not enabled, return all worker ids, which means start
+        # lmcache worker on all ranks as default;
+        # if mla is enabled, return [0], which means start lmcache
+        # worker on worker 0 as default.
+        return [0] if use_mla else list(range(world_size))
+
+    # check the input
+    for worker_id in self.lmcache_worker_ids:
+        assert -1 < worker_id < world_size
+    return self.lmcache_worker_ids
+
+
 def _get_lookup_server_worker_ids(self, use_mla, world_size):
-    if self.lookup_server_worker_ids is None:
-        # if mla is not enabled, return [], which means start
+    if not self.lookup_server_worker_ids:
+        # if mla is not enabled, return all worker ids, which means start
         # lookup server on all worker as default;
         # if mla is enabled, return [0], which means start lookup
         # server on worker 0 as default.
-        return [0] if use_mla else []
+        return [0] if use_mla else list(range(world_size))
 
     # check the input
     for worker_id in self.lookup_server_worker_ids:
@@ -644,6 +756,7 @@ def _from_legacy(cls, **kwargs):
             config_values[name] = config["default"]
 
     instance = cls(**config_values)
+    instance.validate()
     return instance
 
 
@@ -714,16 +827,7 @@ def _update_config_from_env(self):
                     f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
                 )
                 # Keep existing value if conversion fails
-
-    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading or self.use_layerwise:
-        logger.warning(
-            "Automatically setting save_unfull_chunk=False because "
-            "enable_async_loading=True or use_layerwise=True to prevent "
-            "CPU memory fragmentation"
-        )
-        self.save_unfull_chunk = False
-
+    self.validate()
     return self
 
 

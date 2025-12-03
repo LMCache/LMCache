@@ -74,6 +74,7 @@ class DiskCacheMetadata:
     size: int  # in bytes
     shape: Optional[torch.Size] = None
     dtype: Optional[torch.dtype] = None
+    cached_positions: Optional[torch.Tensor] = None
     fmt: Optional[MemoryFormat] = None
     pin_count: int = 0
 
@@ -297,6 +298,18 @@ class CacheEngineKey:
             request_configs=request_configs,
         )
 
+    def with_new_worker_id(self, new_worker_id: int) -> "CacheEngineKey":
+        # Reconstruct the cache engine key with new worker id
+        return CacheEngineKey(
+            self.fmt,
+            self.model_name,
+            self.world_size,
+            new_worker_id,
+            self.chunk_hash,
+            self.dtype,
+            self.request_configs,
+        )
+
 
 @dataclass(slots=True)
 class LayerCacheEngineKey(CacheEngineKey):
@@ -319,7 +332,7 @@ class LayerCacheEngineKey(CacheEngineKey):
         )
 
     def __eq__(self, other):
-        if super().__eq__(other):
+        if super(LayerCacheEngineKey, self).__eq__(other):
             return self.layer_id == other.layer_id
 
         return False

@@ -12,6 +12,8 @@ import zmq
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.message import (
+    BatchedP2PLookupMsg,
+    BatchedP2PLookupRetMsg,
     ClearWorkerMsg,
     ClearWorkerRetMsg,
     CompressWorkerMsg,
@@ -35,10 +37,13 @@ from lmcache.v1.cache_controller.message import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.rpc_utils import (
+    DEFAULT_SOCKET_RECV_TIMEOUT_MS,
+    DEFAULT_SOCKET_SEND_TIMEOUT_MS,
     close_zmq_socket,
     get_ip,
     get_zmq_context,
     get_zmq_socket,
+    get_zmq_socket_with_timeout,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +77,14 @@ class LMCacheWorker:
 
         self.context = get_zmq_context()
 
+        # Load timeout configurations from extra_config (in milliseconds)
+        self.socket_recv_timeout_ms = config.get_extra_config_value(
+            "worker_socket_recv_timeout_ms", DEFAULT_SOCKET_RECV_TIMEOUT_MS
+        )
+        self.socket_send_timeout_ms = config.get_extra_config_value(
+            "worker_socket_send_timeout_ms", DEFAULT_SOCKET_SEND_TIMEOUT_MS
+        )
+
         assert config.controller_pull_url is not None
 
         controller_pull_url = config.controller_pull_url
@@ -84,24 +97,31 @@ class LMCacheWorker:
         )
 
         if config.controller_reply_url is not None:
-            controller_rep_url = config.controller_reply_url
-            self.req_socket = get_zmq_socket(
-                self.context,
-                controller_rep_url,
-                protocol="tcp",
-                role=zmq.REQ,  # type: ignore[attr-defined]
-                bind_or_connect="connect",
-            )
+            self.controller_rep_url = config.controller_reply_url
+            self._create_req_socket()
 
-        lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
+        lmcache_worker_ids = config.get_lmcache_worker_ids(
+            metadata.use_mla, metadata.world_size
+        )
+        if not lmcache_worker_ids:
+            # start lmcache worker on all ranks
+            assert len(config.lmcache_worker_ports) == metadata.world_size
+            lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
+        else:
+            # start lmcache worker on given worker ids
+            assert len(lmcache_worker_ids) == len(config.lmcache_worker_ports)
+            index = lmcache_worker_ids.index(self.worker_id)
+            lmcache_worker_port = config.lmcache_worker_ports[index]
 
         self.lmcache_worker_internal_url = f"*:{lmcache_worker_port}"
         self.lmcache_worker_ip = get_ip()
         self.lmcache_worker_port = lmcache_worker_port
 
-        self.p2p_host = config.p2p_host
-        self.p2p_init_port = config.p2p_init_ports[self.worker_id]
-        self.p2p_init_url = f"{self.p2p_host}:{self.p2p_init_port}"
+        self.p2p_init_url = None
+        if config.enable_p2p:
+            self.p2p_host = config.p2p_host
+            self.p2p_init_port = config.p2p_init_ports[self.worker_id]
+            self.p2p_init_url = f"{self.p2p_host}:{self.p2p_init_port}"
 
         self.reply_socket = get_zmq_socket(
             self.context,
@@ -137,7 +157,7 @@ class LMCacheWorker:
                 worker_id=self.worker_id,
                 ip=self.lmcache_worker_ip,
                 port=self.lmcache_worker_port,
-                distributed_url=self.p2p_init_url,
+                peer_init_url=self.p2p_init_url,
             )
         )
 
@@ -162,11 +182,46 @@ class LMCacheWorker:
         """
         Send a message to the controller and wait for the response.
         """
+        try:
+            self.req_socket.send(msgspec.msgpack.encode(msg))
+            serialized_ret_msg = await self.req_socket.recv()
+            ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
+            return ret_msg
+        except zmq.Again as e:
+            logger.error("Timeout occurred, recreating socket. Error: %s", e)
+            self._recreate_req_socket()
+            return self._create_ret_msg(msg)
+        except zmq.ZMQError as e:
+            logger.error("ZMQ error occurred, recreating socket. Error: %s", e)
+            self._recreate_req_socket()
+            return self._create_ret_msg(msg)
+        except Exception as e:
+            logger.error("Error happens in lmcache worker req_socket. Error: %s", e)
+            return self._create_ret_msg(msg)
 
-        self.req_socket.send(msgspec.msgpack.encode(msg))
-        serialized_ret_msg = await self.req_socket.recv()
-        ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
-        return ret_msg
+    def _create_req_socket(self):
+        self.req_socket = get_zmq_socket_with_timeout(
+            self.context,
+            self.controller_rep_url,
+            "tcp",
+            zmq.REQ,  # type: ignore[attr-defined]
+            "connect",
+            self.socket_recv_timeout_ms,
+            self.socket_send_timeout_ms,
+        )
+
+    def _recreate_req_socket(self):
+        try:
+            self.req_socket.close(linger=0)
+        except Exception as e:
+            logger.error("Error closing req socket: %s", e)
+        self._create_req_socket()
+
+    def _create_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+        if isinstance(msg, BatchedP2PLookupMsg):
+            return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
+        else:
+            raise ValueError(f"Unknown message type: {type(msg)}")
 
     def put_msg(self, msg: WorkerMsg):
         """
@@ -217,7 +272,7 @@ class LMCacheWorker:
                         worker_id=self.worker_id,
                         ip=self.lmcache_worker_ip,
                         port=self.lmcache_worker_port,
-                        distributed_url=self.p2p_init_url,
+                        peer_init_url=self.p2p_init_url,
                     )
                 )
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
