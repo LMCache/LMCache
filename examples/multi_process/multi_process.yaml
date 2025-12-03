@@ -50,7 +50,7 @@ spec:
         - name: vllm
           image: lmcache/vllm-openai:latest-nightly
           args:
-            - Qwen/Qwen2.5-1.5B
+            - Qwen/Qwen3-14B
             - --host
             - "0.0.0.0"
             - --port

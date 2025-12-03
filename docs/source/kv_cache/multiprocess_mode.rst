@@ -168,7 +168,7 @@ Prerequisites
     kubectl apply -f examples/multi_process/multi_process.yaml
 
 .. note::
-    The default model is ``Qwen/Qwen2.5-1.5B``, which does not require a Hugging Face token. If you want to use a gated model (like Llama), you need to:
+    The default model is ``Qwen/Qwen3-14B``, which does not require a Hugging Face token. If you want to use a gated model (like Llama), you need to:
     
     1. Add a Secret with your Hugging Face token:
     
@@ -228,9 +228,9 @@ Send a test request with repeated prompts:
     curl -X POST http://localhost:8000/v1/completions \
       -H "Content-Type: application/json" \
       -d "{
-        \"model\": \"Qwen/Qwen2.5-1.5B\",
+        \"model\": \"Qwen/Qwen3-14B\",
         \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
-        \"max_tokens\": 100
+        \"max_tokens\": 10
       }"
 
 On the first request, check LMCache server logs for:
