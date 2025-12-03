@@ -319,7 +319,11 @@ class P2PBackend(StorageBackendInterface):
         )
 
         while self.running.is_set():
-            msg_bytes = await self.async_peer_socket.recv()
+            try:
+                msg_bytes = await self.async_peer_socket.recv()
+            except zmq.Again:
+                # Timeout occurred, check if we should stop
+                continue
             msg = msgspec.msgpack.decode(msg_bytes, type=P2PMsg)
 
             num_tokens = len(msg.mem_indexes) * self.chunk_size

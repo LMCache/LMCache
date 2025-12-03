@@ -67,9 +67,7 @@ def get_zmq_socket_with_timeout(
         role,
         bind_or_connect,
     )
-    # Only set RCVTIMEO for client role connect sockets
-    if bind_or_connect == "connect":
-        socket.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)
+    socket.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)
     socket.setsockopt(zmq.SNDTIMEO, send_timeout_ms)
     return socket
 

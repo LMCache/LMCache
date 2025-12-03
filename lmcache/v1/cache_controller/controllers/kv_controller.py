@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import threading
 from collections import defaultdict
 from typing import Optional
+import threading
 
 # First Party
 from lmcache.logging import init_logger
