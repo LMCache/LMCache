@@ -135,6 +135,23 @@ class PeerInfo:
     lookup_lock: asyncio.Lock
     lookup_socket: zmq.asyncio.Socket
 
+    def update_peer_lookup_url(self, new_peer_lookup_url: str):
+        if self.peer_lookup_url != new_peer_lookup_url:
+            logger.info(
+                "Target peer %s lookup url changed from %s to %s",
+                self.peer_init_url,
+                self.peer_lookup_url,
+                new_peer_lookup_url,
+            )
+            self.peer_lookup_url = new_peer_lookup_url
+
+    def update_lookup_socket(self, new_lookup_socket: zmq.asyncio.Socket):
+        try:
+            self.lookup_socket.close(linger=0)
+        except Exception as e:
+            logger.error("Failed to close peer %s lookup socket", self.peer_init_url, e)
+        self.lookup_socket = new_lookup_socket
+
 
 # TODO(Jiayi): handle asymmetric TP.
 class P2PBackend(StorageBackendInterface):
@@ -484,21 +501,8 @@ class P2PBackend(StorageBackendInterface):
             self.socket_send_timeout_ms,
         )
         if peer_info is not None:
-            # update peer_lookup_url if it's different
-            if peer_info.peer_lookup_url != peer_lookup_url:
-                logger.info(
-                    "Target peer %s lookup url changed from %s to %s",
-                    target_peer_init_url,
-                    peer_info.peer_lookup_url,
-                    peer_lookup_url,
-                )
-                peer_info.peer_lookup_url = peer_lookup_url
-            # update lookup socket
-            try:
-                peer_info.lookup_socket.close(linger=0)
-            except Exception as e:
-                logger.error("Error closing old lookup socket", e)
-            peer_info.lookup_socket = lookup_socket
+            peer_info.update_peer_lookup_url(peer_lookup_url)
+            peer_info.update_lookup_socket(lookup_socket)
         else:
             self.target_peer_info_mapping[target_peer_init_url] = PeerInfo(
                 peer_init_url=target_peer_init_url,
