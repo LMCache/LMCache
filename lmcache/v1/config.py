@@ -114,6 +114,7 @@ _CONFIG_ALIASES = {
     "controller_url": "controller_pull_url",
     "lmcache_worker_port": "lmcache_worker_ports",
     "plugin_locations": "runtime_plugin_locations",
+    "external_backends": "storage_plugins",
 }
 
 _DEPRECATED_CONFIGS = {
@@ -121,6 +122,9 @@ _DEPRECATED_CONFIGS = {
     "nixl_peer_port": "nixl_peer_port is deprecated, use nixl_receiver_port instead",
     "plugin_locations": (
         "plugin_locations is deprecated, use runtime_plugin_locations instead",
+    ),
+    "external_backends": (
+        "external_backends is deprecated, use storage_plugins instead",
     ),
 }
 

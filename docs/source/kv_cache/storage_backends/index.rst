@@ -10,6 +10,7 @@ Supported Backends
    :maxdepth: 1
 
    cpu_ram
+   custom_backend
    eic
    gds
    infinistore

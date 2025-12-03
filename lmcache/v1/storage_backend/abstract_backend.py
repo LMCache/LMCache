@@ -408,3 +408,7 @@ class StoragePluginInterface(StorageBackendInterface):
         self.metadata = metadata
         self.local_cpu_backend = local_cpu_backend
         self.loop = loop
+
+
+# TODO: Alias for backwards compatibility - remove when applicable
+ConfigurableStorageBackendInterface = StoragePluginInterface
