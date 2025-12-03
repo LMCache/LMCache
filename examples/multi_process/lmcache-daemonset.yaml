@@ -1,0 +1,45 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lmcache-server
+  namespace: multi-process
+spec:
+  selector:
+    matchLabels:
+      app: lmcache-server
+  template:
+    metadata:
+      labels:
+        app: lmcache-server
+    spec:
+      hostNetwork: true
+      containers:
+        - name: lmcache-server
+          image: lmcache/standalone:nightly
+          command:
+            - /opt/venv/bin/python3
+            - -m
+            - lmcache.v1.multiprocess.server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "6555"
+            - --cpu-buffer-size
+            - "60"
+            - --max-workers
+            - "4"
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              memory: "10Gi"
+              cpu: "4"
+            limits:
+              memory: "120Gi"
+              cpu: "8"
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"

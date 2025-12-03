@@ -143,10 +143,10 @@ Once both containers are running, you can send requests to vLLM the same way as 
 Kubernetes Deployment
 ---------------------
 
-You can deploy LMCache and vLLM on Kubernetes using a sidecar container pattern. This approach is suitable for production deployments where you want to leverage Kubernetes orchestration.
+You can deploy LMCache and vLLM on Kubernetes using a DaemonSet pattern. This approach runs one LMCache server per node that can be shared by multiple vLLM pods on the same node, making it suitable for production deployments.
 
 .. note::
-    The Kubernetes deployment requires special configuration due to GPU allocation differences from Docker. Both containers must see all GPUs to avoid device ID mismatches in IPC-based GPU memory operations.
+    The DaemonSet deployment uses ``privileged: true`` to allow LMCache to access GPUs without requesting them as Kubernetes resources. This ensures GPUs remain available for vLLM pods while LMCache can still perform GPU operations.
 
 Prerequisites
 ~~~~~~~~~~~~~
@@ -161,11 +161,21 @@ Prerequisites
 
     kubectl create namespace multi-process
 
-**Step 2: Deploy the Application**
+**Step 2: Deploy LMCache DaemonSet**
+
+First, deploy the LMCache server as a DaemonSet (one instance per node):
 
 .. code-block:: bash
 
-    kubectl apply -f examples/multi_process/multi_process.yaml
+    kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
+
+**Step 3: Deploy vLLM Application**
+
+Deploy one or more vLLM instances that will connect to the LMCache DaemonSet:
+
+.. code-block:: bash
+
+    kubectl apply -f examples/multi_process/vllm-deployment.yaml
 
 .. note::
     The default model is ``Qwen/Qwen3-14B``, which does not require a Hugging Face token. If you want to use a gated model (like Llama), you need to:
@@ -191,35 +201,50 @@ Prerequisites
     
     3. Update the model name in the args section to your desired gated model.
 
-**Step 3: Monitor Deployment**
+.. note::
+    Multiple vLLM pods on the same node will automatically connect to the same LMCache DaemonSet instance via ``status.hostIP``.
 
-Check pod status:
+**Step 4: Monitor Deployment**
 
-.. code-block:: bash
-
-    kubectl get pods -n multi-process -w
-
-Check LMCache server logs:
+Check DaemonSet status:
 
 .. code-block:: bash
 
-    kubectl logs -n multi-process -l app=multi-process-deployment -c lmcache-server -f
+    kubectl get daemonset -n multi-process
+    kubectl get pods -n multi-process -l app=lmcache-server
+
+Check vLLM deployment status:
+
+.. code-block:: bash
+
+    kubectl get pods -n multi-process -l app=vllm-deployment -w
 
 Check vLLM server logs:
 
 .. code-block:: bash
 
-    kubectl logs -n multi-process -l app=multi-process-deployment -c vllm -f
+    kubectl logs -n multi-process -l app=vllm-deployment -f
 
-Wait for the pod to be ready (this may take several minutes for model loading).
+Check LMCache server logs (on the same node as a vLLM pod):
 
-**Step 4: Send Test Requests**
+.. code-block:: bash
+
+    # Get the node where a vLLM pod is running
+    VLLM_NODE=$(kubectl get pod -n multi-process -l app=vllm-deployment -o jsonpath='{.items[0].spec.nodeName}')
+    
+    # Get the LMCache pod on that node and view its logs
+    LMCACHE_POD=$(kubectl get pod -n multi-process -l app=lmcache-server --field-selector spec.nodeName=$VLLM_NODE -o jsonpath='{.items[0].metadata.name}')
+    kubectl logs -n multi-process $LMCACHE_POD -f
+
+Wait for the pods to be ready (this may take several minutes for model loading).
+
+**Step 5: Send Test Requests**
 
 Forward the port to your local machine:
 
 .. code-block:: bash
 
-    kubectl port-forward -n multi-process deployment/multi-process-deployment 8000:8000
+    kubectl port-forward -n multi-process deployment/vllm-deployment 8000:8000
 
 Send a test request with repeated prompts:
 
@@ -248,13 +273,22 @@ On subsequent identical requests, you should see:
 Kubernetes Configuration Notes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Kubernetes deployment differs from Docker in several important ways:
+The DaemonSet deployment differs from the sidecar pattern in several important ways:
 
-**GPU Allocation:**
+**DaemonSet Architecture:**
 
-- GPU resources are allocated at the pod level in Kubernetes, even when specified on a single container
-- All GPUs are automatically visible to all containers in the pod
-- Uses ``hostIPC: true`` for shared memory access required by IPC operations
+- One LMCache server runs per node (not per pod)
+- Multiple vLLM pods on the same node share the same LMCache instance
+- LMCache uses ``hostNetwork: true`` so vLLM pods can connect via node IP
+- vLLM pods use ``status.hostIP`` to discover the LMCache server on their node
+- Both LMCache and vLLM pods use ``hostIPC: true`` for shared memory IPC communication
+
+**GPU Access Without Resource Requests:**
+
+- LMCache DaemonSet uses ``privileged: true`` to access GPUs
+- GPUs are NOT requested in the DaemonSet resources section
+- This allows GPUs to remain exclusively allocated to vLLM pods
+- LMCache can still perform GPU operations for IPC-based memory transfers
 
 **Why LMCache Server Needs GPU Access:**
 
@@ -267,15 +301,19 @@ The LMCache server requires GPU access because it:
 
 The term "CPU offloading" refers to where KV cache is **stored** (CPU memory), not where the server runs.
 
-**Health Checks:**
+**Advantages of DaemonSet Pattern:**
 
-The LMCache server does not have health probes because it uses ZMQ sockets, which don't support standard TCP health checks. The vLLM container will fail to start if LMCache is not working properly.
+- Resource efficiency: One LMCache server per node instead of per pod
+- Better for multi-tenant scenarios with multiple vLLM deployments
+- Easier to manage and monitor centrally
+- Works with SGLang and other inference engines
 
 **Cleanup:**
 
 .. code-block:: bash
 
-    kubectl delete -f examples/multi_process/multi_process.yaml
+    kubectl delete -f examples/multi_process/vllm-deployment.yaml
+    kubectl delete -f examples/multi_process/lmcache-daemonset.yaml
     kubectl delete namespace multi-process
 
 Detailed Configuration
