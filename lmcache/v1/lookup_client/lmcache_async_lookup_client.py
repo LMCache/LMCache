@@ -168,9 +168,10 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self._cleanup_finished_aborted_lookups()
 
         with self.lock:
-            # -1 indicates not found; None indicates ongoing.
-            req_status = self.reqs_status.get(lookup_id, -1)
-            if req_status is None:
+            if (req_status := self.reqs_status.get(lookup_id, -1)) == -1:
+                self.reqs_status[lookup_id] = None
+                self.first_lookup_time[lookup_id] = time.time()
+            elif req_status is None:
                 time.sleep(self.lookup_backoff_time)
                 if (
                     time.time() - self.first_lookup_time[lookup_id]
@@ -187,12 +188,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.first_lookup_time.pop(lookup_id, None)
                     return 0
 
-                return None
-            elif req_status != -1:
-                return req_status
-            self.reqs_status[lookup_id] = None
-        self.first_lookup_time[lookup_id] = time.time()
-        return None
+            return req_status
 
     # TODO(Jiayi): Consider batching here
     def lookup(
@@ -202,7 +198,6 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
         hashes: list[int] = []
-
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False
