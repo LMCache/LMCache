@@ -568,10 +568,6 @@ class LMCacheEngine:
             self.gpu_connector.batched_to_gpu(
                 list(memory_objs), list(starts), list(ends), **kwargs
             )
-        else:
-            logger.warning(
-                "No chunks found while retrieving request %s", kwargs["req_id"]
-            )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
