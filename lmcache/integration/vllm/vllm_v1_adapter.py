@@ -1010,8 +1010,10 @@ class LMCacheConnectorV1Impl:
                 )
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
+                        "Request %s"
                         "The number of retrieved tokens is less than the "
-                        "expected number of tokens! This should not happen!"
+                        "expected number of tokens! This should not happen!",
+                        request.req_id,
                     )
                     logger.error(
                         "Num retrieved tokens: %d, num expected tokens: %d",

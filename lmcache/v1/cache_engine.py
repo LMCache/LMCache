@@ -1213,14 +1213,14 @@ class LMCacheEngine:
 
         tot_kv_size = 0
         chunks: List[ProcessedChunk] = []
+        future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
+
         try:
-            future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
+            memory_objs = future.result()
+            memory_objs = [mm for m in memory_objs for mm in m]
         except Exception as e:
             logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
             return [], 0
-
-        memory_objs = future.result()
-        memory_objs = [mm for m in memory_objs for mm in m]
 
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
