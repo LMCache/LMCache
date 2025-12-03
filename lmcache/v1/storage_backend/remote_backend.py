@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future, TimeoutError
-from typing import Any, List, Optional, Sequence, Set
+from typing import Any, Iterator, List, Optional, Sequence, Set
 import asyncio
 import threading
 import time
@@ -70,7 +70,8 @@ class RemoteBackend(StorageBackendInterface):
         logger.info(f"metadata={metadata}")
         logger.info(
             f"Connected to remote storage at {config.remote_url}, "
-            f"remote_mla_worker_id_as_0 mode: {self._mla_worker_id_as0_mode}"
+            f"remote_mla_worker_id_as_0 mode: {self._mla_worker_id_as0_mode}, "
+            f"batched_serialize: {config.batched_serialize}"
         )
 
         # TODO(Jiayi): If we want to have cache admission policies,
@@ -231,12 +232,20 @@ class RemoteBackend(StorageBackendInterface):
         with self.lock:
             self.put_tasks.difference_update(keys)
 
+
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
     ) -> None:
+        logger.info(f"batched_submit_put_task memory obj length: {len(memory_objs)}")
+
+        def batched(iterable: Sequence[Any], n: int) -> Iterator[List[Any]]:
+            """Split iterable into fixed-sized chunks of size n."""
+            for i in range(0, len(iterable), n):
+                yield list(iterable[i : i + n])
+
         if self.connection is None:
             logger.warning(
                 "Connection is None in batched_submit_put_task, returning None"
@@ -248,10 +257,26 @@ class RemoteBackend(StorageBackendInterface):
 
             compressed_memory_objs = []
 
-            for memory_obj in memory_objs:
-                memory_obj.ref_count_up()
-                compressed_memory_objs.append(self.serializer.serialize(memory_obj))
-                memory_obj.ref_count_down()
+            if self.config.batched_serialize:
+                chunk_size = self.config.batched_serialize_chunk_size
+                logger.info(
+                    f"Serializing {len(memory_objs)} memory objects "
+                    f"in chunks of {chunk_size}"
+                )
+                for chunk in batched(memory_objs, chunk_size):
+                    for memory_obj in chunk:
+                        memory_obj.ref_count_up()
+                    compressed_memory_objs.extend(
+                        self.serializer.serialize_batch(chunk)
+                    )
+                    for memory_obj in chunk:
+                        memory_obj.ref_count_down()
+            else:
+                logger.info(f"Serializing {len(memory_objs)} memory objects")
+                for memory_obj in memory_objs:
+                    memory_obj.ref_count_up()
+                    compressed_memory_objs.append(self.serializer.serialize(memory_obj))
+                    memory_obj.ref_count_down()
 
             future = asyncio.run_coroutine_threadsafe(
                 self.connection.batched_put(keys, compressed_memory_objs),  # type: ignore

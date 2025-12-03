@@ -143,6 +143,17 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
     },
     "remote_serde": {"type": Optional[str], "default": "naive", "env_converter": str},
+    # Batched serialization flag
+    "batched_serialize": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
+    "batched_serialize_chunk_size": {
+        "type": int,
+        "default": 4,
+        "env_converter": int,
+    },
     # Feature toggles
     "use_layerwise": {
         "type": bool,

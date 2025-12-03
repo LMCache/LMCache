@@ -162,6 +162,22 @@ class LMCServerConnector(RemoteConnector):
 
         return memory_obj
 
+    def support_batched_put(self) -> bool:
+        """
+        LMCServerConnector supports batched put by calling put() multiple times.
+        """
+        return True
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        """
+        Batched put by calling put() for each key-value pair in parallel.
+        """
+        await asyncio.gather(
+            *(self.put(key, mem) for key, mem in zip(keys, memory_objs, strict=False))
+        )
+
     # TODO
     @no_type_check
     async def list(self) -> List[str]:
