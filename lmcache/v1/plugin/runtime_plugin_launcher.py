@@ -35,7 +35,7 @@ class RuntimePluginLauncher:
         """Launch plugins from specified location"""
         path = Path(loc)
         if not path.exists():
-            logger.warning(f"Runrime plugin location {loc} does not exist")
+            logger.warning(f"Runtime plugin location {loc} does not exist")
             return
 
         files = []
