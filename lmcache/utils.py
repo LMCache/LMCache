@@ -132,13 +132,17 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
 
     Args:
         key_str: String in format:
-            fmt@model@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
+            fmt@model@world_size@worker_id@chunk_hash@dtype[@layer_id][@tag%value...]
 
     Returns:
         CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
     """
+    print(f"Parsing key string: {key_str}")
     parts = key_str.strip().split("@")
-    if len(parts) >= 6 and parts[5].isdigit():
+    # Layer mode: fmt@model@world_size@worker_id@chunk_hash@dtype@layer_id
+    #             (7 parts, parts[6] is layer_id)
+    # Non-layer mode: fmt@model@world_size@worker_id@chunk_hash@dtype (6 parts)
+    if len(parts) >= 7 and parts[6].isdigit():
         return LayerCacheEngineKey.from_string(key_str)
     return CacheEngineKey.from_string(key_str)
 
@@ -251,12 +255,18 @@ class CacheEngineKey:
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
+        # Handle negative hex numbers in chunk_hash
+        chunk_hash_str = parts[4]
+        if chunk_hash_str.startswith("-"):
+            chunk_hash = -int(chunk_hash_str[1:], 16)
+        else:
+            chunk_hash = int(chunk_hash_str, 16)
         return CacheEngineKey(
             parts[0],
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4], 16),
+            chunk_hash,
             STR_DTYPE_TO_TORCH_DTYPE[parts[5]],
             request_configs,
         )
@@ -378,12 +388,18 @@ class LayerCacheEngineKey(CacheEngineKey):
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
+        # Handle negative hex numbers in chunk_hash
+        chunk_hash_str = parts[4]
+        if chunk_hash_str.startswith("-"):
+            chunk_hash = -int(chunk_hash_str[1:], 16)
+        else:
+            chunk_hash = int(chunk_hash_str, 16)
         return LayerCacheEngineKey(
             parts[0],
             parts[1],
             int(parts[2]),
             int(parts[3]),
-            int(parts[4], 16),
+            chunk_hash,
             STR_DTYPE_TO_TORCH_DTYPE[parts[5]],
             request_configs,
             int(parts[6]),
