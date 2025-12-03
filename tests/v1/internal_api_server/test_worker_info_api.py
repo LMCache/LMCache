@@ -242,7 +242,11 @@ class TestWorkerInfoAPI:
         assert response.status_code == 404
         data = json.loads(response.text)
         assert "detail" in data
-        assert "Worker ('nonexistent', 999) not found" in data["detail"]
+        assert (
+            "not found" in data["detail"]
+            and "nonexistent" in data["detail"]
+            and "999" in data["detail"]
+        )
 
     def test_real_nonexistent_instance(self, client_with_real_controller):
         response = client_with_real_controller.get(

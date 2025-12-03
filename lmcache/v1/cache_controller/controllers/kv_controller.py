@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
+from collections import defaultdict
+from typing import Optional
 
 # First Party
 from lmcache.logging import init_logger
@@ -31,29 +32,21 @@ from lmcache.v1.token_database import ChunkedTokenDatabase
 logger = init_logger(__name__)
 
 
-@dataclass
-class KVChunkMetadata:
-    """
-    A class representing a KV chunk metadata.
-    """
-
-    instance_id: str
-    worker_id: int
-    location: str
-
-
-# TODO(Jiayi): Need more efficient data structures (e.g., trie)
-# to handle these operations (e.g., evict, deregister)
-# more efficiently.
+"""
+The kv controller use `(instance_id, worker_id)` -> [location -> set[chunk_hash]] 
+as kv_pool. When the the number of instance is small and stable, the time complexity 
+of `lookup` in kv controller is O(n). If the number of instance is large or unknown, 
+the time complexity will degrade to O(n^2), and the ReverseIndexKVController is a 
+better choice.
+"""
 
 
 class KVController:
     def __init__(self) -> None:
-        # NOTE (Jiayi): Even if we offload kv_pool to
-        # redis. We might need a local cache for handling
-        # messages like `check_finish`. Or everything should be
-        # written to redis.
-        self.kv_pool: dict[int, list[KVChunkMetadata]] = {}
+        # Mapping from `(instance_id, worker_id)` -> [location -> set[chunk_hash]]
+        self.kv_pool: dict[tuple[str, int], dict[str, set[int]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
 
@@ -67,7 +60,7 @@ class KVController:
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
-            prometheus_logger.kv_pool_keys_count.set_function(lambda: len(self.kv_pool))
+            prometheus_logger.kv_pool_keys_count.set_function(self._get_kv_pool_size)
             prometheus_logger.kv_op_seq_discontinuity_count.set_function(
                 lambda: self.seq_discontinuity_count
             )
@@ -106,52 +99,19 @@ class KVController:
         # Update tracker with current sequence number
         self.seq_tracker[key] = seq_num
 
+    def _get_kv_pool_size(self) -> int:
+        total_size = 0
+        for _, location_kvs in self.kv_pool.items():
+            for _, kvs in location_kvs.items():
+                total_size += len(kvs)
+        return total_size
+
     def post_init(self, reg_controller, cluster_executor):
         """
         Post initialization of the KV controller.
         """
         self.reg_controller = reg_controller
         self.cluster_executor = cluster_executor
-
-    async def admit(self, msg: KVAdmitMsg) -> None:
-        """
-        Admit a new kv chunk.
-        """
-        instance_id = msg.instance_id
-        worker_id = msg.worker_id
-        key = msg.key
-        location = msg.location
-
-        if key not in self.kv_pool:
-            self.kv_pool[key] = []
-        self.kv_pool[key].append(KVChunkMetadata(instance_id, worker_id, location))
-
-    async def evict(self, msg: KVEvictMsg) -> None:
-        """
-        Evict a kv chunk.
-        """
-        instance_id = msg.instance_id
-        worker_id = msg.worker_id
-        key = msg.key
-        location = msg.location
-
-        if key not in self.kv_pool:
-            return
-
-        remaining = [
-            m
-            for m in self.kv_pool[key]
-            if not (
-                m.instance_id == instance_id
-                and m.worker_id == worker_id
-                and m.location == location
-            )
-        ]
-
-        if remaining:
-            self.kv_pool[key] = remaining
-        else:
-            del self.kv_pool[key]
 
     async def clear(self, msg: ClearMsg) -> ClearRetMsg:
         """
@@ -189,18 +149,41 @@ class KVController:
         """
         return await self.cluster_executor.execute("check_finish", msg)
 
+    async def admit(self, msg: KVAdmitMsg) -> None:
+        """
+        Admit a new kv chunk.
+        """
+        report_id = (msg.instance_id, msg.worker_id)
+        self.kv_pool[report_id][msg.location].add(msg.key)
+
+    async def evict(self, msg: KVEvictMsg) -> None:
+        """
+        Evict a kv chunk.
+        """
+        report_id = (msg.instance_id, msg.worker_id)
+        location = msg.location
+        key = msg.key
+
+        if (
+            report_id not in self.kv_pool
+            or location not in self.kv_pool[report_id]
+            or key not in self.kv_pool[report_id][location]
+        ):
+            return
+
+        self.kv_pool[report_id][location].remove(key)
+        if not self.kv_pool[report_id][location]:
+            del self.kv_pool[report_id][location]
+        if not self.kv_pool[report_id]:
+            del self.kv_pool[report_id]
+
     async def deregister(self, instance_id: str, worker_id: int) -> None:
         """
         Deregister all kv chunks of an instance-worker.
         """
-        for key in self.kv_pool:
-            self.kv_pool[key] = [
-                m
-                for m in self.kv_pool[key]
-                if not (m.instance_id == instance_id and m.worker_id == worker_id)
-            ]
-            if not self.kv_pool[key]:
-                del self.kv_pool[key]
+        report_id = (instance_id, worker_id)
+        if report_id in self.kv_pool:
+            del self.kv_pool[report_id]
 
         # Clean up sequence tracker for this instance-worker
         keys_to_remove = [
@@ -225,13 +208,15 @@ class KVController:
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
-            if key not in self.kv_pool:
+            result = self._exists(key)
+            if result is None:
                 break
-            matched_instance = self.kv_pool[key][0].instance_id
-            matched_location = self.kv_pool[key][0].location
+            matched_instance = result[0]
+            matched_location = result[2]
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)
 
+    # TODO: improve the matching logic, return multi results
     async def batched_p2p_lookup(
         self, msg: BatchedP2PLookupMsg
     ) -> BatchedP2PLookupRetMsg:
@@ -242,47 +227,23 @@ class KVController:
 
         :return: A BatchedP2PLookupRetMsg containing the lookup results.
         """
+        if len(msg.hashes) == 0:
+            return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
 
-        worker_id = msg.worker_id
-        query_instance_id = msg.instance_id
+        result = self._exists(msg.hashes[0], msg.instance_id)
+        if result is None:
+            return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
+
+        instance_id = result[0]
+        worker_id = result[1]
+        location = result[2]
+        peer_init_url = self.reg_controller.get_peer_init_url(instance_id, worker_id)
+        assert peer_init_url is not None
+        current_instance_keys = self.kv_pool[(instance_id, worker_id)][location]
         num_hit_chunks = 0
-        instance_id = ""
-        location = ""
-        peer_init_url = ""
         for key in msg.hashes:
-            # TODO(Jiayi): remove this string conversion
-            if key not in self.kv_pool:
+            if key not in current_instance_keys:
                 break
-
-            # TODO(Jiayi): Currently, we use the first matched
-            # kv chunk metadata to do matching. The matching
-            # logic can be improved.
-            # TODO(Jiayi): The KV Cache could be from different
-            # instances. We need to handle this case as well.
-            matched_kv_chunk_meta = None
-            for kv_chunk_meta in self.kv_pool[key]:
-                if kv_chunk_meta.instance_id != query_instance_id:
-                    # Found a matching instance_id that's not the
-                    # same as the query_instance_id.
-                    matched_kv_chunk_meta = kv_chunk_meta
-                    break
-
-            if matched_kv_chunk_meta is None:
-                break
-            if instance_id != "" and (
-                instance_id != matched_kv_chunk_meta.instance_id
-                or location != matched_kv_chunk_meta.location
-            ):
-                # We have already found a different instance_id
-                # before. Stop here.
-                break
-            elif instance_id == "":
-                instance_id = matched_kv_chunk_meta.instance_id
-                location = matched_kv_chunk_meta.location
-                peer_init_url = self.reg_controller.get_peer_init_url(
-                    instance_id, worker_id
-                )
-                assert peer_init_url is not None
             num_hit_chunks += 1
 
         return BatchedP2PLookupRetMsg(
@@ -290,3 +251,31 @@ class KVController:
                 (instance_id, location, num_hit_chunks, peer_init_url),
             ]
         )
+
+    def _exists(
+        self,
+        key: int,
+        exclude_instance_id: Optional[str] = None,
+        exclude_location: Optional[str] = None,
+    ) -> Optional[tuple[str, int, str]]:
+        """
+        Check if a key exists in the KV pool.
+
+        :param int key: The key to check.
+
+        :param str exclude_instance_id: The instance ID to exclude.
+
+        :param str exclude_location: The location to exclude.
+
+        :return: A tuple of (instance_id, worker_id, location) if the key exists,
+        None otherwise.
+        """
+        for (instance_id, worker_id), location_kvs in self.kv_pool.items():
+            if exclude_instance_id is not None and instance_id == exclude_instance_id:
+                continue
+            for location, kvs in location_kvs.items():
+                if exclude_location is not None and location == exclude_location:
+                    continue
+                if key in kvs:
+                    return instance_id, worker_id, location
+        return None
