@@ -473,8 +473,28 @@ def test_single_layer_kernel(num_tokens, token_major):
     )
 
 
+def cuda_newer_than(version: str) -> bool:
+    cuda_version_str = torch.version.cuda
+    if cuda_version_str is None:
+        return False
+    cuda_version_parts = cuda_version_str.split(".")
+    version_parts = version.split(".")
+
+    for cuda_part, version_part in zip(cuda_version_parts, version_parts, strict=False):
+        if int(cuda_part) > int(version_part):
+            return True
+        elif int(cuda_part) < int(version_part):
+            return False
+
+    return len(cuda_version_parts) >= len(version_parts)
+
+
 @pytest.mark.parametrize("kv_dim", [1, 2])
 @pytest.mark.parametrize("lmcache_chunk_size", [256, 512])
+@pytest.mark.skipif(
+    not cuda_newer_than("12.8"),
+    reason="Requires CUDA 12.8 or newer to run batched copy kernel",
+)
 def test_batched_copy_kernel_new(kv_dim, lmcache_chunk_size):
     kv_dim = 2
     num_layers = 32

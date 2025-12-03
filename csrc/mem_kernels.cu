@@ -872,6 +872,8 @@ inline size_t get_obj_buffer_bytes_offset(const ObjBufferShapeDesc& desc,
  *
  * - page_to_obj: direction of transfer, true for paged buffer to object buffer
  * (store), false for object buffer to paged buffer (retrieve)
+ *
+ * - device: the device where the paged buffers are located
  */
 void batched_kv_transfer(std::vector<uintptr_t>& paged_buffers,
                          std::vector<uintptr_t>& obj_buffers,
@@ -886,17 +888,28 @@ void batched_kv_transfer(std::vector<uintptr_t>& paged_buffers,
   size_t copy_size =
       page_shape.page_size * page_shape.hidden_dim * element_size;
 
+  // Parameter checks
+  TORCH_CHECK(
+      paged_buffers.size() == num_layers,
+      "Number of paged buffers must match number of layers in object shape.");
+  TORCH_CHECK(
+      pages_per_object * obj_buffers.size() == num_pages,
+      "Number of page ids must match number of pages in the object buffers.");
+
   std::vector<void*> dst_ptrs(num_copies);
   std::vector<void*> src_ptrs(num_copies);
   std::vector<size_t> sizes(num_copies, copy_size);
 
   // Prepare the copy attrs
   cudaMemcpyAttributes attr = {};
-  attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+  // attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+  attr.srcAccessOrder = cudaMemcpySrcAccessOrderAny;
   std::vector<size_t> attrsIdxs(1, 0);  // all use the same attribute
   size_t failIdx = 0;
 
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto torch_stream = at::cuda::getCurrentCUDAStream();
+  const at::cuda::CUDAStreamGuard stream_guard(torch_stream);
+  const cudaStream_t stream = torch_stream.stream();
 
   // Prepare src and dst pointers
   size_t copy_idx = 0;

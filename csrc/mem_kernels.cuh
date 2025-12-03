@@ -50,4 +50,4 @@ void batched_kv_transfer(std::vector<uintptr_t>& paged_buffers,
                          const std::vector<size_t>& page_indices,
                          const PageBufferShapeDesc& page_shape,
                          const ObjBufferShapeDesc& obj_shape,
-                         const int element_size, const bool page_to_obj = true);
+                         const int element_size, const bool page_to_obj);
