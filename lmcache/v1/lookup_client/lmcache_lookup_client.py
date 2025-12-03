@@ -51,7 +51,7 @@ class LMCacheLookupClient(LookupClientInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ):
-        metadata, config = create_lmcache_metadata(vllm_config)
+        metadata, _ = create_lmcache_metadata(vllm_config)
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
