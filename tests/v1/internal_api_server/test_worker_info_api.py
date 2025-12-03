@@ -46,6 +46,7 @@ class TestWorkerInfoAPI:
             controller_urls=controller_urls,
             health_check_interval=10,
             lmcache_worker_timeout=30,
+            enable_reverse_index=False,
         )
 
         self.controller_thread = threading.Thread(

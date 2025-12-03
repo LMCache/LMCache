@@ -378,7 +378,7 @@ def main():
     )
     parser.add_argument(
         "--enable-reverse-index",
-        type=bool,
+        action="store_true",
         default=False,
         help="Enable reverse index in KVController.",
     )
