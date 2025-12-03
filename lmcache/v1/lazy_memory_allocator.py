@@ -31,8 +31,9 @@ if TYPE_CHECKING:
 if torch.cuda.is_available():
     # First Party
     try:
+        # First Party
         import lmcache.c_ops as lmc_ops
-    except:
+    except (ModuleNotFoundError, ImportError):
         lmc_ops = None
 else:
     # First Party

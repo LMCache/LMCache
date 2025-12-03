@@ -63,8 +63,11 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
+
 if hasattr(torch, "hpu") and torch.hpu.is_available():
     from lmcache.v1.hpu_connector import VLLMPagedMemHPUConnectorV2
+
+# First Party
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
@@ -590,11 +593,11 @@ def _init_lmcache_engine(
         tpg = get_tp_group()
     else:
         if hasattr(torch, "hpu") and torch.hpu.is_available():
-            connector_cls = VLLMPagedMemHPUConnectorV2
+            connector_cls = VLLMPagedMemHPUConnectorV2  # type: ignore[assignment]
         elif current_platform.is_cuda_alike():
-            connector_cls = VLLMPagedMemGPUConnectorV2
+            connector_cls = VLLMPagedMemGPUConnectorV2  # type: ignore[assignment]
         elif current_platform.is_xpu():
-            connector_cls = VLLMPagedMemXPUConnectorV2
+            connector_cls = VLLMPagedMemXPUConnectorV2  # type: ignore[assignment]
         else:
             raise RuntimeError("No supported connector found for the current platform.")
 

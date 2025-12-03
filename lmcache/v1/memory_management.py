@@ -29,7 +29,7 @@ try:
     else:
         # First Party
         import lmcache.non_cuda_equivalents as lmc_ops
-except:
+except (ModuleNotFoundError, ImportError):
     lmc_ops = None
 
 logger = init_logger(__name__)

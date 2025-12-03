@@ -18,7 +18,7 @@ try:
     if torch.cuda.is_available():
         # First Party
         import lmcache.c_ops as lmc_ops
-except:
+except (ModuleNotFoundError, ImportError):
     lmc_ops = None
 
 logger = init_logger(__name__)
