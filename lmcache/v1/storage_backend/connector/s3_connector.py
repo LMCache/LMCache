@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import IntEnum, auto
-from typing import List, Optional, Union
+from typing import List, Optional
 from urllib.parse import quote as url_quote
 import asyncio
 import ctypes
@@ -31,7 +31,7 @@ class Priorities(IntEnum):
 
 # zero copy helper for S3 upload
 class MemoryViewStream:
-    def __init__(self, mv: Union[bytes, bytearray, memoryview]):
+    def __init__(self, mv: bytes):
         # casting does not copy
         # we just get a uint8 view
         self.mv = memoryview(mv).cast("B")
