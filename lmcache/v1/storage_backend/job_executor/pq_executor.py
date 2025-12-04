@@ -87,6 +87,16 @@ class AsyncPQExecutor(BaseJobExecutor):
                 return_exceptions=True,
             )
 
+        # Force cancel workers in case they are still blocked on queue.get()
+        for fut in self._workers:
+            fut.cancel()
+
+        # Wait for workers to exit
+        await asyncio.gather(
+            *[asyncio.wrap_future(fut, loop=self.loop) for fut in self._workers],
+            return_exceptions=True,
+        )
+
     def shutdown(self, wait: bool = True) -> None:
         future = asyncio.run_coroutine_threadsafe(self._shutdown_async(wait), self.loop)
         if wait:
