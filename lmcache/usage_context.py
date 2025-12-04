@@ -312,8 +312,6 @@ class ContinuousUsageContext:
             os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
             "cache-lifespan",
         )
-        logger.info(f"sending cache usage stats to {self.cache_usage_url}")
-        logger.info(f"sending cache lifespan stats to {self.cache_lifespan_url}")
         self.min_logging_interval: int = int(
             os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
         )
@@ -376,10 +374,13 @@ class ContinuousUsageContext:
             logger.debug(f"Unable to send lmcache caching lifespan message: {e}")
 
     def list_to_histogram(self, data: List[float], buckets: List[float]) -> dict:
-        data_array = np.array(data)
-        output_histogram = {}
-        for bucket in buckets:
-            output_histogram[bucket] = int(np.sum(data_array <= bucket))
+        histogram, _ = np.histogram(data, bins=buckets)
+        histogram = list(histogram)
+        histogram.insert(0, 0)
+        output_histogram = {
+            bucket: int(count)
+            for bucket, count in zip(buckets, histogram, strict=False)
+        }
         return output_histogram
 
     def incr_or_send_stats(self, stats: "LMCacheStats"):
