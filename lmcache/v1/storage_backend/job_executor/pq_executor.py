@@ -75,6 +75,9 @@ class AsyncPQExecutor(BaseJobExecutor):
             return
         self._closed = True
 
+        # Enqueue comparable sentinel tuples with the highest priority value so
+        # that outstanding work drains before shutdown signals are consumed.
+        # Use a very large integer to satisfy the typed queue's expected int priority
         sentinel_priority = 2**31 - 1
 
         # Push sentinel for each worker
