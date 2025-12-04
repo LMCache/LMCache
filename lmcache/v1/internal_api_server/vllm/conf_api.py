@@ -41,7 +41,7 @@ async def get_metadata(request: Request, names: Optional[str] = None):
     """
     Get metadata of the cache engine
     """
-    metadata = request.app.state.lmcache_adapter.metadata
+    metadata = request.app.state.lmcache_adapter.lmcache_engine_metadata
 
     if names:
         attr_list = names.split(",")
