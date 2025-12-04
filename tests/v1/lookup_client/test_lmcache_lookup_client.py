@@ -101,6 +101,7 @@ def create_mock_vllm_config(rank: int = 0, world_size: int = 1, rpc_port: int = 
     # Mock model_config
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.model = "test_model"
+    vllm_config.model_config.served_model_name = "test_model"
     vllm_config.model_config.dtype = torch.bfloat16
     vllm_config.model_config.get_num_layers = MagicMock(return_value=4)
     vllm_config.model_config.get_num_kv_heads = MagicMock(return_value=8)
@@ -212,7 +213,8 @@ class TestLMCacheLookupClientServer:
 
                 # Test clear lookup status
                 client.clear_lookup_status(lookup_id)
-                assert client.lookup_cache(lookup_id) is None
+                # After clearing, lookup_cache returns -1 (not found)
+                assert client.lookup_cache(lookup_id) == -1
 
                 # Test supports_producer_reuse
                 assert client.supports_producer_reuse() is True
