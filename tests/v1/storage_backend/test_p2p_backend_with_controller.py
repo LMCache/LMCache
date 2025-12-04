@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Optional
+from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import contextlib
 import multiprocessing as mp
@@ -28,6 +29,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
+from lmcache.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
 from tests.v1.utils import get_available_ports
 
 logger = init_logger(__name__)
@@ -541,3 +543,61 @@ class TestP2PBackendWithController:
                         asyncio.run_coroutine_threadsafe(
                             test_no_hits(), async_loop
                         ).result(timeout=5)
+
+    def test_ensure_peer_connection_race_condition(self, async_loop):
+        peer_init_port, peer_lookup_port = get_available_ports(2)
+
+        config = create_test_config(
+            p2p_host="localhost",
+            p2p_init_ports=[peer_init_port],
+            p2p_lookup_ports=[peer_lookup_port],
+        )
+        metadata = create_test_metadata(worker_id=0)
+        peer_mappings = {}
+
+        with cpu_allocator() as allocator:
+            local_backend = LocalCPUBackend(config=config, memory_allocator=allocator)
+
+            with mock_controller_context(peer_mappings) as controller_url:
+                with MockLMCacheWorker(controller_url) as mock_worker:
+                    with patch(
+                        "lmcache.v1.rpc_utils.get_zmq_socket_with_timeout"
+                    ) as mock_get_socket:
+                        mock_get_socket.return_value = MagicMock()
+
+                        with p2p_backend_context(
+                            config, metadata, async_loop, local_backend, mock_worker
+                        ) as p2p_backend:
+
+                            async def async_lazy_init_peer_connection(*args, **kwargs):
+                                logger.info("async_lazy_init_peer_connection called")
+                                await asyncio.sleep(0.5)
+                                return P2PInitSideRetMsg(
+                                    peer_lookup_url="127.0.0.1:19998"
+                                )
+
+                            p2p_backend.transfer_channel.async_lazy_init_peer_connection = AsyncMock(  # noqa: E501
+                                side_effect=async_lazy_init_peer_connection
+                            )
+
+                            # by mock_get_socket, the port is not used in the test
+                            target_peer_init_url = "127.0.0.1:19999"
+                            future_1 = asyncio.run_coroutine_threadsafe(
+                                p2p_backend._ensure_peer_connection(
+                                    target_peer_init_url
+                                ),
+                                async_loop,
+                            )
+                            future_2 = asyncio.run_coroutine_threadsafe(
+                                p2p_backend._ensure_peer_connection(
+                                    target_peer_init_url
+                                ),
+                                async_loop,
+                            )
+                            future_1.result(timeout=5)
+                            future_2.result(timeout=5)
+
+                            assert (
+                                p2p_backend.transfer_channel.async_lazy_init_peer_connection.call_count
+                                == 1
+                            )
