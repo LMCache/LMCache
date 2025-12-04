@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import IntEnum, auto
-from typing import List, Optional
+from typing import List, Optional, Union
 from urllib.parse import quote as url_quote
 import asyncio
 import ctypes
@@ -31,8 +31,10 @@ class Priorities(IntEnum):
 
 # zero copy helper for S3 upload
 class MemoryViewStream:
-    def __init__(self, mv):
-        self.mv = mv.cast("B")
+    def __init__(self, mv: Union[bytes, bytearray, memoryview]):
+        # casting does not copy
+        # we just get a uint8 view
+        self.mv = memoryview(mv).cast("B")
         self.offset = 0
 
     def read(self, size=None):
@@ -44,9 +46,7 @@ class MemoryViewStream:
         end = min(self.offset + size, len(self.mv))
         result = self.mv[self.offset : end]
         self.offset = end
-        # If CRT/Python binding logic strictly requires bytes object,
-        # we might need: return bytes(result)
-        # But often buffers work. We'll try direct slicing first.
+        # CRT/Python accepts memoryview
         return result
 
     def seek(self, offset, whence=0):
@@ -60,6 +60,9 @@ class MemoryViewStream:
 
     def tell(self):
         return self.offset
+
+    def __len__(self):
+        return len(self.mv)
 
 
 class S3Connector(RemoteConnector):
@@ -501,7 +504,7 @@ class S3Connector(RemoteConnector):
         # Zero-copy approach using MemoryViewStream
         stream = MemoryViewStream(memory_obj.byte_array)
         # Calculate total length from the memoryview
-        total_len = len(stream.mv)
+        total_len = len(stream)
 
         headers = HttpHeaders()
         headers.add("Host", self.s3_endpoint)
