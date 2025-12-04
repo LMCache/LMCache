@@ -1229,6 +1229,8 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
             idx = start // self.config.chunk_size
+            if idx >= len(memory_objs) or memory_objs[idx] is None:
+                break
             memory_obj = memory_objs[idx]
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
