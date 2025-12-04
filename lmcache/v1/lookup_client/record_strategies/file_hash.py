@@ -102,10 +102,10 @@ class FileHashStrategy(RecordStrategy):
     def setup_metrics(self, prometheus_logger) -> None:
         """Setup file hash specific metrics."""
         super().setup_metrics(prometheus_logger)
-        prometheus_logger.chunk_statistics_file_count.set_function(
+        prometheus_logger.metrics.chunk_statistics_file_count.set_function(
             lambda: self.file_count
         )
-        prometheus_logger.chunk_statistics_current_file_size.set_function(
+        prometheus_logger.metrics.chunk_statistics_current_file_size.set_function(
             lambda: self.current_file_size
         )
 
