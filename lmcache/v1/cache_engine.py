@@ -286,10 +286,10 @@ class LMCacheEngine:
 
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
-        starts = []
-        ends = []
-        keys = []
-        memory_objs = []
+        starts: List[int] = []
+        ends: List[int] = []
+        keys: List[CacheEngineKey] = []
+        memory_objs: List[MemoryObj] = []
 
         offload_time = 0.0
         put_time = 0.0
@@ -324,7 +324,9 @@ class LMCacheEngine:
             if memory_obj is None:
                 logger.warning(
                     "Local cpu memory under pressure so"
-                    " choosing to not store the KV cache."
+                    " choosing to store only "
+                    f" {len(memory_objs)}"
+                    " total chunks of KV cache."
                 )
                 break
 
@@ -344,6 +346,8 @@ class LMCacheEngine:
         t = time.perf_counter()
 
         transfer_spec = kwargs.get("transfer_spec", None)
+        # TODO: we implicitly rely on batched_put to call ref_count_down
+        # this management should be done in a cleaner way
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
@@ -1215,8 +1219,12 @@ class LMCacheEngine:
         chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
-        memory_objs = future.result()
-        memory_objs = [mm for m in memory_objs for mm in m]
+        try:
+            memory_objs = future.result()
+            memory_objs = [mm for m in memory_objs for mm in m]
+        except Exception as e:
+            logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
+            return [], 0
 
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
