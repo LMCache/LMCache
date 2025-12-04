@@ -5,17 +5,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urljoin
-import dataclasses
 import importlib.metadata
 import os
 import platform
 import subprocess
 import threading
-import time
 
 # Third Party
 import cpuinfo
-import numpy as np
 import psutil
 import requests
 import torch
@@ -27,7 +24,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.observability import LMCacheStats
+    pass
 
 
 logger = init_logger(__name__)
@@ -276,76 +273,6 @@ class UsageContext:
             pass
 
         return "UNKNOWN"
-
-
-class ContinuousUsageContext:
-    _instance = None
-
-    def __init__(self, metadata: LMCacheEngineMetadata):
-        self.metadata: LMCacheEngineMetadata = metadata
-        self.server_url: str = urljoin(
-            os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
-            "cache-usage",
-        )
-        logger.info(f"sending cache usage stats to {self.server_url}")
-        self.min_logging_interval: int = int(
-            os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
-        )
-        # send the first message immediately after init
-        self.last_logged_ts: float = -1
-
-        self.interval_num_hit_tokens: int = 0
-        self.interval_num_stored_tokens: int = 0
-        self.kv_sz_per_token_bytes: int = int(
-            np.prod(self.metadata.kv_shape)
-            * self.metadata.kv_dtype.itemsize
-            / self.metadata.kv_shape[2]
-        )
-
-    @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "ContinuousUsageContext":
-        if ContinuousUsageContext._instance is None:
-            ContinuousUsageContext._instance = ContinuousUsageContext(metadata)
-        if ContinuousUsageContext._instance.metadata != metadata:
-            logger.error(
-                "ContinuousUsageContext instance already created with"
-                "different metadata. This should not happen except "
-                "in test."
-            )
-        return ContinuousUsageContext._instance
-
-    def send_caching_message(self):
-        msg: ContinuousContextMessage = ContinuousContextMessage(
-            interval_stored_kv_size=int(
-                self.kv_sz_per_token_bytes * self.interval_num_stored_tokens
-            ),
-            interval_num_hit_tokens=int(self.interval_num_hit_tokens),
-            interval_num_stored_tokens=int(self.interval_num_stored_tokens),
-        )
-        try:
-            global_http_client = global_http_connection.get_sync_client()
-            if self.server_url is not None:
-                logger.debug("caching usage message sent.")
-                global_http_client.post(
-                    f"{self.server_url}", json=dataclasses.asdict(msg), timeout=5
-                )
-            self.interval_num_hit_tokens = 0
-            self.interval_num_stored_tokens = 0
-        except requests.exceptions.RequestException:
-            logger.debug("Unable to send lmcache caching usage message...")
-
-    def incr_or_send_stats(self, stats: "LMCacheStats"):
-        # no-ops when user disable usage tracking
-        if os.getenv("LMCACHE_TRACK_USAGE") == "false":
-            return None
-
-        self.interval_num_hit_tokens += stats.interval_hit_tokens
-        self.interval_num_stored_tokens += stats.interval_stored_tokens
-
-        cur_ts: float = time.monotonic()
-        if cur_ts - self.last_logged_ts >= self.min_logging_interval:
-            self.send_caching_message()
-            self.last_logged_ts = cur_ts
 
 
 def InitializeUsageContext(
