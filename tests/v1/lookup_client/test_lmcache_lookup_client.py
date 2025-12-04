@@ -131,7 +131,6 @@ def create_mock_vllm_config(rank: int = 0, world_size: int = 1, rpc_port: int = 
     return vllm_config
 
 
-@pytest.mark.skip(reason="Skip to pass the comprehensive test")
 class TestLMCacheLookupClientServer:
     """Test suite for LMCacheLookupClient and LMCacheLookupServer communication."""
 
