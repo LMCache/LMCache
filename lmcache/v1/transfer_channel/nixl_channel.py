@@ -237,6 +237,9 @@ class NixlChannel(BaseTransferChannel):
         init_tmp_socket.close()
         return init_ret_msg
 
+    def remote_xfer_handler_exists(self, receiver_or_sender_id: str) -> bool:
+        return receiver_or_sender_id in self.remote_xfer_handlers_dict
+
     def _init_side_channels(self):
         if self.peer_init_url is None:
             return
