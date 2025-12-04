@@ -1319,6 +1319,12 @@ class LMCacheEngine:
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
                 ret_mask[start:end] = True
+                if last_failed_block_start is not None:
+                    for (key, start, end), memory_obj in zip(
+                        blocks, memory_objs, strict=False
+                    ):
+                        if memory_obj is not None and start >= last_failed_block_start:
+                            memory_obj.ref_count_down()
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
