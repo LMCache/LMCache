@@ -356,14 +356,19 @@ class LMCacheEngine:
                     token_ids=[],
                     block_size=num_tokens,
                     lora_id=None,
-                    medium="GPU",
+                    medium="cpu",
                 )
                 if tokens is not None:
-                    stored_event.token_ids = (
-                        tokens.tolist()[start : end + 1]
-                        if isinstance(tokens, torch.Tensor)
-                        else tokens[start : end + 1]
-                    )
+                    if isinstance(tokens, torch.Tensor) and tokens.is_cuda:
+                        stored_event.token_ids = tokens.detach().cpu().tolist()
+                    else:
+                        stored_event.token_ids = (
+                            tokens.tolist()[start : end + 1]
+                            if isinstance(tokens, torch.Tensor)
+                            else tokens[start : end + 1]
+                        )
+                    if isinstance(tokens, torch.Tensor):
+                        stored_event.medium = tokens.device
                 elif hashes is not None:
                     stored_event.token_ids = hashes[start : end + 1]
                 logger.debug(
@@ -492,13 +497,22 @@ class LMCacheEngine:
                 stored_event = CacheStoreEvent(
                     block_hashes=[key.chunk_hash],
                     parent_block_hash=None if start == 0 else prev_key,
-                    token_ids=tokens.tolist()[start : end + 1]
-                    if isinstance(tokens, torch.Tensor)
-                    else tokens[start : end + 1],
+                    token_ids=[],
                     block_size=num_tokens,
                     lora_id=None,
-                    medium="GPU",
+                    medium="cpu",
                 )
+                if tokens is not None:
+                    if isinstance(tokens, torch.Tensor) and tokens.is_cuda:
+                        stored_event.token_ids = tokens.detach().cpu().tolist()
+                    else:
+                        stored_event.token_ids = (
+                            tokens.tolist()[start : end + 1]
+                            if isinstance(tokens, torch.Tensor)
+                            else tokens[start : end + 1]
+                        )
+                    if isinstance(tokens, torch.Tensor):
+                        stored_event.medium = tokens.device
                 logger.debug(
                     f"Added kv cache event '{stored_event}' to kv cache events queue"
                 )
@@ -1194,8 +1208,7 @@ class LMCacheEngine:
 
     @_lmcache_nvtx_annotate
     def get_kv_events(self) -> Iterable[CacheStoreEvent]:
-        if self.kv_events_enabled and self.kv_events:
-            events = self.kv_events
+        if self.kv_events_enabled and (events := self.kv_events):
             self.kv_events = []
             return events
         return []
