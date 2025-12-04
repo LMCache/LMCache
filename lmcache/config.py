@@ -38,6 +38,7 @@ class LMCacheEngineMetadata:
     """ the first rank of the distributed setting """
     # TODO(baoloongmao): first_rank should be configurable
     first_rank = 0
+    served_model_name: Optional[str] = None
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
