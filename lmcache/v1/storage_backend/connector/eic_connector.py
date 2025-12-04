@@ -325,12 +325,12 @@ class EICConnector(RemoteConnector):
             if err_code == eic.StatusCode.KEY_NOT_EXIST:
                 logger.debug(
                     f"eic mget meta {key_str} failed, status_code {status_code}"
-                    " err_code {err_code}"
+                    f" err_code {err_code}"
                 )
             else:
                 logger.error(
                     f"eic mget meta {key_str} failed, status_code {status_code}"
-                    " err_code {err_code}"
+                    f" err_code {err_code}"
                 )
             return None
         else:
@@ -359,7 +359,7 @@ class EICConnector(RemoteConnector):
         if memory_obj is None:
             logger.error(
                 f"fail to allocate memory during remote receive key {key_str} length"
-                " {meta.length}"
+                f" {meta.length}"
             )
             return None
         perf_timer.stop("alloc_obj")
@@ -389,8 +389,10 @@ class EICConnector(RemoteConnector):
         if status_code != eic.StatusCode.SUCCESS or err_code != eic.StatusCode.SUCCESS:
             logger.error(
                 f"eic mget data {key_str} failed, status_code {status_code}"
-                " err_code {err_code}"
+                f" err_code {err_code}"
             )
+            # eic has fill some data to data_ptr
+            memory_obj.ref_count_down()
             return None
         else:
             logger.debug(f"eic mget data {key_str} success")
@@ -475,7 +477,7 @@ class EICConnector(RemoteConnector):
 
         logger.debug(
             f"eic put {key_str} meta ptr {meta_ptr} len {meta_size} data ptr {data_ptr}"
-            " len {data_size}"
+            f" len {data_size}"
         )
 
         perf_timer.start("eic_mset")
@@ -556,7 +558,7 @@ class EICConnector(RemoteConnector):
 
             logger.info(
                 f"eic batched_put {key_str} shape {kv_shape} dtype {kv_dtype}"
-                " fmt {memory_format}"
+                f" fmt {memory_format}"
             )
 
             # Add meta key & value
@@ -655,7 +657,7 @@ class EICConnector(RemoteConnector):
             if status_code != eic.StatusCode.SUCCESS:
                 logger.debug(
                     f"eic batched_async_contains {key.to_string()} miss,"
-                    " err_code {status_code}"
+                    f" err_code {status_code}"
                 )
                 break
             num_hit_counts += 1
@@ -712,7 +714,13 @@ class EICConnector(RemoteConnector):
     ) -> List[MemoryObj]:
         # calling self.get will create a circular dependency
         results = await asyncio.gather(*(self._get(key) for key in keys))
-        return [r for r in results if r is not None]
+        # Stop at first None, return only elements before None
+        result_list = []
+        for r in results:
+            if r is None:
+                break
+            result_list.append(r)
+        return result_list
 
     async def batched_get_non_blocking(
         self,
