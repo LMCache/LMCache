@@ -267,6 +267,9 @@ class StorageManager:
         else:
             self.internal_copy_stream = None
 
+        # Hot cache freeze mode: only use local_cpu backend for retrieval
+        self.hot_cache_freeze_mode = False
+
         self._setup_metrics()
 
     def _setup_metrics(self):
@@ -431,6 +434,10 @@ class StorageManager:
 
         # Search all backends for blocking get
         for backend_name, backend in self.storage_backends.items():
+            # In hot cache freeze mode, only check local_cpu backend
+            if self.hot_cache_freeze_mode and backend_name != "LocalCPUBackend":
+                continue
+
             if location and backend_name != location:
                 continue
             # TODO(Jiayi): need to make sure all memory_objs returned
@@ -460,6 +467,10 @@ class StorageManager:
 
         # Search all backends for non-blocking get
         for backend_name, backend in self.storage_backends.items():
+            # In hot cache freeze mode, only check local_cpu backend
+            if self.hot_cache_freeze_mode and backend_name != "LocalCPUBackend":
+                continue
+
             if location and backend_name != location:
                 continue
             # NOTE(Jiayi): bypass the allocator for now
@@ -479,6 +490,10 @@ class StorageManager:
         """
         # TODO (ApostaC): remove the nested optional here
         for backend_name, storage_backend in self.storage_backends.items():
+            # In hot cache freeze mode, only check local_cpu backend
+            if self.hot_cache_freeze_mode and backend_name != "LocalCPUBackend":
+                continue
+
             if location and backend_name != location:
                 continue
             memory_objs = storage_backend.batched_get_blocking(keys)
@@ -663,6 +678,10 @@ class StorageManager:
         # we also keep track of the keys for each tier and each chunk
         loading_task_keys: list[list[CacheEngineKey]] = []
         for backend_name, backend in self.storage_backends.items():
+            # In hot cache freeze mode, only check local_cpu backend
+            if self.hot_cache_freeze_mode and backend_name != "LocalCPUBackend":
+                continue
+
             if search_range and backend_name not in search_range:
                 continue
             num_hit_chunks = await backend.batched_async_contains(lookup_id, keys, pin)
@@ -747,6 +766,24 @@ class StorageManager:
             )
         )
 
+    def set_hot_cache_freeze_mode(self, enabled: bool) -> None:
+        """
+        Set hot cache freeze mode.
+
+        When enabled, only local_cpu backend will be used for retrieval.
+        """
+        self.hot_cache_freeze_mode = enabled
+        logger.info("StorageManager hot cache freeze mode set to %s", enabled)
+
+    def get_hot_cache_freeze_mode(self) -> bool:
+        """
+        Get hot cache freeze mode status.
+
+        Returns:
+            bool: True if hot cache freeze mode is enabled, False otherwise
+        """
+        return self.hot_cache_freeze_mode
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -769,6 +806,10 @@ class StorageManager:
         """
 
         for backend_name, backend in self.storage_backends.items():
+            # In hot cache freeze mode, only check local_cpu backend
+            if self.hot_cache_freeze_mode and backend_name != "LocalCPUBackend":
+                continue
+
             if search_range and backend_name not in search_range:
                 continue
 
@@ -807,6 +848,10 @@ class StorageManager:
         total_hit_chunks = 0
         block_mapping = {}
         for backend_name, backend in self.storage_backends.items():
+            # In hot cache freeze mode, only check local_cpu backend
+            if self.hot_cache_freeze_mode and backend_name != "LocalCPUBackend":
+                continue
+
             if search_range and backend_name not in search_range:
                 continue
 
@@ -845,6 +890,10 @@ class StorageManager:
         block_mapping = {}
         total_hit_chunks = 0
         for backend_name, backend in self.storage_backends.items():
+            # In hot cache freeze mode, only check local_cpu backend
+            if self.hot_cache_freeze_mode and backend_name != "LocalCPUBackend":
+                continue
+
             hit_chunks = backend.batched_contains(keys)
             if hit_chunks == 0:
                 continue
