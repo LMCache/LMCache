@@ -2,21 +2,18 @@
 # Standard
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
-from urllib.parse import urljoin
-import dataclasses
 import os
 import threading
 import time
 
 # Third Party
 from prometheus_client import REGISTRY
-import numpy as np
 import prometheus_client
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
+from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
 
 logger = init_logger(__name__)
@@ -1346,129 +1343,6 @@ class PrometheusLogger:
         otherwise returns None.
         """
         return PrometheusLogger._instance
-
-
-@dataclass
-class ContinuousContextMessage:
-    interval_num_stored_tokens: int
-    interval_num_hit_tokens: int
-    interval_stored_kv_size: int
-    message_type: str = "ContinuousContextMessage"
-
-
-class ContinuousUsageContext:
-    _instance = None
-
-    def __init__(self, metadata: LMCacheEngineMetadata):
-        self.cache_lifespan_buckets = [
-            0,
-            1,
-            5,
-            10,
-            20,
-            40,
-            60,
-            80,
-            100,
-            250,
-            500,
-            750,
-            1000,
-            2500,
-            5000,
-        ]
-        self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
-        self.metadata: LMCacheEngineMetadata = metadata
-        self.cache_usage_url: str = urljoin(
-            os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
-            "cache-usage",
-        )
-        self.cache_lifespan_url: str = urljoin(
-            os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
-            "cache-lifespan",
-        )
-        logger.info(f"sending cache usage stats to {self.cache_usage_url}")
-        logger.info(f"sending cache lifespan stats to {self.cache_lifespan_url}")
-        self.min_logging_interval: int = int(
-            os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
-        )
-        # send the first message immediately after init
-        self.last_logged_ts: float = -1
-
-        self.interval_num_hit_tokens: int = 0
-        self.interval_num_stored_tokens: int = 0
-        self.kv_sz_per_token_bytes: int = int(
-            np.prod(self.metadata.kv_shape)
-            * self.metadata.kv_dtype.itemsize
-            / self.metadata.kv_shape[2]
-        )
-        self.cache_lifespan_data: List[float] = []
-
-    @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "ContinuousUsageContext":
-        if ContinuousUsageContext._instance is None:
-            ContinuousUsageContext._instance = ContinuousUsageContext(metadata)
-        if ContinuousUsageContext._instance.metadata != metadata:
-            logger.error(
-                "ContinuousUsageContext instance already created with"
-                "different metadata. This should not happen except "
-                "in test."
-            )
-        return ContinuousUsageContext._instance
-
-    def send_caching_message(self):
-        msg: ContinuousContextMessage = ContinuousContextMessage(
-            interval_stored_kv_size=int(
-                self.kv_sz_per_token_bytes * self.interval_num_stored_tokens
-            ),
-            interval_num_hit_tokens=int(self.interval_num_hit_tokens),
-            interval_num_stored_tokens=int(self.interval_num_stored_tokens),
-        )
-        try:
-            global_http_client = global_http_connection.get_sync_client()
-            if self.cache_usage_url is not None:
-                logger.debug("caching usage message sent.")
-                global_http_client.post(
-                    f"{self.cache_usage_url}", json=dataclasses.asdict(msg), timeout=5
-                )
-
-            self.interval_num_hit_tokens = 0
-            self.interval_num_stored_tokens = 0
-        except Exception as e:
-            logger.debug(f"Unable to send lmcache caching usage message: {e}")
-        try:
-            histogram_data = self.list_to_histogram(
-                self.cache_lifespan_data, self.cache_lifespan_buckets
-            )
-            global_http_client = global_http_connection.get_sync_client()
-            if self.cache_lifespan_url is not None:
-                global_http_client.post(
-                    f"{self.cache_lifespan_url}", json=histogram_data, timeout=5
-                )
-                logger.debug("caching lifespan message sent.")
-            self.cache_lifespan_data = []
-        except Exception as e:
-            logger.debug(f"Unable to send lmcache caching lifespan message: {e}")
-
-    def list_to_histogram(self, data: List[float], buckets: List[float]) -> dict:
-        data_array = np.array(data)
-        output_histogram = {}
-        for bucket in buckets:
-            output_histogram[bucket] = int(np.sum(data_array <= bucket))
-        return output_histogram
-
-    def incr_or_send_stats(self, stats: "LMCacheStats"):
-        # no-ops when user disable usage tracking
-        self.cache_lifespan_data.extend(stats.interval_request_cache_lifespan)
-        if os.getenv("LMCACHE_TRACK_USAGE") == "false":
-            return None
-        self.interval_num_hit_tokens += stats.interval_hit_tokens
-        self.interval_num_stored_tokens += stats.interval_stored_tokens
-
-        cur_ts: float = time.monotonic()
-        if cur_ts - self.last_logged_ts >= self.min_logging_interval:
-            self.send_caching_message()
-            self.last_logged_ts = cur_ts
 
 
 class LMCacheStatsLogger:
