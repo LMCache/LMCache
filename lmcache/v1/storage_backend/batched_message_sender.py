@@ -70,13 +70,6 @@ class BatchedMessageSender:
         self.sequence_number = 0
         self.sequence_lock = threading.Lock()
 
-        # Lock to ensure _drain_and_send is not called concurrently
-        self.drain_lock = threading.Lock()
-
-        # Flag to indicate flush is in progress
-        self.flushing = False
-        self.flush_lock = threading.Lock()
-
         # Condition variable for coordinating producer and consumer
         self.cv = threading.Condition()
         self.running = False
@@ -111,11 +104,6 @@ class BatchedMessageSender:
                 # This prevents race conditions but we'll release lock
                 # before blocking operations
                 if self.message_queue.empty():
-                    continue
-
-            # Skip processing if flush is in progress to avoid interference
-            with self.flush_lock:
-                if self.flushing:
                     continue
 
             # Drain the queue without holding the lock to avoid blocking producers
@@ -162,30 +150,26 @@ class BatchedMessageSender:
 
         This method is called by the consumer thread to collect all pending
         operations from the queue and send them as a single batched message.
-
-        Thread-safe: Uses drain_lock to prevent concurrent execution.
         """
-        with self.drain_lock:
-            ops_to_send: List[KVOpEvent] = []
+        ops_to_send: List[KVOpEvent] = []
 
-            # Drain all messages from the queue using blocking get with timeout
-            # This ensures we don't miss any messages due to race conditions
-            while True:
-                try:
-                    # Use a small timeout to avoid blocking indefinitely
-                    op = self.message_queue.get(timeout=0.001)
-                    # Assign sequence number at drain time to ensure strict ordering
-                    op.seq_num = self._get_next_sequence_number()
-                    ops_to_send.append(op)
-                    # Mark task as done to maintain queue count accuracy
-                    self.message_queue.task_done()
-                except queue.Empty:
-                    # Queue is empty, break the loop
-                    break
+        # Drain all messages from the queue using blocking get with timeout
+        # This ensures we don't miss any messages due to race conditions
+        while True:
+            try:
+                # Use a small timeout to avoid blocking indefinitely
+                op = self.message_queue.get(timeout=0.001)
+                # Assign sequence number at drain time to ensure strict ordering
+                op.seq_num = self._get_next_sequence_number()
+                ops_to_send.append(op)
+            except queue.Empty:
+                # Queue is empty, break the loop
+                break
 
-            if not ops_to_send:
-                return
+        if not ops_to_send:
+            return
 
+        try:
             # Ensure common fields are set
             assert self.instance_id is not None, "instance_id must be set"
             assert self.worker_id is not None, "worker_id must be set"
@@ -200,46 +184,27 @@ class BatchedMessageSender:
                 operations=ops_to_send,
             )
             self.lmcache_worker.put_msg(batched_msg)
+        finally:
+            # Mark all tasks as done regardless of success/failure
+            # This ensures flush() doesn't hang if put_msg fails
+            for _ in ops_to_send:
+                self.message_queue.task_done()
 
     def flush(self):
         """Manually flush all pending messages.
 
         This method ensures all pending messages in the queue are processed
-        before returning. It repeatedly drains the queue until empty to handle
-        race conditions in high-throughput scenarios.
-
-        Sets flushing flag to prevent background thread interference.
+        before returning. It triggers the consumer thread and waits for the
+        queue to be empty.
         """
-        # Set flushing flag to prevent background thread from processing
-        with self.flush_lock:
-            self.flushing = True
+        with self.cv:
+            self.cv.notify()
 
-        try:
-            # Notify consumer thread (it will skip due to flushing flag)
-            with self.cv:
-                self.cv.notify()
-
-            # Keep draining until queue is truly empty
-            # This handles the race condition where messages are being added
-            # while we're trying to flush
-            max_attempts = 10
-            for _ in range(max_attempts):
-                self._drain_and_send()
-                # Small sleep to allow any in-flight messages to be queued
-                if not self.message_queue.empty():
-                    threading.Event().wait(0.001)
-                else:
-                    break
-
-            # Final drain to ensure we got everything
-            self._drain_and_send()
-        finally:
-            # Clear flushing flag to allow background thread to resume
-            with self.flush_lock:
-                self.flushing = False
+        self.message_queue.join()
 
     def close(self):
         """Close the batched message sender and flush remaining messages."""
+        self.flush()
         self.running = False
 
         # Wake up consumer thread to exit
@@ -253,6 +218,3 @@ class BatchedMessageSender:
                 logger.warning(
                     "Batched message sender thread did not terminate within timeout"
                 )
-
-        # Flush remaining messages
-        self.flush()
