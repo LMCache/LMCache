@@ -17,6 +17,7 @@ class AsyncPQExecutor(BaseJobExecutor):
     def __init__(self, loop: asyncio.AbstractEventLoop, max_workers: int = 4):
         max_size = 0  # infinite
         self.loop = loop
+        # (priority, time_id, fn, args, kwargs, done_future)
         self._queue: asyncio.PriorityQueue[
             tuple[
                 int,
@@ -27,6 +28,7 @@ class AsyncPQExecutor(BaseJobExecutor):
                 asyncio.Future[Any] | None,
             ]
         ] = asyncio.PriorityQueue(maxsize=max_size)
+        # counter breaks ties for equal priority items (FCFS)
         self._counter = itertools.count()
         self.max_workers = max_workers
         # we don't use asyncio.create_task so that PQ executor can be invoked
@@ -122,6 +124,7 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                 asyncio.Future[Any] | None,
             ]
         ] = asyncio.PriorityQueue(maxsize=max_size)
+        # counter breaks ties for equal priority items (FCFS)
         self._counter = itertools.count()
         self.max_workers = max_workers
         self._workers = []
@@ -164,6 +167,11 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
             )
         if wait:
             await self._queue.join()
+
+            # FORCE CANCEL to avoid loop-closing race
+            for fut in self._workers:
+                fut.cancel()
+
             await asyncio.gather(
                 *[asyncio.wrap_future(fut, loop=self.loop) for fut in self._workers],
                 return_exceptions=True,
