@@ -14,7 +14,7 @@ Commandline arguments:
                   (Optional, default: 100)
 
     --repeat-count: The number of times to repeat each prompt.
-                    (Optional, default: 2)
+                    (Optional, default: 4)
 
     --repeat-mode: The mode to repeat prompts. The supported modes are:
         - 'random': shuffle the prompts randomly. (Default)
