@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -29,6 +29,8 @@ class LMCacheBypassLookupClient(LookupClientInterface):
     def __init__(
         self,
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         lmcache_engine: LMCacheEngine,
     ):
         """
@@ -36,10 +38,10 @@ class LMCacheBypassLookupClient(LookupClientInterface):
 
         Args:
             vllm_config: The vLLM configuration
+            config: The LMCacheEngine configuration
+            metadata: The LMCacheEngine metadata
             lmcache_engine: The LMCacheEngine instance to use for lookups
         """
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration should be passed."
         )

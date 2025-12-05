@@ -111,7 +111,11 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
 
 
 def create_lmcache_metadata(
-    vllm_config=None, model_config=None, parallel_config=None, cache_config=None
+    vllm_config=None,
+    model_config=None,
+    parallel_config=None,
+    cache_config=None,
+    role=None,
 ):
     """
     Create LMCacheEngineMetadata from vLLM configuration.
@@ -173,6 +177,7 @@ def create_lmcache_metadata(
         kv_dtype,
         kv_shape,
         use_mla,
+        role,
     )
 
     return metadata, config
