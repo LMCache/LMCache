@@ -213,7 +213,6 @@ class TestLMCacheLookupClientServer:
 
                 # Test clear lookup status
                 client.clear_lookup_status(lookup_id)
-                # After clearing, lookup_cache returns -1 (not found)
                 assert client.lookup_cache(lookup_id) == -1
 
                 # Test supports_producer_reuse

@@ -313,7 +313,7 @@ class LMCacheControllerManager:
     async def health_check(self):
         while True:
             time.sleep(self.health_check_interval)
-            worker_infos = list(self.reg_controller.worker_info_mapping.values())
+            worker_infos = self.reg_controller.registry.get_all_worker_infos()
             for worker_info in worker_infos:
                 if (
                     time.time() - worker_info.last_heartbeat_time

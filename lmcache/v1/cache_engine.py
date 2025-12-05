@@ -1219,34 +1219,42 @@ class LMCacheEngine:
         chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
+        # As mentioned in async_lookup_and_prefetch(), the future.result()
+        # is key data pair for each chunk in each tier. So extract the key
+        # and memory object pairs to memory_obj_map
         try:
-            memory_objs = future.result()
-            memory_objs = [mm for m in memory_objs for mm in m]
+            keyed_memory_objs = future.result()
+            memory_obj_map: dict[CacheEngineKey, MemoryObj] = {}
         except Exception as e:
             logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
             return [], 0
 
-        # NOTE(Jiayi): here we assume the retrieved memory_objs have
-        # the same order as the lookup order.
+        for backend_results in keyed_memory_objs:
+            for key, memory_obj in backend_results:
+                memory_obj_map[key] = memory_obj
+
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
-        used_indices = set()
+        used_keys: set[CacheEngineKey] = set()
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            idx = start // self.config.chunk_size
-            memory_obj = memory_objs[idx]
+            memory_obj = memory_obj_map.get(key)
+            if memory_obj is None:
+                # returned chunks are expected to be contiguous.
+                # break at the first missing chunk.
+                break
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
-            used_indices.add(idx)
+            used_keys.add(key)
 
         # NOTE: free the memory objects that are not hit.
-        for idx, unused_mem_obj in enumerate(memory_objs):
-            if idx not in used_indices:
-                unused_mem_obj.ref_count_down()
+        for key, mem_obj in memory_obj_map.items():
+            if key not in used_keys:
+                mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 
