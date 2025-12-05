@@ -1221,13 +1221,14 @@ class LMCacheEngine:
 
         # As mentioned in async_lookup_and_prefetch(), the future.result()
         # is key data pair for each chunk in each tier. So extract the key
-        # and memory object pairs to memory_obj_map        try:
+        # and memory object pairs to memory_obj_map
+        try:
             keyed_memory_objs = future.result()
             memory_obj_map: dict[CacheEngineKey, MemoryObj] = {}
         except Exception as e:
             logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
             return [], 0
-        
+
         for backend_results in keyed_memory_objs:
             for key, memory_obj in backend_results:
                 memory_obj_map[key] = memory_obj
