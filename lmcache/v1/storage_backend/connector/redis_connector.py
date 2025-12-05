@@ -375,8 +375,9 @@ class RedisSentinelConnector(RemoteConnector):
         ).serialize()
 
         key_str = key.to_string()
-        self.master.set(key_str + "metadata", metadata_bytes)
+        # kv bytes needs to be set first to avoid race condition
         self.master.set(key_str + "kv_bytes", kv_bytes)
+        self.master.set(key_str + "metadata", metadata_bytes)
 
         memory_obj.ref_count_down()
 
