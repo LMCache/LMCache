@@ -568,9 +568,9 @@ class P2PBackend(StorageBackendInterface):
         retry_count = 0
         while retry_count < self.max_retry_count:
             peer_info = self.target_peer_info_mapping[target_peer_init_url]
-            lookup_socket = peer_info.lookup_socket
             lookup_lock = peer_info.lookup_lock
             async with lookup_lock:
+                lookup_socket = peer_info.lookup_socket
                 try:
                     retry_count += 1
                     await lookup_socket.send(msgspec.msgpack.encode(msg))
@@ -658,10 +658,9 @@ class P2PBackend(StorageBackendInterface):
         )
 
         peer_info = self.target_peer_info_mapping[target_peer_init_url]
-        lookup_socket = peer_info.lookup_socket
         lookup_lock = peer_info.lookup_lock
-
         async with lookup_lock:
+            lookup_socket = peer_info.lookup_socket
             await lookup_socket.send(msgspec.msgpack.encode(msg))
             ret_msg_bytes = await lookup_socket.recv()
         ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
