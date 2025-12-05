@@ -437,6 +437,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict if necessary. Storage manager should always call
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
+
+        busy_loop should only be used for retrieve
+        the reasoning is that:
+
+        1. synchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - one retrieve at a time (okay to busy loop because stores will clear)
+
+        2. asynchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - many retrieves happen concurrently
+        (we use the async serializer to handle this)
         """
         logger.debug(
             f"Allocating memory in local cpu backend with busy loop: {busy_loop}"
@@ -529,6 +541,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict if necessary. Storage manager should always call
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
+
+        busy_loop should only be used for retrieve
+        the reasoning is that:
+
+        1. synchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - one retrieve at a time (okay to busy loop because stores will clear)
+
+        2. asynchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - many retrieves happen concurrently
+        (we use the async serializer to handle this)
         """
         logger.debug(
             f"Batched allocating memory in local cpu backend"
