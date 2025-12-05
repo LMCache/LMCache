@@ -2,7 +2,7 @@
 """
 Test cases for  storage_plugin_launcher.
 
-This module tests the dynamic backend loading mechanism in CreateStorageBackends.
+This module tests the storage plugins loading mechanism in CreateStorageBackends.
 It creates a simple mock storage plugin extends StoragePluginInterface
 and verifies that:
 1. The backend is properly loaded via the configuration
