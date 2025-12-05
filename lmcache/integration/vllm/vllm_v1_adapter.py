@@ -1484,7 +1484,9 @@ class LMCacheConnectorV1Impl:
 
             # Align computed tokens once to avoid repeated chunk-size rounding downstream
             aligned_num_computed_tokens = (
-                num_computed_tokens // self._lmcache_chunk_size * self._lmcache_chunk_size
+                num_computed_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
             )
 
             # token_ids = request.prompt_token_ids
