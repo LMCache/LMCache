@@ -203,7 +203,7 @@ def get_mock_backend(storage_manager_or_backends):
 
 
 class TestCreateDynamicBackends:
-    """Test cases for create_dynamic_backends functionality."""
+    """Test cases for storage_plugin_launcher functionality."""
 
     @pytest.fixture
     def event_manager(self):
