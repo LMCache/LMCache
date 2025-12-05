@@ -298,6 +298,9 @@ class KVController:
                     (instance_id, location, num_hit_chunks, peer_init_url),
                 ]
             )
+        except KeyError as e:
+            logger.error("Key not found in kv_pool during batched p2p lookup", e)
+            return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
         except Exception as e:
-            logger.error("batched p2p lookup error", e)
+            logger.error("An unexpected error occurred during batched p2p lookup", e)
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
