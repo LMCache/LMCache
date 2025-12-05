@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Test cases for create_dynamic_backends.
+Test cases for  storage_plugin_launcher.
 
 This module tests the dynamic backend loading mechanism in CreateStorageBackends.
 It creates a simple mock storage plugin extends StoragePluginInterface
