@@ -841,13 +841,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         num_tokens = len(slot_mapping_full)
 
+        tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
-            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
-                self.gpu_buffer_allocator.allocate(
-                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
-                )
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
@@ -912,10 +911,10 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             current_stream.wait_stream(self.load_stream)
 
         # free the buffer memory
-        assert tmp_gpu_buffer_obj is not None
-        tmp_gpu_buffer_obj.ref_count_down()
+        if tmp_gpu_buffer_obj is not None:
+            tmp_gpu_buffer_obj.ref_count_down()
 
-        logger.debug(f"Finished loading layer {layer_id}")
+        logger.debug(f"Finished loading all {self.num_layers} layers.")
         yield
 
     @_lmcache_nvtx_annotate
@@ -974,13 +973,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
         num_tokens = len(slot_mapping_full)
 
+        tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
-            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
-                self.gpu_buffer_allocator.allocate(
-                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
-                )
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
@@ -1034,8 +1032,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
-        assert tmp_gpu_buffer_obj is not None
-        tmp_gpu_buffer_obj.ref_count_down()
+        if tmp_gpu_buffer_obj is not None:
+            tmp_gpu_buffer_obj.ref_count_down()
+
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:

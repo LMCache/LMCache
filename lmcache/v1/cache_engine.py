@@ -130,6 +130,16 @@ class LMCacheEngine:
             and (not lmcache_worker_ids or metadata.worker_id in lmcache_worker_ids)
         ):
             self.lmcache_worker = LMCacheWorker(config, metadata, self)
+        else:
+            self.lmcache_worker = None
+            logger.info(
+                "LMCacheWorker is not initialized (related configs: "
+                "enable_controller: %s, role: %s, worker_id: %s, worker_ids: %s).",
+                self.enable_controller,
+                self.metadata.role,
+                self.metadata.worker_id,
+                lmcache_worker_ids,
+            )
 
         self.async_loading = config.enable_async_loading
         self.event_manager = EventManager()
@@ -188,8 +198,10 @@ class LMCacheEngine:
         # NOTE(ApostaC): we haven't support lookup-cache yet
         self.lookup_cache: dict[CacheEngineKey, Any] = {}
 
-        # lookup_id -> [pinned keys]
-        self.lookup_pins: dict[str, list] = defaultdict(list)
+        # lookup_id -> {location -> [pinned keys]}
+        self.lookup_pins: dict[str, dict[str, list]] = defaultdict(
+            lambda: defaultdict(list)
+        )
 
         InitializeUsageContext(config.to_original_config(), metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -274,10 +286,10 @@ class LMCacheEngine:
 
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
-        starts = []
-        ends = []
-        keys = []
-        memory_objs = []
+        starts: List[int] = []
+        ends: List[int] = []
+        keys: List[CacheEngineKey] = []
+        memory_objs: List[MemoryObj] = []
 
         offload_time = 0.0
         put_time = 0.0
@@ -312,7 +324,9 @@ class LMCacheEngine:
             if memory_obj is None:
                 logger.warning(
                     "Local cpu memory under pressure so"
-                    " choosing to not store the KV cache."
+                    " choosing to store only "
+                    f" {len(memory_objs)}"
+                    " total chunks of KV cache."
                 )
                 break
 
@@ -332,6 +346,8 @@ class LMCacheEngine:
         t = time.perf_counter()
 
         transfer_spec = kwargs.get("transfer_spec", None)
+        # TODO: we implicitly rely on batched_put to call ref_count_down
+        # this management should be done in a cleaner way
         self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
         put_time += time.perf_counter() - t
 
@@ -784,20 +800,20 @@ class LMCacheEngine:
                     # of one layer
                     key_all_layers = key.split_layers(self.num_layers)
 
-                    found = False
-                    for key_single_layer in key_all_layers:
-                        if self.storage_manager.contains(
-                            key_single_layer, search_range, pin
-                        ):
-                            found = True
-                    if found:
+                    hit_chunks, block_mapping = self.storage_manager.batched_contains(
+                        key_all_layers,  # type: ignore
+                        search_range,
+                        pin,
+                    )
+                    # Only all layers are hit and hit in one location,
+                    # we consider this key as a hit
+                    if hit_chunks == self.num_layers and len(block_mapping) == 1:
                         if pin:
                             assert lookup_id is not None, (
                                 "lookup_id is required when pin is True"
                             )
-                            self.lookup_pins[lookup_id].extend(  # type: ignore
-                                key_all_layers
-                            )
+                            location = next(iter(block_mapping.keys()))
+                            self.lookup_pins[lookup_id][location].extend(key_all_layers)
                         res = end
                         continue
                     return res
@@ -810,16 +826,16 @@ class LMCacheEngine:
                     keys.append(chunk_info[2])
 
                 # hit chunks by prefix matching
-                hit_chunks = self.storage_manager.batched_contains(
+                hit_chunks, block_mapping = self.storage_manager.batched_contains(
                     keys, search_range, pin
                 )
+                if pin and block_mapping:
+                    assert lookup_id is not None, (
+                        "lookup_id is required when pin is True"
+                    )
+                    self.lookup_pins[lookup_id] = block_mapping
                 for idx, (start, end, key) in enumerate(chunk_info_list):
                     if idx < hit_chunks:
-                        if pin:
-                            assert lookup_id is not None, (
-                                "lookup_id is required when pin is True"
-                            )
-                            self.lookup_pins[lookup_id].append(key)
                         res = end
                         continue
                     return res
@@ -848,7 +864,7 @@ class LMCacheEngine:
 
         num_tokens = self.lookup(
             tokens,
-            search_range=old_position,
+            search_range=[old_position],
             lookup_id=event_id,
             pin=True,
         )
@@ -857,7 +873,9 @@ class LMCacheEngine:
             logger.debug("Move is not performed as there are no tokens to move.")
             return 0
 
-        keys = self.lookup_pins[event_id]
+        block_mapping = self.lookup_pins[event_id]
+        assert len(block_mapping) == 1
+        keys = block_mapping[old_position]
 
         memory_objs = self.storage_manager.batched_get(
             keys=keys,
@@ -873,7 +891,7 @@ class LMCacheEngine:
         offsets = [m.meta.shape[token_dim] for m in memory_objs]  # type: ignore
 
         transfer_spec = {
-            "peer_init_url": new_position[0],
+            "target_peer_init_url": new_position[0],
             "offsets": offsets,
         }
 
@@ -1008,7 +1026,9 @@ class LMCacheEngine:
             logger.debug("Move is not performed as there are no tokens to move.")
             return 0
 
-        keys = self.lookup_pins[event_id]
+        block_mapping = self.lookup_pins[event_id]
+        assert len(block_mapping) == 1
+        keys = block_mapping[location]
 
         memory_objs = self.storage_manager.batched_get(
             keys=keys,
@@ -1064,7 +1084,9 @@ class LMCacheEngine:
             logger.debug("there are no tokens to decompress.")
             return 0
 
-        keys = self.lookup_pins[event_id]
+        block_mapping = self.lookup_pins[event_id]
+        assert len(block_mapping) == 1
+        keys = block_mapping[location]
 
         compressed_memory_objs = self.storage_manager.batched_get(
             keys=keys,
@@ -1097,8 +1119,8 @@ class LMCacheEngine:
     def lookup_unpin(self, lookup_id: str) -> None:
         if lookup_id in self.lookup_pins:
             assert self.storage_manager is not None
-            self.storage_manager.batched_unpin(self.lookup_pins[lookup_id])
-            del self.lookup_pins[lookup_id]
+            for location, keys in self.lookup_pins.pop(lookup_id).items():
+                self.storage_manager.batched_unpin(keys, [location])
 
     @_lmcache_nvtx_annotate
     def clear(
@@ -1152,12 +1174,23 @@ class LMCacheEngine:
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
+        logger.info("Closing LMCacheEngine...")
 
         if self.lmcache_worker is not None:
-            self.lmcache_worker.close()
+            try:
+                logger.info("Closing lmcache_worker...")
+                self.lmcache_worker.close()
+                logger.info("lmcache_worker closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing lmcache_worker: {e}")
 
-        if self.storage_manager is not None:
-            self.storage_manager.close()
+        try:
+            logger.info("Closing storage_manager...")
+            if self.storage_manager is not None:
+                self.storage_manager.close()
+            logger.info("storage_manager closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing storage_manager: {e}")
 
         logger.info("LMCacheEngine closed.")
 
@@ -1186,8 +1219,12 @@ class LMCacheEngine:
         chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
-        memory_objs = future.result()
-        memory_objs = [mm for m in memory_objs for mm in m]
+        try:
+            memory_objs = future.result()
+            memory_objs = [mm for m in memory_objs for mm in m]
+        except Exception as e:
+            logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
+            return [], 0
 
         # NOTE(Jiayi): here we assume the retrieved memory_objs have
         # the same order as the lookup order.
@@ -1541,13 +1578,42 @@ class LMCacheEngineBuilder:
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
+        logger.info(f"Destroying LMCacheEngine instance: {instance_id}")
+
         if instance_id in cls._instances:
             stat_logger = cls._stat_loggers[instance_id]
-            stat_logger.shutdown()
+            try:
+                logger.info("Shutting down stats logger...")
+                stat_logger.shutdown()
+                logger.info("Stats logger shut down successfully")
+            except Exception as e:
+                logger.error(f"Error shutting down stats logger: {e}")
+
             engine = cls._instances[instance_id]
-            engine.close()
-            cls._instances.pop(instance_id, None)
-            cls._cfgs.pop(instance_id, None)
-            cls._metadatas.pop(instance_id, None)
-            cls._stat_loggers.pop(instance_id, None)
-            LMCStatsMonitor.DestroyInstance()
+            try:
+                logger.info("Closing cache engine...")
+                engine.close()
+                logger.info("Cache engine closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing cache engine: {e}")
+
+            try:
+                logger.info("Cleaning up instance dictionaries...")
+                cls._instances.pop(instance_id, None)
+                cls._cfgs.pop(instance_id, None)
+                cls._metadatas.pop(instance_id, None)
+                cls._stat_loggers.pop(instance_id, None)
+                logger.info("Instance dictionaries cleaned up")
+            except Exception as e:
+                logger.error(f"Error cleaning up instances: {e}")
+
+            try:
+                logger.info("Destroying stats monitor...")
+                LMCStatsMonitor.DestroyInstance()
+                logger.info("Stats monitor destroyed successfully")
+            except Exception as e:
+                logger.error(f"Error destroying stats monitor: {e}")
+
+            logger.info(f"LMCacheEngine instance {instance_id} destroyed")
+        else:
+            logger.warning(f"Instance {instance_id} not found for destruction")

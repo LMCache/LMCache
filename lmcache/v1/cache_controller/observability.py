@@ -96,6 +96,14 @@ class PrometheusLogger:
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
 
+        # Sequence number discontinuity metrics
+        self.kv_op_seq_discontinuity_count = self._gauge_cls(
+            name="lmcache:cache_controller_kv_op_seq_discontinuity_count",
+            documentation="Total count of KV operation sequence number discontinuities",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
     @staticmethod
     def GetOrCreate(
         labels: dict,
@@ -168,5 +176,7 @@ class SocketMetricsContext:
             getattr(self.manager, self.active_attr) - self.message_count,
         )
         if exc_type is not None:
-            logger.error(f"Controller Manager error: {exc_val}")
+            logger.error(
+                "Controller Manager error", exc_info=(exc_type, exc_val, exc_tb)
+            )
         return False

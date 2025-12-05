@@ -15,7 +15,6 @@ pip install -e "python[all]"
 ## Server script
 To start SGLang server with LMCache, run
 ```bash
-export LMCACHE_USE_EXPERIMENTAL=True
 export LMCACHE_CONFIG_FILE=lmcache_config.yaml
 python -m sglang.launch_server --model-path Qwen/Qwen2.5-14B-Instruct --port 30000 --tp 2 --page-size 32 --enable-lmcache
 ```

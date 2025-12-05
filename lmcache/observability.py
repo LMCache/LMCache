@@ -81,6 +81,8 @@ class LMCacheStats:
     interval_lookup_hit_rates: List[float]
     interval_lookup_0_hit_requests: int
 
+    interval_request_cache_lifespan: List[float]  # cache lifespan in minutes
+
 
 @dataclass
 class LookupRequestStats:
@@ -208,6 +210,9 @@ class LMCStatsMonitor:
         self.store_request_id = 0
         self.lookup_request_id = 0
 
+        self.interval_request_cache_lifespan: Dict[int, float] = {}
+        self.reuse_chunk_id = 0
+
     @thread_safe
     def on_lookup_request(self, num_tokens: int) -> int:
         """
@@ -311,6 +316,14 @@ class LMCStatsMonitor:
         p2p_stats = self.p2p_requests[request_id]
         self.interval_p2p_transferred_tokens += p2p_stats.num_tokens
         p2p_stats.end_time = curr_time
+
+    @thread_safe
+    def on_chunk_reuse(self, time_interval: float):
+        """
+        time_interval: float or int, in seconds
+        """
+        self.interval_request_cache_lifespan[self.reuse_chunk_id] = time_interval / 60.0
+        self.reuse_chunk_id += 1
 
     @thread_safe
     def update_local_cache_usage(self, usage: int):
@@ -447,6 +460,9 @@ class LMCStatsMonitor:
                 new_lookup_requests[request_id] = lookup_stats
         self.lookup_requests = new_lookup_requests
 
+        self.interval_request_cache_lifespan.clear()
+        self.reuse_chunk_id = 0
+
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
         """
@@ -502,6 +518,8 @@ class LMCStatsMonitor:
             ]
         )
 
+        request_lifespan = list(self.interval_request_cache_lifespan.values())
+
         ret = LMCacheStats(
             interval_retrieve_requests=self.interval_retrieve_requests,
             interval_store_requests=self.interval_store_requests,
@@ -542,6 +560,7 @@ class LMCStatsMonitor:
             p2p_time_to_transfer=p2p_time_to_transfer,
             p2p_transfer_speed=p2p_transfer_speed,
             interval_lookup_hit_rates=request_lookup_hit_rates,
+            interval_request_cache_lifespan=request_lifespan,
             interval_prompt_tokens=self.interval_prompt_tokens,
             interval_lookup_0_hit_requests=self.interval_lookup_0_hit_requests,
         )
@@ -991,6 +1010,30 @@ class PrometheusLogger:
             buckets=request_cache_hit_rate,
         )
 
+        request_cache_lifespan_buckets = [
+            0,
+            1,
+            5,
+            10,
+            20,
+            40,
+            60,
+            80,
+            100,
+            250,
+            500,
+            750,
+            1000,
+            2500,
+            5000,
+        ]
+        self.histogram_request_cache_lifespan = self._histogram_cls(
+            name="lmcache:request_cache_lifespan",
+            documentation="Request cache lifespan in minutes",
+            labelnames=labelnames,
+            buckets=request_cache_lifespan_buckets,
+        )
+
         # Ping latency metrics: use a gauge to record the latest ping latency
         self.gauge_remote_ping_latency = self._gauge_cls(
             name="lmcache:remote_ping_latency",
@@ -1029,6 +1072,12 @@ class PrometheusLogger:
         self.local_cpu_keys_in_request_count = self._gauge_cls(
             name="lmcache:local_cpu_keys_in_request_count",
             documentation="The size of the keys_in_request",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.kv_msg_queue_size = self._gauge_cls(
+            name="lmcache:kv_msg_queue_size",
+            documentation="The size of the KV message queue in BatchedMessageSender",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
@@ -1234,6 +1283,9 @@ class PrometheusLogger:
         self._log_histogram(
             self.histogram_request_cache_hit_rate, stats.interval_lookup_hit_rates
         )
+        self._log_histogram(
+            self.histogram_request_cache_lifespan, stats.interval_request_cache_lifespan
+        )
         self._log_gauge(
             self.gauge_remote_ping_latency, stats.interval_remote_ping_latency
         )
@@ -1301,6 +1353,8 @@ class LMCacheStatsLogger:
         self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
         self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.is_running = True
+        # Event for interruptible sleep during shutdown
+        self.shutdown_event = threading.Event()
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
         self.thread.start()
@@ -1310,8 +1364,44 @@ class LMCacheStatsLogger:
             stats = self.monitor.get_stats_and_clear()
             self.prometheus_logger.log_prometheus(stats)
             self.lmc_usage_logger.incr_or_send_stats(stats)
-            time.sleep(self.log_interval)
+            # Use Event.wait() instead of time.sleep() for interruptible sleep
+            # Returns True if event was set, False if timeout occurred
+            self.shutdown_event.wait(self.log_interval)
 
     def shutdown(self):
+        """Shutdown the stats logger gracefully with immediate wake-up"""
+        logger.info("Shutting down LMCacheStatsLogger...")
+
+        # Signal the worker thread to stop
         self.is_running = False
-        self.thread.join()
+
+        # Signal the event to wake up the thread immediately from sleep
+        self.shutdown_event.set()
+
+        # Wait for thread with a reasonable timeout
+        if self.thread.is_alive():
+            # Since we wake up the thread immediately, use a shorter timeout
+            # Just enough time for the thread to finish its current iteration
+            timeout = 5.0
+            logger.info(
+                f"Waiting for stats logger thread to finish (timeout: {timeout}s)..."
+            )
+
+            try:
+                self.thread.join(timeout=timeout)
+
+                if self.thread.is_alive():
+                    logger.warning(
+                        f"Stats logger thread did not terminate "
+                        f"within {timeout}s timeout. "
+                        "Thread may be blocked in logging operations. "
+                        "Proceeding with shutdown anyway."
+                    )
+                else:
+                    logger.info("Stats logger thread terminated successfully")
+            except Exception as e:
+                logger.error(f"Error waiting for stats logger thread: {e}")
+        else:
+            logger.info("Stats logger thread already stopped")
+
+        logger.info("LMCacheStatsLogger shutdown complete")

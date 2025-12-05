@@ -8,8 +8,8 @@ httpx
 msgspec
 # if nixl decides to support >=3.13 in the future, we can remove this constraint
 nixl; python_version < "3.13"
-# nixl uses numba which requires numpy<=2.2
-numpy<=2.2
+# nixl uses numba which requires numpy<=2.2.6
+numpy<=2.2.6
 nvtx
 prometheus_client >= 0.18.0
 psutil
@@ -35,3 +35,5 @@ sortedcontainers
 torch
 transformers >= 4.51.1
 uvicorn
+# Right now we are using cuda 12.x to align with serving engines
+cupy-cuda12x

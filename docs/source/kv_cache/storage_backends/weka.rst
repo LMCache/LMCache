@@ -16,12 +16,8 @@ Ways to configure LMCache WEKA Offloading
 
 **1. Environment Variables:**
 
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
-
 .. code-block:: bash
 
-    # Specify LMCache V1
-    export LMCACHE_USE_EXPERIMENTAL=True
     # 256 Tokens per KV Chunk
     export LMCACHE_CHUNK_SIZE=256
     # Path to Weka Mount
@@ -37,8 +33,6 @@ Ways to configure LMCache WEKA Offloading
 **2. Configuration File**:
 
 Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
-
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
 
 Example ``config.yaml``:
 
@@ -129,7 +123,6 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_CUFILE_BUFFER_SIZE=8192 \
     # LMCACHE_EXTRA_CONFIG='{"gds_io_threads": 32}' \
     LMCACHE_CONFIG_FILE="weka-offload.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 65536 \
