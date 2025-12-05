@@ -423,7 +423,7 @@ def main():
     args.query_prompt = args.query_prompt.encode().decode("unicode_escape")
     if args.verbose:
         global logger
-        logger = init_logger(__name__, level=logging.DEBUG)
+        logger = init_logger(__name__, logging.DEBUG)
     run_rag(args)
 
 
