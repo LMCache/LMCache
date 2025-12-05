@@ -76,14 +76,11 @@ def convert_tokens_to_list(
     if tokens is None:
         return []
 
-    if isinstance(tokens, torch.Tensor) and tokens.is_cuda:
-        return tokens.detach().cpu().tolist()[token_start : token_end + 1]
-    else:
-        return (
-            tokens.tolist()[token_start : token_end + 1]
-            if isinstance(tokens, torch.Tensor)
-            else tokens[token_start : token_end + 1]
-        )
+    return (
+        tokens.tolist()[token_start : token_end + 1]
+        if isinstance(tokens, torch.Tensor)
+        else tokens[token_start : token_end + 1]
+    )
 
 
 @dataclass
