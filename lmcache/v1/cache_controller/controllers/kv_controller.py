@@ -285,7 +285,10 @@ class KVController:
             peer_init_url = self.reg_controller.get_peer_init_url(
                 instance_id, worker_id
             )
-            assert peer_init_url is not None
+            if peer_init_url is None:
+                raise ValueError(
+                    f"Peer init url not found for {instance_id}: {worker_id}"
+                )
             current_instance_keys = self.kv_pool[(instance_id, worker_id)][location]
             num_hit_chunks = 0
             for key in msg.hashes:
