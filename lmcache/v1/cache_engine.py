@@ -25,7 +25,12 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
-from lmcache.utils import CacheEngineKey, CacheStoreEvent, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    CacheStoreEvent,
+    _lmcache_nvtx_annotate,
+    convert_tokens_to_list,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector import (
@@ -359,14 +364,11 @@ class LMCacheEngine:
                     medium="cpu",
                 )
                 if tokens is not None:
-                    if isinstance(tokens, torch.Tensor) and tokens.is_cuda:
-                        stored_event.token_ids = tokens.detach().cpu().tolist()
-                    else:
-                        stored_event.token_ids = (
-                            tokens.tolist()[start : end + 1]
-                            if isinstance(tokens, torch.Tensor)
-                            else tokens[start : end + 1]
-                        )
+                    stored_event.token_ids = convert_tokens_to_list(
+                        tokens,
+                        start,
+                        end,
+                    )
                     if isinstance(tokens, torch.Tensor):
                         stored_event.medium = tokens.device
                 elif hashes is not None:
@@ -503,14 +505,11 @@ class LMCacheEngine:
                     medium="cpu",
                 )
                 if tokens is not None:
-                    if isinstance(tokens, torch.Tensor) and tokens.is_cuda:
-                        stored_event.token_ids = tokens.detach().cpu().tolist()
-                    else:
-                        stored_event.token_ids = (
-                            tokens.tolist()[start : end + 1]
-                            if isinstance(tokens, torch.Tensor)
-                            else tokens[start : end + 1]
-                        )
+                    stored_event.token_ids = convert_tokens_to_list(
+                        tokens,
+                        start,
+                        end,
+                    )
                     if isinstance(tokens, torch.Tensor):
                         stored_event.medium = tokens.device
                 logger.debug(
