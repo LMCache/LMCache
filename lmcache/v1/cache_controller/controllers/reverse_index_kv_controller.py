@@ -61,25 +61,6 @@ class ReverseIndexKVController(KVController):
         self.reverse_index: dict[int, deque[KVChunkMetadata]] = defaultdict(deque)
         logger.info("created reverse index kv controller")
 
-    async def admit(self, msg: KVAdmitMsg) -> None:
-        await super().admit(msg)
-        chunk_meta = KVChunkMetadata(msg.instance_id, msg.worker_id, msg.location)
-        self.reverse_index[msg.key].append(chunk_meta)
-
-    async def evict(self, msg: KVEvictMsg) -> None:
-        await super().evict(msg)
-
-        if msg.key not in self.reverse_index:
-            return
-
-        chunk_meta = KVChunkMetadata(msg.instance_id, msg.worker_id, msg.location)
-        try:
-            self.reverse_index[msg.key].remove(chunk_meta)
-        except ValueError:
-            pass
-        if not self.reverse_index[msg.key]:
-            del self.reverse_index[msg.key]
-
     async def deregister(self, instance_id: str, worker_id: int) -> None:
         for location, keys in self.kv_pool[(instance_id, worker_id)].items():
             for key in keys:
@@ -107,6 +88,25 @@ class ReverseIndexKVController(KVController):
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)
 
+    async def admit(self, msg: KVAdmitMsg) -> None:
+        await super().admit(msg)
+        chunk_meta = KVChunkMetadata(msg.instance_id, msg.worker_id, msg.location)
+        self.reverse_index[msg.key].append(chunk_meta)
+
+    async def evict(self, msg: KVEvictMsg) -> None:
+        await super().evict(msg)
+
+        if msg.key not in self.reverse_index:
+            return
+
+        chunk_meta = KVChunkMetadata(msg.instance_id, msg.worker_id, msg.location)
+        try:
+            self.reverse_index[msg.key].remove(chunk_meta)
+        except ValueError:
+            pass
+        if not self.reverse_index[msg.key]:
+            del self.reverse_index[msg.key]
+
     async def batched_p2p_lookup(
         self, msg: BatchedP2PLookupMsg
     ) -> BatchedP2PLookupRetMsg:
@@ -116,44 +116,48 @@ class ReverseIndexKVController(KVController):
         instance_id = ""
         location = ""
         peer_init_url = ""
-        for key in msg.hashes:
-            # TODO(Jiayi): remove this string conversion
-            if key not in self.reverse_index:
-                break
-
-            # TODO(Jiayi): Currently, we use the first matched
-            # kv chunk metadata to do matching. The matching
-            # logic can be improved.
-            # TODO(Jiayi): The KV Cache could be from different
-            # instances. We need to handle this case as well.
-            matched_kv_chunk_meta = None
-            for kv_chunk_meta in self.reverse_index[key]:
-                if kv_chunk_meta.instance_id != query_instance_id:
-                    # Found a matching instance_id that's not the
-                    # same as the query_instance_id.
-                    matched_kv_chunk_meta = kv_chunk_meta
+        try:
+            for key in msg.hashes:
+                # TODO(Jiayi): remove this string conversion
+                if key not in self.reverse_index:
                     break
 
-            if matched_kv_chunk_meta is None:
-                break
-            if instance_id != "" and (
-                instance_id != matched_kv_chunk_meta.instance_id
-                or location != matched_kv_chunk_meta.location
-            ):
-                # We have already found a different instance_id
-                # before. Stop here.
-                break
-            elif instance_id == "":
-                instance_id = matched_kv_chunk_meta.instance_id
-                location = matched_kv_chunk_meta.location
-                peer_init_url = self.reg_controller.get_peer_init_url(
-                    instance_id, worker_id
-                )
-                assert peer_init_url is not None
-            num_hit_chunks += 1
+                # TODO(Jiayi): Currently, we use the first matched
+                # kv chunk metadata to do matching. The matching
+                # logic can be improved.
+                # TODO(Jiayi): The KV Cache could be from different
+                # instances. We need to handle this case as well.
+                matched_kv_chunk_meta = None
+                for kv_chunk_meta in self.reverse_index[key]:
+                    if kv_chunk_meta.instance_id != query_instance_id:
+                        # Found a matching instance_id that's not the
+                        # same as the query_instance_id.
+                        matched_kv_chunk_meta = kv_chunk_meta
+                        break
 
-        return BatchedP2PLookupRetMsg(
-            layout_info=[
-                (instance_id, location, num_hit_chunks, peer_init_url),
-            ]
-        )
+                if matched_kv_chunk_meta is None:
+                    break
+                if instance_id != "" and (
+                    instance_id != matched_kv_chunk_meta.instance_id
+                    or location != matched_kv_chunk_meta.location
+                ):
+                    # We have already found a different instance_id
+                    # before. Stop here.
+                    break
+                elif instance_id == "":
+                    instance_id = matched_kv_chunk_meta.instance_id
+                    location = matched_kv_chunk_meta.location
+                    peer_init_url = self.reg_controller.get_peer_init_url(
+                        instance_id, worker_id
+                    )
+                    assert peer_init_url is not None
+                num_hit_chunks += 1
+
+            return BatchedP2PLookupRetMsg(
+                layout_info=[
+                    (instance_id, location, num_hit_chunks, peer_init_url),
+                ]
+            )
+        except Exception as e:
+            logger.error("An unexpected error occurred during batched p2p lookup", e)
+            return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
