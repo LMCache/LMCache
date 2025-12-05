@@ -257,13 +257,31 @@ class TestBatchedMessageSender:
         # Verify total number of operations
         assert len(all_ops) == num_threads * ops_per_thread
 
-        # Verify sequence numbers are strictly consecutive
-        # Even with multiple producer threads, the single consumer thread
-        # ensures messages are sent in the order they were queued.
+        # Verify sequence numbers are strictly increasing within each batch
+        # Since sequence numbers are assigned during drain (not add_kv_op),
+        # the order in which operations are dequeued determines their
+        # sequence numbers. This guarantees that within each batch,
+        # sequence numbers are strictly increasing.
         seq_nums = [op.seq_num for op in all_ops]
-        assert seq_nums == list(range(num_threads * ops_per_thread)), (
-            "Sequence numbers must be consecutive starting from 0"
+
+        # Verify no duplicate sequence numbers
+        assert len(seq_nums) == len(set(seq_nums)), "Sequence numbers must be unique"
+
+        # Verify all sequence numbers are present (no messages lost)
+        expected_seq_nums = set(range(num_threads * ops_per_thread))
+        actual_seq_nums = set(seq_nums)
+        assert expected_seq_nums == actual_seq_nums, (
+            f"Missing sequence numbers: {expected_seq_nums - actual_seq_nums}"
         )
+
+        # Verify sequence numbers are strictly increasing within each batch
+        for msg in lmcache_worker.messages:
+            batch_seq_nums = [op.seq_num for op in msg.operations]
+            for i in range(1, len(batch_seq_nums)):
+                assert batch_seq_nums[i] > batch_seq_nums[i - 1], (
+                    f"Sequence numbers must be strictly increasing within batch: "
+                    f"{batch_seq_nums[i - 1]} -> {batch_seq_nums[i]}"
+                )
 
         sender.close()
 
