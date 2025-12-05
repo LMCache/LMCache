@@ -1750,11 +1750,17 @@ class LMCacheConnectorV1Impl:
                     f"This might be due to an unsupported vLLM version."
                 )
             if preempted:
+                assert load_spec is not None, (
+                    f"Request {req_id} is preempted but was not given a load spec"
+                )
                 # num_computed_tokens should be reset to 0 during preemption
                 # and then set to the number of external tokens (from vllm
                 # scheduler's perspective)
                 # this assumption is crucial for the update() call of RequestTracker
-                assert request.num_computed_tokens == lmcache_cached_tokens, (
+                assert request.num_computed_tokens == max(
+                    lmcache_cached_tokens, load_spec.vllm_cached_tokens
+                )
+                (
                     f"Preempted request {req_id} has "
                     f"num_computed_tokens {request.num_computed_tokens} "
                     f"but lmcache_cached_tokens {lmcache_cached_tokens}"
