@@ -667,7 +667,7 @@ def parse_arguments():
     parser.add_argument(
         "--disable-ramp-up",
         action="store_true",
-        help="Does not ramp up during the uphill stage",
+        help="Disable the initial ramp-up phase, allowing users to join gradually",
     )
     args = parser.parse_args()
     return args
