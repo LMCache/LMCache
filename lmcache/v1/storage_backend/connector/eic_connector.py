@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import IntEnum, auto
-from typing import List, Optional, Union, no_type_check
+from typing import List, Optional, Union, cast, no_type_check
 import asyncio
 import ctypes
 import os
@@ -712,15 +712,15 @@ class EICConnector(RemoteConnector):
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
-        # calling self.get will create a circular dependency
         results = await asyncio.gather(*(self._get(key) for key in keys))
-        # Stop at first None, return only elements before None
-        result_list = []
-        for r in results:
-            if r is None:
-                break
-            result_list.append(r)
-        return result_list
+        first_none_idx = results.index(None) if None in results else None
+        if first_none_idx is None:
+            return cast(List[MemoryObj], results)
+        for obj in results[first_none_idx + 1 :]:
+            if obj is not None:
+                obj.ref_count_down()
+
+        return cast(List[MemoryObj], results[:first_none_idx])
 
     async def batched_get_non_blocking(
         self,
