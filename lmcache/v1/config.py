@@ -113,11 +113,19 @@ _CONFIG_ALIASES = {
     "nixl_role": "pd_role",
     "controller_url": "controller_pull_url",
     "lmcache_worker_port": "lmcache_worker_ports",
+    "plugin_locations": "runtime_plugin_locations",
+    "external_backends": "storage_plugins",
 }
 
 _DEPRECATED_CONFIGS = {
     # Maps deprecated names to warning messages
     "nixl_peer_port": "nixl_peer_port is deprecated, use nixl_receiver_port instead",
+    "plugin_locations": (
+        "plugin_locations is deprecated, use runtime_plugin_locations instead",
+    ),
+    "external_backends": (
+        "external_backends is deprecated, use storage_plugins instead",
+    ),
 }
 
 # Single configuration definition center - add new config items only here
@@ -375,12 +383,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
-    "plugin_locations": {
+    "runtime_plugin_locations": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
     },
-    "external_backends": {
+    "storage_plugins": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
@@ -569,14 +577,15 @@ def _create_config_class():
 def _validate_config(self):
     """Validate configuration"""
 
-    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading:
-        logger.warning(
-            "Automatically setting save_unfull_chunk=False because "
-            "enable_async_loading=True or use_layerwise=True to prevent "
-            "CPU memory fragmentation"
-        )
-        self.save_unfull_chunk = False
+    # needed for the old async serializer implementation
+    # # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
+    # if self.enable_async_loading:
+    #     logger.warning(
+    #         "Automatically setting save_unfull_chunk=False because "
+    #         "enable_async_loading=True or use_layerwise=True to prevent "
+    #         "CPU memory fragmentation"
+    #     )
+    #     self.save_unfull_chunk = False
 
     if self.enable_blending:
         if not self.save_unfull_chunk:

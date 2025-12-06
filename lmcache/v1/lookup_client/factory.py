@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -36,6 +37,7 @@ class LookupClientFactory:
     def create_lookup_client(
         vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         lmcache_engine: Optional[LMCacheEngine] = None,
     ) -> LookupClientInterface:
         """
@@ -60,7 +62,7 @@ class LookupClientFactory:
                     "Asynchronous loading is not supported for external lookup clients."
                 )
             client = LookupClientFactory._create_external_lookup_client(
-                config.external_lookup_client, vllm_config
+                config.external_lookup_client, vllm_config, config, metadata
             )
         else:
             # First Party
@@ -73,11 +75,13 @@ class LookupClientFactory:
 
             # Check if bypass lookup is enabled and lmcache_engine is provided
             if config.enable_scheduler_bypass_lookup and lmcache_engine is not None:
-                client = LMCacheBypassLookupClient(vllm_config, lmcache_engine)
+                client = LMCacheBypassLookupClient(
+                    vllm_config, config, metadata, lmcache_engine
+                )
             elif config.enable_async_loading:
-                client = LMCacheAsyncLookupClient(vllm_config)
+                client = LMCacheAsyncLookupClient(vllm_config, config, metadata)
             else:
-                client = LMCacheLookupClient(vllm_config)
+                client = LMCacheLookupClient(vllm_config, config, metadata)
 
         if config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1:
             client = HitLimitLookupClient(client, config)
@@ -137,6 +141,8 @@ class LookupClientFactory:
     def _create_external_lookup_client(
         external_lookup_uri: str,
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
     ) -> LookupClientInterface:
         """
         Create an external lookup client based on the URI format.
@@ -163,7 +169,7 @@ class LookupClientFactory:
         # Route to appropriate client based on scheme
         if scheme == "mooncakestore":
             return LookupClientFactory._create_mooncake_lookup_client(
-                address, vllm_config
+                address, vllm_config, config, metadata
             )
         else:
             raise ValueError(
@@ -175,6 +181,8 @@ class LookupClientFactory:
     def _create_mooncake_lookup_client(
         master_address: str,
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
     ) -> "MooncakeLookupClient":
         """Create a MooncakeLookupClient instance."""
         # First Party
@@ -182,4 +190,4 @@ class LookupClientFactory:
             MooncakeLookupClient,
         )
 
-        return MooncakeLookupClient(vllm_config, master_address)
+        return MooncakeLookupClient(vllm_config, config, metadata, master_address)

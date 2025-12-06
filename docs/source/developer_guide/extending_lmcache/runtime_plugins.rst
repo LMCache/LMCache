@@ -1,7 +1,7 @@
-Extending LMCache: Plugin
-=========================
+Runtime Plugins
+===============
 
-The LMCache plugin system allows developers to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``PluginLauncher`` class.
+The LMCache runtime plugin system provides the ability to extend functionality by running custom scripts alongside LMCache processes. Plugins can be written in Python and Bash for now, and are managed by the ``RuntimePluginLauncher`` class.
 
 Key Use Cases
 -------------
@@ -13,26 +13,26 @@ Key Use Cases
 
 Configuration
 -------------
-Plugins are configured through environment variables and configuration files:
+Runtime plugins are configured through environment variables and configuration files:
 
 Environment Variables:
-- ``LMCACHE_PLUGIN_ROLE``: Process role (e.g., ``SCHEDULER``, ``WORKER``)
-- ``LMCACHE_PLUGIN_CONFIG``: JSON string containing plugin configuration
-- ``LMCACHE_PLUGIN_WORKER_ID``: Current worker ID
-- ``LMCACHE_PLUGIN_WORKER_COUNT``: Total worker count in cluster
+- ``LMCACHE_RUNTIME_PLUGIN_ROLE``: Process role (e.g., ``SCHEDULER``, ``WORKER``)
+- ``LMCACHE_RUNTIME_PLUGIN_CONFIG``: JSON string containing plugin configuration
+- ``LMCACHE_RUNTIME_PLUGIN_WORKER_ID``: Current worker ID
+- ``LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT``: Total worker count in cluster
 
 Configuration File (``lmcache.yaml``):
 
 .. code-block:: yaml
 
-   plugin_locations:
+   runtime_plugin_locations:
      - "/path/to/plugins"
 
    extra_config:
      custom_setting: value
 
-Plugin Naming Convention
-------------------------
+Runtime Plugin Naming Convention
+--------------------------------
 Plugin filenames determine execution targets:
 
 Role-Specific Plugins:
@@ -65,8 +65,8 @@ Execution Model
    - Launched as subprocesses
    - Terminated when parent process exits
 
-Example Plugins
----------------
+Example Runtime Plugins
+-----------------------
 Python Plugin (``scheduler_foo_plugin.py``):
 
 .. literalinclude:: ../../../../examples/plugins/scheduler_foo_plugin.py
@@ -81,7 +81,7 @@ Bash Plugin (``all_plugin.sh``):
 
 Best Practices
 --------------
-1. Keep plugins lightweight and efficient
+1. Keep runtime plugins lightweight and efficient
 2. Use descriptive naming conventions
 3. Implement graceful error handling
 4. Include shebang for portability
