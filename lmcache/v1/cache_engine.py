@@ -149,7 +149,8 @@ class LMCacheEngine:
 
         self.async_loading = config.enable_async_loading
         self.event_manager = EventManager()
-
+        InitializeUsageContext(config.to_original_config(), metadata)
+        self.stats_monitor: LMCStatsMonitor = LMCStatsMonitor.GetOrCreate()
         self.use_layerwise = config.use_layerwise
 
         # TODO: support save_only_first_rank when use layerwise
@@ -181,6 +182,7 @@ class LMCacheEngine:
                 # self.memory_allocator,
                 event_manager=self.event_manager,
                 lmcache_worker=self.lmcache_worker,
+                stats_monitor=self.stats_monitor,
             )
 
         # KV events
@@ -1018,9 +1020,18 @@ class LMCacheEngine:
             keys.append(key)
             cum_chunk_lengths.append(end)
 
+        # Track lookup metrics for async path
+        num_requested_tokens = cum_chunk_lengths[-1]
+        lookup_request_id = self.stats_monitor.on_lookup_request(num_requested_tokens)
+
         asyncio.run_coroutine_threadsafe(
             self.storage_manager.async_lookup_and_prefetch(
-                lookup_id, keys, cum_chunk_lengths, search_range, pin
+                lookup_id,
+                keys,
+                cum_chunk_lengths,
+                search_range,
+                pin,
+                lookup_request_id=lookup_request_id,
             ),
             self.storage_manager.loop,
         )

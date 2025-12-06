@@ -851,6 +851,8 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.1)
     """ Wait until disk load (prefetch) finishes and delete disk cache"""
+    lookup_req_before = engine.stats_monitor.interval_lookup_requests
+    lookup_hits_before = engine.stats_monitor.interval_lookup_hits
     engine.async_lookup_and_prefetch(
         lookup_id=test_lookup_id, tokens=torch.cat([tokens, new_tokens])
     )
@@ -866,6 +868,13 @@ def test_paged_prefetch_retrieve(backend, prefetch_from, autorelease_v1):
                 raise TimeoutError(f"Operation timed out after {timeout} seconds.")
             time.sleep(0.01)
         engine.storage_manager.storage_backends["LocalDiskBackend"].dict.clear()
+
+    assert engine.stats_monitor.interval_lookup_requests == lookup_req_before + 1
+    assert (
+        engine.stats_monitor.interval_lookup_hits
+        == lookup_hits_before + expected_length
+    )
+
     """ test retrieve """
     t4 = time.perf_counter()
 

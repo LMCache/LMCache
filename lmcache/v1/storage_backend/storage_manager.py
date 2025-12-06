@@ -24,7 +24,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.observability import PrometheusLogger
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import (
     CacheEngineKey,
     _lmcache_nvtx_annotate,
@@ -212,10 +212,12 @@ class StorageManager:
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        stats_monitor: Optional[LMCStatsMonitor] = None,
     ):
         self.config = config
         self.metadata = metadata
         self.loop = asyncio.new_event_loop()
+        self.stats_monitor = stats_monitor
 
         self.thread = threading.Thread(
             target=start_loop_in_thread_with_exceptions,
@@ -532,6 +534,7 @@ class StorageManager:
         lookup_id: str,
         cum_chunk_lengths_total: list[int],
         tier_expected_chunks: list[int],
+        lookup_request_id: Optional[int] = None,
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -606,6 +609,8 @@ class StorageManager:
             f"Responding to scheduler for lookup id {lookup_id}"
             f" with retrieved length {retrieved_length}"
         )
+        if self.stats_monitor is not None and lookup_request_id is not None:
+            self.stats_monitor.on_lookup_finished(lookup_request_id, retrieved_length)
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
     async def async_lookup_and_prefetch(
@@ -615,6 +620,7 @@ class StorageManager:
         cum_chunk_lengths: list[int],
         search_range: Optional[list[str]] = None,
         pin: bool = False,
+        lookup_request_id: Optional[int] = None,
     ) -> None:
         """
         Perform asynchronous lookup and prefetching across all storage backends.
@@ -634,6 +640,7 @@ class StorageManager:
         to search in. Should be a subset of ["LocalCPUBackend",
         "LocalDiskBackend"] for now. If None, search in all backends.
         :param bool pin: Whether to pin the keys.
+        :param Optional[int] lookup_request_id: Stats monitor lookup request id.
         """
 
         # NOTE(Jiayi): Currently, the retrieval pattern is always
@@ -708,6 +715,8 @@ class StorageManager:
 
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
+            if self.stats_monitor is not None and lookup_request_id is not None:
+                self.stats_monitor.on_lookup_finished(lookup_request_id, 0)
             if self.async_lookup_server is not None:
                 self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
             return
@@ -744,6 +753,7 @@ class StorageManager:
                 lookup_id,
                 cum_chunk_lengths_total,
                 tier_expected_chunks,
+                lookup_request_id,
             )
         )
 
