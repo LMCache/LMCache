@@ -599,6 +599,7 @@ def _init_lmcache_engine(
             dtype=kv_dtype,
             device=device,
             use_mla=use_mla,
+            enable_pd=lmcache_config.enable_pd,
         )
         tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(

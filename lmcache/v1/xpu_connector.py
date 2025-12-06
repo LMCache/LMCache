@@ -63,6 +63,7 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.kvcaches: Optional[List[torch.Tensor]] = None
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        self.enable_pd = "enable_pd" in kwargs and kwargs["enable_pd"]
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -192,10 +193,10 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             tmp = torch.stack([tmp_k, tmp_v])
         memory_obj.tensor.copy_(tmp, non_blocking=True)
 
-        if not memory_obj.tensor.is_xpu:
-            # Force a synchronize if the target buffer is NOT XPU device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
+        # Force a synchronize if:
+        # 1. the target buffer is NOT XPU device, OR
+        # 2. we're in PD disaggregation scenario (cross-node transfer requires sync)
+        if not memory_obj.tensor.is_xpu or self.enable_pd:
             torch.xpu.synchronize()
 
         if self.use_mla:

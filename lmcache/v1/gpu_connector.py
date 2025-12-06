@@ -146,6 +146,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        self.enable_pd = "enable_pd" in kwargs and kwargs["enable_pd"]
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -299,10 +300,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
+        # Force a synchronize if:
+        # 1. the target buffer is NOT CUDA device, OR
+        # 2. we're in PD disaggregation scenario (cross-node transfer requires sync)
+        if not memory_obj.tensor.is_cuda or self.enable_pd:
             self.store_stream.synchronize()
 
         if self.use_mla:
