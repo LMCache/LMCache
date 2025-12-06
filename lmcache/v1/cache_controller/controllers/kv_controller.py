@@ -55,10 +55,6 @@ class KVController:
 
         self._setup_metrics()
 
-    ############################################################
-    # private and public methods
-    ############################################################
-
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
