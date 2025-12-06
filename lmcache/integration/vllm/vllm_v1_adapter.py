@@ -540,6 +540,7 @@ def _init_lmcache_engine(
         kv_shape,
         use_mla,
         role,
+        served_model_name=model_config.served_model_name,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
