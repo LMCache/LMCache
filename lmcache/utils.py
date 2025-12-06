@@ -68,6 +68,21 @@ def get_version():
     return f"{version_display}-{commit_id_display}"
 
 
+def convert_tokens_to_list(
+    tokens: Optional[Union[torch.Tensor, list[int]]], token_start: int, token_end: int
+) -> List[int]:
+    """Convert tokens to a list.
+    token_start and token_end delineate tokens to convert"""
+    if tokens is None:
+        return []
+
+    return (
+        tokens.tolist()[token_start : token_end + 1]
+        if isinstance(tokens, torch.Tensor)
+        else tokens[token_start : token_end + 1]
+    )
+
+
 @dataclass
 class DiskCacheMetadata:
     path: str
@@ -388,6 +403,16 @@ class LayerCacheEngineKey(CacheEngineKey):
             request_configs,
             int(parts[6]),
         )
+
+
+@dataclass
+class CacheStoreEvent:
+    block_hashes: list[int]
+    parent_block_hash: int | None
+    token_ids: list[int]
+    block_size: int
+    lora_id: int | None
+    medium: str | None
 
 
 ##### NVTX annotation #####
