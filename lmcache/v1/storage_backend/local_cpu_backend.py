@@ -651,20 +651,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 
-    def calculate_chunk_budget(self) -> int:
-        """
-        Calculate the maximum number of chunks that can be allocated concurrently
-        without causing memory deadlocks in the async loading system.
-
-        Returns:
-            int: The estimated chunk budget for concurrent allocations
-        """
-        logger.debug("Attempting to calculate chunk budget for async loading")
+    def get_full_chunk_size(self) -> int:
+        logger.info("Calculating the size of a single LMCache chunk")
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
         )
 
-        total_memory = int(self.config.max_local_cpu_size * 1024**3)
         chunk_tokens = self.config.chunk_size
         # already accounted for parallelism
         kv_shape = (
@@ -672,6 +664,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         )  # [num_layers, kv_size, chunk_size, num_heads, head_size]
         num_layers = kv_shape[0]
         kv_size = kv_shape[1]  # 1 for MLA, 2 for regular
+        # per gpu
         num_heads = kv_shape[3]
         head_size = kv_shape[4]
         hidden_dim = num_heads * head_size
@@ -690,6 +683,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
             f"hidden_dim={hidden_dim}"
         )
         logger.debug(f"Calculated bytes per chunk per rank: {chunk_bytes}")
+        return chunk_bytes
+
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the maximum number of chunks that can be allocated concurrently
+        without causing memory deadlocks in the async loading system.
+
+        Returns:
+            int: The estimated chunk budget for concurrent allocations
+        """
+        total_memory = int(self.config.max_local_cpu_size * 1024**3)
+        chunk_bytes = self.get_full_chunk_size()
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         assert hasattr(self.memory_allocator, "align_bytes")

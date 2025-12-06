@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import (
     Any,
     Callable,
@@ -24,7 +25,12 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
-from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    CacheStoreEvent,
+    _lmcache_nvtx_annotate,
+    convert_tokens_to_list,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector import (
@@ -177,6 +183,15 @@ class LMCacheEngine:
                 lmcache_worker=self.lmcache_worker,
             )
 
+        # KV events
+        self.kv_events_enabled = False
+        self.kv_events_enabled = config.enable_kv_events
+        if self.kv_events_enabled:
+            self.kv_events: List[CacheStoreEvent] = []
+            logger.info("KV events are enabled.")
+        else:
+            logger.info("KV events are disabled.")
+
         # HACK: remove this in the future
         # NOTE (Jiayi): This is currently used to support
         # dropping the kv cache from the buffer in PD backend
@@ -301,6 +316,7 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        prev_key = 0
         for start, end, key in self.token_database.process_tokens(
             tokens,
             hashes,
@@ -336,6 +352,32 @@ class LMCacheEngine:
             memory_objs.append(memory_obj)
             tot_kv_size += memory_obj.get_size()
             tot_token_num += num_tokens
+
+            # Create KV event
+            if self.kv_events_enabled:
+                stored_event = CacheStoreEvent(
+                    block_hashes=[key.chunk_hash],
+                    parent_block_hash=None if start == 0 else prev_key,
+                    token_ids=[],
+                    block_size=num_tokens,
+                    lora_id=None,
+                    medium="cpu",
+                )
+                if tokens is not None:
+                    stored_event.token_ids = convert_tokens_to_list(
+                        tokens,
+                        start,
+                        end,
+                    )
+                    if isinstance(tokens, torch.Tensor):
+                        stored_event.medium = tokens.device
+                elif hashes is not None:
+                    stored_event.token_ids = hashes[start : end + 1]
+                logger.debug(
+                    f"Added kv cache event '{stored_event}' to kv cache events queue"
+                )
+                self.kv_events.append(stored_event)
+                prev_key = key.chunk_hash
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
@@ -416,6 +458,7 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        prev_key = 0
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask, request_configs=request_configs
         ):
@@ -450,6 +493,30 @@ class LMCacheEngine:
             keys.append(keys_multi_layer)
             memory_objs.append(memory_objs_multi_layer)
             tot_token_num += num_tokens
+
+            # Create KV event
+            if self.kv_events_enabled and tokens is not None:
+                stored_event = CacheStoreEvent(
+                    block_hashes=[key.chunk_hash],
+                    parent_block_hash=None if start == 0 else prev_key,
+                    token_ids=[],
+                    block_size=num_tokens,
+                    lora_id=None,
+                    medium="cpu",
+                )
+                if tokens is not None:
+                    stored_event.token_ids = convert_tokens_to_list(
+                        tokens,
+                        start,
+                        end,
+                    )
+                    if isinstance(tokens, torch.Tensor):
+                        stored_event.medium = tokens.device
+                logger.debug(
+                    f"Added kv cache event '{stored_event}' to kv cache events queue"
+                )
+                self.kv_events.append(stored_event)
+                prev_key = key.chunk_hash
 
         if keys:
             # Transpose the keys and memory objects into layer major format
@@ -1138,6 +1205,13 @@ class LMCacheEngine:
                 return 0
         return self._clear(tokens, locations, request_configs)
 
+    @_lmcache_nvtx_annotate
+    def get_kv_events(self) -> Iterable[CacheStoreEvent]:
+        if self.kv_events_enabled and (events := self.kv_events):
+            self.kv_events = []
+            return events
+        return []
+
     def _clear(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
@@ -1219,34 +1293,42 @@ class LMCacheEngine:
         chunks: List[ProcessedChunk] = []
         future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
+        # As mentioned in async_lookup_and_prefetch(), the future.result()
+        # is key data pair for each chunk in each tier. So extract the key
+        # and memory object pairs to memory_obj_map
         try:
-            memory_objs = future.result()
-            memory_objs = [mm for m in memory_objs for mm in m]
+            keyed_memory_objs = future.result()
+            memory_obj_map: dict[CacheEngineKey, MemoryObj] = {}
         except Exception as e:
             logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
             return [], 0
 
-        # NOTE(Jiayi): here we assume the retrieved memory_objs have
-        # the same order as the lookup order.
+        for backend_results in keyed_memory_objs:
+            for key, memory_obj in backend_results:
+                memory_obj_map[key] = memory_obj
+
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
-        used_indices = set()
+        used_keys: set[CacheEngineKey] = set()
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
             mask=mask,
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            idx = start // self.config.chunk_size
-            memory_obj = memory_objs[idx]
+            memory_obj = memory_obj_map.get(key)
+            if memory_obj is None:
+                # returned chunks are expected to be contiguous.
+                # break at the first missing chunk.
+                break
             chunks.append((key, memory_obj, start, end))
             tot_kv_size += memory_obj.get_size()
             ret_mask[start:end] = True
-            used_indices.add(idx)
+            used_keys.add(key)
 
         # NOTE: free the memory objects that are not hit.
-        for idx, unused_mem_obj in enumerate(memory_objs):
-            if idx not in used_indices:
-                unused_mem_obj.ref_count_down()
+        for key, mem_obj in memory_obj_map.items():
+            if key not in used_keys:
+                mem_obj.ref_count_down()
 
         return chunks, tot_kv_size
 
