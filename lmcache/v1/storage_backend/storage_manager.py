@@ -12,6 +12,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 import asyncio
 import functools
@@ -147,10 +148,12 @@ class WeightedSemaphore:
             self._cond.notify_all()
 
 
-class AsyncSerializer:
+class AsyncMultiSerializer:
     """
     Prevent race conditions where multiple batched_get's cause the local CPU
     backend to allocate memory objects in parallel and get deadlocked.
+    Make the assumption that the save_unfull_chunk is False so that we
+    can assume that we can always use 50% of the given memory
     """
 
     def __init__(
@@ -172,6 +175,29 @@ class AsyncSerializer:
             return await coro_fn
         finally:
             await self._sem.release(num_chunks)
+
+
+class AsyncSingleSerializer:
+    """
+    Prevent race conditions in a naive way by forcing each request that
+    is passed through to be serialized
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        # lazy init in run
+        self.lock: Optional[asyncio.Lock] = None
+
+    async def run(self, coro_fn: Coroutine[Any, Any, Any], *args, **kwargs) -> Any:
+        # we need to lazily initialize the lock to
+        # place it on the calling event loop
+        if self.lock is None:
+            self.lock = asyncio.Lock()
+        async with self.lock:  # type: ignore
+            return await coro_fn
+
+
+AsyncSerializer = Union[AsyncSingleSerializer, AsyncMultiSerializer]
 
 
 # TODO: extend this class to implement caching policies and eviction policies
@@ -268,17 +294,11 @@ class StorageManager:
 
     def post_init(self, **kwargs) -> None:
         if "async_lookup_server" in kwargs:
-            assert not self.config.save_unfull_chunk, (
-                "save_unfull_chunk should be automatically set to False when using "
-                "async loading."
-            )
             self.async_lookup_server = kwargs.pop("async_lookup_server")
         # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and (
-            self.config.enable_async_loading or self.config.use_layerwise
-        ):
+        if not self.enable_pd and self.config.enable_async_loading:
             assert self.allocator_backend is not None
-            self.async_serializer = AsyncSerializer(self.allocator_backend, self.loop)
+            self.async_serializer = AsyncSingleSerializer(self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -489,14 +509,7 @@ class StorageManager:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
             # TODO(Jiayi): need to make async loading and layerwise compatible
-            assert self.async_serializer is not None, (
-                "Async serializer must be initialized via post_init before using "
-                "layerwise_batched_get."
-            )
-            coro = self.async_serializer.run(
-                backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk),
-                len(keys_multi_chunk),
-            )
+            coro = backend.batched_get_non_blocking("fake_lookup_id", keys_multi_chunk)
             task = asyncio.run_coroutine_threadsafe(coro, self.loop)
             yield task
 
@@ -647,6 +660,8 @@ class StorageManager:
         cum_chunk_lengths_total = cum_chunk_lengths[:]
         loading_tasks = []
         tier_expected_chunks = []
+        # we also keep track of the keys for each tier and each chunk
+        loading_task_keys: list[list[CacheEngineKey]] = []
         for backend_name, backend in self.storage_backends.items():
             if search_range and backend_name not in search_range:
                 continue
@@ -658,14 +673,18 @@ class StorageManager:
             num_total_hit_chunks += num_hit_chunks
             tier_expected_chunks.append(num_hit_chunks)
 
+            backend_keys = keys[:num_hit_chunks]
+            loading_task_keys.append(backend_keys)
+
             assert self.async_serializer is not None, (
                 "Async serializer must be initialized via post_init before using "
                 "async_lookup_and_prefetch."
             )
+            # num_hit_chunks is only used for the multi serializer
             get_coro = self.async_serializer.run(
                 backend.batched_get_non_blocking(
                     lookup_id,
-                    keys[:num_hit_chunks],
+                    backend_keys,
                     {"cum_chunk_lengths": cum_chunk_lengths[: num_hit_chunks + 1]},
                 ),
                 num_hit_chunks,
@@ -693,7 +712,25 @@ class StorageManager:
                 self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
             return
 
-        all_done = asyncio.gather(*loading_tasks)
+        # gather_with_keys() here make a pair of (key, memory_obj) for each chunk
+        # in each tier. The all_done result's layout is like following and
+        # will be processed in _async_process_tokens_internal()
+        # Tier 0:
+        #  Tuple(loading_task_keys[0][0] : MemoryObj0)
+        #  Tuple(loading_task_keys[0][1] : MemoryObj1)
+        # Tier 1:
+        #  Tuple(loading_task_keys[1][0] : MemoryObj2)
+        #  Tuple(loading_task_keys[1][1] : MemoryObj3)
+        async def gather_with_keys() -> list[list[tuple[CacheEngineKey, MemoryObj]]]:
+            loading_results = await asyncio.gather(*loading_tasks)
+            return [
+                list(zip(keys, results, strict=False))
+                for keys, results in zip(
+                    loading_task_keys, loading_results, strict=False
+                )
+            ]
+
+        all_done = asyncio.create_task(gather_with_keys())
         # Register the event before adding the callback to avoid race conditions
         self.event_manager.add_event(
             EventType.LOADING,

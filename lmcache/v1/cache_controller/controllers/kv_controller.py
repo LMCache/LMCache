@@ -50,9 +50,7 @@ class KVController:
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
 
-        # Track sequence numbers for each (instance_id, worker_id, location) tuple
-        # Key: (instance_id, worker_id, location), Value: last_seq_num
-        self.seq_tracker: dict[tuple[str, int, str], int] = {}
+        # Track sequence discontinuity count for metrics
         self.seq_discontinuity_count = 0
 
         self._setup_metrics()
@@ -76,28 +74,35 @@ class KVController:
         worker_id = msg.worker_id
         location = msg.location
         seq_num = msg.seq_num
-        key = (instance_id, worker_id, location)
 
-        if key not in self.seq_tracker:
+        last_seq_num = self.reg_controller.registry.get_seq_num(
+            instance_id, worker_id, location
+        )
+
+        if last_seq_num is None:
             # First message from this source
-            self.seq_tracker[key] = seq_num
+            self.reg_controller.registry.update_seq_num(
+                instance_id, worker_id, location, seq_num
+            )
             return
 
-        expected_seq = self.seq_tracker[key] + 1
+        expected_seq = last_seq_num + 1
         if seq_num != expected_seq:
             # Sequence number discontinuity detected
             self.seq_discontinuity_count += 1
             logger.warning(
                 "KV operation sequence discontinuity detected: "
                 "key=%s, expected_seq=%s, actual_seq=%s, gap=%s",
-                key,
+                (instance_id, worker_id, location),
                 expected_seq,
                 seq_num,
                 seq_num - expected_seq,
             )
 
         # Update tracker with current sequence number
-        self.seq_tracker[key] = seq_num
+        self.reg_controller.registry.update_seq_num(
+            instance_id, worker_id, location, seq_num
+        )
 
     def _get_kv_pool_size(self) -> int:
         total_size = 0
@@ -184,15 +189,6 @@ class KVController:
         report_id = (instance_id, worker_id)
         if report_id in self.kv_pool:
             del self.kv_pool[report_id]
-
-        # Clean up sequence tracker for this instance-worker
-        keys_to_remove = [
-            k
-            for k in self.seq_tracker.keys()
-            if k[0] == instance_id and k[1] == worker_id
-        ]
-        for k in keys_to_remove:
-            del self.seq_tracker[k]
 
     # TODO(Jiayi): The current implementation does not handle
     # the case where the prefix chunks are evicted while the
