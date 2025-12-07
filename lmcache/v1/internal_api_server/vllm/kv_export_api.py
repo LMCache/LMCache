@@ -4,6 +4,10 @@ from typing import List, Optional
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
+import threading
+from pathlib import Path
+from queue import Queue, Empty
 
 # Third Party
 from fastapi import APIRouter
@@ -22,11 +26,30 @@ logger = init_logger(__name__)
 # These operations are CPU-bound (tensor ops) so we use threads to avoid blocking the event loop
 KV_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="kv_worker")
 
+# Disk-based KV cache export
+KV_CACHE_DIR = Path(os.environ.get("KV_CACHE_DIR", "/tmp/kv_cache"))
+KV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Queue for async disk exports
+_export_queue: Queue = Queue()
+_disk_export_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="disk_export")
+
 
 class KVExportRequest(BaseModel):
     """Request model for KV cache export."""
     tokens: List[int]
     locations: Optional[List[str]] = None
+
+
+class ExportAsyncItem(BaseModel):
+    """Single item for async export."""
+    session_id: str
+    tokens: List[int]
+
+
+class ExportAsyncRequest(BaseModel):
+    """Request model for async disk export."""
+    items: List[ExportAsyncItem]
 
 
 def _do_export(lmcache_engine, tokens: List[int], locations: Optional[List[str]]):
@@ -216,6 +239,212 @@ async def export_kv(
         
     except Exception as e:
         logger.exception(f"[/kv/export] Error: {e}")
+        return PlainTextResponse(
+            content=json.dumps({"error": str(e)}),
+            media_type="application/json",
+            status_code=500,
+        )
+
+
+def _export_session_to_disk(lmcache_engine, session_id: str, tokens: List[int]):
+    """Export KV cache to disk using clone + torch.save().
+    
+    Key optimization: Clone tensors quickly (~10-20ms for 230MB), then release refs.
+    LMCache is only blocked during the clone, not during disk write.
+    """
+    import time
+    
+    try:
+        t0 = time.time()
+        
+        storage_manager = lmcache_engine.storage_manager
+        token_database = lmcache_engine.token_database
+        
+        if storage_manager is None or token_database is None:
+            logger.warning(f"[disk_export] {session_id}: engine not initialized")
+            return
+        
+        # Process tokens to get cache keys (fast)
+        tokens_tensor = torch.tensor(tokens, dtype=torch.long)
+        chunk_info_list = list(token_database.process_tokens(tokens=tokens_tensor))
+        
+        if not chunk_info_list:
+            logger.debug(f"[disk_export] {session_id}: no chunks")
+            return
+        
+        # Check which chunks exist (fast - just dict lookups)
+        keys = [chunk_info[2] for chunk_info in chunk_info_list]
+        hit_chunks, block_mapping = storage_manager.batched_contains(keys, pin=False)
+        
+        if hit_chunks == 0:
+            logger.debug(f"[disk_export] {session_id}: no cache hits")
+            return
+        
+        # Get memory objects (fast - just refs + ref count)
+        t1 = time.time()
+        location = next(iter(block_mapping.keys())) if block_mapping else None
+        memory_objs = storage_manager.batched_get(keys[:hit_chunks], location=location)
+        get_time = (time.time() - t1) * 1000
+        
+        if not memory_objs:
+            logger.debug(f"[disk_export] {session_id}: no memory objects")
+            return
+        
+        # CLONE + RELEASE in single pass - release each ref immediately after clone
+        # With 50ms SLA to avoid blocking inference
+        t2 = time.time()
+        clones = []
+        processed_count = 0
+        sla_breached = False
+        for memory_obj in memory_objs:
+            if memory_obj and memory_obj.tensor is not None:
+                clones.append((memory_obj.tensor.clone(), memory_obj.get_memory_format().name))
+                memory_obj.ref_count_down()  # Release immediately after clone
+            else:
+                clones.append(None)
+                if memory_obj:
+                    memory_obj.ref_count_down()
+            processed_count += 1
+            
+            # 50ms SLA - break early if taking too long
+            if ((time.time() - t2) * 1000) > 50:
+                sla_breached = True
+                break
+        
+        # CRITICAL: Release refs for any unprocessed memory_objs (avoid ref leak)
+        for memory_obj in memory_objs[processed_count:]:
+            if memory_obj:
+                memory_obj.ref_count_down()
+        
+        clone_time = (time.time() - t2) * 1000
+        
+        # Build metadata - only use the clones we actually made
+        chunks_data = []
+        total_bytes = 0
+        for clone_data, chunk_info in zip(clones, chunk_info_list[:len(clones)]):
+            if clone_data is None:
+                continue
+            cloned_tensor, fmt_name = clone_data
+            start_idx, end_idx, key = chunk_info
+            total_bytes += cloned_tensor.numel() * cloned_tensor.element_size()
+            chunks_data.append({
+                'tensor': cloned_tensor,
+                'key': str(key),
+                'start': start_idx,
+                'end': end_idx,
+                'fmt': fmt_name,
+            })
+        
+        if not chunks_data:
+            logger.debug(f"[disk_export] {session_id}: no valid chunks")
+            return
+        
+        # torch.save() - happens AFTER refs released, doesn't block LMCache
+        t4 = time.time()
+        cache_path = KV_CACHE_DIR / f"{session_id}.pt"
+        torch.save(chunks_data, cache_path)
+        save_time = (time.time() - t4) * 1000
+        
+        total_time = (time.time() - t0) * 1000
+        data_mb = total_bytes / 1024 / 1024
+        
+        # Log with breakdown showing LMCache block time vs total time
+        lmcache_block_time = get_time + clone_time
+        sla_status = f" [SLA breach, {processed_count}/{len(memory_objs)} chunks]" if sla_breached else ""
+        logger.info(f"[disk_export] {session_id}: {len(chunks_data)} chunks, {data_mb:.1f}MB{sla_status}")
+        logger.info(f"   ⏱️ LMCache blocked: {lmcache_block_time:.0f}ms (get={get_time:.0f}ms, clone+release={clone_time:.0f}ms)")
+        logger.info(f"   ⏱️ Disk write (async): {save_time:.0f}ms")
+        logger.info(f"   ⏱️ Total: {total_time:.0f}ms, path={cache_path}")
+        
+    except Exception as e:
+        logger.exception(f"[disk_export] {session_id}: error - {e}")
+
+
+def _export_queue_worker():
+    """Background worker that processes export queue.
+    
+    With the clone optimization, LMCache is only blocked for ~10-20ms per export,
+    so we can export more aggressively without impacting inference.
+    """
+    logger.info(f"[export_queue_worker] Started, KV_CACHE_DIR={KV_CACHE_DIR.absolute()}")
+    
+    # We need to wait for the lmcache_engine to be available
+    # The engine will be set when the first request comes in
+    lmcache_engine = None
+    
+    import time
+    
+    # With clone optimization, we only block LMCache for ~20ms per export
+    # So we can export more frequently
+    EXPORT_INTERVAL = 2.0  # 500ms between exports
+    
+    while True:
+        try:
+            # Get item from queue (blocks until available)
+            item = _export_queue.get(timeout=1.0)
+            
+            if item is None:  # Shutdown signal
+                break
+                
+            session_id, tokens, engine = item
+            
+            # Update engine reference
+            if engine is not None:
+                lmcache_engine = engine
+            
+            if lmcache_engine is None:
+                logger.warning(f"[export_queue_worker] No engine available, skipping {session_id}")
+                continue
+            
+            # Export with clone optimization - only blocks LMCache for ~20ms
+            _export_session_to_disk(lmcache_engine, session_id, tokens)
+            
+            # Small delay between exports
+            time.sleep(EXPORT_INTERVAL)
+            
+        except Empty:
+            continue
+        except Exception as e:
+            logger.exception(f"[export_queue_worker] Error: {e}")
+
+
+# Start background worker thread
+_export_worker_thread = threading.Thread(target=_export_queue_worker, daemon=True)
+_export_worker_thread.start()
+
+
+@router.post("/kv/export_async")
+async def export_kv_async(request: Request, export_request: ExportAsyncRequest):
+    """Queue KV cache exports to disk asynchronously.
+    
+    This endpoint returns immediately after queuing the exports.
+    The actual export work happens in background threads.
+    """
+    try:
+        lmcache_adapter = request.app.state.lmcache_adapter
+        lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
+        
+        if not lmcache_engine:
+            return PlainTextResponse(
+                content=json.dumps({"error": "LMCache engine not configured"}),
+                media_type="application/json",
+                status_code=503,
+            )
+        
+        queued = 0
+        for item in export_request.items:
+            _export_queue.put((item.session_id, item.tokens, lmcache_engine))
+            queued += 1
+        
+        logger.info(f"[/kv/export_async] Queued {queued} sessions for disk export")
+        
+        return PlainTextResponse(
+            content=json.dumps({"queued": queued}),
+            media_type="application/json",
+        )
+        
+    except Exception as e:
+        logger.exception(f"[/kv/export_async] Error: {e}")
         return PlainTextResponse(
             content=json.dumps({"error": str(e)}),
             media_type="application/json",
