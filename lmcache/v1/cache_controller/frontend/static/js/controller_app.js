@@ -37,20 +37,8 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('refreshWorkersBtn').addEventListener('click', loadWorkers);
     document.getElementById('instanceFilter').addEventListener('change', loadWorkers);
 
-    // Key pool management
-    document.getElementById('refreshKeyPoolBtn').addEventListener('click', loadKeyPool);
-    document.getElementById('clearKeyPoolBtn').addEventListener('click', clearKeyPool);
-    document.getElementById('keySearchInput').addEventListener('input', filterKeyPool);
-
     // Metrics
     document.getElementById('refreshMetricsBtn').addEventListener('click', loadMetrics);
-
-    // Log level management
-    document.getElementById('setLogLevelBtn').addEventListener('click', setLogLevel);
-
-    // Config management
-    document.getElementById('getConfigBtn').addEventListener('click', getConfig);
-    document.getElementById('setConfigBtn').addEventListener('click', setConfig);
 
     // Threads
     document.getElementById('refreshThreadsBtn').addEventListener('click', loadThreads);
@@ -58,20 +46,19 @@ window.addEventListener('DOMContentLoaded', () => {
     // Environment
     document.getElementById('envSearchInput').addEventListener('input', filterEnvVariables);
 
-    // Script execution
-    document.getElementById('executeScriptBtn').addEventListener('click', executeScript);
-    document.getElementById('uploadScriptBtn').addEventListener('click', uploadScript);
-
-    // Auto-connect if parameters are set
+    // Auto-connect on startup
     const urlParams = new URLSearchParams(window.location.search);
-    const autoHost = urlParams.get('host') || 'localhost';
-    const autoPort = urlParams.get('port') || '9000';
+    const urlHostParam = urlParams.get('host');
+    const urlPortParam = urlParams.get('port');
     
-    if (urlParams.has('host') || urlParams.has('port')) {
-        document.getElementById('controllerHostInput').value = autoHost;
-        document.getElementById('controllerPortInput').value = autoPort;
-        setTimeout(() => connectToController(), 1000);
-    }
+    // Get host and port from URL parameters, or use current page's hostname and port
+    const autoHost = urlHostParam || window.location.hostname;
+    const autoPort = urlPortParam || window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+    
+    // Always set input values and attempt to connect
+    document.getElementById('controllerHostInput').value = autoHost;
+    document.getElementById('controllerPortInput').value = autoPort;
+    setTimeout(() => connectToController(), 1000);
 });
 
 // Update current time display
@@ -96,7 +83,9 @@ async function connectToController() {
         return;
     }
 
-    controllerBaseUrl = `http://${host}:${port}`;
+    // Construct the base URL
+    const protocol = window.location.protocol;
+    controllerBaseUrl = `${protocol}//${host}:${port}`;
     const statusElement = document.getElementById('connectionStatus');
     
     try {
@@ -119,7 +108,6 @@ async function connectToController() {
             loadOverview();
             loadInstances();
             loadWorkers();
-            loadKeyPool();
             
             // Update URL with connection parameters
             const newUrl = new URL(window.location);
@@ -164,26 +152,14 @@ function loadTabData(tabId) {
         case 'workers':
             loadWorkers();
             break;
-        case 'keypool':
-            loadKeyPool();
-            break;
         case 'metrics':
             loadMetrics();
-            break;
-        case 'loglevel':
-            loadLogLevel();
-            break;
-        case 'config':
-            loadConfig();
             break;
         case 'threads':
             loadThreads();
             break;
         case 'env':
             loadEnvironment();
-            break;
-        case 'script':
-            // Nothing to load for script tab
             break;
     }
 }
@@ -216,16 +192,16 @@ async function loadOverview() {
         }
 
         // Load quick stats (instance count, worker count, key count)
-        const instancesResponse = await fetch(`${controllerBaseUrl}/query_worker_info`, {
+        const response = await fetch(`${controllerBaseUrl}/query_worker_info`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ instance_id: 'all' })
+            body: JSON.stringify({ instance_id: 'all', worker_ids: [] })
         });
 
-        if (instancesResponse.ok) {
-            const instancesData = await instancesResponse.json();
-            const instanceCount = new Set(instancesData.worker_infos.map(w => w.instance_id)).size;
-            const workerCount = instancesData.worker_infos.length;
+        if (response.ok) {
+            const data = await response.json();
+            const instanceCount = new Set(data.worker_infos.map(w => w.instance_id)).size;
+            const workerCount = data.worker_infos.length;
             
             // For key count, we would need to implement a separate endpoint
             quickStatsElement.innerHTML = `
@@ -411,8 +387,8 @@ async function loadWorkers() {
 
     try {
         const requestBody = instanceFilter ? 
-            { instance_id: instanceFilter } : 
-            { instance_id: 'all' };
+            { instance_id: instanceFilter, worker_ids: [] } : 
+            { instance_id: 'all', worker_ids: [] };
         
         const response = await fetch(`${controllerBaseUrl}/query_worker_info`, {
             method: 'POST',
@@ -458,92 +434,7 @@ async function loadWorkers() {
     }
 }
 
-// Load key pool (placeholder - would need backend implementation)
-async function loadKeyPool() {
-    if (!isConnected) return;
-
-    const tableBody = document.getElementById('keyPoolTableBody');
-    tableBody.innerHTML = '<tr><td colspan="6" class="text-center"><div class="spinner-border" role="status"></div></td></tr>';
-
-    try {
-        // This is a placeholder - in reality, you would need a backend endpoint to get key pool
-        // Simulating data for demonstration
-        currentKeyPool = [
-            { key: 'key_001', instance_id: 'instance_1', location: 'memory', seq_num: 1, status: 'active' },
-            { key: 'key_002', instance_id: 'instance_1', location: 'disk', seq_num: 2, status: 'active' },
-            { key: 'key_003', instance_id: 'instance_2', location: 'memory', seq_num: 1, status: 'pinned' },
-            { key: 'key_004', instance_id: 'instance_2', location: 'memory', seq_num: 3, status: 'evicted' },
-            { key: 'key_005', instance_id: 'instance_1', location: 'disk', seq_num: 4, status: 'active' }
-        ];
-        
-        // Populate table
-        tableBody.innerHTML = '';
-        currentKeyPool.forEach(key => {
-            const row = document.createElement('tr');
-            const statusClass = key.status === 'active' ? 'status-active' : 
-                               key.status === 'pinned' ? 'status-info' : 
-                               'status-inactive';
-            
-            row.innerHTML = `
-                <td><code>${key.key}</code></td>
-                <td>${key.instance_id}</td>
-                <td>${key.location}</td>
-                <td>${key.seq_num}</td>
-                <td><span class="${statusClass}">${key.status}</span></td>
-                <td>
-                    <button class="btn btn-sm btn-info view-key" data-key="${key.key}">View</button>
-                    <button class="btn btn-sm btn-danger remove-key" data-key="${key.key}">Remove</button>
-                </td>
-            `;
-            tableBody.appendChild(row);
-        });
-
-        // Add event listeners
-        document.querySelectorAll('.view-key').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const key = e.target.dataset.key;
-                alert(`Viewing key: ${key}`);
-            });
-        });
-
-        document.querySelectorAll('.remove-key').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const key = e.target.dataset.key;
-                if (confirm(`Are you sure you want to remove key ${key}?`)) {
-                    removeKey(key);
-                }
-            });
-        });
-
-    } catch (error) {
-        console.error('Error loading key pool:', error);
-        tableBody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">Error: ${error.message}</td></tr>`;
-    }
-}
-
-// Filter key pool
-function filterKeyPool() {
-    const searchTerm = document.getElementById('keySearchInput').value.toLowerCase();
-    const rows = document.querySelectorAll('#keyPoolTableBody tr');
-    
-    rows.forEach(row => {
-        const text = row.textContent.toLowerCase();
-        row.style.display = text.includes(searchTerm) ? '' : 'none';
-    });
-}
-
-// Clear key pool (placeholder)
-async function clearKeyPool() {
-    if (!confirm('Are you sure you want to clear all keys from the key pool? This cannot be undone.')) {
-        return;
-    }
-
-    // This is a placeholder - in reality, you would need a backend endpoint to clear key pool
-    alert('Would clear key pool');
-    loadKeyPool();
-}
-
-// Remove key (placeholder)
+// Load log level
 async function removeKey(key) {
     // This is a placeholder - in reality, you would need a backend endpoint to remove keys
     alert(`Would remove key: ${key}`);
@@ -573,122 +464,6 @@ async function loadMetrics() {
     }
 }
 
-// Load log level
-async function loadLogLevel() {
-    if (!isConnected) return;
-
-    const contentDiv = document.getElementById('logLevelContent');
-    contentDiv.textContent = 'Loading...';
-
-    try {
-        // Note: This endpoint might not exist in the current controller
-        // You would need to implement a log level endpoint
-        contentDiv.textContent = 'Log level management would require implementing /loglevel endpoint in controller.';
-    } catch (error) {
-        contentDiv.textContent = `Failed to load log levels: ${error.message}`;
-    }
-}
-
-// Set log level
-async function setLogLevel() {
-    if (!isConnected) return;
-
-    const loggerInput = document.getElementById('loggerInput');
-    const levelSelector = document.getElementById('logLevelSelector');
-
-    const loggerName = loggerInput.value.trim();
-    const level = levelSelector.value;
-
-    if (!level) {
-        alert('Please select a log level');
-        return;
-    }
-
-    if (!loggerName) {
-        alert('Please enter a logger name');
-        return;
-    }
-
-    try {
-        // This is a placeholder - you would need to implement this endpoint
-        alert(`Would set log level for ${loggerName} to ${level}`);
-        loadLogLevel();
-    } catch (error) {
-        alert(`Failed to set log level: ${error.message}`);
-    }
-}
-
-// Load configuration
-async function loadConfig() {
-    if (!isConnected) return;
-
-    const contentDiv = document.getElementById('configContent');
-    contentDiv.textContent = 'Loading...';
-
-    try {
-        // Note: This endpoint might not exist in the current controller
-        // You would need to implement a config endpoint
-        contentDiv.textContent = 'Configuration management would require implementing /conf endpoint in controller.';
-    } catch (error) {
-        contentDiv.textContent = `Failed to load configuration: ${error.message}`;
-    }
-}
-
-// Get configuration
-async function getConfig() {
-    if (!isConnected) return;
-
-    const configKeyInput = document.getElementById('configKeyInput');
-    const configKey = configKeyInput.value.trim();
-
-    try {
-        // This is a placeholder - you would need to implement this endpoint
-        alert(`Would get configuration for key: ${configKey || 'all'}`);
-    } catch (error) {
-        alert(`Failed to get configuration: ${error.message}`);
-    }
-}
-
-// Set configuration
-async function setConfig() {
-    if (!isConnected) return;
-
-    const configKeyInput = document.getElementById('configKeyInput');
-    const configValueInput = document.getElementById('configValueInput');
-
-    const configKey = configKeyInput.value.trim();
-    const configValue = configValueInput.value.trim();
-
-    if (!configKey || !configValue) {
-        alert('Please enter both key and value');
-        return;
-    }
-
-    try {
-        // This is a placeholder - you would need to implement this endpoint
-        alert(`Would set configuration ${configKey}=${configValue}`);
-        loadConfig();
-    } catch (error) {
-        alert(`Failed to set configuration: ${error.message}`);
-    }
-}
-
-// Load threads
-async function loadThreads() {
-    if (!isConnected) return;
-
-    const contentDiv = document.getElementById('threadsContent');
-    contentDiv.textContent = 'Loading...';
-
-    try {
-        // Note: This endpoint might not exist in the current controller
-        // You would need to implement a threads endpoint
-        contentDiv.textContent = 'Thread information would require implementing /threads endpoint in controller.';
-    } catch (error) {
-        contentDiv.textContent = `Failed to load threads: ${error.message}`;
-    }
-}
-
 // Load environment variables
 async function loadEnvironment() {
     if (!isConnected) return;
@@ -699,26 +474,27 @@ async function loadEnvironment() {
     searchInput.value = '';
 
     try {
-        // Note: This endpoint might not exist in the current controller
-        // You would need to implement an env endpoint
-        // For now, simulate some data
-        envVariablesData = {
-            'PYTHONPATH': '/Users/msy/projects/LMCache',
-            'PATH': '/usr/local/bin:/usr/bin:/bin',
-            'LANG': 'en_US.UTF-8',
-            'HOME': '/Users/msy',
-            'USER': 'msy',
-            'SHELL': '/bin/zsh',
-            'PWD': '/Users/msy/projects/LMCache',
-            'LMCACHE_CONFIG': 'config.yaml'
-        };
+        // Call /env API to get environment variables
+        const response = await fetch(`${controllerBaseUrl}/env`);
+        
+        if (!response.ok) {
+            throw new Error('Failed to fetch environment variables');
+        }
+
+        envVariablesData = await response.json();
         
         // Format for display
-        const formattedText = Object.entries(envVariablesData)
-            .map(([key, value]) => `${key}=${value}`)
-            .join('\n');
-        contentDiv.textContent = formattedText;
+        if (typeof envVariablesData === 'object' && envVariablesData !== null) {
+            const formattedText = Object.entries(envVariablesData)
+                .map(([key, value]) => `${key}=${value}`)
+                .join('\n');
+            contentDiv.textContent = formattedText;
+        } else {
+            contentDiv.textContent = 'No environment variables found or invalid data format';
+            envVariablesData = null;
+        }
     } catch (error) {
+        console.error('Error loading environment variables:', error);
         contentDiv.textContent = `Failed to load environment variables: ${error.message}`;
         envVariablesData = null;
     }
@@ -744,58 +520,52 @@ function filterEnvVariables() {
     }
 }
 
-// Execute script
-async function executeScript() {
+// Load threads
+async function loadThreads() {
     if (!isConnected) return;
 
-    const scriptName = document.getElementById('scriptNameInput').value.trim();
-    const scriptContent = document.getElementById('scriptContent').value.trim();
-    const allowedImports = document.getElementById('allowedImportsInput').value.trim();
-
-    if (!scriptContent) {
-        alert('Please enter script content');
-        return;
-    }
-
-    const resultsDiv = document.getElementById('scriptResults');
-    resultsDiv.textContent = 'Executing script...';
+    const contentDiv = document.getElementById('threadsContent');
+    contentDiv.textContent = 'Loading...';
 
     try {
-        // This is a placeholder - you would need to implement a script execution endpoint
-        // Based on test_run_script.py, the endpoint might be something like /run_script
+        const response = await fetch(`${controllerBaseUrl}/threads`);
         
-        // Simulate execution for demonstration
-        setTimeout(() => {
-            resultsDiv.textContent = `Script execution results:\n`;
-            resultsDiv.textContent += `Script: ${scriptName || 'Untitled'}\n`;
-            resultsDiv.textContent += `Allowed imports: ${allowedImports || 'None'}\n`;
-            resultsDiv.textContent += `Execution time: 0.5s\n`;
-            resultsDiv.textContent += `Result: Script executed successfully\n`;
-            resultsDiv.textContent += `Output: Hello from LMCache Controller!`;
-        }, 1000);
+        if (!response.ok) {
+            throw new Error('Failed to fetch threads');
+        }
 
+        // Try to parse as JSON first
+        const responseText = await response.text();
+        
+        let formattedText;
+        try {
+            // Try to parse as JSON
+            const threadsData = JSON.parse(responseText);
+            
+            // Format threads data as text
+            formattedText = '';
+            threadsData.forEach((thread, index) => {
+                formattedText += `Thread: ${thread.function_name}\n`;
+                // Add thread details in a format similar to stack trace
+                formattedText += `  thread_id: ${thread.thread_id}\n`;
+                formattedText += `  name: ${thread.name}\n`;
+                formattedText += `  state: ${thread.state}\n`;
+                formattedText += `  cpu_time: ${thread.cpu_time}\n`;
+                formattedText += `  memory_usage: ${thread.memory_usage}\n`;
+                
+                // Add separator between threads
+                if (index < threadsData.length - 1) {
+                    formattedText += '\n\n';
+                }
+            });
+        } catch (jsonError) {
+            // If not JSON, use the text as-is
+            formattedText = responseText;
+        }
+        
+        contentDiv.textContent = formattedText;
     } catch (error) {
-        resultsDiv.textContent = `Failed to execute script: ${error.message}`;
+        console.error('Error loading threads:', error);
+        contentDiv.textContent = `Failed to load threads: ${error.message}`;
     }
-}
-
-// Upload script
-function uploadScript() {
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = '.py,.txt';
-    
-    fileInput.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            document.getElementById('scriptContent').value = event.target.result;
-            document.getElementById('scriptNameInput').value = file.name.replace(/\.[^/.]+$/, '');
-        };
-        reader.readAsText(file);
-    });
-    
-    fileInput.click();
 }

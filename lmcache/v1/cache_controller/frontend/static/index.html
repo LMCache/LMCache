@@ -50,25 +50,13 @@
                 <button class="nav-link" id="workers-tab" data-bs-toggle="tab" data-bs-target="#workers" type="button" role="tab">Workers</button>
             </li>
             <li class="nav-item" role="presentation">
-                <button class="nav-link" id="keypool-tab" data-bs-toggle="tab" data-bs-target="#keypool" type="button" role="tab">Key Pool</button>
-            </li>
-            <li class="nav-item" role="presentation">
                 <button class="nav-link" id="metrics-tab" data-bs-toggle="tab" data-bs-target="#metrics" type="button" role="tab">Metrics</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="loglevel-tab" data-bs-toggle="tab" data-bs-target="#loglevel" type="button" role="tab">Log Level</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="config-tab" data-bs-toggle="tab" data-bs-target="#config" type="button" role="tab">Config</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="threads-tab" data-bs-toggle="tab" data-bs-target="#threads" type="button" role="tab">Threads</button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="env-tab" data-bs-toggle="tab" data-bs-target="#env" type="button" role="tab">Environment</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="script-tab" data-bs-toggle="tab" data-bs-target="#script" type="button" role="tab">Script Execution</button>
             </li>
         </ul>
 
@@ -182,44 +170,6 @@
                 </div>
             </div>
 
-            <div class="tab-pane fade" id="keypool" role="tabpanel">
-                <h3>Key Pool Management</h3>
-                <div class="mb-3">
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <input type="text" class="form-control" id="keySearchInput" placeholder="Search keys...">
-                        </div>
-                        <div class="col-md-2">
-                            <button id="refreshKeyPoolBtn" class="btn btn-primary w-100">
-                                <i class="bi bi-arrow-clockwise"></i> Refresh
-                            </button>
-                        </div>
-                        <div class="col-md-2">
-                            <button id="clearKeyPoolBtn" class="btn btn-danger w-100">
-                                <i class="bi bi-trash"></i> Clear All
-                            </button>
-                        </div>
-                    </div>
-                </div>
-                <div class="table-responsive">
-                    <table class="table table-striped">
-                        <thead>
-                            <tr>
-                                <th>Key</th>
-                                <th>Instance ID</th>
-                                <th>Location</th>
-                                <th>Sequence Number</th>
-                                <th>Status</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="keyPoolTableBody">
-                            <!-- Key pool entries will be populated here -->
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
             <div class="tab-pane fade" id="metrics" role="tabpanel">
                 <h3>Performance Metrics</h3>
                 <div class="mb-3">
@@ -228,58 +178,6 @@
                     </button>
                 </div>
                 <pre id="metricsContent">Please connect to controller first</pre>
-            </div>
-
-            <div class="tab-pane fade" id="loglevel" role="tabpanel">
-                <h3>Log Level Management</h3>
-                <div class="row">
-                    <div class="col-md-6">
-                        <div class="mb-3">
-                            <label for="loggerInput" class="form-label">Logger Name (leave empty for all)</label>
-                            <input type="text" class="form-control" id="loggerInput" placeholder="Enter logger name">
-                        </div>
-                        <div class="mb-3">
-                            <label for="logLevelSelector" class="form-label">Log Level</label>
-                            <select class="form-select" id="logLevelSelector">
-                                <option value="">-- Read Level --</option>
-                                <option value="TRACE">TRACE</option>
-                                <option value="DEBUG">DEBUG</option>
-                                <option value="INFO">INFO</option>
-                                <option value="WARN">WARN</option>
-                                <option value="ERROR">ERROR</option>
-                                <option value="FATAL">FATAL</option>
-                                <option value="OFF">OFF</option>
-                            </select>
-                        </div>
-                        <button id="setLogLevelBtn" class="btn btn-primary">Set Level</button>
-                    </div>
-                    <div class="col-md-6">
-                        <h4>Current Log Levels</h4>
-                        <pre id="logLevelContent">Please connect to controller first</pre>
-                    </div>
-                </div>
-            </div>
-
-            <div class="tab-pane fade" id="config" role="tabpanel">
-                <h3>Configuration Management</h3>
-                <div class="row">
-                    <div class="col-md-6">
-                        <div class="mb-3">
-                            <label for="configKeyInput" class="form-label">Configuration Key (leave empty for all)</label>
-                            <input type="text" class="form-control" id="configKeyInput" placeholder="Enter config key">
-                        </div>
-                        <div class="mb-3">
-                            <label for="configValueInput" class="form-label">Configuration Value</label>
-                            <input type="text" class="form-control" id="configValueInput" placeholder="Enter config value">
-                        </div>
-                        <button id="getConfigBtn" class="btn btn-info me-2">Get Config</button>
-                        <button id="setConfigBtn" class="btn btn-primary">Set Config</button>
-                    </div>
-                    <div class="col-md-6">
-                        <h4>Current Configuration</h4>
-                        <pre id="configContent">Please connect to controller first</pre>
-                    </div>
-                </div>
             </div>
 
             <div class="tab-pane fade" id="threads" role="tabpanel">
@@ -298,32 +196,6 @@
                     <input type="text" class="form-control" id="envSearchInput" placeholder="Search environment variables...">
                 </div>
                 <pre id="envContent">Please connect to controller first</pre>
-            </div>
-
-            <div class="tab-pane fade" id="script" role="tabpanel">
-                <h3>Script Execution</h3>
-                <div class="row">
-                    <div class="col-md-6">
-                        <div class="mb-3">
-                            <label for="scriptNameInput" class="form-label">Script Name</label>
-                            <input type="text" class="form-control" id="scriptNameInput" placeholder="Enter script name">
-                        </div>
-                        <div class="mb-3">
-                            <label for="scriptContent" class="form-label">Script Content (Python)</label>
-                            <textarea class="form-control" id="scriptContent" rows="10" placeholder="Enter Python script content..."></textarea>
-                        </div>
-                        <div class="mb-3">
-                            <label for="allowedImportsInput" class="form-label">Allowed Imports (comma-separated)</label>
-                            <input type="text" class="form-control" id="allowedImportsInput" placeholder="e.g., os,json,math">
-                        </div>
-                        <button id="executeScriptBtn" class="btn btn-primary me-2">Execute Script</button>
-                        <button id="uploadScriptBtn" class="btn btn-success">Upload Script File</button>
-                    </div>
-                    <div class="col-md-6">
-                        <h4>Execution Results</h4>
-                        <pre id="scriptResults" class="bg-light p-3" style="min-height: 300px;">Results will appear here...</pre>
-                    </div>
-                </div>
             </div>
         </div>
     </div>

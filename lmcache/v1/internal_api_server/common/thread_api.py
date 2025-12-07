@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Optional
+import sys
 import threading
+import traceback
 
 # Third Party
 from fastapi import APIRouter, Query
 from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 router = APIRouter()
 
@@ -33,28 +36,28 @@ async def get_threads(
     thread_info = []
 
     for t in filtered_threads:
-        # Get thread details - match the structure from api_server/__main__.py
-        thread_data = {
-            "thread_id": t.ident,
-            "name": t.name,
-            "state": "running" if t.is_alive() else "terminated",
-            "function_name": str(t),  # This will show target function if available
-            "cpu_time": 0,  # Placeholder - would need more complex tracking
-            "memory_usage": 0,  # Placeholder - would need more complex tracking
-        }
-        thread_info.append(thread_data)
+        # Basic thread info with creation time
+        info = f"Thread: {t}\n"
 
-    # If no threads found, return some default info
-    if not thread_info:
-        thread_info = [
-            {
-                "thread_id": 1,
-                "name": "MainThread",
-                "state": "running",
-                "function_name": "API Server",
-                "cpu_time": 0,
-                "memory_usage": 0,
-            }
-        ]
+        # Get stack trace if available
+        try:
+            stack_frames = (
+                sys._current_frames().get(t.ident) if t.ident is not None else None
+            )
+            if stack_frames:
+                stack_trace = traceback.format_stack(stack_frames)
+                info += "Stack trace:\n" + "".join(stack_trace)
+            else:
+                info += "No stack trace available\n"
+        except AttributeError:
+            info += "Stack trace unavailable\n"
 
-    return thread_info
+        thread_info.append(info)
+
+    # Add summary section
+    summary = "\n\n=== Thread Summary ===\n"
+    summary += f"Total threads: {len(filtered_threads)}\n"
+
+    return PlainTextResponse(
+        content="\n\n".join(thread_info) + summary, media_type="text/plain"
+    )
