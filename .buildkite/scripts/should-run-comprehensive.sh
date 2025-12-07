@@ -42,30 +42,30 @@ add_safe_category() {
 }
 
 # If any changed file is NOT in a safe path, we must run tests.
-for f in ${CHANGED_FILES}; do
-  case "${f}" in
-    docs/*|docs/**)
+while IFS= read -r f; do
+  case "$f" in
+    docs/*)
       add_safe_category "docs/"
       ;;
     *.md|*.rst)
       add_safe_category "*.md/*.rst"
       ;;
-    tests/*|tests/**)
+    tests/*)
       add_safe_category "tests/"
       ;;
-    benchmarks/*|benchmarks/**)
+    benchmarks/*)
       add_safe_category "benchmarks/"
       ;;
-    tools/*|tools/**)
+    tools/*)
       add_safe_category "tools/"
       ;;
-    lmcache/tools/*|lmcache/tools/**)
+    lmcache/tools/*)
       add_safe_category "lmcache/tools/"
       ;;
-    examples/*|examples/**)
+    examples/*)
       add_safe_category "examples/"
       ;;
-    asset/*|asset/**)
+    asset/*)
       add_safe_category "asset/"
       ;;
     *)
@@ -73,16 +73,11 @@ for f in ${CHANGED_FILES}; do
       exit 0
       ;;
   esac
-done
+done <<< "${CHANGED_FILES}"
 
-if ((${#safe_categories[@]} == 0)); then
-  echo "Safe-path-only change detected; skipping comprehensive tests."
-else
-  msg="${safe_categories[0]}"
-  for ((i = 1; i < ${#safe_categories[@]}; i++)); do
-    msg+=", ${safe_categories[i]}"
-  done
-  echo "${msg} change detected; skipping comprehensive tests."
-fi
+# If we reach here, all changes are in safe paths, so safe_categories is not empty.
+# Join the array of categories for a clean log message.
+joined_cats=$(IFS=', '; echo "${safe_categories[*]}")
+echo "${joined_cats} change detected; skipping comprehensive tests."
 
 exit 1
