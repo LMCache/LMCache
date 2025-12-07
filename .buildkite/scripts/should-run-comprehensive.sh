@@ -15,10 +15,11 @@ fi
 BASE_BRANCH="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-dev}"
 BASE_REF="origin/${BASE_BRANCH}"
 
-# Ensure the base ref exists; ignore fetch failures (repo might already have it).
-git fetch origin "${BASE_BRANCH}" >/dev/null 2>&1 || true
+# Ensure the base ref exists; log a warning on fetch failure.
+if ! git fetch origin "${BASE_BRANCH}" >/dev/null 2>&1; then
+  echo "Warning: failed to fetch origin/${BASE_BRANCH}, falling back to local ref for diff." >&2
+fi
 
-# Compute changed files between the base and current HEAD.
 # Compute changed files between the base and current HEAD.
 # If this fails, we will fall back to running the tests (CHANGED_FILES will be empty).
 CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || echo "")
