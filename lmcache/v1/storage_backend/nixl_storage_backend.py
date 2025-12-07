@@ -223,6 +223,12 @@ PresenceCache = Union[SetPresenceCache]
 
 
 @dataclass
+class NixlDesc:
+    device_id: int
+    meta_info: str
+
+
+@dataclass
 class NixlKeyMetadata:
     index: int
     shape: Optional[torch.Size] = None
@@ -422,17 +428,24 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
     ):
         super().__init__(allocator, device, backend, backend_params)
 
-    def create_batched_storage_handler(self, object_keys: list[str], page_size: int):
+        if backend == "OBJ":
+            self.mem_type = "OBJ"
+        else:
+            # Already validated in validate_nixl_backend
+            raise ValueError(f"unexpected backend: {backend}")
+
+    def create_batched_storage_handler(self, descs: list[NixlDesc], page_size: int):
         reg_list = []
         xfer_desc = []
-        for i in range(len(object_keys)):
-            reg_list.append((0, page_size, i, object_keys[i]))
-            xfer_desc.append((0, page_size, i))
 
-        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
-        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
+        for i in range(len(descs)):
+            reg_list.append((0, page_size, descs[i].device_id, descs[i].meta_info))
+            xfer_desc.append((0, page_size, descs[i].device_id))
+
+        reg_descs = self.nixl_agent.register_memory(reg_list, self.mem_type)
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, self.mem_type)
         xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_descs, mem_type="OBJ"
+            self.agent_name, xfer_descs, mem_type=self.mem_type
         )
         return reg_descs, xfer_handler
 
@@ -1022,17 +1035,14 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self, keys: list[CacheEngineKey], pin: bool = False
     ) -> list[Optional[MemoryObj]]:
         obj_list: list[Optional[MemoryObj]] = []
-        object_keys = []
-        mem_indices = []
-        storage_indices = []
         page_size = self.memory_allocator.align_bytes
         start_time = time.time()
+        storage_indices = []
+        mem_indices = []
+        descs = []
 
         # Prepare mem and storage indices
         for idx in range(len(keys)):
-            object_key = self._format_object_key(keys[idx])
-            object_keys.append(object_key)
-
             # Allocate memory for the object
             assert self.meta_shape is not None
             assert self.meta_dtype is not None
@@ -1051,9 +1061,17 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             mem_indices.append(obj.meta.address)
             storage_indices.append(idx)
 
+        if self.agent.mem_type == "OBJ":
+            for idx in range(len(keys)):
+                object_key = self._format_object_key(keys[idx])
+                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+        else:
+            # Already validated in validate_nixl_backend
+            raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
+
         # Create batched storage handler
         storage_reg_descs, storage_xfer_handler = (
-            self.agent.create_batched_storage_handler(object_keys, page_size)
+            self.agent.create_batched_storage_handler(descs, page_size)
         )
         # Create transfer handle
         handle = self.agent.get_storage_to_mem_handle(
@@ -1128,19 +1146,21 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         if len(keys) == 0:
             return
 
-        object_keys = []
+        storage_indices = range(len(keys))
         mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
         page_size = self.memory_allocator.align_bytes
-        storage_indices = []
+        descs = []
 
-        for i in range(len(keys)):
-            # Generate object key based on CacheEngineKey
-            object_key = self._format_object_key(keys[i])
-            object_keys.append(object_key)
-            storage_indices.append(i)
+        if self.agent.mem_type == "OBJ":
+            for idx in range(len(keys)):
+                object_key = self._format_object_key(keys[idx])
+                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+        else:
+            # Already validated in validate_nixl_backend
+            raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
 
         storage_reg_descs, storage_xfer_handler = (
-            self.agent.create_batched_storage_handler(object_keys, page_size)
+            self.agent.create_batched_storage_handler(descs, page_size)
         )
 
         handle = self.agent.get_mem_to_storage_handle(
