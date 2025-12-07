@@ -682,6 +682,183 @@ async def import_kv(request: Request):
         )
 
 
+def _do_import_pt(lmcache_engine, tokens, pt_bytes, read_body_time):
+    """Import KV cache from .pt format (torch.save format).
+    
+    This is faster than binary import because torch.load is optimized.
+    """
+    import io
+    import time
+    from lmcache.v1.memory_management import MemoryFormat
+    
+    timings = {'read_body': read_body_time}
+    total_start = time.time()
+    
+    try:
+        storage_manager = lmcache_engine.storage_manager
+        token_database = lmcache_engine.token_database
+        
+        if storage_manager is None or token_database is None:
+            return {"error": "Engine not fully initialized", "status_code": 503}
+        
+        # Token processing - use token_database.process_tokens() like _do_import
+        t0 = time.time()
+        tokens_tensor = torch.tensor(tokens, dtype=torch.long)
+        chunk_info_list = list(token_database.process_tokens(tokens=tokens_tensor))
+        timings['token_processing'] = (time.time() - t0) * 1000
+        
+        # torch.load the .pt bytes
+        t0 = time.time()
+        chunks_data = torch.load(io.BytesIO(pt_bytes), weights_only=False)
+        timings['torch_load'] = (time.time() - t0) * 1000
+        
+        if not chunks_data:
+            return {"error": "Empty .pt data", "status_code": 400}
+        
+        # Get allocator backend
+        local_cpu = storage_manager.storage_backends.get("LocalCPUBackend")
+        if not local_cpu:
+            return {"error": "LocalCPUBackend not available", "status_code": 503}
+        
+        # Import chunks - tensors are already in memory from torch.load
+        num_imported = 0
+        time_allocate = 0
+        time_copy = 0
+        time_submit = 0
+        total_bytes = 0
+        
+        for chunk_idx, chunk in enumerate(chunks_data):
+            try:
+                tensor = chunk['tensor']
+                total_bytes += tensor.numel() * tensor.element_size()
+                
+                if chunk_idx < len(chunk_info_list):
+                    start_idx, end_idx, key = chunk_info_list[chunk_idx]
+                    
+                    fmt_name = chunk.get('fmt', 'KV_2LTD')
+                    try:
+                        fmt = MemoryFormat[fmt_name]
+                    except KeyError:
+                        fmt = MemoryFormat.KV_2LTD
+                    
+                    # Allocate memory
+                    t0 = time.time()
+                    memory_obj = local_cpu.allocate(
+                        shape=tensor.shape,
+                        dtype=tensor.dtype,
+                        fmt=fmt,
+                    )
+                    time_allocate += (time.time() - t0) * 1000
+                    
+                    if memory_obj and memory_obj.tensor is not None:
+                        # Copy tensor data
+                        t0 = time.time()
+                        memory_obj.tensor.copy_(tensor)
+                        time_copy += (time.time() - t0) * 1000
+                        
+                        # Submit to storage
+                        t0 = time.time()
+                        local_cpu.submit_put_task(key, memory_obj)
+                        time_submit += (time.time() - t0) * 1000
+                        
+                        num_imported += 1
+                        
+            except Exception as e:
+                logger.warning(f"[/kv/import_pt] chunk[{chunk_idx}] error: {e}")
+        
+        timings['allocate'] = time_allocate
+        timings['copy'] = time_copy
+        timings['submit'] = time_submit
+        timings['total'] = (time.time() - total_start) * 1000 + read_body_time
+        
+        data_mb = total_bytes / 1024 / 1024
+        logger.info(f"[/kv/import_pt] {num_imported}/{len(chunks_data)} chunks, {data_mb:.1f}MB")
+        logger.info(f"   ⏱️ read_body: {timings['read_body']:.1f}ms")
+        logger.info(f"   ⏱️ token_processing: {timings['token_processing']:.1f}ms")
+        logger.info(f"   ⏱️ torch_load: {timings['torch_load']:.1f}ms")
+        logger.info(f"   ⏱️ allocate: {timings['allocate']:.1f}ms")
+        logger.info(f"   ⏱️ copy: {timings['copy']:.1f}ms")
+        logger.info(f"   ⏱️ submit: {timings['submit']:.1f}ms")
+        logger.info(f"   ⏱️ TOTAL: {timings['total']:.1f}ms ({data_mb * 1000 / max(timings['total'], 0.1):.0f} MB/s)")
+        
+        return {"num_imported": num_imported}
+        
+    except Exception as e:
+        logger.exception(f"[/kv/import_pt] _do_import_pt error: {e}")
+        return {"error": str(e), "status_code": 500}
+
+
+@router.post("/kv/import_pt")
+async def import_kv_pt(request: Request):
+    """Import KV cache from .pt format (torch.save format).
+    
+    This is faster than binary import - no re-serialization needed.
+    Just torch.load and copy tensors to LMCache.
+    
+    Headers:
+    - X-Tokens: JSON array of token IDs
+    """
+    import time
+    
+    try:
+        lmcache_adapter = request.app.state.lmcache_adapter
+        lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
+        
+        if not lmcache_engine:
+            return PlainTextResponse(
+                content=json.dumps({"error": "LMCache engine not configured"}),
+                media_type="application/json",
+                status_code=503,
+            )
+        
+        # Get tokens from header
+        tokens_header = request.headers.get("X-Tokens")
+        if not tokens_header:
+            return PlainTextResponse(
+                content=json.dumps({"error": "Missing X-Tokens header"}),
+                media_type="application/json",
+                status_code=400,
+            )
+        tokens = json.loads(tokens_header)
+        
+        # Read .pt bytes (async, before moving to thread)
+        t0 = time.time()
+        pt_bytes = await request.body()
+        read_body_time = (time.time() - t0) * 1000
+        
+        # Run heavy computation in thread pool
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            KV_EXECUTOR,
+            _do_import_pt,
+            lmcache_engine,
+            tokens,
+            pt_bytes,
+            read_body_time,
+        )
+        
+        # Handle error result
+        if "error" in result:
+            return PlainTextResponse(
+                content=json.dumps({"error": result["error"]}),
+                media_type="application/json",
+                status_code=result.get("status_code", 500),
+            )
+        
+        return PlainTextResponse(
+            content=json.dumps({"num_imported": result["num_imported"]}),
+            media_type="application/json",
+        )
+        
+    except Exception as e:
+        logger.exception(f"[/kv/import_pt] Error: {e}")
+        return PlainTextResponse(
+            content=json.dumps({"error": str(e)}),
+            media_type="application/json",
+            status_code=500,
+        )
+
+
 @router.get("/kv/info")
 async def kv_info(request: Request):
     """Get KV cache storage info."""
