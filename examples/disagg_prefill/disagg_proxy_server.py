@@ -121,80 +121,93 @@ async def lifespan(app: FastAPI):
         and len(alloc_port_list) > global_args.num_decoders
     )
     
-    if init_port_complete_lists:
-        tp_ranks_per_decoder = len(init_port_list) // global_args.num_decoders
-    elif alloc_port_complete_lists:
-        tp_ranks_per_decoder = len(alloc_port_list) // global_args.num_decoders
-    else:
-        tp_ranks_per_decoder = None
+    # Calculate TP ranks from each port list and validate consistency
+    tp_ranks_from_init = (
+        len(init_port_list) // global_args.num_decoders 
+        if init_port_complete_lists else None
+    )
+    tp_ranks_from_alloc = (
+        len(alloc_port_list) // global_args.num_decoders 
+        if alloc_port_complete_lists else None
+    )
+    
+    # Validate that both port lists imply the same TP ranks if both are complete lists
+    if tp_ranks_from_init is not None and tp_ranks_from_alloc is not None:
+        if tp_ranks_from_init != tp_ranks_from_alloc:
+            raise ValueError(
+                f"Inconsistent TP ranks detected. "
+                f"Init ports imply {tp_ranks_from_init} ranks per decoder "
+                f"(based on {len(init_port_list)} ports / {global_args.num_decoders} decoders), "
+                f"while alloc ports imply {tp_ranks_from_alloc} ranks per decoder "
+                f"(based on {len(alloc_port_list)} ports / {global_args.num_decoders} decoders). "
+                f"Please ensure both port lists have the same number of ports per decoder."
+            )
+    
+    # Use the determined TP ranks (prioritize init if both are available)
+    tp_ranks_per_decoder = tp_ranks_from_init or tp_ranks_from_alloc
+
+    def get_decoder_ports(
+        port_list: list[int],
+        port_name: str,
+        decoder_idx: int,
+    ) -> list[int]:
+        """
+        Helper function to get the correct port list for a specific decoder.
+        
+        Args:
+            port_list: The full port list provided via command line
+            port_name: Name of the port type ("init" or "alloc") for error messages
+            decoder_idx: Index of the decoder (0-based)
+            
+        Returns:
+            List of ports assigned to this decoder
+        """
+        port_complete_lists = (
+            len(port_list) % global_args.num_decoders == 0 
+            and len(port_list) > global_args.num_decoders
+        )
+        
+        if incremental_mode:
+            # Incremental mode: add index to each base port for TP ranks
+            # Example: base ports [7300, 7301], decoder 0 -> [7300, 7301], decoder 1 -> [7301, 7302]
+            return [p + decoder_idx for p in port_list]
+        elif port_complete_lists:
+            # Ports are provided as complete lists, split them per decoder
+            # Example: [7300, 7301, 7350, 7351] with num_decoders=2, TP=2
+            #          -> decoder 0: [7300, 7301], decoder 1: [7350, 7351]
+            start_idx = decoder_idx * tp_ranks_per_decoder
+            end_idx = start_idx + tp_ranks_per_decoder
+            return port_list[start_idx:end_idx]
+        elif len(port_list) == global_args.num_decoders:
+            # Base ports provided per decoder
+            # Try to infer TP ranks from the other port list if available
+            if tp_ranks_per_decoder is not None:
+                # Use inferred TP ranks to generate port list
+                base_port = port_list[decoder_idx]
+                return [base_port + j for j in range(tp_ranks_per_decoder)]
+            else:
+                # Cannot determine TP ranks, use single port (will warn if TP > 1)
+                logger.warning(
+                    f"Cannot determine TP ranks for decoder {decoder_idx} {port_name} ports. "
+                    f"Using single port {port_list[decoder_idx]}. "
+                    f"This may cause issues if TP > 1. "
+                    f"Please provide complete port lists: "
+                    f"--decoder-{port_name}-port should have num_decoders * TP_ranks ports "
+                    f"(e.g., for {global_args.num_decoders} decoders with TP=2: "
+                    f"provide {global_args.num_decoders * 2} ports)."
+                )
+                return [port_list[decoder_idx]]
+        else:
+            # Use the provided ports as-is (shared across all decoders)
+            # (suitable when different hosts can reuse same port numbers)
+            return port_list
 
     for i, (host, port) in enumerate(decoder_pairs):
         decoder_base_url = f"http://{host}:{int(port)}"
         decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
-        if incremental_mode:
-            # Incremental mode: add index to each base port for TP ranks
-            # Example: base ports [7300, 7301], decoder 0 -> [7300, 7301], decoder 1 -> [7301, 7302]
-            init_ports = [p + i for p in global_args.decoder_init_port]
-            alloc_ports = [p + i for p in global_args.decoder_alloc_port]
-        elif init_port_complete_lists:
-            # Ports are provided as complete lists, split them per decoder
-            # Example: [7300, 7301, 7350, 7351] with num_decoders=2, TP=2
-            #          -> decoder 0: [7300, 7301], decoder 1: [7350, 7351]
-            start_idx = i * tp_ranks_per_decoder
-            end_idx = start_idx + tp_ranks_per_decoder
-            init_ports = init_port_list[start_idx:end_idx]
-        elif len(init_port_list) == global_args.num_decoders:
-            # Base ports provided per decoder
-            # Try to infer TP ranks by checking if alloc ports have complete lists
-            if alloc_port_complete_lists:
-                # Use alloc ports to infer TP ranks
-                init_base_port = init_port_list[i]
-                init_ports = [init_base_port + j for j in range(tp_ranks_per_decoder)]
-            elif len(alloc_port_list) == global_args.num_decoders and i < len(alloc_port_list) - 1:
-                # Try to infer TP ranks from port spacing between decoders
-                # If decoder ports are spaced consistently, we can infer TP ranks
-                # Example: decoder 0 base=7300, decoder 1 base=7350, spacing=50
-                #          If TP=2, ports should be [7300,7301] and [7350,7351]
-                #          The spacing between decoders (50) suggests TP might be large
-                #          But we can't reliably infer from spacing alone
-                # For now, assume TP=1 if we can't determine
-                init_ports = [init_port_list[i]]
-                logger.warning(
-                    f"Cannot determine TP ranks for decoder {i}. "
-                    f"Using single port {init_port_list[i]}. "
-                    f"This may cause issues if TP > 1. "
-                    f"Please provide complete port lists: "
-                    f"--decoder-init-port should have num_decoders * TP_ranks ports "
-                    f"(e.g., for 2 decoders with TP=2: 7300,7301,7350,7351)."
-                )
-            else:
-                init_ports = [init_port_list[i]]
-                logger.warning(
-                    f"Cannot determine TP ranks for decoder {i}. "
-                    f"Using single port {init_port_list[i]}. "
-                    f"For TP > 1, provide complete port lists."
-                )
-        else:
-            # Use the provided ports as-is (shared across all decoders)
-            # (suitable when different hosts can reuse same port numbers)
-            init_ports = init_port_list
         
-        if alloc_port_complete_lists:
-            start_idx = i * tp_ranks_per_decoder
-            end_idx = start_idx + tp_ranks_per_decoder
-            alloc_ports = alloc_port_list[start_idx:end_idx]
-        elif len(alloc_port_list) == global_args.num_decoders:
-            if init_port_complete_lists:
-                alloc_base_port = alloc_port_list[i]
-                alloc_ports = [alloc_base_port + j for j in range(tp_ranks_per_decoder)]
-            else:
-                logger.warning(
-                    f"Cannot determine TP ranks for decoder {i} alloc ports. "
-                    f"Using single port {alloc_port_list[i]}."
-                )
-                alloc_ports = [alloc_port_list[i]]
-        else:
-            alloc_ports = alloc_port_list
+        init_ports = get_decoder_ports(init_port_list, "init", i)
+        alloc_ports = get_decoder_ports(alloc_port_list, "alloc", i)
 
         app.state.decode_clients.append(
             ClientInfo(
