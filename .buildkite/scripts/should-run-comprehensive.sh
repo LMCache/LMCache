@@ -19,12 +19,9 @@ BASE_REF="origin/${BASE_BRANCH}"
 git fetch origin "${BASE_BRANCH}" >/dev/null 2>&1 || true
 
 # Compute changed files between the base and current HEAD.
-if CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null); then
-  :
-else
-  # Fallback: diff against the previous commit if base ref is unavailable.
-  CHANGED_FILES=$(git diff --name-only HEAD~1 2>/dev/null || echo "")
-fi
+# Compute changed files between the base and current HEAD.
+# If this fails, we will fall back to running the tests (CHANGED_FILES will be empty).
+CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || echo "")
 
 # If we cannot determine changes, be conservative and run tests.
 if [[ -z "${CHANGED_FILES}" ]]; then
