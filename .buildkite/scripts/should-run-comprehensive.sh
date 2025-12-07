@@ -54,9 +54,6 @@ while IFS= read -r f; do
     tests/*)
       add_safe_category "tests/"
       ;;
-    benchmarks/*)
-      add_safe_category "benchmarks/"
-      ;;
     tools/*)
       add_safe_category "tools/"
       ;;
