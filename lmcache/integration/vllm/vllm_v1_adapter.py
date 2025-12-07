@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
@@ -54,7 +55,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
@@ -70,7 +71,7 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
     LMCacheAsyncLookupServer,
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.plugin_launcher import PluginLauncher
+from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
 
 if TYPE_CHECKING:
@@ -540,6 +541,7 @@ def _init_lmcache_engine(
         kv_shape,
         use_mla,
         role,
+        served_model_name=model_config.served_model_name,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
@@ -778,7 +780,7 @@ class LMCacheConnectorV1Impl:
             self.api_server = InternalAPIServer(self)
             self.api_server.start()
             # Launch plugins
-            self.plugin_launcher = PluginLauncher(
+            self.runtime_plugin_launcher = RuntimePluginLauncher(
                 self.config,
                 role,
                 self.worker_count,
@@ -786,10 +788,10 @@ class LMCacheConnectorV1Impl:
                 if self.lmcache_engine is None  # scheduler side
                 else self.lmcache_engine.metadata.worker_id,
             )
-            self.plugin_launcher.launch_plugins()
+            self.runtime_plugin_launcher.launch_plugins()
         else:
             self.api_server = None  # type: ignore[assignment]
-            self.plugin_launcher = None  # type: ignore[assignment]
+            self.runtime_plugin_launcher = None  # type: ignore[assignment]
 
         # Setup metrics for monitoring data structures
         self._setup_metrics()
@@ -1383,9 +1385,11 @@ class LMCacheConnectorV1Impl:
             _safe_close("offload_server", self.offload_server.close, timeout=10.0)
 
         # Stop plugins
-        if hasattr(self, "plugin_launcher") and self.plugin_launcher:
+        if hasattr(self, "runtime_plugin_launcher") and self.runtime_plugin_launcher:
             _safe_close(
-                "plugin_launcher", self.plugin_launcher.stop_plugins, timeout=10.0
+                "runtime_plugin_launcher",
+                self.runtime_plugin_launcher.stop_plugins,
+                timeout=10.0,
             )
 
         # Stop API server
@@ -1807,3 +1811,9 @@ class LMCacheConnectorV1Impl:
             }
 
         return False, return_params
+
+    @_lmcache_nvtx_annotate
+    def get_kv_events(self) -> Iterable[CacheStoreEvent]:
+        if self.lmcache_engine is not None:
+            return self.lmcache_engine.get_kv_events()
+        return []
