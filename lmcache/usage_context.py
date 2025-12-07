@@ -5,17 +5,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urljoin
-import dataclasses
 import importlib.metadata
 import os
 import platform
 import subprocess
 import threading
-import time
 
 # Third Party
 import cpuinfo
-import numpy as np
 import psutil
 import requests
 import torch
@@ -29,6 +26,13 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.observability import LMCacheStats
 
+# Standard
+from typing import List
+import dataclasses
+import time
+
+# Third Party
+import numpy as np
 
 logger = init_logger(__name__)
 
@@ -282,12 +286,32 @@ class ContinuousUsageContext:
     _instance = None
 
     def __init__(self, metadata: LMCacheEngineMetadata):
+        self.cache_lifespan_buckets = [
+            0,
+            1,
+            5,
+            10,
+            20,
+            40,
+            60,
+            80,
+            100,
+            250,
+            500,
+            750,
+            1000,
+            2500,
+            5000,
+        ]
         self.metadata: LMCacheEngineMetadata = metadata
-        self.server_url: str = urljoin(
+        self.cache_usage_url: str = urljoin(
             os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
             "cache-usage",
         )
-        logger.info(f"sending cache usage stats to {self.server_url}")
+        self.cache_lifespan_url: str = urljoin(
+            os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
+            "cache-lifespan",
+        )
         self.min_logging_interval: int = int(
             os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
         )
@@ -301,6 +325,7 @@ class ContinuousUsageContext:
             * self.metadata.kv_dtype.itemsize
             / self.metadata.kv_shape[2]
         )
+        self.cache_lifespan_data: List[float] = []
 
     @staticmethod
     def GetOrCreate(metadata: LMCacheEngineMetadata) -> "ContinuousUsageContext":
@@ -324,21 +349,45 @@ class ContinuousUsageContext:
         )
         try:
             global_http_client = global_http_connection.get_sync_client()
-            if self.server_url is not None:
+            if self.cache_usage_url is not None:
                 logger.debug("caching usage message sent.")
                 global_http_client.post(
-                    f"{self.server_url}", json=dataclasses.asdict(msg), timeout=5
+                    f"{self.cache_usage_url}", json=dataclasses.asdict(msg), timeout=5
                 )
+
             self.interval_num_hit_tokens = 0
             self.interval_num_stored_tokens = 0
-        except requests.exceptions.RequestException:
-            logger.debug("Unable to send lmcache caching usage message...")
+        except Exception as e:
+            logger.debug(f"Unable to send lmcache caching usage message: {e}")
+        try:
+            histogram_data = self.list_to_histogram(
+                self.cache_lifespan_data, self.cache_lifespan_buckets
+            )
+            global_http_client = global_http_connection.get_sync_client()
+            if self.cache_lifespan_url is not None:
+                global_http_client.post(
+                    f"{self.cache_lifespan_url}", json=histogram_data, timeout=5
+                )
+                logger.debug("caching lifespan message sent.")
+            self.cache_lifespan_data = []
+        except Exception as e:
+            logger.debug(f"Unable to send lmcache caching lifespan message: {e}")
+
+    def list_to_histogram(self, data: List[float], buckets: List[float]) -> dict:
+        histogram, _ = np.histogram(data, bins=buckets)
+        histogram = list(histogram)
+        histogram.insert(0, 0)
+        output_histogram = {
+            bucket: int(count)
+            for bucket, count in zip(buckets, histogram, strict=False)
+        }
+        return output_histogram
 
     def incr_or_send_stats(self, stats: "LMCacheStats"):
         # no-ops when user disable usage tracking
+        self.cache_lifespan_data.extend(stats.interval_request_cache_lifespan)
         if os.getenv("LMCACHE_TRACK_USAGE") == "false":
             return None
-
         self.interval_num_hit_tokens += stats.interval_hit_tokens
         self.interval_num_stored_tokens += stats.interval_stored_tokens
 
