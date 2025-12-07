@@ -80,7 +80,13 @@ Dynamic Mode
 
 Nixl Storage Backend also supports a dynamic mode, which creates nixl storage descriptors on demand instead of at init time.
 
-In order to use dynamic mode, extra_config.nixl_pool_size should be set to 0. Dynamic mode is currently only supported for nixl OBJ backend.
+In order to use dynamic mode, extra_config.nixl_pool_size should be set to 0.
+
+Restrictions
+^^^^^^^^^^^^
+
+- Dynamic mode is currently only supported for nixl OBJ backend.
+- save_unfull_chunk must be set to False.
 
 Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:
 
