@@ -5,10 +5,22 @@ from typing import Dict, List, Optional, Tuple
 import argparse
 import asyncio
 import json
+import os
+import sys
 import uuid
+
+# Add project root to Python path for local development
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ),
+)
 
 # Third Party
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 
@@ -76,6 +88,35 @@ def create_app(
     # Register internal APIs (only common APIs, not vllm-specific ones)
     registry = APIRegistry(app)
     registry.register_all_apis(categories=["common", "controller"])
+
+    # Add static files for frontend
+    static_dir = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "cache_controller",
+        "frontend",
+        "static",
+    )
+    if os.path.exists(static_dir):
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+        logger.info("Controller frontend static files mounted at /static")
+    else:
+        logger.warning("Controller frontend static directory not found: %s", static_dir)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def serve_frontend():
+        """Serve the Controller frontend HTML page."""
+        index_path = os.path.join(static_dir, "index.html")
+        if os.path.exists(index_path):
+            with open(index_path, "r") as f:
+                html_content = f.read()
+            return HTMLResponse(content=html_content)
+        else:
+            return HTMLResponse(
+                content="<h1>Controller Frontend not found</h1>"
+                "<p>Please build the frontend first.</p>",
+                status_code=404,
+            )
 
     class QueryInstRequest(BaseModel):
         event_id: str
@@ -317,7 +358,7 @@ def create_app(
 
     class QueryWorkerInfoRequest(BaseModel):
         instance_id: str
-        worker_ids: Optional[list[int]]
+        worker_ids: Optional[list[int]] = None
 
     class QueryWorkerInfoResponse(BaseModel):
         event_id: str
@@ -339,6 +380,84 @@ def create_app(
                 event_id=ret_msg.event_id, worker_infos=ret_msg.worker_infos
             )
         except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    @app.get("/threads")
+    async def get_threads():
+        """Get current thread information."""
+        try:
+            # Standard
+            import threading
+
+            threads_info = []
+
+            # Get current Python threads
+            for thread in threading.enumerate():
+                thread_info = {
+                    "thread_id": thread.ident,
+                    "name": thread.name,
+                    "state": "running" if thread.is_alive() else "terminated",
+                    "function_name": str(
+                        thread
+                    ),  # This will show target function if available
+                    "cpu_time": 0,  # Placeholder - would need more complex tracking
+                    "memory_usage": 0,  # Placeholder - would need more complex tracking
+                }
+                threads_info.append(thread_info)
+
+            # If no Python threads found, return some default info
+            if not threads_info:
+                threads_info = [
+                    {
+                        "thread_id": 1,
+                        "name": "MainThread",
+                        "state": "running",
+                        "function_name": "main",
+                        "cpu_time": 0,
+                        "memory_usage": 0,
+                    }
+                ]
+
+            return threads_info
+
+        except Exception as e:
+            logger.error("Failed to get threads information: %s", str(e))
+            # Return basic thread information even on error
+            return [
+                {
+                    "thread_id": 1,
+                    "name": "MainThread",
+                    "state": "running",
+                    "function_name": "API Server",
+                    "cpu_time": 0,
+                    "memory_usage": 0,
+                }
+            ]
+
+    @app.get("/env")
+    async def get_environment():
+        """Get current environment variables."""
+        try:
+            # Return all environment variables
+            env_vars = dict(os.environ)
+
+            # Filter out sensitive information
+            sensitive_keys = ["PASSWORD", "SECRET", "KEY", "TOKEN", "CREDENTIAL"]
+            filtered_env = {}
+
+            for key, value in env_vars.items():
+                should_include = True
+                for sensitive in sensitive_keys:
+                    if sensitive in key.upper():
+                        should_include = False
+                        break
+                if should_include:
+                    filtered_env[key] = value
+
+            return filtered_env
+
+        except Exception as e:
+            logger.error("Failed to get environment variables: %s", str(e))
             raise HTTPException(status_code=500, detail=str(e)) from e
 
     return app
