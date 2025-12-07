@@ -242,6 +242,8 @@ def run(args):
                 # Skip short videos or categories without prompts
                 if duration_s < args.window_seconds or category_key not in prompts:
                     continue
+                if args.window_seconds == 30 and duration_s > 90 and duration_s < 30:
+                    continue
 
                 print(f"[INFO] Video: {video_path}")
                 print(f"       category={category} duration={duration_s:.2f}s frames={total_frames} src_fps={video_fps:.3f}")
@@ -307,7 +309,7 @@ def run(args):
                             model=args.model,
                             messages=messages,
                             max_tokens=args.max_tokens if args.max_tokens > 0 else None,
-                            temperature=0.01,
+                            temperature=0.0,
                             top_p=1.0,
                         )
                     else:

@@ -1,34 +1,11 @@
-cd ../scripts_to_build_env
-bash 3_compile.sh
-cd ../scripts_test_video
-
-BLEND_SPECIAL_STR="<<SEG>>"
-# update in lmcache_blend.yml
-sed -i "s|blend_special_str: .*|blend_special_str: \"$BLEND_SPECIAL_STR\"|g" lmcache_blend.yml
-
 echo "Waiting for server to start..."
-export LM_CACHE_METRICS=1
-export LMCACHE_DEBUG=1
-export LMDEBUG=1
-export LMCACHE_VERBOSE=1
-export LMCACHE_CONFIG_FILE=lmcache_blend.yml
-export LM_CACHE_CONFIG_FILE=lmcache_blend.yml   
 model=OpenGVLab/InternVL3-14B
 model_name="InternVL3-14B"
-SERVER_LOG=server_log.log     
-
-
-# 1. simple example
-# python3 video_client.py \
-#   --video-path /root/workspace/dataset/video/sintel.mp4 \
-#   --model Qwen/Qwen2.5-VL-7B-Instruct \
-#   --use-sliding-window \
-#   --blend-special-str "$BLEND_SPECIAL_STR"
-
+SERVER_LOG=server_baseline.log     
 
 # 2. anomaly detection
-WIN_SIZES=(20)
-STRIDE_SIZES=(0.2 0.4 0.6)
+WIN_SIZES=(30)
+STRIDE_SIZES=(0.2)
 categorys=("abuse" "arson" "fighting" "shooting" "shoplifting" "vandalism" "stealing")
 
 for category in "${categorys[@]}"; do
@@ -48,8 +25,7 @@ for category in "${categorys[@]}"; do
     --disable-chunked-mm-input \
     --enforce-eager \
     --no-enable-prefix-caching \
-    --mm-processor-kwargs '{"max_dynamic_patch": 4}' \
-    --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_size":2000000000}' > $SERVER_LOG 2>&1 &
+    --mm-processor-kwargs '{"max_dynamic_patch": 4}' > $SERVER_LOG 2>&1 &
 
   # check if server is up by looking for a specific log line
   while ! grep -q "Application startup complete." "$SERVER_LOG"; do
@@ -64,7 +40,7 @@ for category in "${categorys[@]}"; do
       echo "Running win=${WIN}s, stride=${STRIDE}"
       python3 anomaly_video_client.py \
         --dataset-root /root/workspace/dataset/Anomaly-Detection-Dataset \
-        --output-dir results_analysis/logs/${model_name} \
+        --output-dir results_analysis/logs_baselines_0.9.0/${model_name} \
         --csv-name request_times_win${WIN}_stride${STRIDE}.csv \
         --model $model \
         --sample-fps 1.0 \
@@ -73,7 +49,7 @@ for category in "${categorys[@]}"; do
         --stride-ratio ${STRIDE} \
         --max-tokens 6 \
         --category $category \
-        --blend-special-str "$BLEND_SPECIAL_STR"
+        --blend-special-str ""
       sleep 5
     done
     sleep 5

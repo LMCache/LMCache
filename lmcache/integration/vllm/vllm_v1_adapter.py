@@ -68,6 +68,7 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
+from lmcache.v1.compute.models.utils import VLLMModelTracker
 
 if TYPE_CHECKING:
     # Third Party
@@ -79,6 +80,38 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _patch_vllm_model_registration():
+    """
+    Some vLLM builds miss the LMCache registration hook. Patch GPUModelRunner
+    so the underlying model is registered once it is loaded, allowing the
+    blender to fetch it safely later.
+    """
+    try:
+        # Third Party
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Skip GPUModelRunner patch: %s", exc)
+        return
+
+    if getattr(GPUModelRunner.load_model, "_lmcache_patched", False):
+        return
+
+    orig_load_model = GPUModelRunner.load_model
+
+    def _load_model_with_register(self, *args, **kwargs):
+        orig_load_model(self, *args, **kwargs)
+        try:
+            VLLMModelTracker.register_model(ENGINE_NAME, self.model)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to register vLLM model for LMCache: %s", exc)
+
+    _load_model_with_register._lmcache_patched = True  # type: ignore[attr-defined]
+    GPUModelRunner.load_model = _load_model_with_register
+
+
+_patch_vllm_model_registration()
 
 
 @dataclass
@@ -649,16 +682,8 @@ class LMCacheConnectorV1Impl:
             self.use_layerwise = config.use_layerwise
             self.enable_blending = config.enable_blending
 
-            if self.enable_blending:
-                assert self.lmcache_engine.gpu_connector is not None, (
-                    "GPU connector must be available for blending"
-                )
-                self.blender = LMCBlenderBuilder.get_or_create(
-                    ENGINE_NAME,
-                    self.lmcache_engine,
-                    self.lmcache_engine.gpu_connector,
-                    config,
-                )
+            # Blender is built lazily after model registration.
+            self.blender = None
 
             # Create lookup server using factory
             assert self.lmcache_engine is not None
@@ -740,6 +765,33 @@ class LMCacheConnectorV1Impl:
             f"vllm version {VLLM_VERSION}, "
             "lmcache cache_engine metadata: "
             f"{getattr(self.lmcache_engine, 'metadata', None)}"
+        )
+
+    def _ensure_blender_initialized(self):
+        """
+        Lazily build the blender once the vLLM model has been registered.
+        If the model is unavailable, skip blending for this round instead of
+        failing startup.
+        """
+        if not self.enable_blending or self.blender is not None:
+            return
+
+        try:
+            _ = VLLMModelTracker.get_model(ENGINE_NAME)
+        except Exception as exc:
+            logger.warning(
+                "Blending requested but vLLM model not registered yet: %s", exc
+            )
+            return
+
+        assert self.lmcache_engine.gpu_connector is not None, (
+            "GPU connector must be available for blending"
+        )
+        self.blender = LMCBlenderBuilder.get_or_create(
+            ENGINE_NAME,
+            self.lmcache_engine,
+            self.lmcache_engine.gpu_connector,
+            self.config,
         )
 
     def get_inference_info(self) -> dict:
@@ -883,6 +935,24 @@ class LMCacheConnectorV1Impl:
                     sync = False
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
+                    self._ensure_blender_initialized()
+                    if self.blender is None:
+                        logger.warning(
+                            "Blender unavailable; falling back to layerwise retrieve."
+                        )
+                        self.enable_blending = False
+                        layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                            tokens[:lmcache_cached_tokens],
+                            token_mask[:lmcache_cached_tokens],
+                            kvcaches=kvcaches,
+                            slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                            sync=sync,
+                        )
+                        next(layerwise_retriever)
+                        next(layerwise_retriever)
+                        self.layerwise_retrievers.append(layerwise_retriever)
+                        continue
+
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
                     start_blending = time.perf_counter()
                     page_stream = self.lmcache_engine.gpu_connector.get_page_stream()
@@ -1302,8 +1372,8 @@ class LMCacheConnectorV1Impl:
         # If the request has multimodal hashes, apply them to the token ids
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
-            logger.info("Applying multimodal hashes to token ids for request %s, mm_hashes: %s, mm_positions: %s",
-                         request.request_id, mm_hashes, mm_positions)
+            # logger.info("Applying multimodal hashes to token ids for request %s, mm_hashes: %s, mm_positions: %s",
+                        #  request.request_id, mm_hashes, mm_positions)
             # TODO(Jiayi): Optimize this
             token_ids = torch.tensor(request.prompt_token_ids)
             apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)

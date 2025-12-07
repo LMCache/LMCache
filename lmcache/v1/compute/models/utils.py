@@ -62,11 +62,14 @@ def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
         from lmcache.v1.compute.models.llama import LMCLlamaModel
 
         return LMCLlamaModel(vllm_model, blender, enable_sparse)
-    elif model_name == "Qwen2_5_VLForConditionalGeneration":
+    elif model_name in {
+        "Qwen2_5_VLForConditionalGeneration",
+        "Qwen2VLForConditionalGeneration",
+    }:
         # First Party
-        from lmcache.v1.compute.models.qwen2 import LMCQwen2Model
+        from lmcache.v1.compute.models.qwen2vl import LMCQwen2VLModel
 
-        return LMCQwen2Model(vllm_model, blender, enable_sparse)
+        return LMCQwen2VLModel(vllm_model, blender, enable_sparse)
     elif model_name == "Qwen3ForCausalLM":
         # First Party
         from lmcache.v1.compute.models.qwen3 import LMCQwen3Model
@@ -77,6 +80,11 @@ def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
         from lmcache.v1.compute.models.internvl import LMCInternVLModel
 
         return LMCInternVLModel(vllm_model, blender, enable_sparse)
+    elif model_name == "Qwen3VLForConditionalGeneration":
+        # First Party
+        from lmcache.v1.compute.models.qwen3vl import LMCQwen3VLModel
+
+        return LMCQwen3VLModel(vllm_model, blender, enable_sparse)
     else:
         # TODO(Jiayi): Add support for more models
         raise NotImplementedError(

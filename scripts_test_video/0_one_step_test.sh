@@ -15,7 +15,16 @@ export LMCACHE_CONFIG_FILE=lmcache_blend.yml
 export LM_CACHE_CONFIG_FILE=lmcache_blend.yml   
 model=Qwen/Qwen2.5-VL-7B-Instruct
 model_name="Qwen2.5-VL-7B-Instruct"
-SERVER_LOG=server_log.log     
+model=Qwen/Qwen3-VL-8B-Instruct
+model_name="Qwen3-VL-8B-Instruct"
+# model=Qwen/Qwen3-VL-8B-Instruct
+# model_name="Qwen3-VL-8B-Thinking"
+SERVER_LOG=server.log
+dataset_root=/root/workspace/dataset/Anomaly-Detection-Dataset
+results_dir=results_analysis/logs/${model_name}
+if [ ! -d "$results_dir" ]; then
+  mkdir -p "$results_dir"
+fi   
 
 
 # 1. simple example
@@ -27,9 +36,10 @@ SERVER_LOG=server_log.log
 
 
 # 2. anomaly detection
-WIN_SIZES=(120)
+WIN_SIZES=(10 20 30 40 50 60 70 80 90 100)
 STRIDE_SIZES=(0.2)
 categorys=("arson" "fighting" "shooting" "shoplifting" "vandalism" "abuse" "stealing")
+categorys=("vandalism") 
 
 for category in "${categorys[@]}"; do
   rm -f $SERVER_LOG
@@ -62,8 +72,8 @@ for category in "${categorys[@]}"; do
     for STRIDE in "${STRIDE_SIZES[@]}"; do
       echo "Running win=${WIN}s, stride=${STRIDE}"
       python3 anomaly_video_client.py \
-        --dataset-root /root/workspace/dataset/Anomaly-Detection-Dataset \
-        --output-dir results_analysis/logs/${model_name} \
+        --dataset-root $dataset_root  \
+        --output-dir $results_dir \
         --csv-name request_times_win${WIN}_stride${STRIDE}.csv \
         --model $model \
         --sample-fps 1.0 \

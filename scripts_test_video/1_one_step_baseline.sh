@@ -1,12 +1,16 @@
 echo "Waiting for server to start..."
 model=Qwen/Qwen2.5-VL-7B-Instruct
 model_name="Qwen2.5-VL-7B-Instruct"
+model=Qwen/Qwen3-VL-8B-Instruct
+model_name="Qwen3-VL-8B-Instruct"
+# model=Qwen/Qwen3-VL-8B-Thinking
+# model_name="Qwen3-VL-8B-Thinking"
 SERVER_LOG=server_baseline.log     
 
 # 2. anomaly detection
-WIN_SIZES=(60)
+WIN_SIZES=(10 20 30 40 50 60 70 80 90 100)
 STRIDE_SIZES=(0.2)
-categorys=("arson" "fighting" "shooting" "shoplifting" "vandalism" "abuse" "stealing")
+categorys=("abuse" "arson" "fighting" "shooting" "shoplifting" "vandalism" "stealing")
 
 for category in "${categorys[@]}"; do
   rm -f $SERVER_LOG

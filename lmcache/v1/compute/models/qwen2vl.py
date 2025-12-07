@@ -3,10 +3,10 @@
 from lmcache.v1.compute.models.base import LMCBaseModel
 
 
-class LMCQwen2Model(LMCBaseModel):
+class LMCQwen2VLModel(LMCBaseModel):
     """
     LMCache Q/K/V preprocessing for Qwen2.5 family (incl. Qwen2.5-VL).
-    - Most Qwen2.5 variants do NOT use per-head q_norm / k_norm like Qwen3.
+    - Most Qwen2.5VL variants do NOT use per-head q_norm / k_norm like Qwen3.
     - For robustness, we probe self_attn.{q_norm,k_norm}; if present, apply them.
     - Otherwise, return q/k/v unchanged.
 
