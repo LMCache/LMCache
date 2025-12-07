@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import random
 
 # First Party
-from lmcache.v1.cache_controller.message import HeartbeatMsg
+from lmcache.v1.cache_controller.message import HeartbeatMsg, HeartbeatRetMsg
 
 if TYPE_CHECKING:
     # Local
@@ -18,11 +18,15 @@ from .base import OperationHandler
 
 
 class HeartbeatHandler(OperationHandler):
-    """Handler for heartbeat operations"""
+    """Handler for heartbeat operations (REQ-REP mode)"""
 
     @property
     def operation_name(self) -> str:
         return "heartbeat"
+
+    def use_req_socket(self) -> bool:
+        """Heartbeat now uses REQ-REP mode"""
+        return True
 
     def create_message(
         self, benchmark: "ZMQControllerBenchmark", test_data: "TestData"
@@ -40,6 +44,13 @@ class HeartbeatHandler(OperationHandler):
             port=port,
             peer_init_url=peer_init_url,
         )
+
+    def validate_response(self, response: Any) -> bool:
+        """Validate the heartbeat response"""
+        if not isinstance(response, HeartbeatRetMsg):
+            return False
+        # Response should have need_full_sync field
+        return hasattr(response, "need_full_sync")
 
     def get_message_count(self, benchmark: "ZMQControllerBenchmark") -> int:
         return 1

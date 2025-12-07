@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import NamedTuple, Optional
+from enum import Enum
+from typing import NamedTuple, Optional, Set
 
 # Third Party
 import zmq.asyncio
@@ -16,6 +17,33 @@ class KVChunkInfo(NamedTuple):
     instance_id: str
     worker_id: int
     location: str
+
+
+class FullSyncState(Enum):
+    """State of full sync for a worker"""
+
+    IDLE = "idle"  # Not in sync
+    SYNCING = "syncing"  # Sync in progress
+    COMPLETED = "completed"  # Sync completed
+    FAILED = "failed"  # Sync failed/timeout
+
+
+@dataclass
+class WorkerSyncInfo:
+    """Information about a worker's sync state"""
+
+    sync_id: str
+    state: FullSyncState
+    start_time: float
+    expected_total_keys: int
+    expected_batch_count: int
+    received_batches: Set[int] = field(default_factory=set)
+    received_keys_count: int = 0
+    last_activity_time: float = 0.0
+
+    def __post_init__(self):
+        if self.last_activity_time == 0.0:
+            self.last_activity_time = self.start_time
 
 
 @dataclass
@@ -46,6 +74,7 @@ class WorkerNode:
     kv_store: dict[str, set[int]] = field(
         default_factory=dict
     )  # location -> set[chunk_hash]
+    sync_info: Optional[WorkerSyncInfo] = None  # Full sync state
 
     def admit_kv(self, location: str, key: int) -> None:
         """Admit a KV chunk to this worker."""

@@ -109,15 +109,6 @@ class KVOpEvent(msgspec.Struct):
     seq_num: int
 
 
-class HeartbeatMsg(RegisterMsg):
-    """Message for heartbeat, include register info for re-register"""
-
-    # TODO: add more heartbeat info
-
-    def describe(self) -> str:
-        return f"Heartbeat from instance {self.instance_id}, worker {self.worker_id}"
-
-
 class BatchedKVOperationMsg(WorkerMsg):
     """Batched KV operation message with common fields and lightweight operations
 
@@ -138,12 +129,68 @@ class BatchedKVOperationMsg(WorkerMsg):
         )
 
 
+# ============= Full Sync Messages (PUSH mode) =============
+
+
+class FullSyncBatchMsg(WorkerMsg):
+    """Full sync batch message (PUSH mode, no confirmation needed)
+
+    Used to send a batch of chunk hashes during full sync.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
+    sync_id: str
+    batch_id: int  # Current batch number (0-indexed)
+    keys: list[int]  # List of chunk_hash in this batch
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncBatch sync_id={self.sync_id} batch_id={self.batch_id} "
+            f"keys_count={len(self.keys)} from {self.instance_id}:{self.worker_id}"
+        )
+
+
+class FullSyncEndMsg(WorkerMsg):
+    """Full sync end message (PUSH mode)
+
+    Sent after all batches are sent to signal completion.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
+    sync_id: str
+    actual_total_keys: int  # Actual total keys sent (for verification)
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncEnd sync_id={self.sync_id} "
+            f"total_keys={self.actual_total_keys} from "
+            f"{self.instance_id}:{self.worker_id}"
+        )
+
+
 """Worker Request (requiring an reply) Message from LMcache to Controller"""
 
 
 class WorkerReqMsg(MsgBase):
     def describe(self) -> str:
         return ""
+
+
+class HeartbeatMsg(WorkerReqMsg):
+    """Message for heartbeat (REQ-REP mode), include register info for re-register"""
+
+    instance_id: str
+    worker_id: int
+    ip: str
+    port: int
+    peer_init_url: Optional[str]
+
+    def describe(self) -> str:
+        return f"Heartbeat from instance {self.instance_id}, worker {self.worker_id}"
 
 
 class BatchedP2PLookupMsg(WorkerReqMsg):
@@ -161,12 +208,63 @@ class BatchedP2PLookupMsg(WorkerReqMsg):
         )
 
 
+class FullSyncStartMsg(WorkerReqMsg):
+    """Full sync start message (REQ-REP mode, needs confirmation)
+
+    Sent before starting full sync to notify controller and get confirmation.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
+    sync_id: str  # Sync session ID
+    total_keys: int  # Expected total key count
+    batch_count: int  # Expected batch count
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncStart sync_id={self.sync_id} "
+            f"total_keys={self.total_keys} batches={self.batch_count} "
+            f"from {self.instance_id}:{self.worker_id}"
+        )
+
+
+class FullSyncStatusMsg(WorkerReqMsg):
+    """Full sync status query message (REQ-REP mode)
+
+    Used to query sync progress and check if freeze mode can be exited.
+    """
+
+    instance_id: str
+    worker_id: int
+    sync_id: str
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncStatus query sync_id={self.sync_id} "
+            f"from {self.instance_id}:{self.worker_id}"
+        )
+
+
 """Worker Request Return Message from Controller back to LMCache"""
 
 
 class WorkerReqRetMsg(MsgBase):
     def describe(self) -> str:
         return ""
+
+
+class HeartbeatRetMsg(WorkerReqRetMsg):
+    """Heartbeat response message"""
+
+    need_full_sync: bool = False  # Whether full sync is needed
+    full_sync_reason: Optional[str] = None  # Sync reason (e.g., "controller_restart")
+
+    def describe(self) -> str:
+        return (
+            f"HeartbeatRet need_full_sync={self.need_full_sync} "
+            f"reason={self.full_sync_reason}"
+        )
 
 
 class BatchedP2PLookupRetMsg(WorkerReqRetMsg):
@@ -177,6 +275,33 @@ class BatchedP2PLookupRetMsg(WorkerReqRetMsg):
 
     def describe(self) -> str:
         return f"The layout info is {self.layout_info}"
+
+
+class FullSyncStartRetMsg(WorkerReqRetMsg):
+    """Full sync start response message"""
+
+    sync_id: str
+    accepted: bool  # Whether sync request is accepted
+    error_msg: Optional[str] = None
+
+    def describe(self) -> str:
+        return f"FullSyncStartRet sync_id={self.sync_id} accepted={self.accepted}"
+
+
+class FullSyncStatusRetMsg(WorkerReqRetMsg):
+    """Full sync status response message"""
+
+    sync_id: str
+    is_complete: bool  # Whether current worker sync is complete
+    global_progress: float  # Global progress (0.0 - 1.0)
+    can_exit_freeze: bool  # Whether freeze mode can be exited
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncStatusRet sync_id={self.sync_id} "
+            f"complete={self.is_complete} progress={self.global_progress:.2%} "
+            f"can_exit_freeze={self.can_exit_freeze}"
+        )
 
 
 """Control Message from Controller to LMCache"""
@@ -590,7 +715,7 @@ class QueryWorkerInfoRetMsg(OrchRetMsg):
         return f"worker infos: {self.worker_infos}"
 
 
-class ErrorMsg(MsgBase):
+class ErrorMsg(WorkerReqRetMsg):
     """Control Error Message"""
 
     error: str
@@ -639,8 +764,15 @@ Msg = Union[
     QueryInstMsg,
     QueryInstRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
     QueryWorkerInfoMsg,
     QueryWorkerInfoRetMsg,
+    FullSyncStartMsg,
+    FullSyncStartRetMsg,
+    FullSyncBatchMsg,
+    FullSyncEndMsg,
+    FullSyncStatusMsg,
+    FullSyncStatusRetMsg,
 ]

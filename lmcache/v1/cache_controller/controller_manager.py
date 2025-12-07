@@ -33,6 +33,10 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     DecompressMsg,
     DeRegisterMsg,
     ErrorMsg,
+    FullSyncBatchMsg,
+    FullSyncEndMsg,
+    FullSyncStartMsg,
+    FullSyncStatusMsg,
     HealthMsg,
     HeartbeatMsg,
     KVAdmitMsg,
@@ -66,6 +70,8 @@ class LMCacheControllerManager:
         controller_urls: dict[str, str],
         health_check_interval: int,
         lmcache_worker_timeout: int,
+        full_sync_completion_threshold: float = 0.8,
+        full_sync_timeout_s: float = 300.0,
     ):
         # Initialize stats logger
         prometheus_labels = {
@@ -104,7 +110,11 @@ class LMCacheControllerManager:
                 bind_or_connect="bind",
             )
         self.reg_controller = RegistrationController()
-        self.kv_controller = KVController(self.reg_controller.registry)
+        self.kv_controller = KVController(
+            registry=self.reg_controller.registry,
+            full_sync_completion_threshold=full_sync_completion_threshold,
+            full_sync_timeout_s=full_sync_timeout_s,
+        )
 
         # Cluster executor
         self.cluster_executor = LMCacheClusterExecutor(
@@ -170,12 +180,25 @@ class LMCacheControllerManager:
                     await self.kv_controller.evict(evict_msg)
                 else:
                     logger.error("Unknown operation type: %s", op.op_type)
+        # Full sync messages (PUSH mode, no reply needed)
+        elif isinstance(msg, FullSyncBatchMsg):
+            await self.kv_controller.handle_full_sync_batch(msg)
+        elif isinstance(msg, FullSyncEndMsg):
+            await self.kv_controller.handle_full_sync_end(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
     async def handle_worker_req_message(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+        ret_msg: WorkerReqRetMsg
         if isinstance(msg, BatchedP2PLookupMsg):
             ret_msg = await self.kv_controller.batched_p2p_lookup(msg)
+        elif isinstance(msg, FullSyncStartMsg):
+            ret_msg = await self.kv_controller.handle_full_sync_start(msg)
+        elif isinstance(msg, FullSyncStatusMsg):
+            ret_msg = await self.kv_controller.handle_full_sync_status(msg)
+        else:
+            logger.error(f"Unknown worker request message type: {msg}")
+            ret_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
         return ret_msg
 
     async def handle_orchestration_message(self, msg: OrchMsg) -> OrchRetMsg:

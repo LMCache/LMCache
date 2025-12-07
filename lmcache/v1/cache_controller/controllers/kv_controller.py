@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_controller.controllers.full_sync_tracker import FullSyncTracker
 from lmcache.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
@@ -15,6 +16,12 @@ from lmcache.v1.cache_controller.message import (
     CompressRetMsg,
     DecompressMsg,
     DecompressRetMsg,
+    FullSyncBatchMsg,
+    FullSyncEndMsg,
+    FullSyncStartMsg,
+    FullSyncStartRetMsg,
+    FullSyncStatusMsg,
+    FullSyncStatusRetMsg,
     KVAdmitMsg,
     KVEvictMsg,
     KVOperationMsg,
@@ -46,7 +53,12 @@ better choice.
 
 
 class KVController:
-    def __init__(self, registry: RegistryTree) -> None:
+    def __init__(
+        self,
+        registry: RegistryTree,
+        full_sync_completion_threshold: float = 0.8,
+        full_sync_timeout_s: float = 300.0,
+    ) -> None:
         # TODO(Jiayi): remove this hardcode
         self.token_database = ChunkedTokenDatabase()
 
@@ -55,6 +67,13 @@ class KVController:
 
         self.registry = registry
         self.cluster_executor: Any = None
+
+        # Full sync tracker
+        self.full_sync_tracker = FullSyncTracker(
+            registry_tree=registry,
+            completion_threshold=full_sync_completion_threshold,
+            sync_timeout_s=full_sync_timeout_s,
+        )
 
     def _setup_metrics(self) -> None:
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
@@ -159,13 +178,200 @@ class KVController:
         """
         Admit a new kv chunk.
         """
+        # Discard incremental messages if worker is syncing
+        if self.full_sync_tracker.is_worker_syncing(msg.instance_id, msg.worker_id):
+            report_id = (msg.instance_id, msg.worker_id)
+            logger.debug("Discarding incremental admit during full sync: %s", report_id)
+            return
+
         self.registry.admit_kv(msg.instance_id, msg.worker_id, msg.location, msg.key)
 
     async def evict(self, msg: KVEvictMsg) -> None:
         """
         Evict a kv chunk.
         """
+        # Discard incremental messages if worker is syncing
+        if self.full_sync_tracker.is_worker_syncing(msg.instance_id, msg.worker_id):
+            report_id = (msg.instance_id, msg.worker_id)
+            logger.debug("Discarding incremental evict during full sync: %s", report_id)
+            return
+
         self.registry.evict_kv(msg.instance_id, msg.worker_id, msg.location, msg.key)
+
+    async def deregister(self, instance_id: str, worker_id: int) -> None:
+        """
+        Deregister all kv chunks of an instance-worker.
+        """
+        # sync_info is cleared when worker is deregistered from registry_tree
+        pass
+
+    # ============= Full Sync Message Handlers =============
+
+    async def handle_full_sync_start(
+        self, msg: FullSyncStartMsg
+    ) -> FullSyncStartRetMsg:
+        """
+        Handle full sync start request from a worker.
+
+        This is called when a worker wants to start full sync.
+        The controller should:
+        1. Clear existing keys for this worker
+        2. Mark the worker as syncing (incremental events will be discarded)
+        3. Return acceptance
+        """
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        sync_id = msg.sync_id
+        report_id = (instance_id, worker_id)
+
+        # Clear existing keys for this worker/location before sync
+        existing_keys = self.registry.get_worker_kv_keys(
+            instance_id, worker_id, msg.location
+        )
+        if existing_keys:
+            old_count = len(existing_keys)
+            # Clear by evicting all keys
+            for key in list(existing_keys):
+                self.registry.evict_kv(instance_id, worker_id, msg.location, key)
+            logger.info(
+                "Cleared %d existing keys for worker %s location %s before full sync",
+                old_count,
+                report_id,
+                msg.location,
+            )
+
+        # Start sync tracking
+        success = self.full_sync_tracker.start_sync(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            sync_id=sync_id,
+            total_keys=msg.total_keys,
+            batch_count=msg.batch_count,
+        )
+
+        if success:
+            logger.info(
+                "Accepted full sync start: worker=%s, sync_id=%s, "
+                "total_keys=%d, batch_count=%d",
+                report_id,
+                sync_id,
+                msg.total_keys,
+                msg.batch_count,
+            )
+            return FullSyncStartRetMsg(sync_id=sync_id, accepted=True)
+        else:
+            logger.warning(
+                "Rejected full sync start: worker=%s, sync_id=%s", report_id, sync_id
+            )
+            return FullSyncStartRetMsg(
+                sync_id=sync_id,
+                accepted=False,
+                error_msg="Worker already syncing with different sync_id",
+            )
+
+    async def handle_full_sync_batch(self, msg: FullSyncBatchMsg) -> None:
+        """
+        Handle full sync batch message from a worker.
+
+        This adds the keys from the batch to the registry.
+        """
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        location = msg.location
+        sync_id = msg.sync_id
+        batch_id = msg.batch_id
+        keys = msg.keys
+        report_id = (instance_id, worker_id)
+
+        # Record batch receipt
+        if not self.full_sync_tracker.receive_batch(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            sync_id=sync_id,
+            batch_id=batch_id,
+            keys_count=len(keys),
+        ):
+            logger.warning(
+                "Failed to record batch %d for worker %s", batch_id, report_id
+            )
+            return
+
+        # Add keys to registry
+        for key in keys:
+            self.registry.admit_kv(instance_id, worker_id, location, key)
+
+        current_keys = self.registry.get_worker_kv_keys(
+            instance_id, worker_id, location
+        )
+        logger.debug(
+            "Added %d keys from batch %d for worker %s, total now: %d",
+            len(keys),
+            batch_id,
+            report_id,
+            len(current_keys),
+        )
+
+    async def handle_full_sync_end(self, msg: FullSyncEndMsg) -> None:
+        """
+        Handle full sync end message from a worker.
+
+        This marks the sync as completed and verifies the key count.
+        """
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        sync_id = msg.sync_id
+        actual_total_keys = msg.actual_total_keys
+        report_id = (instance_id, worker_id)
+
+        success = self.full_sync_tracker.complete_sync(
+            instance_id=instance_id,
+            worker_id=worker_id,
+            sync_id=sync_id,
+            actual_total_keys=actual_total_keys,
+        )
+
+        if success:
+            # Verify registry has the expected number of keys
+            actual_keys_in_pool = len(
+                self.registry.get_worker_kv_keys(instance_id, worker_id, msg.location)
+            )
+            logger.info(
+                "Full sync completed for worker %s: sync_id=%s, "
+                "reported_keys=%d, keys_in_pool=%d",
+                report_id,
+                sync_id,
+                actual_total_keys,
+                actual_keys_in_pool,
+            )
+        else:
+            logger.warning(
+                "Failed to complete full sync for worker %s: sync_id=%s",
+                report_id,
+                sync_id,
+            )
+
+    async def handle_full_sync_status(
+        self, msg: FullSyncStatusMsg
+    ) -> FullSyncStatusRetMsg:
+        """
+        Handle full sync status query from a worker.
+
+        Returns the sync status and whether freeze mode can be exited.
+        """
+        is_complete, global_progress, can_exit_freeze = (
+            self.full_sync_tracker.get_sync_status(
+                instance_id=msg.instance_id,
+                worker_id=msg.worker_id,
+                sync_id=msg.sync_id,
+            )
+        )
+
+        return FullSyncStatusRetMsg(
+            sync_id=msg.sync_id,
+            is_complete=is_complete,
+            global_progress=global_progress,
+            can_exit_freeze=can_exit_freeze,
+        )
 
     # TODO(Jiayi): The current implementation does not handle
     # the case where the prefix chunks are evicted while the

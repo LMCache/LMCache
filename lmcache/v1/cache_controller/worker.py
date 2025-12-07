@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import asyncio
 import threading
 
@@ -22,9 +22,12 @@ from lmcache.v1.cache_controller.message import (
     DecompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
+    FullSyncStartRetMsg,
+    FullSyncStatusRetMsg,
     HealthWorkerMsg,
     HealthWorkerRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
@@ -49,6 +52,7 @@ from lmcache.v1.rpc_utils import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
 
 logger = init_logger(__name__)
 
@@ -140,7 +144,28 @@ class LMCacheWorker:
 
         self.msg_queue: asyncio.Queue[WorkerMsg] = asyncio.Queue()
 
+        # Full sync sender (initialized lazily when needed)
+        self._full_sync_sender: Optional["FullSyncSender"] = None
+        self._full_sync_in_progress = False
+
         self.register()
+
+    def _get_full_sync_sender(self):
+        """Lazy initialization of FullSyncSender"""
+        if self._full_sync_sender is None:
+            # Import here to avoid circular imports
+            # First Party
+            from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
+
+            # Get the local_cpu_backend from lmcache_engine
+            local_cpu_backend = self.lmcache_engine.storage_manager.local_cpu_backend
+            self._full_sync_sender = FullSyncSender(
+                config=self.config,
+                worker=self,
+                lmcache_engine=self.lmcache_engine,
+                local_cpu_backend=local_cpu_backend,
+            )
+        return self._full_sync_sender
 
     def register(self):
         """
@@ -218,8 +243,29 @@ class LMCacheWorker:
         self._create_req_socket()
 
     def _create_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+        # First Party
+        from lmcache.v1.cache_controller.message import (
+            FullSyncStartMsg,
+            FullSyncStatusMsg,
+        )
+
         if isinstance(msg, BatchedP2PLookupMsg):
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
+        elif isinstance(msg, HeartbeatMsg):
+            return HeartbeatRetMsg(need_full_sync=False)
+        elif isinstance(msg, FullSyncStartMsg):
+            return FullSyncStartRetMsg(
+                sync_id=msg.sync_id,
+                accepted=False,
+                error_msg="Communication error",
+            )
+        elif isinstance(msg, FullSyncStatusMsg):
+            return FullSyncStatusRetMsg(
+                sync_id=msg.sync_id,
+                is_complete=False,
+                global_progress=0.0,
+                can_exit_freeze=False,
+            )
         else:
             raise ValueError(f"Unknown message type: {type(msg)}")
 
@@ -254,6 +300,11 @@ class LMCacheWorker:
         return batch
 
     async def heartbeat(self):
+        """
+        Send periodic heartbeats to the controller (REQ-REP mode).
+
+        If the controller responds with need_full_sync=True, trigger full sync.
+        """
         enable_heartbeat = (
             self.config.lmcache_worker_heartbeat_time is not None
             and self.config.lmcache_worker_heartbeat_time > 0
@@ -266,16 +317,51 @@ class LMCacheWorker:
             )
             await asyncio.sleep(self.config.lmcache_worker_heartbeat_delay_time)
             while True:
-                self.put_msg(
-                    HeartbeatMsg(
-                        instance_id=self.lmcache_instance_id,
-                        worker_id=self.worker_id,
-                        ip=self.lmcache_worker_ip,
-                        port=self.lmcache_worker_port,
-                        peer_init_url=self.p2p_init_url,
-                    )
+                # Send heartbeat via REQ-REP and get response
+                heartbeat_msg = HeartbeatMsg(
+                    instance_id=self.lmcache_instance_id,
+                    worker_id=self.worker_id,
+                    ip=self.lmcache_worker_ip,
+                    port=self.lmcache_worker_port,
+                    peer_init_url=self.p2p_init_url,
                 )
+
+                try:
+                    ret_msg = await self.async_put_and_wait_msg(heartbeat_msg)
+
+                    if isinstance(ret_msg, HeartbeatRetMsg):
+                        if ret_msg.need_full_sync and not self._full_sync_in_progress:
+                            logger.info(
+                                "Controller requested full sync, reason: %s",
+                                ret_msg.full_sync_reason,
+                            )
+                            # Trigger full sync in background
+                            self._full_sync_in_progress = True
+                            asyncio.create_task(
+                                self._do_full_sync(ret_msg.full_sync_reason)
+                            )
+                    else:
+                        logger.warning(
+                            "Unexpected heartbeat response type: %s", type(ret_msg)
+                        )
+                except Exception as e:
+                    logger.error("Error during heartbeat: %s", e)
+
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
+
+    async def _do_full_sync(self, reason: Optional[str] = None):
+        """Perform full sync in background"""
+        try:
+            sender = self._get_full_sync_sender()
+            success = await sender.start_full_sync(reason)
+            if success:
+                logger.info("Full sync completed successfully")
+            else:
+                logger.error("Full sync failed")
+        except Exception as e:
+            logger.error("Error during full sync: %s", e)
+        finally:
+            self._full_sync_in_progress = False
 
     async def push(self):
         while True:

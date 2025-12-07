@@ -14,6 +14,7 @@ from lmcache.v1.cache_controller.message import (
     HealthMsg,
     HealthRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     QueryInstMsg,
     QueryInstRetMsg,
     QueryWorkerInfoMsg,
@@ -175,21 +176,48 @@ class RegistrationController:
             msg,
         )
 
-    # TODO: add more worker info in heartbeat
-    async def heartbeat(self, msg: HeartbeatMsg) -> None:
+    async def heartbeat(self, msg: HeartbeatMsg) -> HeartbeatRetMsg:
         """
-        Heartbeat from lmcache worker.
+        Heartbeat from lmcache worker (REQ-REP mode).
+
+        Returns HeartbeatRetMsg with need_full_sync flag.
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
         success = self.registry.update_heartbeat(instance_id, worker_id, time.time())
+
+        need_full_sync = False
+        full_sync_reason = None
+
         if not success:
             logger.warning(
                 "%s has not been registered, re-register the worker.",
                 (instance_id, worker_id),
             )
             # re-register the worker
-            await self.register(msg)
+            register_msg = RegisterMsg(
+                instance_id=msg.instance_id,
+                worker_id=msg.worker_id,
+                ip=msg.ip,
+                port=msg.port,
+                peer_init_url=msg.peer_init_url,
+            )
+            await self.register(register_msg)
+            # New worker always needs full sync
+            need_full_sync = True
+            full_sync_reason = "worker_re_registered"
+        else:
+            # Check if full sync is needed (e.g., controller restart)
+            need_full_sync, full_sync_reason = (
+                self.kv_controller.full_sync_tracker.should_request_full_sync(
+                    instance_id, worker_id
+                )
+            )
+
+        return HeartbeatRetMsg(
+            need_full_sync=need_full_sync,
+            full_sync_reason=full_sync_reason,
+        )
 
     async def query_worker_info(self, msg: QueryWorkerInfoMsg) -> QueryWorkerInfoRetMsg:
         """
