@@ -26,10 +26,13 @@ from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annot
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     CuFileMemoryAllocator,
+    GPUMemoryAllocator,
+    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 
 logger = init_logger(__name__)
 
@@ -190,7 +193,6 @@ class GdsBackend(AllocatorBackendInterface):
 
         self.config = config
         self.loop = loop
-        self.memory_allocator = self.initialize_allocator(config, metadata)
         self.dst_device = dst_device
 
         assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
@@ -203,6 +205,7 @@ class GdsBackend(AllocatorBackendInterface):
             f"GDS backend using fstype '{self.fstype}' on path '{self.gds_path}'"
         )
 
+        # Determine use_cufile BEFORE initializing allocator
         self.use_cufile = True
         use_cufile_from_config = False
 
@@ -237,6 +240,9 @@ class GdsBackend(AllocatorBackendInterface):
             self.cufile = None
             self.cudart = ctypes.CDLL("libcudart.so")
 
+        # Initialize allocator AFTER determining use_cufile
+        self.memory_allocator = self.initialize_allocator(config, metadata)
+
         self.use_direct_io = False
 
         if config.extra_config is not None:
@@ -248,6 +254,29 @@ class GdsBackend(AllocatorBackendInterface):
             os.makedirs(self.gds_path, exist_ok=True)
 
         self.stats = None  # TODO: plug into LMCache Statistics
+
+        # Cache policy and size tracking for GDS eviction
+        # Use max_cache_size as the GDS cache size limit (unified naming)
+        self.cache_policy = get_cache_policy(config.cache_policy)
+        # 优先用 config.max_gds_size（单位GB），没有就用环境变量
+        max_gds_size = getattr(config, "max_gds_size", None)
+        if max_gds_size is None or max_gds_size == 0:
+            env_val = os.environ.get("LMCACHE_MAX_GDS_SIZE")
+            if env_val is not None:
+                try:
+                    max_gds_size = float(env_val)
+                    logger.info(f"[GDS CACHE] max_gds_size set from env: {max_gds_size} GB")
+                except Exception as e:
+                    logger.warning(f"[GDS CACHE] Failed to parse LMCACHE_MAX_GDS_SIZE: {env_val}, error: {e}")
+            else:
+                max_gds_size = 0
+        self.max_cache_size = int(max_gds_size * 1024**3)  # 统一为字节数
+        logger.info(f"[GDS CACHE] config.max_gds_size={getattr(config, 'max_gds_size', None)} (env: {os.environ.get('LMCACHE_MAX_GDS_SIZE')})")
+        self.current_cache_size = 0
+        logger.info(
+            f"[GDS CACHE] Initialized with cache_policy={config.cache_policy}, "
+            f"max_cache_size={self.max_cache_size} bytes ({self.max_cache_size / 1024 / 1024:.2f} MB)"
+        )
 
         self.hot_lock = threading.Lock()
         self.hot_cache: OrderedDict[CacheEngineKey, DiskCacheMetadata] = OrderedDict()
@@ -354,6 +383,14 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
             self.hot_cache[key] = metadata
+            # Update size tracking for existing cache entries
+            self.current_cache_size += size
+            self.cache_policy.update_on_put(key)
+        logger.debug(
+            f"[GDS CACHE] Loaded existing entry: key={key}, "
+            f"size={size / 1024 / 1024:.2f} MB, "
+            f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB"
+        )
         return metadata
 
     def __str__(self):
@@ -400,16 +437,122 @@ class GdsBackend(AllocatorBackendInterface):
             l2_dir,
         )
 
+    def _maybe_evict_for(self, required_size: int) -> bool:
+        """
+        Evict cache entries if needed to make room for a new entry.
+        
+        Args:
+            required_size: Size in bytes needed for the new entry
+            
+        Returns:
+            True if eviction was successful (or not needed), False otherwise
+        """
+        if self.max_cache_size <= 0:
+            # No size limit configured
+            logger.info("[GDS EVICT] No size limit configured, skip eviction.")
+            return True
+
+        # 直接用self.max_cache_size判断空间，去掉max_bytes冗余变量
+        logger.info(
+            f"[GDS EVICT CHECK] current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB, "
+            f"required_size={required_size / 1024 / 1024:.2f} MB, "
+            f"max_cache_size={self.max_cache_size / 1024 / 1024:.2f} MB, "
+            f"current_cache_size+required_size={ (self.current_cache_size + required_size) / 1024 / 1024:.2f} MB, "
+            f"hot_cache_entries={len(self.hot_cache)}"
+        )
+
+        if self.current_cache_size + required_size <= self.max_cache_size:
+            logger.info(
+                f"[GDS EVICT] Not triggered: current_cache_size + required_size <= max_cache_size ({self.current_cache_size + required_size:.0f} <= {self.max_cache_size:.0f} bytes)"
+            )
+            return True
+
+        with self.hot_lock:
+            while self.current_cache_size + required_size > self.max_cache_size:
+                # Get eviction candidates from cache policy
+                evict_keys = self.cache_policy.get_evict_candidates(
+                    self.hot_cache, num_candidates=1
+                )
+                if not evict_keys:
+                    logger.info(
+                        "[GDS EVICTION] No eviction candidates found. "
+                        f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB, "
+                        f"max_cache_size={self.max_cache_size / 1024 / 1024:.2f} MB, "
+                        f"required_size={required_size / 1024 / 1024:.2f} MB, "
+                        f"hot_cache_entries={len(self.hot_cache)}"
+                    )
+                    return False
+
+                for evict_key in evict_keys:
+                    metadata = self.hot_cache.pop(evict_key, None)
+                    if metadata is None:
+                        continue
+
+                    evict_size = metadata.size
+                    evict_path = metadata.path
+
+                    # Remove files from disk
+                    try:
+                        os.remove(evict_path)
+                        os.remove(evict_path + _METADATA_FILE_SUFFIX)
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"[GDS EVICTION] Error removing files: {e}")
+
+                    self.current_cache_size -= evict_size
+                    self.cache_policy.update_on_force_evict(evict_key)
+
+                    logger.info(
+                        f"[GDS EVICTION] Evicted key={evict_key}, "
+                        f"size={evict_size / 1024 / 1024:.2f} MB. "
+                        f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB, "
+                        f"hot_cache_entries={len(self.hot_cache)}"
+                    )
+
+        return True
+
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.put_lock:
             return key in self.put_tasks
 
     def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
         assert memory_obj.tensor is not None
-        memory_obj.ref_count_up()
+
+        logger.info(f"[GDS PUT] submit_put_task called for key={key}, size={memory_obj.get_physical_size() / 1024 / 1024:.2f} MB")
+        # Skip repeated save
+        if self.exists_in_put_tasks(key):
+            logger.debug(f"Put task for {key} is already in progress.")
+            return None
 
         with self.put_lock:
             self.put_tasks.add(key)
+
+        required_size = memory_obj.get_physical_size()
+        
+        # Perform eviction if needed before saving
+        evict_success = self._maybe_evict_for(required_size)
+        if not evict_success:
+            with self.put_lock:
+                self.put_tasks.discard(key)
+            logger.warning(
+                f"[GDS CACHE] Cannot store key={key}, eviction failed. "
+                f"required_size={required_size / 1024 / 1024:.2f} MB"
+            )
+            return None
+
+        # Update current size after successful eviction check
+        with self.hot_lock:
+            self.current_cache_size += required_size
+        
+        self.cache_policy.update_on_put(key)
+        memory_obj.ref_count_up()
+
+        logger.info(
+            f"[GDS CACHE] Submitting PUT task: key={key}, "
+            f"size={required_size / 1024 / 1024:.2f} MB, "
+            f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB"
+        )
 
         future = asyncio.run_coroutine_threadsafe(
             self._async_save_bytes_to_disk(key, memory_obj), self.loop
@@ -481,6 +624,11 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             # TODO(Jiayi): need to support `cached_positions`.
             self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
+            logger.info(
+                f"[GDS CACHE] Inserted key={key}, size={size / 1024 / 1024:.2f} MB. "
+                f"Total hot_cache entries: {len(self.hot_cache)}, "
+                f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB"
+            )
 
     def submit_prefetch_task(
         self,
@@ -523,14 +671,16 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> Optional[MemoryObj]:
         with self.hot_lock:
             entry = self.hot_cache.get(key)
-        if entry is None:
-            return None
+            if entry is None:
+                return None
+            # Update cache policy on hit (for LRU/LFU etc.)
+            self.cache_policy.update_on_hit(key, self.hot_cache)
 
         path = entry.path
         dtype = entry.dtype
         shape = entry.shape
         fmt = entry.fmt
-        logger.warning(entry)
+        logger.debug(f"[GDS CACHE] Cache hit: key={key}")
         assert dtype is not None
         assert shape is not None
         assert fmt is not None
@@ -723,9 +873,18 @@ class GdsBackend(AllocatorBackendInterface):
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> CuFileMemoryAllocator:
+    ) -> MemoryAllocatorInterface:
         assert config.cufile_buffer_size is not None
-        return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
+        size = config.cufile_buffer_size * 1024**2
+        logger.info(
+            f"[GDS CACHE] Initializing allocator with buffer size: "
+            f"{config.cufile_buffer_size} MB ({size} bytes)"
+        )
+        if self.use_cufile:
+            return CuFileMemoryAllocator(size)
+        else:
+            logger.info("Using GPUMemoryAllocator instead of CuFileMemoryAllocator")
+            return GPUMemoryAllocator(size, device=self.dst_device)
 
     def allocate(
         self,
@@ -737,10 +896,24 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> Optional[MemoryObj]:
         if busy_loop:
             logger.warning("GDS Backend does not support allocation with busy loop")
-        if eviction:
-            logger.warning("GDS Backend does not support eviction")
+        # if eviction:
+        #     logger.warning("GDS Backend does not support eviction")
 
-        return self.memory_allocator.allocate(shape, dtype, fmt)
+        result = self.memory_allocator.allocate(shape, dtype, fmt)
+        
+        if result is None:
+            # Calculate required size for logging
+            element_size = torch.tensor([], dtype=dtype).element_size()
+            required_size = shape.numel() * element_size
+            logger.warning(
+                f"[GDS GPU BUFFER] GPU staging allocator failed! "
+                f"This is unrelated to GDS disk eviction. "
+                f"Requested shape={shape}, dtype={dtype}, "
+                f"required_size={required_size / 1024 / 1024:.2f} MB. "
+                f"Consider increasing cufile_buffer_size or GPU memory."
+            )
+        
+        return result
 
     def batched_allocate(
         self,
@@ -756,7 +929,21 @@ class GdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        result = self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        
+        if result is None:
+            # Calculate required size for logging
+            element_size = torch.tensor([], dtype=dtype).element_size()
+            required_size = shape.numel() * element_size * batch_size
+            logger.warning(
+                f"[GDS GPU BUFFER] Batched GPU staging allocator failed! "
+                f"This is unrelated to GDS disk eviction. "
+                f"Requested shape={shape}, dtype={dtype}, batch_size={batch_size}, "
+                f"required_size={required_size / 1024 / 1024:.2f} MB. "
+                f"Consider increasing cufile_buffer_size or GPU memory."
+            )
+        
+        return result
 
     def get_allocator_backend(self):
         return self

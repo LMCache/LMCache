@@ -300,6 +300,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     # Storage paths
     "weka_path": {"type": Optional[str], "default": None, "env_converter": str},
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "max_gds_size": {
+        "type": float,
+        "default": 0.0,
+        "env_converter": float,
+    },
     "cufile_buffer_size": {
         "type": Optional[int],
         "default": None,
