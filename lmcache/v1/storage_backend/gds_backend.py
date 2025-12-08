@@ -215,6 +215,7 @@ class GdsBackend(AllocatorBackendInterface):
 
         self.data_suffix = _DATA_FILE_SUFFIX
         self.use_thread_pool = False
+        self._thread_pool = None
 
         if self.fstype in ["tmpfs", "overlayfs"]:
             # TODO: we can replace the auto-detection of unsupported cufile
@@ -235,7 +236,7 @@ class GdsBackend(AllocatorBackendInterface):
             thread_count = _DEFAULT_THREAD_COUNT
             if config.extra_config is not None:
                 thread_count = config.extra_config.get(
-                    "gds_thread_count", _DEFAULT_THREAD_COUNT
+                    "gds_io_threads", _DEFAULT_THREAD_COUNT
                 )
             self._thread_pool = ThreadPoolExecutor(
                 max_workers=thread_count, thread_name_prefix="weka-gds-io"
@@ -693,6 +694,7 @@ class GdsBackend(AllocatorBackendInterface):
             memory_objs.append(memory_obj)
 
         start_time = time.perf_counter()
+        assert self._thread_pool is not None
         results = list(
             self._thread_pool.map(
                 self._load_bytes_from_disk_with_memory, keys, paths, memory_objs
