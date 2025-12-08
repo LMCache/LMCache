@@ -93,7 +93,7 @@ def test_launch_plugins_no_locations(config_without_location, worker_role):
     assert len(launcher.plugin_processes) == 0
 
 
-def test_launch_plugins_location_does_not_exist(worker_role, caplog):
+def test_launch_plugins_location_does_not_exist(worker_role):
     """Test launch_plugins when location does not exist."""
     config = MockConfig(["/non/existent/path"])
     launcher = RuntimePluginLauncher(config, worker_role, worker_count=4, worker_id=1)
@@ -301,11 +301,10 @@ def test_get_interpreter_no_shebang(temp_plugin_dir):
 
     with patch("lmcache.v1.plugin.runtime_plugin_launcher.shutil.which") as mock_which:
         # Mock which to return interpreter for python
-        mock_which.side_effect = (
-            lambda x: "/usr/bin/python"
-            if x == "python"
-            else ("/usr/bin/python3" if x == "python3" else None)
-        )
+        mock_which.side_effect = {
+            "python": "/usr/bin/python",
+            "python3": "/usr/bin/python3",
+        }.get
         interpreter = launcher._get_interpreter(python_file)
 
         # Should return python (first in the fallback list)
@@ -329,30 +328,24 @@ def test_get_interpreter_unsupported_type(temp_plugin_dir):
     assert "not supported" in str(exc_info.value)
 
 
-def test_should_skip_plugin():
+@pytest.mark.parametrize(
+    ("role_name", "worker_id", "filename_parts", "should_skip"),
+    [
+        ("WORKER", 1, ["SCHEDULER", "test"], True),
+        ("WORKER", 1, ["WORKER", "test"], False),
+        ("WORKER", 1, ["ALL", "test"], False),
+        ("WORKER", 1, ["WORKER", "0", "specific"], True),
+        ("WORKER", 1, ["WORKER", "1", "specific"], False),
+        ("WORKER", 1, ["WORKER", "generic"], False),
+        ("SCHEDULER", 0, ["WORKER", "generic"], True),
+    ],
+)
+def test_should_skip_plugin(role_name, worker_id, filename_parts, should_skip):
     """Test plugin skipping logic."""
     config = MockConfig()
-    launcher = RuntimePluginLauncher(config, MockRole("WORKER"), 4, 1)
+    launcher = RuntimePluginLauncher(config, MockRole(role_name), 4, worker_id)
 
-    # Test role mismatch
-    assert launcher._should_skip_plugin(Path("test.py"), ["SCHEDULER", "test"])
-
-    # Test role match
-    assert not launcher._should_skip_plugin(Path("test.py"), ["WORKER", "test"])
-
-    # Test ALL role
-    assert not launcher._should_skip_plugin(Path("test.py"), ["ALL", "test"])
-
-    # Test worker ID mismatch
-    assert launcher._should_skip_plugin(Path("test.py"), ["WORKER", "0", "specific"])
-
-    # Test worker ID match
-    assert not launcher._should_skip_plugin(
-        Path("test.py"), ["WORKER", "1", "specific"]
-    )
-
-    # Test generic worker plugin (no worker ID)
-    assert not launcher._should_skip_plugin(Path("test.py"), ["WORKER", "generic"])
+    assert launcher._should_skip_plugin(Path("test.py"), filename_parts) is should_skip
 
 
 def test_stop_plugins():
