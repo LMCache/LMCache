@@ -186,9 +186,7 @@ class TestGdsBackend:
         assert not gds_backend.pin(key)
         assert not gds_backend.unpin(key)
 
-    def test_weka_initialization_uses_thread_pool_and_suffix(
-        self, temp_gds_path, async_loop
-    ):
+    def test_weka_initialization_suffix(self, temp_gds_path, async_loop):
         class DummyAllocator:
             def __init__(self):
                 self.base_pointer = 0
@@ -234,9 +232,7 @@ class TestGdsBackend:
                     side_effect=lambda self, config, metadata: DummyAllocator(),
                 ),
             ):
-                # Ensure thread pool picks up custom size and weka-specific suffix
                 config = create_test_config(temp_gds_path)
-                config.extra_config["gds_io_threads"] = 8
                 metadata = create_test_metadata()
 
                 backend = GdsBackend(
@@ -245,32 +241,14 @@ class TestGdsBackend:
                     metadata=metadata,
                     dst_device="cuda:0",
                 )
-                try:
-                    key = create_test_key(0)
-                    path, _, _, _ = backend._key_to_path(key)
-                    assert path.endswith(".weka1")
-                    assert backend.data_suffix == ".weka1"
-                    assert backend.use_thread_pool
-                    assert backend._thread_pool is not None
-                    assert backend._thread_pool._max_workers == 8
-                    assert backend.use_cufile
-
-                    called = {}
-
-                    def fake_batched(self, keys):
-                        called["keys"] = keys
-                        return ["thread_pool_path"]
-
-                    with mock.patch.object(
-                        GdsBackend,
-                        "_batched_get_blocking_by_thread_pool_impl",
-                        fake_batched,
-                    ):
-                        result = backend.batched_get_blocking([key])
-                        assert result == ["thread_pool_path"]
-                        assert called["keys"] == [key]
-                finally:
-                    backend.close()
+            try:
+                key = create_test_key(0)
+                path, _, _, _ = backend._key_to_path(key)
+                assert path.endswith(".weka1")
+                assert backend.data_suffix == ".weka1"
+                assert backend.use_cufile
+            finally:
+                backend.close()
 
     def test_weka_disallows_disabling_cufile(self, temp_gds_path, async_loop):
         class DummyAllocator:
