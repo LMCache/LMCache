@@ -1563,7 +1563,7 @@ class LMCacheEngineBuilder:
                 MemoryFormat.KV_2LTD,
             )
 
-        if config.weka_path is not None or config.gds_path is not None:
+        if config.gds_path is not None:
             assert config.cufile_buffer_size is not None
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 

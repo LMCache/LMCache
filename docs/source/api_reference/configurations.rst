@@ -330,9 +330,6 @@ Settings for different storage backends and paths.
    * - YAML Config Name
      - Environment Variable
      - Description
-   * - weka_path
-     - LMCACHE_WEKA_PATH
-     - Path for Weka storage backend
    * - gds_path
      - LMCACHE_GDS_PATH
      - Path for GDS backend
