@@ -229,7 +229,7 @@ class TestGdsBackend:
                 mock.patch.object(
                     GdsBackend,
                     "initialize_allocator",
-                    side_effect=lambda self, config, metadata: DummyAllocator(),
+                    return_value=DummyAllocator(),
                 ),
             ):
                 config = create_test_config(temp_gds_path)
@@ -241,14 +241,14 @@ class TestGdsBackend:
                     metadata=metadata,
                     dst_device="cuda:0",
                 )
-            try:
-                key = create_test_key(0)
-                path, _, _, _ = backend._key_to_path(key)
-                assert path.endswith(".weka1")
-                assert backend.data_suffix == ".weka1"
-                assert backend.use_cufile
-            finally:
-                backend.close()
+                try:
+                    key = create_test_key(0)
+                    path, _, _, _ = backend._key_to_path(key)
+                    assert path.endswith(".weka1")
+                    assert backend.data_suffix == ".weka1"
+                    assert backend.use_cufile
+                finally:
+                    backend.close()
 
     def test_weka_disallows_disabling_cufile(self, temp_gds_path, async_loop):
         class DummyAllocator:
@@ -266,7 +266,7 @@ class TestGdsBackend:
             mock.patch.object(
                 GdsBackend,
                 "initialize_allocator",
-                side_effect=lambda self, config, metadata: DummyAllocator(),
+                return_value=DummyAllocator(),
             ),
         ):
             config = create_test_config(temp_gds_path)
