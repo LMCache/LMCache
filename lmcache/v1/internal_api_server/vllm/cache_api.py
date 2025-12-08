@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Annotated, List, Optional
+from typing import Annotated, Callable, List, Optional, Tuple
 import json
 
 # Third Party
@@ -8,7 +8,85 @@ from fastapi import APIRouter, Query
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
+# First Party
+from lmcache.v1.cache_engine import LMCacheEngine
+
 router = APIRouter()
+
+
+def _parse_tokens_from_params(
+    tokens_mock: Optional[str],
+) -> Tuple[Optional[List[int]], Optional[dict]]:
+    """Parse tokens from input parameters.
+
+    Args:
+        tokens_mock: Two comma-separated numbers specifying start and end of token range
+
+    Returns:
+        Tuple of (tokens list, error dict).
+        If error dict is not None, tokens will be None.
+    """
+    # TODO(baoloongmao): Add support for tokens_input parameter to read tokens from file
+    if tokens_mock:
+        try:
+            parts = tokens_mock.split(",")
+            if len(parts) != 2:
+                raise ValueError("tokens_mock must contain exactly 2 numbers")
+            start, end = int(parts[0].strip()), int(parts[1].strip())
+            if start >= end:
+                raise ValueError("start must be less than end")
+            tokens = list(range(start, end))
+            return tokens, None
+        except ValueError as e:
+            return None, {
+                "error": "Invalid tokens_mock format",
+                "message": f"tokens_mock must be 'start,end': {str(e)}",
+            }
+    else:
+        return None, {
+            "error": "Missing parameters",
+            "message": "Must specify either tokens_input or tokens_mock",
+        }
+
+
+def _create_error_response(error_info: dict, status_code: int) -> PlainTextResponse:
+    """Create a standardized error response.
+
+    Args:
+        error_info: Dictionary containing error information
+        status_code: HTTP status code
+
+    Returns:
+        PlainTextResponse with error information
+    """
+    return PlainTextResponse(
+        content=json.dumps(error_info, indent=2),
+        media_type="application/json",
+        status_code=status_code,
+    )
+
+
+def _check_lmcache_engine(
+    request: Request,
+) -> Tuple[Optional["LMCacheEngine"], Optional[PlainTextResponse]]:
+    """Check if LMCache engine is available.
+
+    Args:
+        request: FastAPI request object
+
+    Returns:
+        Tuple of (lmcache_engine, error_response).
+        If error_response is not None, engine will be None.
+    """
+    lmcache_adapter = request.app.state.lmcache_adapter
+    lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
+    if not lmcache_engine:
+        error_info = {
+            "error": "LMCache API is unavailable",
+            "message": "LMCache engine not configured.",
+        }
+        return None, _create_error_response(error_info, 503)
+    return lmcache_engine, None
 
 
 @router.delete("/cache/clear")
@@ -53,19 +131,12 @@ async def clear(
         ```
     """
     try:
-        lmcache_adapter = request.app.state.lmcache_adapter
-        lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
-        if not lmcache_engine:
-            error_info = {
-                "error": "/cache/clear API is unavailable",
-                "message": "LMCache engine not configured.",
-            }
-            return PlainTextResponse(
-                content=json.dumps(error_info, indent=2),
-                media_type="application/json",
-                status_code=503,  # Service Unavailable
-            )
-        num_removed = lmcache_engine.clear(
+        lmcache_engine, error_response = _check_lmcache_engine(request)
+        if error_response:
+            return error_response
+
+        assert lmcache_engine is not None
+        num_removed = lmcache_engine.clear(  # type: ignore[attr-defined]
             locations=locations, request_configs=request_configs
         )
         success_info = {
@@ -78,8 +149,151 @@ async def clear(
         )
     except Exception as e:
         error_info = {"error": "Failed to clear cache", "message": str(e)}
+        return _create_error_response(error_info, 500)
+
+
+def _process_tokens_request(
+    request: Request,
+    tokens_mock: Optional[str],
+) -> Tuple[Optional[object], Optional[List[int]], Optional[PlainTextResponse]]:
+    """Process tokens request and validate parameters.
+
+    Args:
+        request: FastAPI request object
+        tokens_mock: Mock token range specification
+
+    Returns:
+        Tuple of (lmcache_engine, tokens, error_response).
+        If error_response is not None, the other values will be None.
+    """
+    lmcache_engine, error_response = _check_lmcache_engine(request)
+    if error_response:
+        return None, None, error_response
+
+    tokens, error_info = _parse_tokens_from_params(tokens_mock)
+    if error_info:
+        status_code = 400 if error_info["error"] != "File not found" else 404
+        return None, None, _create_error_response(error_info, status_code)
+
+    return lmcache_engine, tokens, None
+
+
+def _execute_cache_operation(
+    operation_name: str,
+    operation_func: Callable,
+    lmcache_engine: object,
+    tokens: List[int],
+) -> PlainTextResponse:
+    """Execute a cache operation and return standardized response.
+
+    Args:
+        operation_name: Name of the operation for error messages
+        operation_func: Function to execute the operation
+        lmcache_engine: LMCache engine instance
+        tokens: List of token IDs
+
+    Returns:
+        PlainTextResponse with operation result
+    """
+    try:
+        result = operation_func(lmcache_engine, tokens)
+        success_info = {
+            "status": "success",
+            "num_tokens": len(tokens),
+        }
+        if result is not None:
+            success_info.update(result)
         return PlainTextResponse(
-            content=json.dumps(error_info, indent=2),
+            content=json.dumps(success_info, indent=2),
             media_type="application/json",
-            status_code=500,
         )
+    except Exception as e:
+        error_info = {"error": f"Failed to {operation_name}", "message": str(e)}
+        return _create_error_response(error_info, 500)
+
+
+@router.post("/cache/store")
+async def store(
+    request: Request,
+    tokens_mock: Optional[str] = None,
+):
+    """Store KV cache data into the LMCache engine.
+
+    This endpoint provides a way to store KV cache data by generating mock tokens.
+
+    Args:
+        request (Request): The FastAPI request object containing application state.
+        tokens_mock (Optional[str], optional): Two comma-separated numbers specifying
+            the start and end of a token range. Example: "0,100" generates tokens
+            from 0 to 99. Defaults to None.
+
+    Returns:
+        PlainTextResponse: A plain text response with operation status
+
+    Example:
+        Store with mock tokens:
+        ```bash
+        curl -X POST "http://localhost:8000/cache/store?tokens_mock=0,100"
+        # Response: {"status": "success", "num_tokens": 100}
+        ```
+    """
+    lmcache_engine, tokens, error_response = _process_tokens_request(
+        request, tokens_mock
+    )
+    if error_response:
+        return error_response
+
+    assert tokens is not None
+    assert lmcache_engine is not None
+
+    def _store_operation(engine, token_list):
+        engine.store(tokens=token_list)
+        return None
+
+    return _execute_cache_operation(
+        "store cache", _store_operation, lmcache_engine, tokens
+    )
+
+
+@router.post("/cache/retrieve")
+async def retrieve(
+    request: Request,
+    tokens_mock: Optional[str] = None,
+):
+    """Retrieve KV cache data from the LMCache engine.
+
+    This endpoint provides a way to retrieve KV cache data by generating mock tokens.
+
+    Args:
+        request (Request): The FastAPI request object containing application state.
+        tokens_mock (Optional[str], optional): Two comma-separated numbers specifying
+            the start and end of a token range. Example: "0,100" generates tokens
+            from 0 to 99. Defaults to None.
+
+    Returns:
+        PlainTextResponse: A plain text response with operation status
+
+    Example:
+        Retrieve with mock tokens:
+        ```bash
+        curl -X POST "http://localhost:8000/cache/retrieve?tokens_mock=0,100"
+        # Response: {"status": "success", "num_tokens": 100, "num_retrieved": 80}
+        ```
+    """
+    lmcache_engine, tokens, error_response = _process_tokens_request(
+        request, tokens_mock
+    )
+    if error_response:
+        return error_response
+
+    assert tokens is not None
+    assert lmcache_engine is not None
+
+    def _retrieve_operation(engine, token_list):
+        ret_mask = engine.retrieve(tokens=token_list)
+        num_retrieved = int(ret_mask.sum().item())
+        return {"num_retrieved": num_retrieved}
+
+    return _execute_cache_operation(
+        "retrieve cache", _retrieve_operation, lmcache_engine, tokens
+    )

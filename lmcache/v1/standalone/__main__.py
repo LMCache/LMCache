@@ -24,11 +24,13 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
+from lmcache.v1.mock_gpu_connector import MockGPUConnector
 
 logger = init_logger(__name__)
 
@@ -50,7 +52,7 @@ class LMCacheStandaloneStarter:
             instance_id=instance_id,
             config=self.config,
             metadata=self.metadata,
-            gpu_connector=None,
+            gpu_connector=MockGPUConnector(kv_shape=metadata.kv_shape),  # type: ignore[arg-type]
             broadcast_fn=mock_up_broadcast_fn,
             broadcast_object_fn=mock_up_broadcast_object_fn,
         )
@@ -60,26 +62,68 @@ class LMCacheStandaloneStarter:
 
         self.running = False
 
+    def _generate_fixed_kvcaches(self) -> dict:
+        """Generate fixed pattern kvcaches for testing and MD5 verification.
+
+        Returns a dict of tensors with deterministic values based on layer index.
+        This ensures consistent MD5 hashes for verification purposes.
+        """
+        kv_shape = self.metadata.kv_shape
+        num_layers, kv_dim, num_blocks, num_heads, head_size = kv_shape
+        dtype = self.metadata.kv_dtype
+        shape = [kv_dim, num_blocks, num_heads, head_size]
+        kvcaches = {}
+        for layer_idx in range(num_layers):
+            torch.manual_seed(42 + layer_idx)
+            tensor = torch.rand(shape, dtype=dtype, device="cpu")
+            layer_name = f"model.layers.{layer_idx}"
+            kvcaches[layer_name] = tensor
+
+        logger.info(
+            "Generated fixed pattern kvcaches: %d layers, shape=%s, dtype=%s",
+            num_layers,
+            shape,
+            dtype,
+        )
+        return kvcaches
+
     def start(self) -> LMCacheEngine:
         """Start the LMCache engine"""
         logger.info("=" * 80)
         logger.info("Starting LMCache Standalone Engine")
         logger.info("=" * 80)
 
-        logger.info(f"Configuration: {self.config}")
-        logger.info(f"Metadata: {self.metadata}")
+        logger.info("Configuration: %s", self.config)
+        logger.info("Metadata: %s", self.metadata)
+
+        # Calculate and log chunk storage size
+        chunk_size = self.config.chunk_size
+        num_layers, kv_dim, _, num_heads, head_size = self.metadata.kv_shape
+        chunk_shape = torch.Size([num_layers, kv_dim, chunk_size, num_heads, head_size])
+        chunk_storage_bytes = get_size_bytes(chunk_shape, self.metadata.kv_dtype)
+        chunk_storage_mb = chunk_storage_bytes / (1024 * 1024)
+        logger.info(
+            "Chunk storage size: %d bytes (%.2f MB) for chunk_size=%d",
+            chunk_storage_bytes,
+            chunk_storage_mb,
+            chunk_size,
+        )
 
         instance_id = self.config.lmcache_instance_id
-        logger.info(f"Starting LMCache engine with instance ID: {instance_id}")
+        logger.info("Starting LMCache engine with instance ID: %s", instance_id)
 
-        # Initialize the engine
-        self.lmcache_engine.post_init()
-        logger.info("LMCache engine post-initialized")
+        # Generate fixed pattern kvcaches for testing
+        kvcaches = self._generate_fixed_kvcaches()
+
+        # Initialize the engine with kvcaches
+        self.lmcache_engine.post_init(kvcaches=kvcaches)
+        logger.info("LMCache engine post-initialized with fixed kvcaches")
 
         # Start internal API server
         self.api_server.start()
 
         self.running = True
+        logger.info("LMCache engine started successfully")
         return self.lmcache_engine
 
     def stop(self):
@@ -100,7 +144,7 @@ class LMCacheStandaloneStarter:
 
             instance_id = self.config.lmcache_instance_id
             LMCacheEngineBuilder.destroy(instance_id)
-            logger.info(f"Engine instance {instance_id} destroyed")
+            logger.info("Engine instance %s destroyed", instance_id)
 
         logger.info("LMCache engine stopped")
 
@@ -260,8 +304,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv-shape",
         type=str,
-        default="32,2,256,32,128",
-        help="KV cache shape as comma-separated integers (e.g., '32,2,256,32,128')",
+        default="2,2,1024,4,16",
+        help=(
+            "KV cache shape as comma-separated integers "
+            "(num_layers,kv_dim,num_blocks,num_heads,head_size). "
+            "num_layers: number of transformer layers, "
+            "kv_dim: dimension for K/V (usually 2), "
+            "num_blocks: number of memory blocks, "
+            "num_heads: number of attention heads, "
+            "head_size: size of each attention head. "
+            "Example: '2,2,1024,4,16' means 2 layers, 2 for K/V, "
+            "1024 blocks, 4 heads, 16 head size"
+        ),
     )
     parser.add_argument(
         "--use-mla",
@@ -292,7 +346,7 @@ def main():
     try:
         config_path = args.config or os.getenv("LMCACHE_CONFIG_FILE")
         if config_path:
-            logger.info(f"Loading LMCache config file: {config_path}")
+            logger.info("Loading LMCache config file: %s", config_path)
             config = LMCacheEngineConfig.from_file(config_path)
             # Allow environment variables to override file settings
             config.update_config_from_env()
@@ -311,7 +365,15 @@ def main():
         kv_dtype = dtype_map.get(args.kv_dtype, torch.float16)
 
         kv_shape = parse_kv_shape(args.kv_shape)
-        logger.info(f"Using KV shape: {kv_shape}")
+        logger.info("Using KV shape: %s", kv_shape)
+        logger.info(
+            "  num_layers=%d, kv_dim=%d, num_blocks=%d, num_heads=%d, head_size=%d",
+            kv_shape[0],
+            kv_shape[1],
+            kv_shape[2],
+            kv_shape[3],
+            kv_shape[4],
+        )
 
         metadata = create_metadata(
             model_name=args.model_name,
