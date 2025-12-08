@@ -499,6 +499,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
         "description": "Recording strategy: memory_bloom_filter or file_hash.",
     },
+    # KV events configuration
+    "enable_kv_events": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
 }
 
 
