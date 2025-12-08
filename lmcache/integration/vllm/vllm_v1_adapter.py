@@ -1470,7 +1470,11 @@ class LMCacheConnectorV1Impl:
 
         # consult the cache before any processing
         if cached_num_hit_toks := self.lookup_client.lookup_cache(lookup_id=req_id):
-            return cached_num_hit_toks
+            # Apply the same full-hit adjustment as the non-cached path
+            need_to_allocate = cached_num_hit_toks - num_computed_tokens
+            if cached_num_hit_toks == request.num_tokens:
+                need_to_allocate -= 1
+            return max(0, need_to_allocate)
 
         self._requests_priority[req_id] = getattr(request, "priority", 0)
 

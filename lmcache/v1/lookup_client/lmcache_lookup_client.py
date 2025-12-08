@@ -169,6 +169,7 @@ class LMCacheLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        cache: bool = True,
     ) -> Optional[int]:
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
@@ -244,7 +245,8 @@ class LMCacheLookupClient(LookupClientInterface):
         # across (TP and PP) ranks, so we can use the minimum value as the
         # number of hit tokens.
         num_hit_toks = min(results)
-        self.reqs_status[lookup_id] = num_hit_toks
+        if cache:
+          self.reqs_status[lookup_id] = num_hit_toks
 
         return num_hit_toks
 
