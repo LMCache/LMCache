@@ -1,10 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # Third Party
 import zmq.asyncio
+
+
+class KVChunkInfo(NamedTuple):
+    """
+    Represents the location information of a KV chunk in the cluster.
+    This class is immutable and can be used as a dictionary key.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
 
 
 @dataclass
@@ -32,6 +43,40 @@ class WorkerNode:
     registration_time: float
     last_heartbeat_time: float
     seq_tracker: dict[str, int] = field(default_factory=dict)  # location -> seq_num
+    kv_store: dict[str, set[int]] = field(
+        default_factory=dict
+    )  # location -> set[chunk_hash]
+
+    def admit_kv(self, location: str, key: int) -> None:
+        """Admit a KV chunk to this worker."""
+        if location not in self.kv_store:
+            self.kv_store[location] = set()
+        self.kv_store[location].add(key)
+
+    def evict_kv(self, location: str, key: int) -> bool:
+        """Evict a KV chunk from this worker. Returns True if evicted."""
+        if location not in self.kv_store or key not in self.kv_store[location]:
+            return False
+        self.kv_store[location].remove(key)
+        if not self.kv_store[location]:
+            del self.kv_store[location]
+        return True
+
+    def has_kv(self, location: str, key: int) -> bool:
+        """Check if a KV chunk exists in this worker."""
+        return location in self.kv_store and key in self.kv_store[location]
+
+    def get_kv_keys(self, location: str) -> set[int]:
+        """Get all keys for a location."""
+        return self.kv_store.get(location, set())
+
+    def clear_kv_store(self) -> None:
+        """Clear all KV data for this worker."""
+        self.kv_store.clear()
+
+    def get_kv_count(self) -> int:
+        """Get total count of KV chunks."""
+        return sum(len(keys) for keys in self.kv_store.values())
 
     def to_worker_info(self, instance_id: str) -> WorkerInfo:
         """Convert to WorkerInfo for backward compatibility."""
@@ -223,3 +268,70 @@ class RegistryTree:
         if worker_node is None:
             return None
         return worker_node.seq_tracker.get(location)
+
+    # KV store operations
+    def admit_kv(
+        self, instance_id: str, worker_id: int, location: str, key: int
+    ) -> bool:
+        """Admit a KV chunk. Returns True if successful."""
+        worker_node = self.get_worker(instance_id, worker_id)
+        if worker_node is None:
+            return False
+        worker_node.admit_kv(location, key)
+        return True
+
+    def evict_kv(
+        self, instance_id: str, worker_id: int, location: str, key: int
+    ) -> bool:
+        """Evict a KV chunk. Returns True if successful."""
+        worker_node = self.get_worker(instance_id, worker_id)
+        if worker_node is None:
+            return False
+        return worker_node.evict_kv(location, key)
+
+    def find_kv(
+        self,
+        key: int,
+        exclude_instance_id: Optional[str] = None,
+        exclude_location: Optional[str] = None,
+    ) -> Optional[KVChunkInfo]:
+        """
+        Find a KV chunk across all workers.
+
+        Returns: KVChunkInfo if found, None otherwise.
+        """
+        for ip_instances in self.instances.values():
+            for instance_id, instance_node in ip_instances.items():
+                if (
+                    exclude_instance_id is not None
+                    and instance_id == exclude_instance_id
+                ):
+                    continue
+                for worker_id, worker_node in instance_node.workers.items():
+                    for location, keys in worker_node.kv_store.items():
+                        if (
+                            exclude_location is not None
+                            and location == exclude_location
+                        ):
+                            continue
+                        if key in keys:
+                            return KVChunkInfo(instance_id, worker_id, location)
+        return None
+
+    def get_total_kv_count(self) -> int:
+        """Get total count of KV chunks across all workers."""
+        return sum(
+            worker_node.get_kv_count()
+            for ip_instances in self.instances.values()
+            for instance_node in ip_instances.values()
+            for worker_node in instance_node.workers.values()
+        )
+
+    def get_worker_kv_keys(
+        self, instance_id: str, worker_id: int, location: str
+    ) -> set[int]:
+        """Get all KV keys for a specific worker and location."""
+        worker_node = self.get_worker(instance_id, worker_id)
+        if worker_node is None:
+            return set()
+        return worker_node.get_kv_keys(location)
