@@ -12,7 +12,7 @@ A standalone starter for LMCacheEngine that:
 """
 
 # Standard
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import argparse
 import asyncio
 import os
@@ -29,10 +29,165 @@ from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
+from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
+
+# Third Party - Platform detection
+try:
+    # Third Party
+    from vllm.platforms import current_platform
+except ImportError:
+    # Fallback for when vLLM is not available
+    current_platform = None
 
 logger = init_logger(__name__)
+
+dtype_map = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "uint8": torch.uint8,
+}
+
+
+class LayerGroupSpec:
+    """Specification for a layer group with KV shape and dtype
+
+    Attributes:
+        layer_count: Number of layers in this group
+        shape: Shape as tuple of integers
+         may be (num_layers, kv_dim, num_blocks, num_heads, head_size)
+        dtype: Data type for this layer group
+    """
+
+    def __init__(
+        self,
+        layer_count: int,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+    ):
+        self.layer_count = layer_count
+        # May be (num_layers, kv_dim, num_blocks, num_heads, head_size)
+        self.shape = shape
+        self.dtype = dtype
+
+    def __repr__(self) -> str:
+        return f"LayerGroupSpec({self.shape}):{self.dtype}:{self.layer_count}"
+
+
+def parse_kvcache_shape_spec(spec_str: str) -> List[LayerGroupSpec]:
+    """Parse KV shape specification with multiple layer groups.
+
+    Format examples:
+    - "(2,2,256,4,16):float16:2" (single group)
+    - "(2,2,256,4,16):float16:2;(3,2,256,4,4):bfloat16:2" (two groups)
+
+    Note: The shape string (inside parentheses) is not parsed and kept as string
+    to support different Attention implementations with varying shapes.
+
+    Returns a list of LayerGroupSpec objects.
+    """
+    if not spec_str:
+        raise ValueError("KV shape specification cannot be empty")
+
+    groups = []
+
+    # Split by semicolon to get individual group specifications
+    group_specs = spec_str.split(";")
+
+    for group_spec in group_specs:
+        group_spec = group_spec.strip()
+        if not group_spec:
+            continue
+
+        # Parse format: (shape_string):dtype:layer_count
+        if not (group_spec.startswith("(") and "):" in group_spec):
+            raise ValueError(f"Invalid group specification format: {group_spec}")
+
+        # Extract shape string inside parentheses and parse it
+        shape_end = group_spec.find(")")
+        shape_str = group_spec[1:shape_end]
+
+        # Extract dtype and layer_count after the shape
+        remaining = group_spec[shape_end + 2 :]  # Skip "):"
+        parts = remaining.split(":")
+
+        if len(parts) != 2:
+            raise ValueError(f"Invalid group specification format: {group_spec}")
+
+        dtype_str = parts[0].strip()
+        layer_count_str = parts[1].strip()
+
+        try:
+            # Parse shape tuple - support arbitrary dimensions
+            shape_parts = shape_str.split(",")
+            shape = tuple(int(part.strip()) for part in shape_parts)
+            layer_count = int(layer_count_str)
+            dtype = dtype_map.get(dtype_str.strip().lower(), torch.float16)
+
+            # Create LayerGroupSpec with parsed shape
+            groups.append(LayerGroupSpec(layer_count, shape, dtype))
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid number format in group specification: {group_spec}"
+            ) from e
+
+    if not groups:
+        raise ValueError("No valid layer groups found in specification")
+
+    return groups
+
+
+def calculate_composite_kv_cache_shape(
+    layer_groups: List[LayerGroupSpec],
+) -> Tuple[int, int, int, int, int]:
+    """Calculate composite KV cache shape from multiple layer groups.
+
+    Returns a shape that represents the KV cache structure:
+    - num_layers: sum of all layer counts
+    - kv_dim: from first group's shape (assumed consistent)
+    - num_blocks: from first group's shape (assumed consistent)
+    - num_heads: maximum num_heads across groups
+    - head_size: maximum head_size across groups
+
+    Note: This returns the KV cache shape, where the third dimension is num_blocks.
+    For metadata KV shape, the third dimension should be chunk_size instead.
+    """
+    if not layer_groups:
+        raise ValueError("No layer groups provided")
+
+    # Get base dimensions from first group's shape
+    first_shape = layer_groups[0].shape
+    base_num_layers, base_kv_dim, base_num_blocks, base_num_heads, base_head_size = (
+        first_shape
+    )
+
+    total_layers = sum(group.layer_count for group in layer_groups)
+
+    # Find maximum num_heads and head_size across all groups
+    max_num_heads = base_num_heads
+    max_head_size = base_head_size
+
+    for group in layer_groups[1:]:
+        shape = group.shape
+        num_heads = shape[3]
+        head_size = shape[4]
+        max_num_heads = max(max_num_heads, num_heads)
+        max_head_size = max(max_head_size, head_size)
+
+    return (total_layers, base_kv_dim, base_num_blocks, max_num_heads, max_head_size)
+
+
+def get_composite_kv_dtype(layer_groups: List[LayerGroupSpec]) -> torch.dtype:
+    """Get a representative dtype for composite KV cache.
+
+    Returns the dtype of the first layer group for compatibility.
+    """
+    if not layer_groups:
+        raise ValueError("No layer groups provided")
+    return layer_groups[0].dtype
 
 
 class LMCacheStandaloneStarter:
@@ -42,17 +197,25 @@ class LMCacheStandaloneStarter:
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
+        layer_groups: Optional[List[LayerGroupSpec]] = None,
+        device: str = "cpu",
     ):
         self.config = config
         self.metadata = metadata
+        self.layer_groups = layer_groups
+        self.device = device
 
         # Create objects in constructor for better error handling
         instance_id = self.config.lmcache_instance_id
+
+        # Construct GPU connector based on platform detection
+        gpu_connector = self._construct_gpu_connector()
+
         self.lmcache_engine = LMCacheEngineBuilder.get_or_create(
             instance_id=instance_id,
             config=self.config,
             metadata=self.metadata,
-            gpu_connector=MockGPUConnector(kv_shape=metadata.kv_shape),  # type: ignore[arg-type]
+            gpu_connector=gpu_connector,
             broadcast_fn=mock_up_broadcast_fn,
             broadcast_object_fn=mock_up_broadcast_object_fn,
         )
@@ -62,11 +225,78 @@ class LMCacheStandaloneStarter:
 
         self.running = False
 
-    def _generate_fixed_kvcaches(self) -> dict:
+    def _construct_gpu_connector(self):
+        """Construct GPU connector based on platform detection"""
+
+        # If vLLM platform detection is not available, use MockGPUConnector
+        if current_platform is None:
+            logger.info("vLLM platform detection not available, using MockGPUConnector")
+            return MockGPUConnector(kv_shape=self.metadata.kv_shape)
+
+        # Extract parameters from metadata and config
+        kv_shape = self.metadata.kv_shape
+        num_layer = kv_shape[0]  # number of layers
+        num_kv_head = kv_shape[3]  # number of KV heads
+        head_size = kv_shape[4]  # head size
+        hidden_dim_size = num_kv_head * head_size
+
+        chunk_size = self.config.chunk_size
+        kv_dtype = self.metadata.kv_dtype
+        use_mla = self.metadata.use_mla
+
+        # Determine device based on platform
+        if current_platform.is_cuda_alike():
+            connector_cls = VLLMPagedMemGPUConnectorV2
+            logger.info("CUDA device detected, using VLLMPagedMemGPUConnectorV2")
+        elif current_platform.is_xpu():
+            connector_cls = VLLMPagedMemXPUConnectorV2
+            logger.info("XPU device detected, using VLLMPagedMemXPUConnectorV2")
+        else:
+            logger.info("No GPU device detected, using MockGPUConnector")
+            return MockGPUConnector(kv_shape=kv_shape)
+
+        # Construct the GPU connector
+        gpu_connector = connector_cls(
+            hidden_dim_size,
+            num_layer,
+            use_gpu=False if self.device == "cpu" else True,
+            chunk_size=chunk_size,
+            dtype=kv_dtype,
+            device=self.device,
+            use_mla=use_mla,
+        )
+
+        logger.info(
+            "Constructed GPU connector: hidden_dim_size=%d, num_layer=%d, "
+            "chunk_size=%d, dtype=%s",
+            hidden_dim_size,
+            num_layer,
+            chunk_size,
+            kv_dtype,
+        )
+
+        return gpu_connector
+
+    def _generate_fixed_kvcaches(self, device: str = "cpu") -> dict:
         """Generate fixed pattern kvcaches for testing and MD5 verification.
 
-        Returns a dict of tensors with deterministic values based on layer index.
-        This ensures consistent MD5 hashes for verification purposes.
+        Supports both single group and multiple layer groups.
+
+        Args:
+            device: Device to create tensors on (default: "cpu")
+        """
+        if self.layer_groups:
+            # Multi-group configuration
+            return self._generate_multi_group_kvcaches(device=device)
+        else:
+            # Single group configuration (backward compatibility)
+            return self._generate_single_group_kvcaches(device=device)
+
+    def _generate_single_group_kvcaches(self, device: str = "cpu") -> dict:
+        """Generate kvcaches for single group configuration
+
+        Args:
+            device: Device to create tensors on (default: "cpu")
         """
         kv_shape = self.metadata.kv_shape
         num_layers, kv_dim, num_blocks, num_heads, head_size = kv_shape
@@ -75,15 +305,60 @@ class LMCacheStandaloneStarter:
         kvcaches = {}
         for layer_idx in range(num_layers):
             torch.manual_seed(42 + layer_idx)
-            tensor = torch.rand(shape, dtype=dtype, device="cpu")
+            tensor = torch.rand(shape, dtype=dtype, device=device)
             layer_name = f"model.layers.{layer_idx}"
             kvcaches[layer_name] = tensor
 
         logger.info(
-            "Generated fixed pattern kvcaches: %d layers, shape=%s, dtype=%s",
+            "Generated fixed pattern kvcaches: %d layers, shape=%s, dtype=%s,"
+            " device=%s",
             num_layers,
             shape,
             dtype,
+            device,
+        )
+        return kvcaches
+
+    def _generate_multi_group_kvcaches(self, device: str = "cpu") -> dict:
+        """Generate kvcaches for multiple layer groups configuration
+
+        Args:
+            device: Device to create tensors on (default: "cpu")
+        """
+        if not self.layer_groups:
+            raise ValueError("No layer groups specified for multi-group generation")
+
+        kvcaches = {}
+        current_layer = 0
+
+        for group_idx, group in enumerate(self.layer_groups):
+            # group.shape is already the final tensor shape
+            tensor_shape = list(group.shape)
+
+            for layer_in_group in range(group.layer_count):
+                layer_idx = current_layer + layer_in_group
+                torch.manual_seed(42 + layer_idx)
+                tensor = torch.rand(tensor_shape, dtype=group.dtype, device=device)
+                layer_name = f"model.layers.{layer_idx}"
+                kvcaches[layer_name] = tensor
+
+            current_layer += group.layer_count
+            logger.info(
+                "Generated layer group %d: %d layers, shape=%s, dtype=%s, device=%s",
+                group_idx,
+                group.layer_count,
+                tensor_shape,
+                group.dtype,
+                device,
+            )
+
+        total_layers = current_layer
+        logger.info(
+            "Generated multi-group kvcaches: %d total layers across %d groups, "
+            "device=%s",
+            total_layers,
+            len(self.layer_groups),
+            device,
         )
         return kvcaches
 
@@ -95,6 +370,9 @@ class LMCacheStandaloneStarter:
 
         logger.info("Configuration: %s", self.config)
         logger.info("Metadata: %s", self.metadata)
+
+        if self.layer_groups:
+            logger.info("Layer groups: %s", self.layer_groups)
 
         # Calculate and log chunk storage size
         chunk_size = self.config.chunk_size
@@ -113,7 +391,7 @@ class LMCacheStandaloneStarter:
         logger.info("Starting LMCache engine with instance ID: %s", instance_id)
 
         # Generate fixed pattern kvcaches for testing
-        kvcaches = self._generate_fixed_kvcaches()
+        kvcaches = self._generate_fixed_kvcaches(device="cpu")
 
         # Initialize the engine with kvcaches
         self.lmcache_engine.post_init(kvcaches=kvcaches)
@@ -297,24 +575,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv-dtype",
         type=str,
-        choices=["float16", "float32", "bfloat16"],
+        choices=["float16", "float32", "bfloat16", "uint8"],
         default="float16",
         help="KV cache data type",
     )
     parser.add_argument(
         "--kv-shape",
         type=str,
-        default="2,2,1024,4,16",
+        default="2,2,256,4,16",
         help=(
             "KV cache shape as comma-separated integers "
-            "(num_layers,kv_dim,num_blocks,num_heads,head_size). "
+            "(num_layer, 2 or 1, chunk_size, num_kv_head, head_size). "
             "num_layers: number of transformer layers, "
             "kv_dim: dimension for K/V (usually 2), "
-            "num_blocks: number of memory blocks, "
+            "chunk_size: number of memory chunks, "
             "num_heads: number of attention heads, "
             "head_size: size of each attention head. "
-            "Example: '2,2,1024,4,16' means 2 layers, 2 for K/V, "
-            "1024 blocks, 4 heads, 16 head size"
+            "Example: '2,2,256,4,16' means 2 layers, 2 for K/V, "
+            "256 chunks, 4 heads, 16 head size"
+        ),
+    )
+    parser.add_argument(
+        "--kvcache-shape-spec",
+        type=str,
+        help=(
+            "KV cache shape specification with multiple layer groups. "
+            "Format: '(shape_string):dtype:layer_count;[...]'. "
+            "shape_string: comma-separated shape (e.g., '2,2,256,4,16'). "
+            "Examples: '(2,2,256,4,16):float16:2' (single group), "
+            "'(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3' (two groups)"
         ),
     )
     parser.add_argument(
@@ -357,14 +646,27 @@ def main():
         if args.extra_params:
             override_config_from_dict(config, args.extra_params)
 
-        dtype_map = {
-            "float16": torch.float16,
-            "float32": torch.float32,
-            "bfloat16": torch.bfloat16,
-        }
-        kv_dtype = dtype_map.get(args.kv_dtype, torch.float16)
+        # Handle KV shape specification
+        if args.kvcache_shape_spec:
+            # Use new multi-group specification
+            layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
+            logger.info("Using KV shape specification: %s", args.kvcache_shape_spec)
+            for i, group in enumerate(layer_groups):
+                logger.info(
+                    "  Group %d: %d layers, shape=%s, dtype=%s",
+                    i,
+                    group.layer_count,
+                    group.shape,
+                    group.dtype,
+                )
+        else:
+            # Set layer_groups to None for single group configuration
+            layer_groups = None
 
+        # Use single group specification - kv-shape directly assigned to metadata
+        kv_dtype = dtype_map.get(args.kv_dtype, torch.float16)
         kv_shape = parse_kv_shape(args.kv_shape)
+
         logger.info("Using KV shape: %s", kv_shape)
         logger.info(
             "  num_layers=%d, kv_dim=%d, num_blocks=%d, num_heads=%d, head_size=%d",
@@ -385,7 +687,7 @@ def main():
             fmt=args.fmt,
         )
 
-        starter = LMCacheStandaloneStarter(config, metadata)
+        starter = LMCacheStandaloneStarter(config, metadata, layer_groups)
         setup_signal_handlers(starter)
 
         starter.start()
