@@ -21,6 +21,8 @@ def _parse_tokens_from_params(
 
     Args:
         tokens_mock: Two comma-separated numbers specifying start and end of token range
+            - Example: "0,100" generates tokens [0, 1, 2, ..., 99]
+            - Example: "50,75" generates tokens [50, 51, 52, ..., 74]
 
     Returns:
         Tuple of (tokens list, error dict).
