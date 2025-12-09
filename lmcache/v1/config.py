@@ -329,7 +329,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "save_unfull_chunk": {
         "type": bool,
-        "default": True,
+        "default": False,
         "env_converter": _to_bool,
     },
     "blocking_timeout_secs": {"type": int, "default": 10, "env_converter": int},
