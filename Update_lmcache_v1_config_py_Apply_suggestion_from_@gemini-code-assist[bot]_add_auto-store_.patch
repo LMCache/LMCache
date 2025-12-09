@@ -1,0 +1,177 @@
+Subject: [PATCH] Update lmcache/v1/config.py
+Apply suggestion from @gemini-code-assist[bot]
+add auto-store remote data to local cache pools
+---
+Index: lmcache/v1/cache_engine.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/lmcache/v1/cache_engine.py b/lmcache/v1/cache_engine.py
+--- a/lmcache/v1/cache_engine.py	(revision a283d326c03dd70a09ec45af77a3ce57401cae52)
++++ b/lmcache/v1/cache_engine.py	(revision 60b23e1a65f7984c379ec9a23fbc14dc3eda8845)
+@@ -130,6 +130,16 @@
+             and (not lmcache_worker_ids or metadata.worker_id in lmcache_worker_ids)
+         ):
+             self.lmcache_worker = LMCacheWorker(config, metadata, self)
++        else:
++            self.lmcache_worker = None
++            logger.info(
++                "LMCacheWorker is not initialized (related configs: "
++                "enable_controller: %s, role: %s, worker_id: %s, worker_ids: %s).",
++                self.enable_controller,
++                self.metadata.role,
++                self.metadata.worker_id,
++                lmcache_worker_ids,
++            )
+ 
+         self.async_loading = config.enable_async_loading
+         self.event_manager = EventManager()
+@@ -1152,12 +1162,23 @@
+ 
+     def close(self) -> None:
+         """Close the cache engine and free all the resources"""
++        logger.info("Closing LMCacheEngine...")
+ 
+         if self.lmcache_worker is not None:
+-            self.lmcache_worker.close()
++            try:
++                logger.info("Closing lmcache_worker...")
++                self.lmcache_worker.close()
++                logger.info("lmcache_worker closed successfully")
++            except Exception as e:
++                logger.error(f"Error closing lmcache_worker: {e}")
+ 
+-        if self.storage_manager is not None:
+-            self.storage_manager.close()
++        try:
++            logger.info("Closing storage_manager...")
++            if self.storage_manager is not None:
++                self.storage_manager.close()
++            logger.info("storage_manager closed successfully")
++        except Exception as e:
++            logger.error(f"Error closing storage_manager: {e}")
+ 
+         logger.info("LMCacheEngine closed.")
+ 
+@@ -1213,6 +1234,17 @@
+ 
+         return chunks, tot_kv_size
+ 
++    def _get_available_local_pools(self) -> list[str]:
++        """Get list of available local cache pool names (LocalCPUBackend/ LocalDiskBackend)."""
++        if self.storage_manager is None:
++            return []
++        local_pools = [
++            backend_name
++            for backend_name in self.storage_manager.storage_backends
++            if backend_name in ["LocalCPUBackend", "LocalDiskBackend"]
++        ]
++        return local_pools
++
+     def _process_tokens_internal(
+         self,
+         tokens,
+@@ -1276,6 +1308,31 @@
+                 "Failed to get memory objects from storage backend"
+             )
+ 
++            # Store remote data to local cache pools if available
++            available_local_pools = self._get_available_local_pools()
++            is_remote_location = location.lower() in ["remote", "remotebackend", "mooncache"]
++            if self.config.auto_store_remote_to_local and is_remote_location and available_local_pools:
++                target_local_pool = available_local_pools[0]  # Prioritize first local pool
++                # Filter keys not existing in local pool to avoid duplicate storage
++                local_missing_keys = []
++                local_missing_objs = []
++                for key, memory_obj in zip(keys, memory_objs, strict=False):
++                    if memory_obj is not None and not self.storage_manager.contains(
++                            key, search_range=[target_local_pool]
++                    ):
++                        local_missing_keys.append(key)
++                        local_missing_objs.append(memory_obj)
++
++                # Save missing remote data to local pool
++                if local_missing_keys:
++                    self.storage_manager.batched_put(
++                        keys=local_missing_keys,
++                        memory_objs=local_missing_objs,
++                        location=target_local_pool
++                    )
++                    logger.debug(
++                        f"[Remote→Local] Stored {len(local_missing_keys)} keys from {location} to {target_local_pool}"
++                    )
+             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
+                 if memory_obj is None:
+                     logger.warning(
+@@ -1541,13 +1598,42 @@
+     def destroy(cls, instance_id: str) -> None:
+         """Close and delete the LMCacheEngine instance by the instance ID"""
+         # TODO: unit test for this
++        logger.info(f"Destroying LMCacheEngine instance: {instance_id}")
++
+         if instance_id in cls._instances:
+             stat_logger = cls._stat_loggers[instance_id]
+-            stat_logger.shutdown()
++            try:
++                logger.info("Shutting down stats logger...")
++                stat_logger.shutdown()
++                logger.info("Stats logger shut down successfully")
++            except Exception as e:
++                logger.error(f"Error shutting down stats logger: {e}")
++
+             engine = cls._instances[instance_id]
+-            engine.close()
+-            cls._instances.pop(instance_id, None)
+-            cls._cfgs.pop(instance_id, None)
+-            cls._metadatas.pop(instance_id, None)
+-            cls._stat_loggers.pop(instance_id, None)
+-            LMCStatsMonitor.DestroyInstance()
++            try:
++                logger.info("Closing cache engine...")
++                engine.close()
++                logger.info("Cache engine closed successfully")
++            except Exception as e:
++                logger.error(f"Error closing cache engine: {e}")
++
++            try:
++                logger.info("Cleaning up instance dictionaries...")
++                cls._instances.pop(instance_id, None)
++                cls._cfgs.pop(instance_id, None)
++                cls._metadatas.pop(instance_id, None)
++                cls._stat_loggers.pop(instance_id, None)
++                logger.info("Instance dictionaries cleaned up")
++            except Exception as e:
++                logger.error(f"Error cleaning up instances: {e}")
++
++            try:
++                logger.info("Destroying stats monitor...")
++                LMCStatsMonitor.DestroyInstance()
++                logger.info("Stats monitor destroyed successfully")
++            except Exception as e:
++                logger.error(f"Error destroying stats monitor: {e}")
++
++            logger.info(f"LMCacheEngine instance {instance_id} destroyed")
++        else:
++            logger.warning(f"Instance {instance_id} not found for destruction")
+Index: lmcache/v1/config.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/lmcache/v1/config.py b/lmcache/v1/config.py
+--- a/lmcache/v1/config.py	(revision a283d326c03dd70a09ec45af77a3ce57401cae52)
++++ b/lmcache/v1/config.py	(revision e1c47b8a1c74d4f474ae207ac621cd939d6d9e99)
+@@ -154,6 +154,12 @@
+         "default": False,
+         "env_converter": _to_bool,
+     },
++    "auto_store_remote_to_local": {
++        "type": bool,
++        "default": True,
++        "env_converter": _to_bool,
++        "description": "Automatically store remote cached data to local pools (LocalCPUBackend/ LocalDiskBackend) when retrieved, to avoid repeated remote fetching in multi-turn scenarios.",
++    },
+     "pre_caching_hash_algorithm": {
+         "type": str,
+         "default": "builtin",
