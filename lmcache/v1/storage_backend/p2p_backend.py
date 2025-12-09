@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import asyncio
 import enum
@@ -125,6 +126,33 @@ P2PMsg = Union[
 ]
 
 
+@dataclass
+class PeerInfo:
+    """Peer information"""
+
+    peer_init_url: str  # peer id
+    peer_lookup_url: str
+    lookup_lock: asyncio.Lock
+    lookup_socket: zmq.asyncio.Socket
+
+    def update_peer_lookup_url(self, new_peer_lookup_url: str):
+        if self.peer_lookup_url != new_peer_lookup_url:
+            logger.info(
+                "Target peer %s lookup url changed from %s to %s",
+                self.peer_init_url,
+                self.peer_lookup_url,
+                new_peer_lookup_url,
+            )
+            self.peer_lookup_url = new_peer_lookup_url
+
+    def update_lookup_socket(self, new_lookup_socket: zmq.asyncio.Socket):
+        try:
+            self.lookup_socket.close(linger=0)
+        except Exception as e:
+            logger.error("Failed to close peer %s lookup socket", self.peer_init_url, e)
+        self.lookup_socket = new_lookup_socket
+
+
 # TODO(Jiayi): handle asymmetric TP.
 class P2PBackend(StorageBackendInterface):
     def __init__(
@@ -169,11 +197,11 @@ class P2PBackend(StorageBackendInterface):
         # A CacheEngineKey (in int form) -> a list of
         # (peer_init_url, peer_lookup_url, location)
         self.local_lookup_cache: dict[int, tuple[str, str, str]] = {}
-        # A set of peer_init_urls
-        self.peer_id_to_lookup_url_mapping: dict[str, str] = {}
-
-        # A lookup_id -> (peer_init_url, peer_lookup_url, location)
-        self.lookup_id_to_peer_mapping: dict[str, tuple[str, str, str]] = {}
+        # the target peer info mapping
+        self.target_peer_info_mapping: dict[str, PeerInfo] = {}
+        # A lookup_id -> (peer_init_url, location)
+        # TODO(chunxiaozheng): location is not used for now
+        self.lookup_id_to_peer_mapping: dict[str, tuple[str, str]] = {}
 
         # TODO(Jiayi): support gpu and local storage p2p as well.
         self.local_cpu_backend = local_cpu_backend
@@ -203,8 +231,6 @@ class P2PBackend(StorageBackendInterface):
 
         self.running = asyncio.Event()
         self.running.set()
-        self.lookup_url_to_socket_mapping: dict[str, zmq.asyncio.Socket] = {}
-        self.lookup_url_to_lock_mapping: dict[str, asyncio.Lock] = {}
         self.async_context: Optional[zmq.asyncio.Context] = None
         self.async_peer_socket: Optional[zmq.asyncio.Socket] = None
         asyncio.run_coroutine_threadsafe(
@@ -270,16 +296,15 @@ class P2PBackend(StorageBackendInterface):
 
         # NOTE(Jiayi): For now we only support one peer hit.
         layout_info = ret_msg.layout_info[0]
-        _, location, num_hit_chunks, peer_init_url = layout_info
+        _, location, num_hit_chunks, target_peer_init_url = layout_info
 
         logger.info(f"Got layout info from controller: {layout_info}")
 
         if num_hit_chunks > 0:
             try:
-                await self._ensure_peer_connection(peer_init_url)
+                await self._ensure_peer_connection(target_peer_init_url)
                 self.lookup_id_to_peer_mapping[lookup_id] = (
-                    peer_init_url,
-                    self.peer_id_to_lookup_url_mapping[peer_init_url],
+                    target_peer_init_url,
                     location,
                 )
             except Exception as e:
@@ -450,67 +475,46 @@ class P2PBackend(StorageBackendInterface):
 
     async def _ensure_peer_connection(
         self,
-        peer_init_url: str,
+        target_peer_init_url: str,
         force_update: bool = False,
     ) -> None:
-        if not force_update and peer_init_url in self.peer_id_to_lookup_url_mapping:
+        if not force_update and target_peer_init_url in self.target_peer_info_mapping:
             return
         init_side_msg = P2PInitSideMsg()
         init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
             local_id=self.peer_init_url,
-            peer_id=peer_init_url,
-            peer_init_url=peer_init_url,
+            peer_id=target_peer_init_url,
+            peer_init_url=target_peer_init_url,
             init_side_msg=init_side_msg,
         )
         assert isinstance(init_ret_msg, P2PInitSideRetMsg)
-        # update peer_lookup_url
-        new_peer_lookup_url = init_ret_msg.peer_lookup_url
-        old_peer_lookup_url = self.peer_id_to_lookup_url_mapping.pop(
-            peer_init_url, None
-        )
-        self.peer_id_to_lookup_url_mapping[peer_init_url] = new_peer_lookup_url
-        if old_peer_lookup_url is not None:
-            if old_peer_lookup_url != new_peer_lookup_url:
-                logger.info(
-                    "Peer %s lookup URL changed from %s to %s",
-                    peer_init_url,
-                    old_peer_lookup_url,
-                    new_peer_lookup_url,
-                )
 
-            # close old lookup socket
-            old_lookup_socket = self.lookup_url_to_socket_mapping.pop(
-                old_peer_lookup_url, None
-            )
-            if old_lookup_socket is not None:
-                try:
-                    old_lookup_socket.close(linger=0)
-                except Exception as e:
-                    logger.error("Error closing old lookup socket", e)
-
-            # get lookup lock
-            lookup_lock = self.lookup_url_to_lock_mapping.pop(
-                old_peer_lookup_url, asyncio.Lock()
-            )
-        else:
-            lookup_lock = asyncio.Lock()
-
-        # update lookup_lock, note that we don't need to create a new lookup_lock
-        # even if the lookup_url changes
-        self.lookup_url_to_lock_mapping[new_peer_lookup_url] = lookup_lock
-        new_lookup_socket = get_zmq_socket_with_timeout(
+        peer_lookup_url = init_ret_msg.peer_lookup_url
+        peer_info = self.target_peer_info_mapping.get(target_peer_init_url, None)
+        lookup_socket = get_zmq_socket_with_timeout(
             self.async_context,
-            new_peer_lookup_url,
+            peer_lookup_url,
             "tcp",
             zmq.REQ,
             "connect",
             self.socket_recv_timeout_ms,
             self.socket_send_timeout_ms,
         )
-        self.lookup_url_to_socket_mapping[new_peer_lookup_url] = new_lookup_socket
+        if peer_info is not None:
+            peer_info.update_peer_lookup_url(peer_lookup_url)
+            peer_info.update_lookup_socket(lookup_socket)
+        else:
+            self.target_peer_info_mapping[target_peer_init_url] = PeerInfo(
+                peer_init_url=target_peer_init_url,
+                peer_lookup_url=peer_lookup_url,
+                lookup_lock=asyncio.Lock(),
+                lookup_socket=lookup_socket,
+            )
+
         logger.info(
-            f"Established connection to peer_init_url {peer_init_url}."
-            f" The peer_lookup_url: {new_peer_lookup_url}"
+            "Established connection to peer_init_url: %s, peer_lookup_url: %s",
+            target_peer_init_url,
+            peer_lookup_url,
         )
 
     async def batched_get_non_blocking(
@@ -519,7 +523,7 @@ class P2PBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
-        peer_init_url, _, _ = self.lookup_id_to_peer_mapping.pop(lookup_id)
+        target_peer_init_url, _ = self.lookup_id_to_peer_mapping.pop(lookup_id)
 
         assert isinstance(transfer_spec, dict)
         cum_chunk_lengths = transfer_spec.get("cum_chunk_lengths", None)
@@ -551,9 +555,9 @@ class P2PBackend(StorageBackendInterface):
 
         retry_count = 0
         while retry_count < self.max_retry_count:
-            peer_lookup_url = self.peer_id_to_lookup_url_mapping[peer_init_url]
-            lookup_socket = self.lookup_url_to_socket_mapping[peer_lookup_url]
-            lookup_lock = self.lookup_url_to_lock_mapping[peer_lookup_url]
+            peer_info = self.target_peer_info_mapping[target_peer_init_url]
+            lookup_socket = peer_info.lookup_socket
+            lookup_lock = peer_info.lookup_lock
             async with lookup_lock:
                 try:
                     retry_count += 1
@@ -571,7 +575,7 @@ class P2PBackend(StorageBackendInterface):
                             lookup_id,
                             retry_count,
                         )
-                        await self._ensure_peer_connection(peer_init_url, True)
+                        await self._ensure_peer_connection(target_peer_init_url, True)
                     else:
                         break
                 except zmq.ZMQError as e:
@@ -580,7 +584,7 @@ class P2PBackend(StorageBackendInterface):
                         lookup_id,
                         e,
                     )
-                    await self._ensure_peer_connection(peer_init_url, True)
+                    await self._ensure_peer_connection(target_peer_init_url, True)
                     if retry_count == self.max_retry_count:
                         logger.error(
                             "Max retry count reached for lookup_id %s",
@@ -623,13 +627,13 @@ class P2PBackend(StorageBackendInterface):
         # TODO(baoloongmao): Add exception handling for socket operations
         # Code path for `move` operation in controller.
         assert isinstance(transfer_spec, dict)
-        assert "peer_init_url" in transfer_spec
+        assert "target_peer_init_url" in transfer_spec
         assert "offsets" in transfer_spec
 
-        peer_init_url = transfer_spec["peer_init_url"]
+        target_peer_init_url = transfer_spec["target_peer_init_url"]
         offsets = transfer_spec["offsets"]
 
-        await self._ensure_peer_connection(transfer_spec["peer_init_url"])
+        await self._ensure_peer_connection(transfer_spec["target_peer_init_url"])
 
         str_keys = [key.to_string() for key in keys]
         local_indexes = self.transfer_channel.get_local_mem_indices(objs)
@@ -641,9 +645,9 @@ class P2PBackend(StorageBackendInterface):
             mem_indexes=local_indexes,
         )
 
-        peer_lookup_url = self.peer_id_to_lookup_url_mapping[peer_init_url]
-        lookup_socket = self.lookup_url_to_socket_mapping[peer_lookup_url]
-        lookup_lock = self.lookup_url_to_lock_mapping[peer_lookup_url]
+        peer_info = self.target_peer_info_mapping[target_peer_init_url]
+        lookup_socket = peer_info.lookup_socket
+        lookup_lock = peer_info.lookup_lock
 
         async with lookup_lock:
             await lookup_socket.send(msgspec.msgpack.encode(msg))
@@ -673,12 +677,12 @@ class P2PBackend(StorageBackendInterface):
         self.running.clear()
 
         # Close all lookup sockets
-        for socket in self.lookup_url_to_socket_mapping.values():
+        for peer_info in self.target_peer_info_mapping.values():
             try:
-                socket.close(linger=0)
+                peer_info.lookup_socket.close(linger=0)
             except Exception as e:
                 logger.warning("Failed to close lookup socket: %s", e)
-        self.lookup_url_to_socket_mapping.clear()
+        self.target_peer_info_mapping.clear()
 
         # Close async peer socket
         if self.async_peer_socket is not None:

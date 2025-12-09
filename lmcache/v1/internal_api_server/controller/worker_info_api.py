@@ -55,13 +55,14 @@ async def get_workers(
 
         # Case 1: Get specific worker by instance_id and worker_id
         if instance_id is not None and worker_id is not None:
-            worker_key = (instance_id, worker_id)
-            if worker_key not in reg_controller.worker_info_mapping:
+            worker_node = reg_controller.registry.get_worker(instance_id, worker_id)
+            if worker_node is None:
                 raise HTTPException(
-                    status_code=404, detail=f"Worker {worker_key} not found"
+                    status_code=404,
+                    detail=f"Worker ({instance_id}, {worker_id}) not found",
                 )
 
-            worker_info = reg_controller.worker_info_mapping[worker_key]
+            worker_info = worker_node.to_worker_info(instance_id)
             return WorkerInfoResponse(
                 instance_id=worker_info.instance_id,
                 worker_id=worker_info.worker_id,
@@ -74,47 +75,44 @@ async def get_workers(
 
         # Case 2: Get all workers for a specific instance
         elif instance_id is not None:
-            worker_ids = reg_controller.get_workers(instance_id)
-            if not worker_ids:
+            instance_node = reg_controller.registry.get_instance(instance_id)
+            if instance_node is None:
                 raise HTTPException(
                     status_code=404,
                     detail=f"No workers found for instance {instance_id}",
                 )
 
-            workers = []
-            for worker_id in worker_ids:
-                worker_key = (instance_id, worker_id)
-                if worker_key in reg_controller.worker_info_mapping:
-                    worker_info = reg_controller.worker_info_mapping[worker_key]
-                    workers.append(
-                        WorkerInfoResponse(
-                            instance_id=worker_info.instance_id,
-                            worker_id=worker_info.worker_id,
-                            ip=worker_info.ip,
-                            port=worker_info.port,
-                            peer_init_url=worker_info.peer_init_url,
-                            registration_time=worker_info.registration_time,
-                            last_heartbeat_time=worker_info.last_heartbeat_time,
-                        )
-                    )
+            worker_infos = instance_node.get_all_worker_infos()
+            workers = [
+                WorkerInfoResponse(
+                    instance_id=worker_info.instance_id,
+                    worker_id=worker_info.worker_id,
+                    ip=worker_info.ip,
+                    port=worker_info.port,
+                    peer_init_url=worker_info.peer_init_url,
+                    registration_time=worker_info.registration_time,
+                    last_heartbeat_time=worker_info.last_heartbeat_time,
+                )
+                for worker_info in worker_infos
+            ]
 
             return WorkerListResponse(workers=workers, total_count=len(workers))
 
         # Case 3: Get all workers across all instances
         else:
-            workers = []
-            for worker_key, worker_info in reg_controller.worker_info_mapping.items():
-                workers.append(
-                    WorkerInfoResponse(
-                        instance_id=worker_info.instance_id,
-                        worker_id=worker_info.worker_id,
-                        ip=worker_info.ip,
-                        port=worker_info.port,
-                        peer_init_url=worker_info.peer_init_url,
-                        registration_time=worker_info.registration_time,
-                        last_heartbeat_time=worker_info.last_heartbeat_time,
-                    )
+            worker_infos = reg_controller.registry.get_all_worker_infos()
+            workers = [
+                WorkerInfoResponse(
+                    instance_id=worker_info.instance_id,
+                    worker_id=worker_info.worker_id,
+                    ip=worker_info.ip,
+                    port=worker_info.port,
+                    peer_init_url=worker_info.peer_init_url,
+                    registration_time=worker_info.registration_time,
+                    last_heartbeat_time=worker_info.last_heartbeat_time,
                 )
+                for worker_info in worker_infos
+            ]
 
             return WorkerListResponse(workers=workers, total_count=len(workers))
     except HTTPException:

@@ -22,14 +22,14 @@ def handle_exit(signum, frame):
 
 signal.signal(signal.SIGTERM, handle_exit)
 
-role = os.getenv("LMCACHE_PLUGIN_ROLE")
-worker_id = os.getenv("LMCACHE_PLUGIN_WORKER_ID")
-worker_count = os.getenv("LMCACHE_PLUGIN_WORKER_COUNT")
-config_str = os.getenv("LMCACHE_PLUGIN_CONFIG")
+role = os.getenv("LMCACHE_RUNTIME_PLUGIN_ROLE")
+worker_id = os.getenv("LMCACHE_RUNTIME_PLUGIN_WORKER_ID")
+worker_count = os.getenv("LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT")
+config_str = os.getenv("LMCACHE_RUNTIME_PLUGIN_CONFIG")
 try:
     config = LMCacheEngineConfig.from_json(config_str)
 except json.JSONDecodeError as e:
-    print(f"Error parsing LMCACHE_PLUGIN_CONFIG: {e}")
+    print(f"Error parsing LMCACHE_RUNTIME_PLUGIN_CONFIG: {e}")
     config = lmcache_get_or_create_config()
 
 print(
