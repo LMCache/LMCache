@@ -671,6 +671,7 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
+        self.layerwise_storers: list[Generator[Optional[torch.Tensor], None, None]] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.lmcache_engine_metadata: LMCacheEngineMetadata
         if role == KVConnectorRole.SCHEDULER:
