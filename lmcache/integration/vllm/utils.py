@@ -178,6 +178,7 @@ def create_lmcache_metadata(
         kv_shape,
         use_mla,
         role,
+        served_model_name=model_cfg.served_model_name,
     )
 
     return metadata, config

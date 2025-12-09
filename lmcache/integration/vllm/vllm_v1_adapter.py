@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
@@ -54,7 +55,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
@@ -409,8 +410,9 @@ class ReqMeta:
         # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
             logger.debug(
-                "Scheduled to load %d tokens for request %s",
+                "Scheduled to load %d tokens (%d cached in vLLM) for request %s",
                 load_spec.lmcache_cached_tokens,
+                load_spec.vllm_cached_tokens,
                 tracker.req_id,
             )
         else:
@@ -540,6 +542,7 @@ def _init_lmcache_engine(
         kv_shape,
         use_mla,
         role,
+        served_model_name=model_config.served_model_name,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
@@ -1483,6 +1486,14 @@ class LMCacheConnectorV1Impl:
             logger.debug(f"Looking up cache for the first time for request {req_id}!")
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
+            # Align computed tokens once to avoid repeated
+            # chunk-size rounding downstream
+            aligned_num_computed_tokens = (
+                num_computed_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
             token_ids = request.all_token_ids
@@ -1503,6 +1514,7 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
+                num_computed_tokens=aligned_num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:
@@ -1809,3 +1821,9 @@ class LMCacheConnectorV1Impl:
             }
 
         return False, return_params
+
+    @_lmcache_nvtx_annotate
+    def get_kv_events(self) -> Iterable[CacheStoreEvent]:
+        if self.lmcache_engine is not None:
+            return self.lmcache_engine.get_kv_events()
+        return []
