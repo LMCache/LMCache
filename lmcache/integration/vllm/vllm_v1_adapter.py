@@ -63,6 +63,7 @@ from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemGPUConnectorV3,
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
@@ -559,6 +560,7 @@ def _init_lmcache_engine(
         use_mla,
         role,
         served_model_name=model_config.served_model_name,
+        chunk_size=lmcache_config.chunk_size,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
@@ -589,9 +591,15 @@ def _init_lmcache_engine(
         tpg = get_tp_group()
     else:
         if current_platform.is_cuda_alike():
-            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
-                metadata, use_gpu, device
-            )
+            # TODO(chunxiaozheng): unify use VLLMPagedMemGPUConnectorV3 after stable
+            if lmcache_config.use_gpu_connector_v3:
+                vllm_gpu_connector = VLLMPagedMemGPUConnectorV3.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
+                    metadata, use_gpu, device
+                )
         elif current_platform.is_xpu():
             vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
                 metadata, use_gpu, device
@@ -909,6 +917,8 @@ class LMCacheConnectorV1Impl:
                 self.lmcache_engine.metadata.kv_layer_groups_manager
             )
             kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+            if self.lmcache_engine.gpu_connector is not None:
+                self.lmcache_engine.gpu_connector.init_group_info()
 
     ####################
     # Worker side APIs

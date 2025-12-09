@@ -505,6 +505,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
+    # TODO(chunxiaozheng): remove this after VLLMPagedMemGPUConnectorV3 is stable
+    "use_gpu_connector_v3": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
 }
 
 

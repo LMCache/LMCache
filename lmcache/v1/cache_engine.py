@@ -366,13 +366,13 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
-            kv_shape = self.gpu_connector.get_shape(num_tokens)
-            kv_dtype = self.metadata.kv_dtype
+            kv_shapes = self.gpu_connector.get_shapes(num_tokens)
+            kv_dtypes = self.metadata.get_dtypes()
 
             # TODO (Jiayi): should be batched in the future
             memory_obj = self.storage_manager.allocate(
-                kv_shape,
-                kv_dtype,
+                kv_shapes,
+                kv_dtypes,
                 busy_loop=self.force_store_wait,
                 fmt=self.fmt,
             )
@@ -1530,9 +1530,9 @@ class LMCacheEngine:
                 self.broadcast_object_fn(combined_metadata, self.metadata.first_rank)
 
                 # Broadcast tensor data
-                tensor_to_broadcast = memory_obj.tensor.to(
-                    f"cuda:{self.metadata.worker_id}"
-                )
+                raw_tensor = memory_obj.raw_tensor
+                assert raw_tensor is not None
+                tensor_to_broadcast = raw_tensor.to(f"cuda:{self.metadata.worker_id}")
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
         else:
             # Receive total chunk count
@@ -1561,16 +1561,16 @@ class LMCacheEngine:
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
                 local_rank = self.metadata.worker_id % torch.cuda.device_count()
-                tensor = torch.empty(
-                    metadata.shape,
-                    dtype=metadata.dtype,
+                raw_tensor = torch.empty(
+                    torch.Size([metadata.get_size()]),
+                    dtype=torch.uint8,
                     device=f"cuda:{local_rank}",
                 )
-                self.broadcast_fn(tensor, self.metadata.first_rank)
+                self.broadcast_fn(raw_tensor, self.metadata.first_rank)
 
                 # Create temporary memory object (key not needed for other ranks)
                 memory_obj = TensorMemoryObj(
-                    raw_data=tensor, metadata=metadata, parent_allocator=None
+                    raw_data=raw_tensor, metadata=metadata, parent_allocator=None
                 )
                 reordered_chunks.append((None, memory_obj, start, end))
 
