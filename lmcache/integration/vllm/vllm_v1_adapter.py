@@ -903,6 +903,13 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
+        # Build KV layer groups structure if not already built
+        if self.lmcache_engine is not None:
+            kv_layer_groups_manager = (
+                self.lmcache_engine.metadata.kv_layer_groups_manager
+            )
+            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+
     ####################
     # Worker side APIs
     ####################
