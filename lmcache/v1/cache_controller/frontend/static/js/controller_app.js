@@ -198,15 +198,22 @@ async function loadOverview() {
             body: JSON.stringify({ instance_id: 'all', worker_ids: [] })
         });
 
-        if (response.ok) {
+        // Load key stats
+        const keyStatsResponse = await fetch(`${controllerBaseUrl}/controller/key-stats`, {
+            method: 'GET',
+            headers: {'Content-Type': 'application/json'}
+        });
+
+        if (response.ok && keyStatsResponse.ok) {
             const data = await response.json();
+            const keyStatsData = await keyStatsResponse.json();
             const instanceCount = new Set(data.worker_infos.map(w => w.instance_id)).size;
             const workerCount = data.worker_infos.length;
+            const keyCount = keyStatsData.total_key_count;
             
-            // For key count, we would need to implement a separate endpoint
             quickStatsElement.innerHTML = `
                 <div class="row">
-                    <div class="col-6">
+                    <div class="col-4">
                         <div class="card bg-light mb-2">
                             <div class="card-body p-2">
                                 <h6 class="card-title mb-0">Instances</h6>
@@ -214,11 +221,19 @@ async function loadOverview() {
                             </div>
                         </div>
                     </div>
-                    <div class="col-6">
+                    <div class="col-4">
                         <div class="card bg-light mb-2">
                             <div class="card-body p-2">
                                 <h6 class="card-title mb-0">Workers</h6>
                                 <h3 class="mb-0">${workerCount}</h3>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-4">
+                        <div class="card bg-light mb-2">
+                            <div class="card-body p-2">
+                                <h6 class="card-title mb-0">Total Keys</h6>
+                                <h3 class="mb-0">${keyCount}</h3>
                             </div>
                         </div>
                     </div>
@@ -251,7 +266,7 @@ async function loadInstances() {
     if (!isConnected) return;
 
     const tableBody = document.getElementById('instancesTableBody');
-    tableBody.innerHTML = '<tr><td colspan="6" class="text-center"><div class="spinner-border" role="status"></div></td></tr>';
+    tableBody.innerHTML = '<tr><td colspan="7" class="text-center"><div class="spinner-border" role="status"></div></td></tr>';
 
     try {
         const response = await fetch(`${controllerBaseUrl}/query_worker_info`, {
@@ -260,12 +275,25 @@ async function loadInstances() {
             body: JSON.stringify({ instance_id: 'all' })
         });
 
-        if (!response.ok) {
-            throw new Error('Failed to fetch instances');
+        // Load key stats for instances
+        const keyStatsResponse = await fetch(`${controllerBaseUrl}/controller/key-stats`, {
+            method: 'GET',
+            headers: {'Content-Type': 'application/json'}
+        });
+
+        if (!response.ok || !keyStatsResponse.ok) {
+            throw new Error('Failed to fetch instances or key stats');
         }
 
         const data = await response.json();
+        const keyStatsData = await keyStatsResponse.json();
         currentInstances = data.worker_infos;
+        
+        // Create a map of instance key counts from key stats
+        const instanceKeyCounts = new Map();
+        keyStatsData.instances.forEach(instance => {
+            instanceKeyCounts.set(instance.instance_id, instance.key_count);
+        });
         
         // Group workers by instance
         const instancesMap = new Map();
@@ -275,7 +303,8 @@ async function loadInstances() {
                     instance_id: worker.instance_id,
                     ip: worker.ip,
                     workers: [],
-                    last_heartbeat: worker.last_heartbeat_time
+                    last_heartbeat: worker.last_heartbeat_time,
+                    key_count: instanceKeyCounts.get(worker.instance_id) || 0
                 });
             }
             instancesMap.get(worker.instance_id).workers.push(worker);
@@ -295,6 +324,20 @@ async function loadInstances() {
             instanceFilter.appendChild(option);
         });
 
+        // Update HTML table header to include Key Count column
+        const tableHeader = document.querySelector('#instances thead tr');
+        if (tableHeader && !tableHeader.innerHTML.includes('Key Count')) {
+            tableHeader.innerHTML = `
+                <th>Instance ID</th>
+                <th>IP Address</th>
+                <th>Status</th>
+                <th>Worker Count</th>
+                <th>Key Count</th>
+                <th>Last Heartbeat</th>
+                <th>Actions</th>
+            `;
+        }
+
         // Populate table
         tableBody.innerHTML = '';
         instancesMap.forEach((instance, instanceId) => {
@@ -311,6 +354,7 @@ async function loadInstances() {
                 <td>${instance.ip}</td>
                 <td><span class="${statusClass}">${status}</span></td>
                 <td>${instance.workers.length}</td>
+                <td>${instance.key_count}</td>
                 <td>${lastHeartbeat}</td>
                 <td>
                     <button class="btn btn-sm btn-info view-instance" data-instance="${instanceId}">View</button>
@@ -340,7 +384,7 @@ async function loadInstances() {
 
     } catch (error) {
         console.error('Error loading instances:', error);
-        tableBody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">Error: ${error.message}</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${error.message}</td></tr>`;
     }
 }
 
@@ -383,7 +427,7 @@ async function loadWorkers() {
     const tableBody = document.getElementById('workersTableBody');
     const instanceFilter = document.getElementById('instanceFilter').value;
     
-    tableBody.innerHTML = '<tr><td colspan="7" class="text-center"><div class="spinner-border" role="status"></div></td></tr>';
+    tableBody.innerHTML = '<tr><td colspan="8" class="text-center"><div class="spinner-border" role="status"></div></td></tr>';
 
     try {
         const requestBody = instanceFilter ? 
@@ -403,9 +447,53 @@ async function loadWorkers() {
         const data = await response.json();
         currentWorkers = data.worker_infos;
         
+        // Get detailed worker info with key counts
+        const workersWithKeyCounts = await Promise.all(
+            currentWorkers.map(async (worker) => {
+                try {
+                    // Get detailed worker info including key count
+                    const workerDetailResponse = await fetch(`${controllerBaseUrl}/controller/workers?instance_id=${worker.instance_id}&worker_id=${worker.worker_id}`, {
+                        method: 'GET',
+                        headers: {'Content-Type': 'application/json'}
+                    });
+                    
+                    if (workerDetailResponse.ok) {
+                        const workerDetail = await workerDetailResponse.json();
+                        return {
+                            ...worker,
+                            key_count: workerDetail.key_count || 0
+                        };
+                    }
+                } catch (error) {
+                    console.warn(`Failed to get key count for worker ${worker.instance_id}/${worker.worker_id}:`, error);
+                }
+                
+                // Fallback to 0 if key count is not available
+                return {
+                    ...worker,
+                    key_count: 0
+                };
+            })
+        );
+        
+        // Update HTML table header to include Key Count column
+        const tableHeader = document.querySelector('#workers thead tr');
+        if (tableHeader && !tableHeader.innerHTML.includes('Key Count')) {
+            tableHeader.innerHTML = `
+                <th>Instance ID</th>
+                <th>Worker ID</th>
+                <th>IP</th>
+                <th>Port</th>
+                <th>Status</th>
+                <th>Key Count</th>
+                <th>Last Heartbeat</th>
+                <th>Actions</th>
+            `;
+        }
+        
         // Populate table
         tableBody.innerHTML = '';
-        currentWorkers.forEach(worker => {
+        workersWithKeyCounts.forEach(worker => {
             const row = document.createElement('tr');
             const now = Math.floor(Date.now() / 1000);
             const timeDiff = now - worker.last_heartbeat_time;
@@ -420,6 +508,7 @@ async function loadWorkers() {
                 <td>${worker.ip}</td>
                 <td>${worker.port}</td>
                 <td><span class="${statusClass}">${status}</span></td>
+                <td>${worker.key_count}</td>
                 <td>${lastHeartbeat}</td>
                 <td>
                     <button class="btn btn-sm btn-info view-worker" data-instance="${worker.instance_id}" data-worker="${worker.worker_id}">View</button>
@@ -430,7 +519,7 @@ async function loadWorkers() {
 
     } catch (error) {
         console.error('Error loading workers:', error);
-        tableBody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${error.message}</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="8" class="text-center text-danger">Error: ${error.message}</td></tr>`;
     }
 }
 
