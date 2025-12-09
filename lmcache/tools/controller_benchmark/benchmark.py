@@ -19,6 +19,7 @@ import zmq.asyncio
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.message import DeRegisterMsg, RegisterMsg
+from lmcache.v1.cache_controller.utils import KVChunkInfo
 from lmcache.v1.rpc_utils import (
     close_zmq_socket,
     get_zmq_context,
@@ -86,8 +87,8 @@ class ZMQControllerBenchmark:
         self.req_socket: Optional[Any] = None
         self.results = BenchmarkResults()
         self.running = False
-        # Track sequence numbers per (instance_id, worker_id, location)
-        self.sequence_numbers: Dict[Tuple[str, int, str], int] = {}
+        # Track sequence numbers per KVChunkInfo (instance_id, worker_id, location)
+        self.sequence_numbers: Dict[KVChunkInfo, int] = {}
 
         # Track registered workers for cleanup
         self.registered_workers: List[Tuple[str, int, str, int]] = []
@@ -159,7 +160,7 @@ class ZMQControllerBenchmark:
         Get monotonically increasing sequence number for specific
         instance-worker-location
         """
-        key = (instance_id, worker_id, location)
+        key = KVChunkInfo(instance_id, worker_id, location)
         if key not in self.sequence_numbers:
             self.sequence_numbers[key] = 0
         seq = self.sequence_numbers[key]

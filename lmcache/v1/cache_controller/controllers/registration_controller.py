@@ -164,7 +164,6 @@ class RegistrationController:
         if worker_node.socket is not None:
             close_zmq_socket(worker_node.socket)
 
-        await self.kv_controller.deregister(instance_id, worker_id)
         logger.info("Deregistered instance-worker %s", (instance_id, worker_id))
 
     async def health(self, msg: HealthMsg) -> HealthRetMsg:
