@@ -383,28 +383,61 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
             self.hot_cache[key] = metadata
-            # Update size tracking for existing cache entries
-            self.current_cache_size += size
-            self.cache_policy.update_on_put(key)
-        logger.debug(
-            f"[GDS CACHE] Loaded existing entry: key={key}, "
-            f"size={size / 1024 / 1024:.2f} MB, "
-            f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB"
-        )
         return metadata
 
     def __str__(self):
         return self.__class__.__name__
 
+    # def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
+    #     # TODO: implement pin() semantics
+    #     with self.hot_lock:
+    #         res = key in self.hot_cache
+    #     if res:
+    #         return True
+    #     if self._try_to_read_metadata(key):
+    #         return True
+    #     return False
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
-        # TODO: implement pin() semantics
+        """
+        Check whether the key exists in the GDS cache.
+
+        Compared to LocalDiskBackend, GDS supports a "lazy metadata loading" path:
+        if the key is not in the in-memory hot_cache, we try to load its metadata
+        directly from the filesystem (.metadata file). If found, the entry will be
+        inserted into hot_cache on-demand.
+
+        Args:
+            key: CacheEngineKey to check.
+            pin: If True, mark the entry as pinned so that eviction policy
+                will not evict it.
+
+        Returns:
+            True if the key exists either in hot_cache or on disk; False otherwise.
+        """
+
+        # --- Fast path: found in in-memory cache ---
         with self.hot_lock:
-            res = key in self.hot_cache
-        if res:
-            return True
-        if self._try_to_read_metadata(key):
-            return True
-        return False
+            meta = self.hot_cache.get(key)
+            if meta is not None:
+                # Cache hit — optional recency update can also be placed here.
+                if pin:
+                    meta.pin()
+                return True
+
+        # --- Slow path: try to load metadata from disk lazily ---
+        meta = self._try_to_read_metadata(key)
+        if meta is None:
+            return False
+
+        # _try_to_read_metadata() already inserted the metadata into hot_cache.
+        # If pin=True, we pin it after insertion.
+        if pin:
+            with self.hot_lock:
+                cached_meta = self.hot_cache.get(key)
+                if cached_meta is not None:
+                    cached_meta.pin()
+
+        return True
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
         path, subdir_key, _, _ = self._key_to_path(key)
@@ -858,15 +891,39 @@ class GdsBackend(AllocatorBackendInterface):
                 "Both cufile and cudart are None, this should not happen"
             )
 
+    # def pin(self, key: CacheEngineKey) -> bool:
+    #     # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+    #     # to implement pin and unpin
+    #     return False
+
+    # def unpin(self, key: CacheEngineKey) -> bool:
+    #     # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+    #     # to implement pin and unpin
+    #     return False
+
     def pin(self, key: CacheEngineKey) -> bool:
-        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
-        # to implement pin and unpin
-        return False
+        """
+        Mark a cache entry as pinned so that the eviction policy
+        should not evict it while it is in use.
+        """
+        with self.hot_lock:
+            meta = self.hot_cache.get(key)
+            if meta is None:
+                return False
+            meta.pin()
+            return True
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
-        # to implement pin and unpin
-        return False
+        """
+        Unmark a cache entry as pinned, allowing the eviction policy
+        to evict it if needed.
+        """
+        with self.hot_lock:
+            meta = self.hot_cache.get(key)
+            if meta is None:
+                return False
+            meta.unpin()
+            return True
 
     def remove(self, key: CacheEngineKey, force: bool = True):
         raise NotImplementedError("Remote backend does not support remove now.")
