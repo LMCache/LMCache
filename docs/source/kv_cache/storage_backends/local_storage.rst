@@ -24,7 +24,7 @@ Two ways to configure LMCache Disk Offloading:
     # Otherwise, enable by setting the directory where LMCache will
     # create files for each KV cache chunks
     # (this directory does NOT need to exist beforehand)
-    export LMCACHE_LOCAL_DISK="file://local/disk_test/local_disk/"
+    export LMCACHE_LOCAL_DISK="file:///local/disk_test/local_disk/"
     # 5GB of Disk
     export LMCACHE_MAX_LOCAL_DISK_SIZE=5.0
 
@@ -41,7 +41,7 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
     # 256 Tokens per KV Chunk
     chunk_size: 256
     # Enable Disk backend
-    local_disk: "file://local/disk_test/local_disk/"
+    local_disk: "file:///local/disk_test/local_disk/"
     # 5GB of Disk memory
     max_local_disk_size: 5.0
 
@@ -125,7 +125,7 @@ Example ``config.yaml``:
     chunk_size: 256
     local_cpu: false
     max_local_cpu_size: 5.0
-    local_disk: "file://local/disk_test/local_disk/"
+    local_disk: "file:///local/disk_test/local_disk/"
     max_local_disk_size: 5.0
 
 If you don't want to use a config file, uncomment the first five environment variables
@@ -136,7 +136,7 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_CHUNK_SIZE=256 \
     # LMCACHE_LOCAL_CPU=False \
     # LMCACHE_MAX_LOCAL_CPU_SIZE=5.0 \
-    # LMCACHE_LOCAL_DISK="file://local/disk_test/local_disk/" \
+    # LMCACHE_LOCAL_DISK="file:///local/disk_test/local_disk/" \
     # LMCACHE_MAX_LOCAL_DISK_SIZE=5.0 \
     LMCACHE_CONFIG_FILE="disk-offload.yaml" \
     vllm serve \

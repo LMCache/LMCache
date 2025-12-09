@@ -45,6 +45,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         config: Optional[LMCacheEngineConfig],
         metadata: Optional[LMCacheEngineMetadata],
     ) -> None:
+        logger.info("initializing chunk meta for remote connector")
         # TODO: support layerwise later
         if (
             config is None

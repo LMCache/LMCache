@@ -37,7 +37,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - name: "Harden Runner"
-              uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+              uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -55,7 +55,7 @@ jobs:
                   releases.githubusercontent.com:443
 
             - name: Checkout code
-              uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+              uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
               with:
                 # for setuptools-scm
                 fetch-depth: 0
@@ -123,7 +123,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+              uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -164,7 +164,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+              uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
               with:
                   disable-sudo-and-containers: false
                   egress-policy: block
@@ -207,7 +207,7 @@ jobs:
 
         steps:
             - name: "Harden Runner"
-              uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+              uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -238,7 +238,7 @@ jobs:
               uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
             - name: Checkout code
-              uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+              uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
               with:
                 # for setuptools-scm
                 fetch-depth: 0
@@ -263,6 +263,11 @@ jobs:
                 docker push lmcache/vllm-openai:latest
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}
             
+            - name: Clean up Docker layers and cache
+              run: |
+                docker system prune -f --all
+                docker builder prune -af
+
             - name: Build lmcache/vllm-openai:lightweight
               run: | 
                 docker build \
@@ -273,7 +278,12 @@ jobs:
               run: |
                 docker push lmcache/vllm-openai:lightweight
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight
-            
+
+            - name: Clean up Docker layers and cache
+              run: |
+                docker system prune -f --all
+                docker builder prune -af
+
             - name: Build lmcache/standalone container image
               run: |
                 docker build \

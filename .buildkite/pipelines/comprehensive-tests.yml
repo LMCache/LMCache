@@ -6,6 +6,7 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     commands:
+      - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Skip comprehensive tests for safe-path-only PRs.
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
       - BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --configs=.buildkite/cases/comprehensive-cases.txt
       - cat /tmp/build_${BUILDKITE_BUILD_ID}_*.log > build_${BUILDKITE_BUILD_ID}.log
