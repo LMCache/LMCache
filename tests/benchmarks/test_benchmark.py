@@ -39,12 +39,13 @@ def create_config():
     - fsconnector
     """
 
-    def make_config(backend, size, **kwargs):
+    def make_config(backend, size, save_unfull_chunk=True, **kwargs):
         match backend:
             case "cpu":
                 return LMCacheEngineConfig.from_defaults(
                     local_cpu=True,
                     max_local_cpu_size=size,
+                    save_unfull_chunk=save_unfull_chunk,
                     extra_config={"force_store_wait": False},
                 )
             case "disk":
@@ -54,6 +55,7 @@ def create_config():
                     max_local_cpu_size=size,
                     local_disk=kwargs["path"],
                     max_local_disk_size=size,
+                    save_unfull_chunk=save_unfull_chunk,
                     extra_config={"force_store_wait": False},
                 )
             case "fsconnector":
@@ -64,6 +66,7 @@ def create_config():
                     max_local_cpu_size=size,
                     remote_url=f"fs://host:0/{p}/",
                     remote_serde="naive",
+                    save_unfull_chunk=save_unfull_chunk,
                     extra_config={"force_store_wait": False},
                 )
             case _:
@@ -83,11 +86,18 @@ def create_config():
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+@pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
-def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
+def test_store_1GB(
+    benchmark,
+    backend,
+    save_unfull_chunk,
+    create_config,
+    autorelease_v1,
+):
     """
     In this test, it will run engine.store to store 10GB data in total.
     The configs are carefully tuned to have:
@@ -139,7 +149,7 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
     )
 
     cache_size = 1.5  # Allocate 15 GB KV cache buffer
-    cfg = create_config(backend, cache_size)
+    cfg = create_config(backend, cache_size, save_unfull_chunk=save_unfull_chunk)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
@@ -152,6 +162,14 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
         )
     )
 
+    # Calculate expected lookup count based on save_unfull_chunk setting
+    def get_expected_count(token_len):
+        if save_unfull_chunk:
+            return token_len
+        else:
+            # Round down to chunk boundary
+            return (token_len // chunk_size) * chunk_size
+
     # Run benchmark
     def run_func(tokens, slot_mappings):
         for t, s in zip(tokens, slot_mappings, strict=False):
@@ -161,7 +179,9 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
         timeout = 60
         start = time.time()
         while time.time() - start < timeout:
-            ready = all([engine.lookup(t) == len(t) for t in tokens])
+            ready = all(
+                [engine.lookup(t) == get_expected_count(len(t)) for t in tokens]
+            )
             if ready:
                 return
             else:
@@ -185,11 +205,18 @@ def test_store_1GB(benchmark, backend, create_config, autorelease_v1):
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+@pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
-def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
+def test_retrieve_1GB_allhit(
+    benchmark,
+    backend,
+    save_unfull_chunk,
+    create_config,
+    autorelease_v1,
+):
     """
     In this test, it will run engine.retrieve to retrieve 10GB data in total.
     The configs are carefully tuned to have:
@@ -248,7 +275,7 @@ def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
     ]
 
     cache_size = 1.5  # 2 GB KV cache buffer
-    cfg = create_config(backend, cache_size)
+    cfg = create_config(backend, cache_size, save_unfull_chunk=save_unfull_chunk)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
@@ -261,6 +288,14 @@ def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
         )
     )
 
+    # Calculate expected lookup count based on save_unfull_chunk setting
+    def get_expected_count(token_len):
+        if save_unfull_chunk:
+            return token_len
+        else:
+            # Round down to chunk boundary
+            return (token_len // chunk_size) * chunk_size
+
     for t, s in zip(list_tokens, list_slot_mappings, strict=False):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
@@ -269,7 +304,9 @@ def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
     start = time.time()
     ready = False
     while time.time() - start < timeout:
-        ready = all([engine.lookup(t) == len(t) for t in list_tokens])
+        ready = all(
+            [engine.lookup(t) == get_expected_count(len(t)) for t in list_tokens]
+        )
         if ready:
             break
         else:
@@ -296,11 +333,18 @@ def test_retrieve_1GB_allhit(benchmark, backend, create_config, autorelease_v1):
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
+@pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
-def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
+def test_lookup_20K_tokens(
+    benchmark,
+    backend,
+    save_unfull_chunk,
+    create_config,
+    autorelease_v1,
+):
     """
     In this test, it will run engine.lookup to lookup 200K tokens in total.
     The configs are carefully tuned to have:
@@ -354,7 +398,7 @@ def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
 
     # TODO: Rewrite the config generation to another helper function
     cache_size = 3  # 15 GB KV cache buffer
-    cfg = create_config(backend, cache_size)
+    cfg = create_config(backend, cache_size, save_unfull_chunk=save_unfull_chunk)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
@@ -367,6 +411,14 @@ def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
         )
     )
 
+    # Calculate expected lookup count based on save_unfull_chunk setting
+    def get_expected_count(token_len):
+        if save_unfull_chunk:
+            return token_len
+        else:
+            # Round down to chunk boundary
+            return (token_len // chunk_size) * chunk_size
+
     for t, s in zip(list_tokens, list_slot_mappings, strict=False):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
@@ -375,7 +427,9 @@ def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
     start = time.time()
     ready = False
     while time.time() - start < timeout:
-        ready = all([engine.lookup(t) == len(t) for t in list_tokens])
+        ready = all(
+            [engine.lookup(t) == get_expected_count(len(t)) for t in list_tokens]
+        )
         if ready:
             break
         else:
@@ -393,6 +447,6 @@ def test_lookup_20K_tokens(benchmark, backend, create_config, autorelease_v1):
 
     def run_func(tokens, slot_mappings):
         for t, s in zip(tokens, slot_mappings, strict=False):
-            assert engine.lookup(t) == len(t)
+            assert engine.lookup(t) == get_expected_count(len(t))
 
     benchmark.pedantic(run_func, setup=setup, rounds=num_repeats, iterations=1)
