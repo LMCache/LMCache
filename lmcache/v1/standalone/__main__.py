@@ -197,7 +197,7 @@ class LMCacheStandaloneStarter:
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        layer_groups: Optional[List[LayerGroupSpec]] = None,
+        layer_groups: List[LayerGroupSpec],
         device: str = "cpu",
     ):
         self.config = config
@@ -245,6 +245,9 @@ class LMCacheStandaloneStarter:
         use_mla = self.metadata.use_mla
 
         # Determine device based on platform
+        if self.device == "cpu":
+            logger.info("CPU device specified, using MockGPUConnector")
+            return MockGPUConnector(kv_shape=kv_shape)
         if current_platform.is_cuda_alike():
             connector_cls = VLLMPagedMemGPUConnectorV2
             logger.info("CUDA device detected, using VLLMPagedMemGPUConnectorV2")
@@ -285,39 +288,7 @@ class LMCacheStandaloneStarter:
         Args:
             device: Device to create tensors on (default: "cpu")
         """
-        if self.layer_groups:
-            # Multi-group configuration
-            return self._generate_multi_group_kvcaches(device=device)
-        else:
-            # Single group configuration (backward compatibility)
-            return self._generate_single_group_kvcaches(device=device)
-
-    def _generate_single_group_kvcaches(self, device: str = "cpu") -> dict:
-        """Generate kvcaches for single group configuration
-
-        Args:
-            device: Device to create tensors on (default: "cpu")
-        """
-        kv_shape = self.metadata.kv_shape
-        num_layers, kv_dim, num_blocks, num_heads, head_size = kv_shape
-        dtype = self.metadata.kv_dtype
-        shape = [kv_dim, num_blocks, num_heads, head_size]
-        kvcaches = {}
-        for layer_idx in range(num_layers):
-            torch.manual_seed(42 + layer_idx)
-            tensor = torch.rand(shape, dtype=dtype, device=device)
-            layer_name = f"model.layers.{layer_idx}"
-            kvcaches[layer_name] = tensor
-
-        logger.info(
-            "Generated fixed pattern kvcaches: %d layers, shape=%s, dtype=%s,"
-            " device=%s",
-            num_layers,
-            shape,
-            dtype,
-            device,
-        )
-        return kvcaches
+        return self._generate_multi_group_kvcaches(device=device)
 
     def _generate_multi_group_kvcaches(self, device: str = "cpu") -> dict:
         """Generate kvcaches for multiple layer groups configuration
@@ -391,10 +362,10 @@ class LMCacheStandaloneStarter:
         logger.info("Starting LMCache engine with instance ID: %s", instance_id)
 
         # Generate fixed pattern kvcaches for testing
-        kvcaches = self._generate_fixed_kvcaches(device="cpu")
+        kvcaches = self._generate_fixed_kvcaches(device=self.device)
 
         # Initialize the engine with kvcaches
-        self.lmcache_engine.post_init(kvcaches=kvcaches)
+        self.lmcache_engine.post_init(kvcaches=list(kvcaches.values()))
         logger.info("LMCache engine post-initialized with fixed kvcaches")
 
         # Start internal API server
@@ -598,6 +569,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kvcache-shape-spec",
         type=str,
+        default="(2,2,256,4,16):float16:2",
         help=(
             "KV cache shape specification with multiple layer groups. "
             "Format: '(shape_string):dtype:layer_count;[...]'. "
@@ -616,6 +588,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="vllm",
         help="Cache format (default: vllm)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Device to run on (default: cpu)",
     )
 
     args, extra = parser.parse_known_args()
@@ -647,7 +625,9 @@ def main():
             override_config_from_dict(config, args.extra_params)
 
         # Handle KV shape specification
-        if args.kvcache_shape_spec:
+        if not args.kvcache_shape_spec:
+            logger.error("--kvcache-shape-spec is required")
+        else:
             # Use new multi-group specification
             layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
             logger.info("Using KV shape specification: %s", args.kvcache_shape_spec)
@@ -659,9 +639,6 @@ def main():
                     group.shape,
                     group.dtype,
                 )
-        else:
-            # Set layer_groups to None for single group configuration
-            layer_groups = None
 
         # Use single group specification - kv-shape directly assigned to metadata
         kv_dtype = dtype_map.get(args.kv_dtype, torch.float16)
@@ -687,7 +664,7 @@ def main():
             fmt=args.fmt,
         )
 
-        starter = LMCacheStandaloneStarter(config, metadata, layer_groups)
+        starter = LMCacheStandaloneStarter(config, metadata, layer_groups, args.device)
         setup_signal_handlers(starter)
 
         starter.start()

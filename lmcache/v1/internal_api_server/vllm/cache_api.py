@@ -2,14 +2,19 @@
 # Standard
 from typing import Annotated, Callable, List, Optional, Tuple
 import json
+import traceback
 
 # Third Party
 from fastapi import APIRouter, Query
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
+import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+
+logger = init_logger(__name__)
 
 router = APIRouter()
 
@@ -89,6 +94,34 @@ def _check_lmcache_engine(
         }
         return None, _create_error_response(error_info, 503)
     return lmcache_engine, None
+
+
+def _get_kvcaches_and_device(engine):
+    """Get kvcaches and device from engine's gpu_connector.
+
+    Args:
+        engine: LMCache engine instance
+
+    Returns:
+        Tuple of (kvcaches, device).
+        kvcaches may be None if not available.
+        device defaults to "cpu" if kvcaches not available.
+    """
+    kvcaches = None
+    device = "cpu"  # Default device
+
+    if engine.gpu_connector:
+        kvcaches = engine.gpu_connector.kvcaches
+        if kvcaches is not None and len(kvcaches) > 0:
+            device = kvcaches[0].device
+            logger.debug(f"Using kvcaches device: {device}")
+        else:
+            logger.warning(
+                "gpu_connector.kvcaches is None or empty. "
+                "Make sure post_init was called with kvcaches."
+            )
+
+    return kvcaches, device
 
 
 @router.delete("/cache/clear")
@@ -210,7 +243,17 @@ def _execute_cache_operation(
             media_type="application/json",
         )
     except Exception as e:
-        error_info = {"error": f"Failed to {operation_name}", "message": str(e)}
+        # Log the full traceback for debugging
+        tb_str = traceback.format_exc()
+        logger.error(f"Failed to {operation_name}: {str(e)}\\n{tb_str}")
+
+        # Include more detailed error info in response
+        error_message = str(e) if str(e) else f"Exception type: {type(e).__name__}"
+        error_info = {
+            "error": f"Failed to {operation_name}",
+            "message": error_message,
+            "exception_type": type(e).__name__,
+        }
         return _create_error_response(error_info, 500)
 
 
@@ -249,7 +292,21 @@ async def store(
     assert lmcache_engine is not None
 
     def _store_operation(engine, token_list):
-        engine.store(tokens=token_list)
+        # Get kvcaches and device using the shared function
+        kvcaches, device = _get_kvcaches_and_device(engine)
+
+        # Create slot mapping for the tokens
+        slot_mapping = torch.arange(len(token_list), dtype=torch.long, device=device)
+
+        logger.debug(
+            f"Storing {len(token_list)} tokens with slot_mapping on device {device}"
+        )
+
+        engine.store(
+            tokens=token_list,
+            slot_mapping=slot_mapping,
+            kvcaches=kvcaches,
+        )
         return None
 
     return _execute_cache_operation(
@@ -292,7 +349,21 @@ async def retrieve(
     assert lmcache_engine is not None
 
     def _retrieve_operation(engine, token_list):
-        ret_mask = engine.retrieve(tokens=token_list)
+        # Get kvcaches and device using the shared function
+        kvcaches, device = _get_kvcaches_and_device(engine)
+
+        # Create slot_mapping for retrieve operation
+        slot_mapping = torch.arange(len(token_list), dtype=torch.long, device=device)
+
+        logger.debug(
+            f"Retrieving {len(token_list)} tokens with slot_mapping on device {device}"
+        )
+
+        ret_mask = engine.retrieve(
+            tokens=token_list,
+            slot_mapping=slot_mapping,
+            kvcaches=kvcaches,
+        )
         num_retrieved = int(ret_mask.sum().item())
         return {"num_retrieved": num_retrieved}
 
