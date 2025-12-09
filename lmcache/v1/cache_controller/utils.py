@@ -1,10 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # Third Party
 import zmq.asyncio
+
+
+class KVChunkInfo(NamedTuple):
+    """
+    Represents the location information of a KV chunk in the cluster.
+    This class is immutable and can be used as a dictionary key.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
 
 
 @dataclass
@@ -283,11 +294,11 @@ class RegistryTree:
         key: int,
         exclude_instance_id: Optional[str] = None,
         exclude_location: Optional[str] = None,
-    ) -> Optional[tuple[str, int, str]]:
+    ) -> Optional[KVChunkInfo]:
         """
         Find a KV chunk across all workers.
 
-        Returns: (instance_id, worker_id, location) if found, None otherwise.
+        Returns: KVChunkInfo if found, None otherwise.
         """
         for ip_instances in self.instances.values():
             for instance_id, instance_node in ip_instances.items():
@@ -304,7 +315,7 @@ class RegistryTree:
                         ):
                             continue
                         if key in keys:
-                            return instance_id, worker_id, location
+                            return KVChunkInfo(instance_id, worker_id, location)
         return None
 
     def get_total_kv_count(self) -> int:

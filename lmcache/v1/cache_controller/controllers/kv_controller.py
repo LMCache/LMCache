@@ -184,8 +184,8 @@ class KVController:
             result = self.registry.find_kv(key)
             if result is None:
                 break
-            matched_instance = result[0]
-            matched_location = result[2]
+            matched_instance = result.instance_id
+            matched_location = result.location
             layout_info[matched_instance] = (matched_location, end)
         return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)
 
@@ -209,9 +209,9 @@ class KVController:
         if result is None:
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
 
-        instance_id = result[0]
-        worker_id = result[1]
-        location = result[2]
+        instance_id = result.instance_id
+        worker_id = result.worker_id
+        location = result.location
         assert self.reg_controller is not None
         peer_init_url = self.reg_controller.get_peer_init_url(instance_id, worker_id)
         assert peer_init_url is not None
