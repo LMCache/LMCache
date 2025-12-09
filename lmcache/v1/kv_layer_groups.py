@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -31,6 +32,15 @@ class KVLayerGroupInfo:
     """ Data type of the KV cache tensor for layers in this group """
     dtype: torch.dtype
 
+    # Internal sets for fast membership checking
+    _layer_indices_set: set[int] = field(init=False, repr=False)
+    _layer_names_set: set[str] = field(init=False, repr=False)
+
+    def __post_init__(self):
+        """Initialize sets for fast membership checking."""
+        self._layer_indices_set = set(self.layer_indices)
+        self._layer_names_set = set(self.layer_names)
+
     def __repr__(self) -> str:
         if not self.layer_indices:
             indices_repr = "[]"
@@ -49,11 +59,11 @@ class KVLayerGroupInfo:
 
     def contains_layer(self, layer_idx: int) -> bool:
         """Check if a layer index belongs to this group."""
-        return layer_idx in self.layer_indices
+        return layer_idx in self._layer_indices_set
 
     def contains_layer_name(self, layer_name: str) -> bool:
         """Check if a layer name belongs to this group."""
-        return layer_name in self.layer_names
+        return layer_name in self._layer_names_set
 
 
 @dataclass
@@ -148,14 +158,14 @@ class KVLayerGroupsManager:
             return
 
         # Group layers by (shape, dtype) in a single loop
-        groups_dict: dict[tuple[tuple, torch.dtype], list[tuple[str, int]]] = {}
+        groups_dict: dict[tuple[tuple, torch.dtype], list[tuple[str, int]]] = (
+            defaultdict(list)
+        )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
             shape = tuple(kv_cache.shape)
             dtype = kv_cache.dtype
             key = (shape, dtype)
-            if key not in groups_dict:
-                groups_dict[key] = []
             groups_dict[key].append((layer_name, idx))
 
         # Build KVLayerGroupInfo list
