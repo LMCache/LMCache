@@ -30,6 +30,23 @@ def generate_random_slot_mapping(num_blocks, block_size, num_tokens, device):
     return torch.tensor(slot_mapping, device=device)
 
 
+def get_expected_count(token_len, save_unfull_chunk, chunk_size):
+    """Calculate expected token count based on save_unfull_chunk setting.
+
+    Args:
+        token_len: Total token length
+        save_unfull_chunk: Whether to save partial chunks
+        chunk_size: Chunk size for alignment
+
+    Returns:
+        If save_unfull_chunk is True, returns token_len as-is.
+        Otherwise, returns chunk-aligned count (rounded down).
+    """
+    if save_unfull_chunk:
+        return token_len
+    return (token_len // chunk_size) * chunk_size
+
+
 @pytest.fixture
 def create_config():
     """
@@ -162,14 +179,6 @@ def test_store_1GB(
         )
     )
 
-    # Calculate expected lookup count based on save_unfull_chunk setting
-    def get_expected_count(token_len):
-        if save_unfull_chunk:
-            return token_len
-        else:
-            # Round down to chunk boundary
-            return (token_len // chunk_size) * chunk_size
-
     # Run benchmark
     def run_func(tokens, slot_mappings):
         for t, s in zip(tokens, slot_mappings, strict=False):
@@ -180,7 +189,11 @@ def test_store_1GB(
         start = time.time()
         while time.time() - start < timeout:
             ready = all(
-                [engine.lookup(t) == get_expected_count(len(t)) for t in tokens]
+                [
+                    engine.lookup(t)
+                    == get_expected_count(len(t), save_unfull_chunk, chunk_size)
+                    for t in tokens
+                ]
             )
             if ready:
                 return
@@ -288,14 +301,6 @@ def test_retrieve_1GB_allhit(
         )
     )
 
-    # Calculate expected lookup count based on save_unfull_chunk setting
-    def get_expected_count(token_len):
-        if save_unfull_chunk:
-            return token_len
-        else:
-            # Round down to chunk boundary
-            return (token_len // chunk_size) * chunk_size
-
     for t, s in zip(list_tokens, list_slot_mappings, strict=False):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
@@ -305,7 +310,11 @@ def test_retrieve_1GB_allhit(
     ready = False
     while time.time() - start < timeout:
         ready = all(
-            [engine.lookup(t) == get_expected_count(len(t)) for t in list_tokens]
+            [
+                engine.lookup(t)
+                == get_expected_count(len(t), save_unfull_chunk, chunk_size)
+                for t in list_tokens
+            ]
         )
         if ready:
             break
@@ -411,14 +420,6 @@ def test_lookup_20K_tokens(
         )
     )
 
-    # Calculate expected lookup count based on save_unfull_chunk setting
-    def get_expected_count(token_len):
-        if save_unfull_chunk:
-            return token_len
-        else:
-            # Round down to chunk boundary
-            return (token_len // chunk_size) * chunk_size
-
     for t, s in zip(list_tokens, list_slot_mappings, strict=False):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
@@ -428,7 +429,11 @@ def test_lookup_20K_tokens(
     ready = False
     while time.time() - start < timeout:
         ready = all(
-            [engine.lookup(t) == get_expected_count(len(t)) for t in list_tokens]
+            [
+                engine.lookup(t)
+                == get_expected_count(len(t), save_unfull_chunk, chunk_size)
+                for t in list_tokens
+            ]
         )
         if ready:
             break
@@ -447,6 +452,8 @@ def test_lookup_20K_tokens(
 
     def run_func(tokens, slot_mappings):
         for t, s in zip(tokens, slot_mappings, strict=False):
-            assert engine.lookup(t) == get_expected_count(len(t))
+            assert engine.lookup(t) == get_expected_count(
+                len(t), save_unfull_chunk, chunk_size
+            )
 
     benchmark.pedantic(run_func, setup=setup, rounds=num_repeats, iterations=1)
