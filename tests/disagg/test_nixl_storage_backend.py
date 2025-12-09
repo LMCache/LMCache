@@ -12,8 +12,6 @@ import time
 import pytest
 import torch
 
-pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
-
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -24,6 +22,9 @@ from lmcache.v1.storage_backend.nixl_storage_backend import (
     NixlStorageBackend,
     NixlStorageConfig,
 )
+
+pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
+pytestmark = pytest.mark.nixl
 
 logger = init_logger(__name__)
 

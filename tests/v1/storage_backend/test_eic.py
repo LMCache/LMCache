@@ -4,9 +4,11 @@ import argparse
 import os
 
 # Third Party
-import eic
+import pytest
 import torch
 import yaml
+
+eic = pytest.importorskip("eic")
 
 
 def parse_args():

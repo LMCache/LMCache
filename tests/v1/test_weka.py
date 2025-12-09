@@ -17,6 +17,8 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import CuFileMemoryAllocator
 from lmcache.v1.storage_backend import CreateStorageBackends
 
+pytestmark = pytest.mark.weka
+
 
 @pytest.mark.skip(reason="We need to add this test back after implementing prefetch")
 def test_weka_backend_sanity():

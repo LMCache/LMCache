@@ -136,6 +136,20 @@ warn_return_any = false
 
 follow_imports = "silent"
 
+[tool.pytest.ini_options]
+markers = [
+    "no_shared_allocator: disable shared allocator monkeypatch",
+    "local_cpu: tests for local CPU backend",
+    "local_disk: tests for local disk backend",
+    "redis: tests for redis connector",
+    "mock_connector: tests for mock connector/backend",
+    "p2p: tests for P2P backend",
+    "pd: tests for PD/disaggregated setups",
+    "nixl: tests for Nixl storage backend",
+    "gds: tests for GDS backend",
+    "weka: tests for Weka GDS backend",
+]
+
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
 

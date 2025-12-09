@@ -185,6 +185,7 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         "unix:///tmp/redis.sock",
     ],
 )
+@pytest.mark.redis
 def test_redis_connector(url, autorelease_v1):
     """Test Redis connector: exists, put, get operations.
 
@@ -246,6 +247,7 @@ def test_redis_connector(url, autorelease_v1):
         "redis-sentinel://localhost:26379",
     ],
 )
+@pytest.mark.redis
 def test_redis_sentinel_connector(url, autorelease_v1):
     """Test Redis Sentinel connector: exists, put, get operations.
 

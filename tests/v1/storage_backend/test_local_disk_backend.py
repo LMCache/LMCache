@@ -20,6 +20,8 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
+pytestmark = pytest.mark.local_disk
+
 
 class MockLookupServer:
     def __init__(self):

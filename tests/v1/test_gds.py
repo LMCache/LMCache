@@ -20,6 +20,8 @@ from lmcache.v1.memory_management import CuFileMemoryAllocator, MemoryFormat
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
 
+pytestmark = pytest.mark.gds
+
 
 def test_gds_backend_metadata():
     # This is a sanity check that packing and unpacking works. We can add

@@ -8,8 +8,6 @@ import threading
 import pytest
 import torch
 
-pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
-
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
@@ -17,6 +15,9 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PagedTensorMemoryAllocator
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
+
+pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
+pytestmark = pytest.mark.nixl
 
 
 def create_key(chunk_hash: str):

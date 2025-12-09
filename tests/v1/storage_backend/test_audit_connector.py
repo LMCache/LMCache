@@ -21,6 +21,8 @@ from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
 from lmcache.v1.storage_backend.connector.mock_connector import MockConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
+pytestmark = pytest.mark.mock_connector
+
 
 def create_test_key(key_id: str) -> CacheEngineKey:
     """Helper to create a test CacheEngineKey"""

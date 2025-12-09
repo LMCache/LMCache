@@ -18,6 +18,8 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
+pytestmark = pytest.mark.local_cpu
+
 
 class MockLookupServer:
     def __init__(self):

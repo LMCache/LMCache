@@ -30,6 +30,8 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from tests.v1.utils import get_available_ports
 
+pytestmark = pytest.mark.p2p
+
 logger = init_logger(__name__)
 
 
