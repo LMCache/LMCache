@@ -149,6 +149,8 @@ markers = [
     "gds: tests for GDS backend",
     "weka: tests for Weka GDS backend",
 ]
+log_cli = true
+log_cli_level = "INFO"
 
 [tool.cibuildwheel]
 build = "cp3*-manylinux_x86_64"
