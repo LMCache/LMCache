@@ -14,6 +14,7 @@ A standalone starter for LMCacheEngine that:
 # Standard
 from typing import Any, Dict, List, Optional, Tuple
 import argparse
+import ast
 import asyncio
 import os
 import signal
@@ -435,7 +436,12 @@ def override_config_from_dict(config: LMCacheEngineConfig, overrides: Dict[str, 
     for key, value in overrides.items():
         if hasattr(config, key):
             old_value = getattr(config, key)
-            setattr(config, key, value)
+            if key == "extra_config":
+                # convert to dict
+                value = ast.literal_eval(value)
+                setattr(config, key, value)
+            else:
+                setattr(config, key, value)
             if old_value != value:
                 logger.info(f"Override config: {key} = {value} (was {old_value})")
         else:
@@ -453,30 +459,6 @@ def parse_kv_shape(shape_str: str) -> Tuple[int, int, int, int, int]:
         return parts  # type: ignore[return-value]
     except ValueError as e:
         raise ValueError(f"Invalid kv_shape format: {shape_str}. Error: {e}") from e
-
-
-def create_metadata(
-    model_name: str,
-    worker_id: int,
-    world_size: int,
-    kv_dtype: torch.dtype,
-    kv_shape: Tuple[int, int, int, int, int],
-    use_mla: bool,
-    fmt: str = "vllm",
-) -> LMCacheEngineMetadata:
-    """Create engine metadata"""
-    metadata = LMCacheEngineMetadata(
-        model_name=model_name,
-        world_size=world_size,
-        worker_id=worker_id,
-        fmt=fmt,
-        kv_dtype=kv_dtype,
-        kv_shape=kv_shape,
-        use_mla=use_mla,
-        role="worker",
-    )
-
-    return metadata
 
 
 def parse_extra_params(extra_args: list) -> Dict[str, Any]:
@@ -655,14 +637,15 @@ def main():
             kv_shape[4],
         )
 
-        metadata = create_metadata(
+        metadata = LMCacheEngineMetadata(
             model_name=args.model_name,
-            worker_id=args.worker_id,
             world_size=args.world_size,
+            worker_id=args.worker_id,
+            fmt=args.fmt,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=args.use_mla,
-            fmt=args.fmt,
+            role="worker",
         )
 
         starter = LMCacheStandaloneStarter(config, metadata, layer_groups, args.device)
