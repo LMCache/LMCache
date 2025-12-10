@@ -209,22 +209,23 @@ class RegistrationController:
                     for worker_info in worker_infos
                     if worker_info.worker_id in msg.worker_ids
                 ]
+            return QueryWorkerInfoRetMsg(event_id=event_id, worker_infos=worker_infos)
+
+        # Normal case: query specific instance
+        instance_node = self.registry.get_instance(msg.instance_id)
+        if instance_node is None:
+            logger.warning("instance %s not registered.", msg.instance_id)
         else:
-            # Normal case: query specific instance
-            instance_node = self.registry.get_instance(msg.instance_id)
-            if instance_node is None:
-                logger.warning("instance %s not registered.", msg.instance_id)
-            else:
-                worker_ids = msg.worker_ids
-                if worker_ids is None or len(worker_ids) == 0:
-                    worker_ids = instance_node.get_worker_ids()
-                for worker_id in worker_ids:
-                    worker_node = instance_node.get_worker(worker_id)
-                    if worker_node is not None:
-                        worker_infos.append(worker_node.to_worker_info(msg.instance_id))
-                    else:
-                        logger.warning(
-                            "worker %s not registered.", (msg.instance_id, worker_id)
-                        )
+            worker_ids = msg.worker_ids
+            if worker_ids is None or len(worker_ids) == 0:
+                worker_ids = instance_node.get_worker_ids()
+            for worker_id in worker_ids:
+                worker_node = instance_node.get_worker(worker_id)
+                if worker_node is not None:
+                    worker_infos.append(worker_node.to_worker_info(msg.instance_id))
+                else:
+                    logger.warning(
+                        "worker %s not registered.", (msg.instance_id, worker_id)
+                    )
 
         return QueryWorkerInfoRetMsg(event_id=event_id, worker_infos=worker_infos)
