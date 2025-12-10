@@ -376,6 +376,7 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             self.metadata_dirs.add(subdir_key)
             self.hot_cache[key] = metadata
+            self.current_cache_size += size
         return metadata
 
     def __str__(self):
@@ -595,38 +596,48 @@ class GdsBackend(AllocatorBackendInterface):
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
         path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
-        # TODO: maybe remove `metadata_dirs` and insert mkdir calls
-        # only for the case where creating the CuFile fails on ENOENT. It
-        # also makes the code more resilient to out-of-band deletions
-        if subdir_key not in self.metadata_dirs:
-            os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
-            self.metadata_dirs.add(subdir_key)
-        tmp = ".tmp" + rand_suffix(self.rand, 8)
-        fmt = memory_obj.metadata.fmt
-        metadata = await asyncio.to_thread(
-            self._save_gds,
-            path,
-            tmp,
-            kv_chunk,
-            fmt,
-            self.cufile_base_pointer,
-            memory_obj.metadata.address,
-        )
+        required_size = memory_obj.get_physical_size()
+        
+        try:
+            # TODO: maybe remove `metadata_dirs` and insert mkdir calls
+            # only for the case where creating the CuFile fails on ENOENT. It
+            # also makes the code more resilient to out-of-band deletions
+            if subdir_key not in self.metadata_dirs:
+                os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
+                self.metadata_dirs.add(subdir_key)
+            tmp = ".tmp" + rand_suffix(self.rand, 8)
+            fmt = memory_obj.metadata.fmt
+            metadata = await asyncio.to_thread(
+                self._save_gds,
+                path,
+                tmp,
+                kv_chunk,
+                fmt,
+                self.cufile_base_pointer,
+                memory_obj.metadata.address,
+            )
 
-        logger.debug(
-            f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
-            f"to {path} with metadata {metadata}"
-        )
-        self.insert_key(key, memory_obj)
-        memory_obj.ref_count_down()
+            logger.debug(
+                f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
+                f"to {path} with metadata {metadata}"
+            )
+            self.insert_key(key, memory_obj)
 
-        task = asyncio.create_task(
-            save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
-        )
-        self.save_metadata_tasks.add(task)
-        task.add_done_callback(self.save_metadata_tasks.discard)
-        with self.put_lock:
-            self.put_tasks.discard(key)
+            task = asyncio.create_task(
+                save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
+            )
+            self.save_metadata_tasks.add(task)
+            task.add_done_callback(self.save_metadata_tasks.discard)
+        except Exception as e:
+            # Rollback cache size on failure
+            with self.hot_lock:
+                self.current_cache_size -= required_size
+            logger.error(f"[GDS CACHE] Failed to save key={key}: {e}")
+            raise
+        finally:
+            memory_obj.ref_count_down()
+            with self.put_lock:
+                self.put_tasks.discard(key)
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
