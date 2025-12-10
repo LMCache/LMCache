@@ -8,7 +8,6 @@ import tempfile
 import threading
 
 # Third Party
-import pytest
 import safetensors
 import torch
 
@@ -17,7 +16,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import CuFileMemoryAllocator, MemoryFormat
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
 
@@ -102,23 +101,42 @@ def test_gds_backend_eviction_lru():
             memory_obj = gds_backend.memory_allocator.allocate(
                 BLOCK_SHAPE, dtype=torch.uint8
             )
-            print(f"[TEST DEBUG] Allocated memory for key {i}: physical_size={memory_obj.get_physical_size()}")
+            print(
+                f"[TEST DEBUG] Allocated memory for key {i}: "
+                f"physical_size={memory_obj.get_physical_size()}"
+            )
             future = gds_backend.submit_put_task(keys[i], memory_obj)
             future.result()
-            print(f"[TEST DEBUG] After PUT {i}: current_cache_size={gds_backend.current_cache_size}, max_cache_size={gds_backend.max_cache_size}, hot_cache_keys={[k.chunk_hash for k in gds_backend.hot_cache.keys()]}")
+            cache_keys = [k.chunk_hash for k in gds_backend.hot_cache.keys()]
+            print(
+                f"[TEST DEBUG] After PUT {i}: "
+                f"current_cache_size={gds_backend.current_cache_size}, "
+                f"max_cache_size={gds_backend.max_cache_size}, "
+                f"hot_cache_keys={cache_keys}"
+            )
 
         # Access block 1 to make it recently used
         _ = gds_backend.get_blocking(keys[0])
-        print(f"[TEST DEBUG] After get_blocking keys[0]: hot_cache_keys={[k.chunk_hash for k in gds_backend.hot_cache.keys()]}")
+        cache_keys = [k.chunk_hash for k in gds_backend.hot_cache.keys()]
+        print(f"[TEST DEBUG] After get_blocking keys[0]: hot_cache_keys={cache_keys}")
 
         # Store block 3 -> block 2 should be evicted (LRU)
         memory_obj = gds_backend.memory_allocator.allocate(
             BLOCK_SHAPE, dtype=torch.uint8
         )
-        print(f"[TEST DEBUG] Allocated memory for key 2: physical_size={memory_obj.get_physical_size()}")
+        print(
+            f"[TEST DEBUG] Allocated memory for key 2: "
+            f"physical_size={memory_obj.get_physical_size()}"
+        )
         future = gds_backend.submit_put_task(keys[2], memory_obj)
         future.result()
-        print(f"[TEST DEBUG] After PUT 2: current_cache_size={gds_backend.current_cache_size}, max_cache_size={gds_backend.max_cache_size}, hot_cache_keys={[k.chunk_hash for k in gds_backend.hot_cache.keys()]}")
+        cache_keys = [k.chunk_hash for k in gds_backend.hot_cache.keys()]
+        print(
+            f"[TEST DEBUG] After PUT 2: "
+            f"current_cache_size={gds_backend.current_cache_size}, "
+            f"max_cache_size={gds_backend.max_cache_size}, "
+            f"hot_cache_keys={cache_keys}"
+        )
 
         # Verify: block 1 should still exist (recently accessed)
         assert gds_backend.contains(keys[0], False), "Key 0 should remain in cache!"
@@ -156,7 +174,7 @@ def test_gds_backend_eviction_fifo():
         # Disable cufile to avoid hardware-specific issues
         config_gds.extra_config = {"use_cufile": False}
         # Set cache_policy to FIFO if supported
-        if hasattr(config_gds, 'cache_policy'):
+        if hasattr(config_gds, "cache_policy"):
             config_gds.cache_policy = "fifo"
 
         thread_loop = asyncio.new_event_loop()
@@ -192,7 +210,9 @@ def test_gds_backend_eviction_fifo():
             future.result()
 
         # FIFO: first inserted (key 0) should be evicted
-        assert not gds_backend.contains(keys[0], False), "FIFO: Key 0 should be evicted!"
+        assert not gds_backend.contains(keys[0], False), (
+            "FIFO: Key 0 should be evicted!"
+        )
         assert gds_backend.contains(keys[1], False), "FIFO: Key 1 should remain!"
         assert gds_backend.contains(keys[2], False), "FIFO: Key 2 should remain!"
 
