@@ -420,6 +420,11 @@ class GdsBackend(AllocatorBackendInterface):
                 cached_meta = self.hot_cache.get(key)
                 if cached_meta is not None:
                     cached_meta.pin()
+                else:
+                    # Race condition: entry was evicted after being read from disk
+                    # but before it could be pinned. We cannot honor pin=True.
+                    logger.warning(f"Key {key} was evicted before it could be pinned.")
+                    return False
 
         return True
 
@@ -512,7 +517,7 @@ class GdsBackend(AllocatorBackendInterface):
                         os.remove(evict_path + _METADATA_FILE_SUFFIX)
                     except FileNotFoundError:
                         pass
-                    except Exception as e:
+                    except OSError as e:
                         logger.error(f"[GDS EVICTION] Error removing files: {e}")
 
                     self.current_cache_size -= evict_size
