@@ -226,8 +226,11 @@ def extract_mm_features(
         return ([], [])
 
 
-def get_size_bytes(shape: torch.Size, kv_dtype: torch.dtype):
+def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     """
     Calculate the size in bytes with the given shape and dtype.
     """
-    return shape.numel() * kv_dtype.itemsize
+    size_in_bytes = 0
+    for shape, kv_dtype in zip(shapes, kv_dtypes, strict=False):
+        size_in_bytes += shape.numel() * kv_dtype.itemsize
+    return size_in_bytes
