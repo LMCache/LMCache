@@ -1120,6 +1120,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         mem_objs: List[MemoryObj],
     ):
         """Asynchronously wait for transfer to complete without blocking."""
+        state = ""
         try:
             state = initial_state
             while state != "DONE" and state != "ERR":
@@ -1128,14 +1129,17 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             if state == "ERR":
                 raise RuntimeError("NIXL transfer failed")
 
-            for key in keys:
-                with self.progress_lock:
-                    self.progress_set.discard(key)
-                self._cache_add(key.chunk_hash)
         finally:
             # Release the handle after transfer completes (success or failure)
             self.agent.release_handle(handle)
             self.agent.release_storage_handler(storage_reg_descs, storage_xfer_handler)
+
+            if state == "DONE":
+                for key in keys:
+                    with self.progress_lock:
+                        self.progress_set.discard(key)
+                    self._cache_add(key.chunk_hash)
+
             for mem_obj in mem_objs:
                 mem_obj.ref_count_down()
 
