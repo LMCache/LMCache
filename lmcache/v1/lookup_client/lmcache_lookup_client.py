@@ -175,23 +175,37 @@ class LMCacheLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
             request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
+        num_computed_buf = num_computed_tokens.to_bytes(8, "big", signed=False)
+        aligned_computed_tokens = num_computed_tokens  # pre-aligned in adapter
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
         if not self.enable_blending:
             hashes = []
             offsets = []
+
+            # We already have hashes here so we can skip the chunks that are already
+            # in GPU cache. Don't pass num_computed_tokens to lookup server.
+
             for start, end, key in self.token_database.process_tokens(
                 token_ids, make_key=False
             ):
+                if end <= aligned_computed_tokens:
+                    continue
                 hashes.append(key)
                 offsets.append(end - start)
+            # Return aligned_computed_tokens immediately if there is no token to
+            # lookup
+            if not hashes:
+                return aligned_computed_tokens
+
             hash_buf = self.encoder.encode(hashes)
             offset_buf = self.encoder.encode(offsets)
             msg_buf = [
@@ -205,6 +219,7 @@ class LMCacheLookupClient(LookupClientInterface):
             tokens_buf = self.encoder.encode(token_ids)
             msg_buf = [
                 tokens_buf,
+                num_computed_buf,
                 lookup_id_buf,
                 request_configs_buf,
             ]
@@ -221,7 +236,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 failed_rank = i
                 resp = self.sockets[i].recv()
                 result = int.from_bytes(resp, "big")
-                results.append(result)
+                results.append(result + aligned_computed_tokens)
         except zmq.Again as e:
             logger.error(
                 "Timeout occurred for rank %s, recreating all sockets. Error: %s",
@@ -332,15 +347,18 @@ class LMCacheLookupServer:
                         lookup_id=lookup_id,
                         pin=True,
                         request_configs=request_configs,
+                        num_computed_tokens=0,
                     )
                 else:
                     token_frames = frames[0]
+                    num_computed_tokens = int.from_bytes(frames[1], "big")
                     tokens = self.decoder.decode(token_frames)
                     result = self.lmcache_engine.lookup(
                         tokens=tokens,
                         lookup_id=lookup_id,
                         pin=True,
                         request_configs=request_configs,
+                        num_computed_tokens=num_computed_tokens,
                     )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
