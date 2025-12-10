@@ -2,7 +2,7 @@
 # Standard
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 # Third Party
 import torch
@@ -28,7 +28,7 @@ class KVLayerGroupInfo:
     """ Shape of the KV cache tensor for layers in this group """
     """ For MHA: typically [2, num_blocks, block_size, num_heads, head_size] """
     """ For MLA: typically [num_blocks, block_size, head_size] """
-    shape: Tuple[int, ...]
+    shape: torch.Size
     """ Data type of the KV cache tensor for layers in this group """
     dtype: torch.dtype
 
@@ -104,14 +104,14 @@ class KVLayerGroupsManager:
                 return group
         return None
 
-    def get_layer_shape(self, layer_idx: int) -> Optional[tuple[int, ...]]:
+    def get_layer_shape(self, layer_idx: int) -> Optional[torch.Size]:
         """Get the shape of the KV cache for a given layer index.
 
         Args:
             layer_idx: The 0-based index of the layer.
 
         Returns:
-            The shape tuple, or None if layer not found.
+            The shape, or None if layer not found.
         """
         group = self.get_group_by_layer_idx(layer_idx)
         return group.shape if group else None
@@ -163,7 +163,7 @@ class KVLayerGroupsManager:
         )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            shape = tuple(kv_cache.shape)
+            shape = kv_cache.shape
             dtype = kv_cache.dtype
             key = (shape, dtype)
             groups_dict[key].append((layer_name, idx))
