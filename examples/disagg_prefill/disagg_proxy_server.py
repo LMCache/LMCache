@@ -214,6 +214,13 @@ app.state.prefill_clients = []
 app.state.decode_clients = []
 app.state.total_clients = []
 
+"""
+client_request and prefill/decode map
+key:   str    - unique id for requests across same conversation
+value: tuple  - (tokenization_client, prefiller_client, decoder_client)
+"""
+app.state.bound_clients = {}
+
 # Keep finished reqs
 app.state.finished_reqs = defaultdict(int)
 
@@ -275,7 +282,14 @@ async def stream_service_response(
 
 def round_robin_pick_client(clients, idx):
     return clients[idx % len(clients)]
-
+round_robin_counter = 0
+def round_robin_pick_clients():
+    global round_robin_counter
+    round_robin_counter += 1
+    tokenization_client = round_robin_pick_client(app.state.total_clients, round_robin_counter)
+    prefill_client = round_robin_pick_client(app.state.prefill_clients, round_robin_counter)
+    decode_client = round_robin_pick_client(app.state.decode_clients, round_robin_counter)
+    return (tokenization_client, prefill_client, decode_client)
 
 async def wait_decode_kv_ready(req_id: str, num_tp_rank: int):
     while app.state.finished_reqs[req_id] < num_tp_rank:
@@ -283,6 +297,33 @@ async def wait_decode_kv_ready(req_id: str, num_tp_rank: int):
     logger.debug(f"Prefill node signaled kv ready for req {req_id}")
     app.state.finished_reqs.pop(req_id)
 
+
+def pick_up_bound_clients(req_data, client_bound_key):
+    """
+    :param req_data: http request
+    :param client_bound_key: the field name of the client uid in http request
+    :return: bound_clients
+    """
+    client_id = req_data.get(client_bound_key)
+    if client_id in app.state.bound_clients:
+        tokenization_client, prefill_client, decode_client = app.state.bound_clients[client_id]
+    else:
+        tokenization_client, prefill_client, decode_client = round_robin_pick_clients()
+
+    if client_id and client_id not in app.state.bound_clients:
+        #only bound non-empty client_id
+        app.state.bound_clients[client_id] = (tokenization_client, prefill_client, decode_client)
+    return tokenization_client, prefill_client, decode_client
+
+ENABLE_BOUND_CLIENT = os.getenv("ENABLE_BOUND_CLIENT", "False").lower() == "true"
+#CLIENT_BOUND_KEY, the field name of the client uid in http headers
+CLIENT_BOUND_KEY = os.getenv("CLIENT_BOUND_KEY", "session-id")
+def pick_up_clients(req_data):
+    if not ENABLE_BOUND_CLIENT:
+        return round_robin_pick_clients()
+    else:
+        return pick_up_bound_clients(req_data, CLIENT_BOUND_KEY)
+    return (tokenization_client, prefill_client, decode_client)
 
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
@@ -294,7 +335,8 @@ async def handle_completions(request: Request):
     try:
         req_data = await request.json()
 
-        tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
+        # Pick tokenization, prefill and decode client
+        tokenization_client, prefill_client, decode_client = pick_up_clients(req_data, counter)
 
         tokenize_output = await send_request_to_service(
             tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
@@ -305,8 +347,6 @@ async def handle_completions(request: Request):
         req_data["prompt"] = tokenize_output["tokens"]
         req_data["max_tokens"] = 1
 
-        # Pick decode client
-        decode_client = round_robin_pick_client(app.state.decode_clients, counter)
 
         disagg_spec = {
             "req_id": req_id,
@@ -396,7 +436,8 @@ async def handle_chat_completions(request: Request):
     try:
         req_data = await request.json()
 
-        tokenization_client = round_robin_pick_client(app.state.total_clients, counter)
+        # Pick tokenization, prefill and decode client
+        tokenization_client, prefill_client, decode_client = pick_up_clients(req_data, counter)
 
         # For chat completions, we need to tokenize the messages
         tokenize_output = await send_request_to_service(
@@ -414,7 +455,6 @@ async def handle_chat_completions(request: Request):
             req_data["max_completion_tokens"] = 1
 
         # Pick decode client
-        decode_client = round_robin_pick_client(app.state.decode_clients, counter)
 
         disagg_spec = {
             "req_id": req_id,
@@ -434,7 +474,6 @@ async def handle_chat_completions(request: Request):
         stream_options = req_data.pop("stream_options", None)
 
         # Send request to prefill service round robin, get the response
-        prefill_client = round_robin_pick_client(app.state.prefill_clients, counter)
         prefill_output = await send_request_to_service(
             prefill_client.client, "/v1/completions", req_data
         )

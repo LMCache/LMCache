@@ -60,6 +60,23 @@ python disagg_proxy_server.py \
     --decoder-init-port  "7300,7301,7302,7303,7304,7305,7306,7307" \
     --decoder-alloc-port "7400,7401,7402,7403,7404,7405,7406,7407"
 ```
+
+#### To support bounded prefiller and decoder for the same session
+For xPyD multi-round QA scenoria, proxy can use the bounded prefiller/decoder for the same session, other than round-robin.
+```
+export ENABLE_BOUND_CLIENT="true"
+#optional, configure the meaningful field in http header as the session-id, "session-id" is the default field name
+export CLINET_BOUND_KEY="session-id"
+python disagg_proxy_server.py \
+    .... \ # other arguments
+```
+
+http requests should provide (key:value) in http header for proxy to bind prefiller/decoder, for example (session-id : uid)
+- value: the unique identifier for proxy to bind the prefiller/decoder in a session
+- key:   the field name for proxy to extract the uid from http header, the field name should equal with the $CLINET_BOUND_KEY
+
+proxy will use the CLIENT_BOUND_KEY to extract the uid as the 
+
 #### Example benchmark command
 
 If you have vLLM's serving benchmark tool, you can run the following command to benchmark the serving performance of the disaggregated prefill setup:
