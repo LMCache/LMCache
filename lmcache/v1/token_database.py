@@ -333,14 +333,14 @@ class SegmentTokenDatabase(TokenDatabase):
         matches = (
             (windows == self.sep_tokens).all(dim=1).nonzero(as_tuple=True)[0].tolist()
         )
-        logger.info(f"Found separator matches at indices: {matches}")
+        # logger.info(f"Found separator matches at indices: {matches}")
 
         # Split based on matches
         start = 0
         for idx in matches:
             yield tokens[start:idx]
             start = idx + self.sep_len
-            logger.info(f"Splitting tokens at index {idx}, next start is {start}")  
+            # logger.info(f"Splitting tokens at index {idx}, next start is {start}")  
         # yield last chunk
         yield tokens[start:]
 

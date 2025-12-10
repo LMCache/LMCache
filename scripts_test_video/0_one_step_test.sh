@@ -12,20 +12,20 @@ export LMCACHE_DEBUG=1
 export LMDEBUG=1
 export LMCACHE_VERBOSE=1
 export LMCACHE_CONFIG_FILE=lmcache_blend.yml
-export LM_CACHE_CONFIG_FILE=lmcache_blend.yml   
-model=Qwen/Qwen2.5-VL-7B-Instruct
-model_name="Qwen2.5-VL-7B-Instruct"
+export LM_CACHE_CONFIG_FILE=lmcache_blend.yml 
+
+change_recompute_ratio=False
+if [ "$change_recompute_ratio" = True ] ; then
+  sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: [0.15]|g" lmcache_blend.yml
+  echo "  blend_recompute_ratio set to 0.15"
+fi  
 model=Qwen/Qwen3-VL-8B-Instruct
 model_name="Qwen3-VL-8B-Instruct"
-# model=Qwen/Qwen3-VL-8B-Instruct
+# model=Qwen/Qwen3-VL-8B-Thinking
 # model_name="Qwen3-VL-8B-Thinking"
 SERVER_LOG=server.log
 dataset_root=/root/workspace/dataset/Anomaly-Detection-Dataset
-results_dir=results_analysis/logs/${model_name}
-if [ ! -d "$results_dir" ]; then
-  mkdir -p "$results_dir"
-fi   
-
+dataset_json="datasets/small_dataset.json"
 
 # 1. simple example
 # python3 video_client.py \
@@ -36,15 +36,26 @@ fi
 
 
 # 2. anomaly detection
-WIN_SIZES=(10 20 30 40 50 60 70 80 90 100)
+WIN_SIZES=(30)
 STRIDE_SIZES=(0.2)
-categorys=("arson" "fighting" "shooting" "shoplifting" "vandalism" "abuse" "stealing")
-categorys=("vandalism") 
+blend_recompute_ratios=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
 
-for category in "${categorys[@]}"; do
+if [ "$change_recompute_ratio" = False ] ; then
+  blend_recompute_ratios=(0.15)
+fi
+for ratio in "${blend_recompute_ratios[@]}"; do
+  # update in lmcache_blend.yml
+  sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: ${ratio}|g" lmcache_blend.yml
+  echo "  blend_recompute_ratio set to ${ratio}"
+  results_dir=results_analysis/logs/${model_name}/tests
+  if [ ! -d "$results_dir" ]; then
+    mkdir -p "$results_dir"
+  fi
+
   rm -f $SERVER_LOG
   # kill existing vllm serve process
   pkill -f "vllm serve $model"
+  kill -9 $(ps aux | grep "VLLM::EngineCore" | awk '{print $2}')
   sleep 15
 
   vllm serve $model \
@@ -73,18 +84,18 @@ for category in "${categorys[@]}"; do
       echo "Running win=${WIN}s, stride=${STRIDE}"
       python3 anomaly_video_client.py \
         --dataset-root $dataset_root  \
+        --dataset-json $dataset_json \
         --output-dir $results_dir \
         --csv-name request_times_win${WIN}_stride${STRIDE}.csv \
         --model $model \
-        --sample-fps 1.0 \
+        --sample-fps 2.0 \
         --use-sliding-window \
         --window-seconds ${WIN} \
         --stride-ratio ${STRIDE} \
-        --max-tokens 6 \
-        --category $category \
+        --category all \
         --blend-special-str "$BLEND_SPECIAL_STR"
       sleep 5
     done
     sleep 5
   done
-done  
+done

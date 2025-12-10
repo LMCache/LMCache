@@ -3,15 +3,6 @@
 """
 Traverse the Anomaly-Detection-Dataset, slice each mp4 into sliding windows (by frames),
 and send them to an OpenAI-compatible endpoint (same frame encoding strategy as video_client.py).
-
-Example:
-python3 anomaly_video_client.py \
-  --dataset-root /root/workspace/dataset/Anomaly-Detection-Dataset/Anomaly-Videos-Part-1 \
-  --output-dir responses/anomaly_win10s_stride40pct_fps1.0 \
-  --model-name Qwen/Qwen2.5-VL-7B-Instruct \
-  --sample-fps 1.0 \
-  --window-seconds 10 \
-  --stride-ratio 0.4
 """
 
 import argparse
@@ -166,13 +157,42 @@ def build_messages_from_frames_internvl(
     ]
 
 
-def iter_videos(dataset_root: str, pattern: str) -> Iterable[str]:
-    """Yield absolute paths of videos matching pattern under dataset_root."""
-    glob_pattern = os.path.join(dataset_root, pattern)
-    for path in sorted(glob.glob(glob_pattern, recursive=True)):
-        print(f"path={path}")
-        if path.lower().endswith(".mp4"):
-            yield path
+def iter_videos(
+    dataset_root: str,
+    category: str,
+    pattern: str,
+    max_normal: int = 100,
+) -> Iterable[Tuple[str, str, str]]:
+    """
+    Yield (absolute_path, label, category), where label is one of:
+      - "anomaly"
+      - "normal"
+    """
+    # ---------- normal videos ----------
+    normal_root = os.path.join(dataset_root, "Testing_Normal_Videos_Anomaly",)
+
+    if not os.path.isdir(normal_root):
+        print(f"[WARN] normal videos root not found: {normal_root}")
+        return
+    normal_pattern = os.path.join(normal_root, pattern)
+    count = 0
+    for path in sorted(glob.glob(normal_pattern, recursive=True)):
+        print(f"[DEBUG] found normal video: {path}")
+        if not path.lower().endswith(".mp4"):
+            continue
+
+        yield os.path.abspath(path), "normal", "normal"
+        count += 1
+        if count >= max_normal:
+            break
+
+    # ---------- anomaly videos ----------
+    category_dirname = category.capitalize() if category else ""
+    anomaly_pattern = os.path.join(dataset_root, category_dirname, pattern)
+    for path in sorted(glob.glob(anomaly_pattern, recursive=True)):
+        if not path.lower().endswith(".mp4"):
+            continue
+        yield os.path.abspath(path), "anomaly", category.lower() if category else infer_category(path, dataset_root)
 
 
 def infer_category(video_path: str, dataset_root: str) -> str:
@@ -180,6 +200,44 @@ def infer_category(video_path: str, dataset_root: str) -> str:
     rel = os.path.relpath(video_path, dataset_root)
     parts = rel.split(os.sep)
     return parts[0] if parts else ""
+
+
+def iter_videos_from_json(
+    dataset_root: str,
+    dataset_json: str,
+    category_filter: str = "",
+) -> Iterable[Tuple[str, str, str]]:
+    """
+    Yield (absolute_path, label, category) using a JSON manifest with
+    items like {"video_path": "...", "category": "..."}.
+    """
+    if not os.path.isfile(dataset_json):
+        raise FileNotFoundError(dataset_json)
+
+    with open(dataset_json, "r") as f:
+        entries = json.load(f)
+
+    if not isinstance(entries, list):
+        raise ValueError(f"dataset_json must contain a list, got {type(entries)}")
+
+    cat_filter = category_filter.lower() if category_filter else ""
+    if cat_filter == "all":
+        cat_filter = ""
+
+    for idx, item in enumerate(entries):
+        path = item.get("video_path")
+        category = (item.get("category") or "").lower()
+        if not path:
+            print(f"[WARN] entry #{idx} missing video_path, skip.")
+            continue
+        if cat_filter and category != cat_filter:
+            continue
+        abs_path = path if os.path.isabs(path) else os.path.join(dataset_root, path)
+        if not os.path.isfile(abs_path):
+            print(f"[WARN] entry #{idx} file not found: {abs_path}, skip.")
+            continue
+        label = "normal" if category == "normal" else "anomaly"
+        yield os.path.abspath(abs_path), label, category or infer_category(abs_path, dataset_root)
 
 
 def run(args):
@@ -208,6 +266,7 @@ def run(args):
     fieldnames = [
         "video_path",
         "category",
+        "label",
         "window_index",
         "start_frame",
         "end_frame",
@@ -224,32 +283,29 @@ def run(args):
     # Per-category timing stats
     cat_stats = {}  # {category: {"count": int, "sum_dur": float}}
 
-    try:
-        for video_path in iter_videos(args.dataset_root, args.pattern):
-            try:
-                category = infer_category(video_path, args.dataset_root)
-                category_key = category.lower()
-                print(f"[INFO] Processing video in category: {category}")
+    if args.dataset_json:
+        video_iter = iter_videos_from_json(args.dataset_root, args.dataset_json, args.category)
+    else:
+        video_iter = iter_videos(args.dataset_root, args.category, args.pattern)
 
-                # If --category is set (not "" or "all"), only process that category
-                if category_filter and category_filter != "all":
-                    if category_key != category_filter:
-                        continue
+    try:
+        for video_path, label, category in video_iter:
+            try:
+                category_lower = category.lower() if category else ""
+                # If we are running a specific crime category, place normal videos under that category folder too.
+                category_for_prompt = category_filter if (label == "normal" and category_filter and category_filter != "all") else category_lower
 
                 duration_s, total_frames, video_fps = probe_video_opencv(video_path)
                 print(f"[INFO] Probed video: duration={duration_s:.2f}s total_frames={total_frames} fps={video_fps:.3f}")
 
-                # Skip short videos or categories without prompts
-                if duration_s < args.window_seconds or category_key not in prompts:
-                    continue
-                if args.window_seconds == 30 and duration_s > 90 and duration_s < 30:
-                    continue
-
                 print(f"[INFO] Video: {video_path}")
                 print(f"       category={category} duration={duration_s:.2f}s frames={total_frames} src_fps={video_fps:.3f}")
 
-                prompt = prompts[category_key]
-                category_dirname = category_key or "unknown"
+                prompt = prompts.get(category_for_prompt)
+                if not prompt:
+                    print(f"[WARN] No prompt found for category '{category_for_prompt}', skip.")
+                    continue
+                category_dirname = category_for_prompt or "unknown"
                 print(f"[INFO] Using prompt: {prompt}")
 
                 # Create per-category output directory
@@ -299,43 +355,107 @@ def run(args):
                 for widx, (s_idx, e_idx) in enumerate(windows):
                     sub_frames = base_frames[s_idx:e_idx]
 
+                    # Stream to measure TTFT (time to first token).
                     if is_internvl:
-                        # Use chat.completions with OpenAI multimodal content; avoid /v1/responses to skip 400s.
                         messages = build_messages_from_frames_internvl(
                             sub_frames, prompt, args.blend_special_str
                         )
                         req_start = time.perf_counter()
-                        resp = client.chat.completions.create(
+                        ttft = None
+                        chunks = []
+                        text_buf: List[str] = []
+                        raw_status = None
+                        with client.chat.completions.create(
                             model=args.model,
                             messages=messages,
                             max_tokens=args.max_tokens if args.max_tokens > 0 else None,
                             temperature=0.0,
                             top_p=1.0,
-                        )
+                            stream=True,
+                        ) as stream:
+                            raw_status = getattr(stream, "response", None).status_code if getattr(stream, "response", None) else None
+                            for chunk in stream:
+                                chunks.append(chunk)
+                                has_content = (
+                                    chunk.choices
+                                    and chunk.choices[0].delta
+                                    and chunk.choices[0].delta.content
+                                )
+                                if ttft is None and has_content:
+                                    ttft = time.perf_counter() - req_start
+                                if has_content:
+                                    piece = chunk.choices[0].delta.content
+                                    if isinstance(piece, str):
+                                        text_buf.append(piece)
+                                    elif isinstance(piece, list):
+                                        for p in piece:
+                                            part_text = getattr(p, "text", None) or (p.get("text") if isinstance(p, dict) else None)
+                                            if part_text:
+                                                text_buf.append(part_text)
                     else:
                         messages = build_messages_from_frames_qwen(sub_frames, prompt, args.blend_special_str)
                         req_start = time.perf_counter()
-                        resp = client.chat.completions.create(
+                        ttft = None
+                        chunks = []
+                        text_buf: List[str] = []
+                        raw_status = None
+                        with client.chat.completions.create(
                             model=args.model,
                             messages=messages,
                             max_tokens=args.max_tokens if args.max_tokens > 0 else None,
-                            temperature=0.01,
+                            temperature=0.0,
                             top_p=1.0,
-                        )
-                    req_dur = time.perf_counter() - req_start
-
-                    try:
-                        resp_obj = resp.model_dump()
-                    except Exception:
-                        resp_obj = str(resp)
+                            stream=True,
+                        ) as stream:
+                            raw_status = getattr(stream, "response", None).status_code if getattr(stream, "response", None) else None
+                            for chunk in stream:
+                                chunks.append(chunk)
+                                has_content = (
+                                    chunk.choices
+                                    and chunk.choices[0].delta
+                                    and chunk.choices[0].delta.content
+                                )
+                                if ttft is None and has_content:
+                                    ttft = time.perf_counter() - req_start
+                                if has_content:
+                                    piece = chunk.choices[0].delta.content
+                                    if isinstance(piece, str):
+                                        text_buf.append(piece)
+                                    elif isinstance(piece, list):
+                                        for p in piece:
+                                            part_text = getattr(p, "text", None) or (p.get("text") if isinstance(p, dict) else None)
+                                            if part_text:
+                                                text_buf.append(part_text)
+                    if ttft is None:
+                        ttft = time.perf_counter() - req_start
+                    # Build a JSON-friendly response object from all streamed chunks to avoid truncation.
+                    full_text = "".join(text_buf)
+                    last_chunk = chunks[-1] if chunks else None
+                    finish_reason = last_chunk.choices[0].finish_reason if last_chunk and last_chunk.choices else None
+                    resp_obj = {
+                        "id": last_chunk.id if last_chunk else None,
+                        "model": args.model,
+                        "raw_status": raw_status,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": full_text},
+                                "message": {"content": full_text},
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                        "stream": [c.model_dump() for c in chunks],
+                    }
 
                     # Save JSON response under category directory
-                    out_name = f"{category_dirname}_{os.path.splitext(os.path.basename(video_path))[0]}_w{widx:03d}_{s_idx}-{e_idx}.json"
+                    out_name = f"{label}_{os.path.splitext(os.path.basename(video_path))[0]}_w{widx:03d}_{s_idx}-{e_idx}.json"
                     out_path = os.path.join(category_dir, out_name)
 
                     meta = {
                         "dataset": "Anomaly-Detection-Dataset",
-                        "category": category or category_dirname,
+                        "category": category_dirname,
+                        "source_category": category or category_dirname,
+                        "label": label,  # anomaly or normal
                         "video_path": video_path,
                         "mode": "sliding" if args.use_sliding_window else "full",
                         "sample_fps": args.sample_fps,
@@ -351,19 +471,20 @@ def run(args):
                         json.dump({"meta": meta, "response": resp_obj}, f, indent=2, ensure_ascii=False)
 
                     print(f"[SAVE] {out_path}")
-                    print(f"[STATS] request {widx} for {video_path} took {req_dur:.3f}s")
+                    print(f"[STATS] request {widx} for {video_path} ttft={ttft:.3f}s")
 
                     # Write per-category CSV record
                     writer.writerow(
                         {
                             "video_path": video_path.split(os.sep)[-1],
-                            "category": category or category_dirname,
+                            "category": category_dirname,
+                            "label": label,
                             "window_index": widx,
                             "start_frame": s_idx,
                             "end_frame": e_idx,
                             "num_frames": e_idx - s_idx,
                             "mode": "sliding" if args.use_sliding_window else "full",
-                            "duration_seconds": f"{req_dur:.6f}",
+                            "duration_seconds": f"{ttft:.6f}",
                             "output_path": out_path.split(os.sep)[-1],
                         }
                     )
@@ -374,7 +495,7 @@ def run(args):
                     if category_dirname not in cat_stats:
                         cat_stats[category_dirname] = {"count": 0, "sum_dur": 0.0}
                     cat_stats[category_dirname]["count"] += 1
-                    cat_stats[category_dirname]["sum_dur"] += req_dur
+                    cat_stats[category_dirname]["sum_dur"] += ttft
 
             except Exception as e:
                 print(f"[ERROR] {video_path}: {e}")
@@ -430,9 +551,10 @@ def run(args):
 def build_argparser():
     ap = argparse.ArgumentParser(description="Send Anomaly-Detection-Dataset videos to an OpenAI-compatible server with sliding windows.")
     ap.add_argument("--dataset-root", type=str,
-                    default="/root/workspace/dataset/Anomaly-Detection-Dataset/Anomaly-Videos-Part-1",
+                    default="/root/workspace/dataset/Anomaly-Detection-Dataset",
                     help="Root dir of the dataset.")
     ap.add_argument("--pattern", type=str, default="**/*.mp4", help="Glob pattern under dataset_root.")
+    ap.add_argument("--dataset-json", type=str, default="", help="Optional JSON manifest with video_path/category fields.")
     ap.add_argument("--output-dir", type=str, default="", help="Where to save responses (default auto name).")
     ap.add_argument("--model", type=str, default="qwen-vl-7b-instant", help="Model name.")
     ap.add_argument("--sample-fps", type=float, default=1.0, help="FPS to sample frames from video.")
@@ -450,7 +572,7 @@ def build_argparser():
                         "shooting": "Describe the frames and determine if they show a shooting. Start your response with 'Yes' or 'No'.",
                         "shoplifting": "Describe the frames and determine if they show shoplifting. Start your response with 'Yes' or 'No'.",
                         "stealing": "Describe the frames and determine if they show stealing. Start your response with 'Yes' or 'No'.",
-                        "vandalism": "Describe the frames and determine if they show vandalism. Start your response with 'Yes' or 'No'."
+                        "vandalism": "Describe the frames and determine if they show vandalism. Start your response with 'Yes' or 'No'.",
                     }, help="Prompt sent with each window.")
     ap.add_argument("--category", type=str, default="", help="If set (and not 'all'), only process this category (case-insensitive).")               
     ap.add_argument("--max-tokens", type=int, default=10, help="Max tokens for the response (<=0 to disable).")
