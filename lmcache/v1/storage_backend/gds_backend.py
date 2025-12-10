@@ -258,25 +258,18 @@ class GdsBackend(AllocatorBackendInterface):
         # Cache policy and size tracking for GDS eviction
         # Use max_cache_size as the GDS cache size limit (unified naming)
         self.cache_policy = get_cache_policy(config.cache_policy)
-        # 优先用 config.max_gds_size（单位GB），没有就用环境变量
         max_gds_size = getattr(config, "max_gds_size", None)
         if max_gds_size is None or max_gds_size == 0:
             env_val = os.environ.get("LMCACHE_MAX_GDS_SIZE")
             if env_val is not None:
                 try:
                     max_gds_size = float(env_val)
-                    logger.info(f"[GDS CACHE] max_gds_size set from env: {max_gds_size} GB")
                 except Exception as e:
                     logger.warning(f"[GDS CACHE] Failed to parse LMCACHE_MAX_GDS_SIZE: {env_val}, error: {e}")
             else:
                 max_gds_size = 0
-        self.max_cache_size = int(max_gds_size * 1024**3)  # 统一为字节数
-        logger.info(f"[GDS CACHE] config.max_gds_size={getattr(config, 'max_gds_size', None)} (env: {os.environ.get('LMCACHE_MAX_GDS_SIZE')})")
+        self.max_cache_size = int(max_gds_size * 1024**3)
         self.current_cache_size = 0
-        logger.info(
-            f"[GDS CACHE] Initialized with cache_policy={config.cache_policy}, "
-            f"max_cache_size={self.max_cache_size} bytes ({self.max_cache_size / 1024 / 1024:.2f} MB)"
-        )
 
         self.hot_lock = threading.Lock()
         self.hot_cache: OrderedDict[CacheEngineKey, DiskCacheMetadata] = OrderedDict()
@@ -388,15 +381,6 @@ class GdsBackend(AllocatorBackendInterface):
     def __str__(self):
         return self.__class__.__name__
 
-    # def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
-    #     # TODO: implement pin() semantics
-    #     with self.hot_lock:
-    #         res = key in self.hot_cache
-    #     if res:
-    #         return True
-    #     if self._try_to_read_metadata(key):
-    #         return True
-    #     return False
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether the key exists in the GDS cache.
@@ -482,11 +466,9 @@ class GdsBackend(AllocatorBackendInterface):
         """
         if self.max_cache_size <= 0:
             # No size limit configured
-            logger.info("[GDS EVICT] No size limit configured, skip eviction.")
             return True
 
-        # 直接用self.max_cache_size判断空间，去掉max_bytes冗余变量
-        logger.info(
+        logger.debug(
             f"[GDS EVICT CHECK] current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB, "
             f"required_size={required_size / 1024 / 1024:.2f} MB, "
             f"max_cache_size={self.max_cache_size / 1024 / 1024:.2f} MB, "
@@ -495,7 +477,7 @@ class GdsBackend(AllocatorBackendInterface):
         )
 
         if self.current_cache_size + required_size <= self.max_cache_size:
-            logger.info(
+            logger.debug(
                 f"[GDS EVICT] Not triggered: current_cache_size + required_size <= max_cache_size ({self.current_cache_size + required_size:.0f} <= {self.max_cache_size:.0f} bytes)"
             )
             return True
@@ -507,7 +489,7 @@ class GdsBackend(AllocatorBackendInterface):
                     self.hot_cache, num_candidates=1
                 )
                 if not evict_keys:
-                    logger.info(
+                    logger.debug(
                         "[GDS EVICTION] No eviction candidates found. "
                         f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB, "
                         f"max_cache_size={self.max_cache_size / 1024 / 1024:.2f} MB, "
@@ -536,7 +518,7 @@ class GdsBackend(AllocatorBackendInterface):
                     self.current_cache_size -= evict_size
                     self.cache_policy.update_on_force_evict(evict_key)
 
-                    logger.info(
+                    logger.debug(
                         f"[GDS EVICTION] Evicted key={evict_key}, "
                         f"size={evict_size / 1024 / 1024:.2f} MB. "
                         f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB, "
@@ -552,7 +534,6 @@ class GdsBackend(AllocatorBackendInterface):
     def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
         assert memory_obj.tensor is not None
 
-        logger.info(f"[GDS PUT] submit_put_task called for key={key}, size={memory_obj.get_physical_size() / 1024 / 1024:.2f} MB")
         # Skip repeated save
         if self.exists_in_put_tasks(key):
             logger.debug(f"Put task for {key} is already in progress.")
@@ -580,12 +561,6 @@ class GdsBackend(AllocatorBackendInterface):
         
         self.cache_policy.update_on_put(key)
         memory_obj.ref_count_up()
-
-        logger.info(
-            f"[GDS CACHE] Submitting PUT task: key={key}, "
-            f"size={required_size / 1024 / 1024:.2f} MB, "
-            f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB"
-        )
 
         future = asyncio.run_coroutine_threadsafe(
             self._async_save_bytes_to_disk(key, memory_obj), self.loop
@@ -891,16 +866,6 @@ class GdsBackend(AllocatorBackendInterface):
                 "Both cufile and cudart are None, this should not happen"
             )
 
-    # def pin(self, key: CacheEngineKey) -> bool:
-    #     # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
-    #     # to implement pin and unpin
-    #     return False
-
-    # def unpin(self, key: CacheEngineKey) -> bool:
-    #     # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
-    #     # to implement pin and unpin
-    #     return False
-
     def pin(self, key: CacheEngineKey) -> bool:
         """
         Mark a cache entry as pinned so that the eviction policy
@@ -933,14 +898,10 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> MemoryAllocatorInterface:
         assert config.cufile_buffer_size is not None
         size = config.cufile_buffer_size * 1024**2
-        logger.info(
-            f"[GDS CACHE] Initializing allocator with buffer size: "
-            f"{config.cufile_buffer_size} MB ({size} bytes)"
-        )
         if self.use_cufile:
             return CuFileMemoryAllocator(size)
         else:
-            logger.info("Using GPUMemoryAllocator instead of CuFileMemoryAllocator")
+            logger.debug("Using GPUMemoryAllocator instead of CuFileMemoryAllocator")
             return GPUMemoryAllocator(size, device=self.dst_device)
 
     def allocate(
@@ -953,8 +914,6 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> Optional[MemoryObj]:
         if busy_loop:
             logger.warning("GDS Backend does not support allocation with busy loop")
-        # if eviction:
-        #     logger.warning("GDS Backend does not support eviction")
 
         result = self.memory_allocator.allocate(shape, dtype, fmt)
         
@@ -983,8 +942,6 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> Optional[list[MemoryObj]]:
         if busy_loop:
             logger.warning("GDS Backend does not support allocation with busy loop")
-        if eviction:
-            logger.warning("GDS Backend does not support eviction")
 
         result = self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
         
