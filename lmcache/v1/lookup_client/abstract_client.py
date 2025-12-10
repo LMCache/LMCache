@@ -20,6 +20,11 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
         Args:
             lookup_id: The lookup ID to lookup
+
+        Returns:
+            -1 means not found;
+            None means ongoing; (this semantic is not supported in sync lookup clients)
+            int >= 0 means number of hit tokens
         """
         return None
 
@@ -29,9 +34,12 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
+        Should be called for first lookup and pinning. Subsequent lookups for the same
+        request should call lookup_cache instead.
 
         Args:
             token_ids: The token IDs to lookup
@@ -40,6 +48,9 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
             request_configs: The configs of the request,
             includes tags and the other configs
+
+            num_computed_tokens: The number of leading tokens that
+            the caller has already computed.
 
         Returns:
             The number of tokens that can be loaded from cache.

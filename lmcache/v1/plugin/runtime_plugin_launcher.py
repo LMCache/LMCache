@@ -13,7 +13,7 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
-class PluginLauncher:
+class RuntimePluginLauncher:
     def __init__(self, config, role, worker_count, worker_id):
         self.config = config
         self.role = role
@@ -25,17 +25,17 @@ class PluginLauncher:
 
     def launch_plugins(self):
         """Launch all configured plugins"""
-        if not self.config.plugin_locations:
+        if not self.config.runtime_plugin_locations:
             return
 
-        for loc in self.config.plugin_locations:
+        for loc in self.config.runtime_plugin_locations:
             self._launch_plugins(loc)
 
     def _launch_plugins(self, loc: str):
         """Launch plugins from specified location"""
         path = Path(loc)
         if not path.exists():
-            logger.warning(f"Plugin location {loc} does not exist")
+            logger.warning(f"Runtime plugin location {loc} does not exist")
             return
 
         files = []
@@ -86,6 +86,12 @@ class PluginLauncher:
 
             # Pass role and config as environment variables
             env = os.environ.copy()
+            env["LMCACHE_RUNTIME_PLUGIN_ROLE"] = str(self.role)
+            env["LMCACHE_RUNTIME_PLUGIN_CONFIG"] = self.config.to_json()
+            env["LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
+            env["LMCACHE_RUNTIME_PLUGIN_WORKER_ID"] = str(self.worker_id)
+
+            # TODO: For backwards compatibility, remove when applicable
             env["LMCACHE_PLUGIN_ROLE"] = str(self.role)
             env["LMCACHE_PLUGIN_CONFIG"] = self.config.to_json()
             env["LMCACHE_PLUGIN_WORKER_COUNT"] = str(self.worker_count)
@@ -99,7 +105,7 @@ class PluginLauncher:
                 text=True,
             )
             self.plugin_processes.append(proc)
-            logger.info(f"Launched plugin: {file} with {interpreter}")
+            logger.info(f"Launched runtime plugin: {file} with {interpreter}")
 
             # Start thread to capture output continuously
             threading.Thread(
@@ -120,7 +126,7 @@ class PluginLauncher:
                     interpreters.append(interpreter_str)
         except Exception as e:
             logger.error(
-                f"Error reading interpreter from plugin file {file} - "
+                f"Error reading interpreter from runtime plugin file {file} - "
                 f"using default interpreters: {e}"
             )
             pass
@@ -146,7 +152,9 @@ class PluginLauncher:
     def _capture_plugin_output(self, proc: subprocess.Popen, plugin_name: str):
         """Continuously capture and log plugin output"""
         try:
-            assert proc.stdout is not None, "The plugin subprocess does not have stdout"
+            assert proc.stdout is not None, (
+                "The runtime plugin subprocess does not have stdout"
+            )
             while True:
                 line = proc.stdout.readline()
                 if not line:
@@ -154,7 +162,9 @@ class PluginLauncher:
                 logger.info(f"[{plugin_name}] {line.strip()}")
 
             proc.wait()
-            logger.info(f"Plugin {plugin_name} exited with code {proc.returncode}")
+            logger.info(
+                f"Runtime plugin {plugin_name} exited with code {proc.returncode}"
+            )
         except Exception as e:
             logger.error(f"Error capturing output for {plugin_name}: {e}")
 
@@ -164,6 +174,6 @@ class PluginLauncher:
             try:
                 if proc.poll() is None:
                     proc.terminate()
-                    logger.info(f"Terminated plugin process: {proc.pid}")
+                    logger.info(f"Terminated runtime plugin process: {proc.pid}")
             except Exception as e:
-                logger.error(f"Error terminating plugin process: {e}")
+                logger.error(f"Error terminating runtime plugin process: {e}")

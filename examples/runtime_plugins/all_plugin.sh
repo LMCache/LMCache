@@ -5,10 +5,10 @@
 # Handle termination signal
 trap "echo 'Received termination signal, exiting...'; exit 0" SIGTERM
 
-role="$LMCACHE_PLUGIN_ROLE"
-worker_id="$LMCACHE_PLUGIN_WORKER_ID"
-worker_count="$LMCACHE_PLUGIN_WORKER_COUNT"
-config="$LMCACHE_PLUGIN_CONFIG"
+role="$LMCACHE_RUNTIME_PLUGIN_ROLE"
+worker_id="$LMCACHE_RUNTIME_PLUGIN_WORKER_ID"
+worker_count="$LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT"
+config="$LMCACHE_RUNTIME_PLUGIN_CONFIG"
 
 echo "All plugin started for role: $role, worker ID: $worker_id, worker count: $worker_count"
 echo "All plugin accept LMCache Config: $config"

@@ -11,13 +11,15 @@ import time
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
-from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
+from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
@@ -100,6 +102,7 @@ class LocalDiskBackend(StorageBackendInterface):
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
     ):
         if torch.cuda.is_available():
             super().__init__(dst_device)
@@ -150,6 +153,20 @@ class LocalDiskBackend(StorageBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+
+        # Batched message sender for controller communication
+        self.batched_msg_sender: Optional[BatchedMessageSender] = None
+
+        # Initialize batched message sender
+        if lmcache_worker and metadata is not None:
+            self.batched_msg_sender = BatchedMessageSender(
+                metadata=metadata,
+                config=config,
+                location=str(self),
+                lmcache_worker=lmcache_worker,
+            )
+        else:
+            logger.warning("Controller message sender is not initialized")
 
     def __str__(self):
         return "LocalDiskBackend"
@@ -233,10 +250,11 @@ class LocalDiskBackend(StorageBackendInterface):
             self.cache_policy.update_on_force_evict(key)
             self.disk_lock.release()
 
-        # push kv evict msg
-        if self.lmcache_worker is not None:
-            self.lmcache_worker.put_msg(
-                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+        # Push kv evict msg with batching
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.EVICT,
+                key=key.chunk_hash,
             )
 
         return True
@@ -263,10 +281,11 @@ class LocalDiskBackend(StorageBackendInterface):
                     path, size, shape, dtype, cached_positions, fmt, 0
                 )
 
-        # push kv admit msg
-        if self.lmcache_worker is not None and not has_stored:
-            self.lmcache_worker.put_msg(
-                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+        # Push kv admit msg with batching
+        if self.batched_msg_sender is not None and not has_stored:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.ADMIT,
+                key=key.chunk_hash,
             )
 
     def submit_put_task(
@@ -575,4 +594,6 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.close()
         self.disk_worker.close()
