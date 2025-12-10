@@ -264,7 +264,7 @@ class GdsBackend(AllocatorBackendInterface):
             if env_val is not None:
                 try:
                     max_gds_size = float(env_val)
-                except Exception as e:
+                except ValueError as e:
                     logger.warning(f"[GDS CACHE] Failed to parse LMCACHE_MAX_GDS_SIZE: {env_val}, error: {e}")
             else:
                 max_gds_size = 0
