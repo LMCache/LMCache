@@ -627,6 +627,7 @@ def main():
         # Handle KV shape specification
         if not args.kvcache_shape_spec:
             logger.error("--kvcache-shape-spec is required")
+            sys.exit(1)
         else:
             # Use new multi-group specification
             layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
