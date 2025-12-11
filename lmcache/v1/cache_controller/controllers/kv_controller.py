@@ -206,7 +206,6 @@ class KVController:
         result = self.registry.find_kv(
             msg.hashes[0],
             exclude_instance_id=msg.instance_id,
-            exclude_worker_id=msg.worker_id,
         )
         if result is None:
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])

@@ -273,36 +273,23 @@ class RegistryTree:
         self,
         key: int,
         exclude_instance_id: Optional[str] = None,
-        exclude_worker_id: Optional[int] = None,
-        exclude_location: Optional[str] = None,
     ) -> Optional[KVChunkInfo]:
         """
         Find a KV chunk across all workers.
 
         Args:
             key: The KV chunk key to find.
-            exclude_instance_id: Instance ID to exclude (used with exclude_worker_id).
-            exclude_worker_id: Worker ID to exclude. Only excludes when both
-                exclude_instance_id and exclude_worker_id match, allowing lookups
-                on other workers within the same instance.
-            exclude_location: Location to exclude from search.
+            exclude_instance_id: Instance ID to exclude
+            (all workers in this instance will be excluded).
 
         Returns: KVChunkInfo if found, None otherwise.
         """
         for instance_id, instance_node in self.instances.items():
+            # Exclude all workers in the specified instance
+            if exclude_instance_id is not None and instance_id == exclude_instance_id:
+                continue
             for worker_id, worker_node in instance_node.workers.items():
-                # Only exclude the specific worker identified by
-                # BOTH instance_id and worker_id
-                if (
-                    exclude_instance_id is not None
-                    and exclude_worker_id is not None
-                    and instance_id == exclude_instance_id
-                    and worker_id == exclude_worker_id
-                ):
-                    continue
                 for location, keys in worker_node.kv_store.items():
-                    if exclude_location is not None and location == exclude_location:
-                        continue
                     if key in keys:
                         return KVChunkInfo(instance_id, worker_id, location)
         return None
