@@ -103,8 +103,8 @@ class LMCacheControllerManager:
                 role=zmq.REP,  # type: ignore[attr-defined]
                 bind_or_connect="bind",
             )
-        self.kv_controller = KVController()
         self.reg_controller = RegistrationController()
+        self.kv_controller = KVController(self.reg_controller.registry)
 
         # Cluster executor
         self.cluster_executor = LMCacheClusterExecutor(
@@ -170,12 +170,6 @@ class LMCacheControllerManager:
                     await self.kv_controller.evict(evict_msg)
                 else:
                     logger.error("Unknown operation type: %s", op.op_type)
-        # TODO(baoloongmao): Use BatchedKVOperationMsg instead of KVAdmitMsg and
-        #  KVEvictMsg in LocalDiskBackend, then we can remove these two messages
-        elif isinstance(msg, KVAdmitMsg):
-            await self.kv_controller.admit(msg)
-        elif isinstance(msg, KVEvictMsg):
-            await self.kv_controller.evict(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
