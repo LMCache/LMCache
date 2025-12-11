@@ -751,10 +751,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def _Compute_raw_size(shapes: list[torch.Size], dtypes: list[torch.dtype]) -> int:
         assert len(shapes) == len(dtypes)
-        raw_size = 0
-        for shape, dtype in zip(shapes, dtypes, strict=False):
-            raw_size += shape.numel() * dtype.itemsize
-        return raw_size
+        return sum(
+            shape.numel() * dtype.itemsize
+            for shape, dtype in zip(shapes, dtypes, strict=False)
+        )
 
     @staticmethod
     @_lmcache_nvtx_annotate
