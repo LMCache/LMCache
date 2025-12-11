@@ -501,6 +501,22 @@ def _init_lmcache_engine(
     ):
         raise ValueError("MLA only works with naive serde mode..")
 
+    # MLA requires save_unfull_chunk=True for correct KV cache storage and retrieval.
+    # Without this, partial chunks would be discarded, causing incomplete cache
+    # and incorrect results in MLA mode.
+    if use_mla and not lmcache_config.save_unfull_chunk:
+        logger.warning(
+            "MLA (Multi-Level Attention) requires save_unfull_chunk=True "
+            "for correct KV cache storage. Automatically setting "
+            "save_unfull_chunk=True."
+        )
+        lmcache_config.save_unfull_chunk = True
+    elif use_mla:
+        logger.info(
+            "MLA mode enabled with save_unfull_chunk=True - all KV cache "
+            "including partial chunks will be stored"
+        )
+
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
@@ -747,6 +763,12 @@ class LMCacheConnectorV1Impl:
 
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
+
+        # Whether to discard partial chunks
+        # MLA mode requires save_unfull_chunk=True, so we should not discard
+        # partial chunks even if discard_partial_chunks is set in vLLM config.
+        # Check if MLA is enabled from model config.
+        use_mla = mla_enabled(vllm_config.model_config)
 
         # Whether to discard partial chunks
         self._discard_partial_chunks = (
