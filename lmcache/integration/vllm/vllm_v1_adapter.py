@@ -765,12 +765,6 @@ class LMCacheConnectorV1Impl:
         self._request_trackers: dict[str, RequestTracker] = {}
 
         # Whether to discard partial chunks
-        # MLA mode requires save_unfull_chunk=True, so we should not discard
-        # partial chunks even if discard_partial_chunks is set in vLLM config.
-        # Check if MLA is enabled from model config.
-        use_mla = mla_enabled(vllm_config.model_config)
-
-        # Whether to discard partial chunks
         self._discard_partial_chunks = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "discard_partial_chunks", False
