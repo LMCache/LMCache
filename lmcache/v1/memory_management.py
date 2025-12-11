@@ -725,6 +725,27 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         """
         return True
 
+    # TODO(chunxiaozheng): remove if after all params replaced by shapes/dtypes
+    def _adapt_shapes_and_dtypes(
+        self,
+        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+    ) -> Tuple[list[torch.Size], list[torch.dtype]]:
+        if isinstance(shapes, torch.Size):
+            shapes = [shapes]
+        elif isinstance(shapes, tuple):
+            shapes = [torch.Size(shapes)]
+
+        if isinstance(dtypes, torch.dtype):
+            dtypes = [dtypes]
+
+        assert len(shapes) == len(dtypes), (
+            f"shapes and dtypes must have the same length, "
+            f"got {len(shapes)} and {len(dtypes)}, "
+            f"shapes: {shapes}, dtypes: {dtypes}"
+        )
+        return shapes, dtypes
+
 
 class TensorMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -816,13 +837,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
-        if isinstance(shapes, torch.Size):
-            shapes = [shapes]
-        elif isinstance(shapes, tuple):
-            shapes = [torch.Size(shapes)]
-        if isinstance(dtypes, torch.dtype):
-            dtypes = [dtypes]
-        assert len(shapes) == len(dtypes)
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
         raw_size = TensorMemoryAllocator._Compute_raw_size(shapes, dtypes)
@@ -896,13 +911,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         Batched allocate tensor memory objs with equal sizes.
         """
-        if isinstance(shapes, torch.Size):
-            shapes = [shapes]
-        elif isinstance(shapes, tuple):
-            shapes = [torch.Size(shapes)]
-        if isinstance(dtypes, torch.dtype):
-            dtypes = [dtypes]
-        assert len(shapes) == len(dtypes)
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
         unit_raw_size = TensorMemoryAllocator._Compute_raw_size(shapes, dtypes)
@@ -1180,13 +1189,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
-        if isinstance(shapes, torch.Size):
-            shapes = [shapes]
-        elif isinstance(shapes, tuple):
-            shapes = [torch.Size(shapes)]
-        if isinstance(dtypes, torch.dtype):
-            dtypes = [dtypes]
-        assert len(shapes) == len(dtypes)
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         try:
             free_block = self.free_blocks.popleft()
@@ -1234,13 +1237,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
         Batched allocate tensor memory objs with pre-defined equal sizes.
         """
-        if isinstance(shapes, torch.Size):
-            shapes = [shapes]
-        elif isinstance(shapes, tuple):
-            shapes = [torch.Size(shapes)]
-        if isinstance(dtypes, torch.dtype):
-            dtypes = [dtypes]
-        assert len(shapes) == len(dtypes)
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         allocated_blocks: list[TensorMemoryObj] = []
         for i in range(batch_size):
