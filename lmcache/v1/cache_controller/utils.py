@@ -45,6 +45,7 @@ class WorkerNode:
     socket: Optional[zmq.asyncio.Socket]
     registration_time: float
     last_heartbeat_time: float
+    # Guarded by _lock
     seq_tracker: dict[str, int] = field(default_factory=dict)  # location -> seq_num
     kv_store: dict[str, set[int]] = field(
         default_factory=dict
@@ -124,51 +125,95 @@ class InstanceNode:
     """
     Represents an instance with all its workers.
     Tree structure: InstanceNode -> WorkerNode
+    Each InstanceNode has its own lock for thread-safe worker operations.
     """
 
     instance_id: str
+    # Guarded by _rwlock
     workers: dict[int, WorkerNode] = field(
         default_factory=dict
     )  # worker_id -> WorkerNode
 
+    def __post_init__(self):
+        # RW lock for protecting workers dict access
+        self._rwlock = RWLockWithTimeout()
+
     def add_worker(self, worker_node: WorkerNode) -> None:
         """Add a worker to this instance."""
-        self.workers[worker_node.worker_id] = worker_node
+        with self._rwlock.write_lock(timeout=0.1):
+            self.workers[worker_node.worker_id] = worker_node
 
     def remove_worker(self, worker_id: int) -> Optional[WorkerNode]:
         """Remove and return a worker from this instance."""
-        return self.workers.pop(worker_id, None)
+        with self._rwlock.write_lock(timeout=0.1):
+            return self.workers.pop(worker_id, None)
 
     def get_worker(self, worker_id: int) -> Optional[WorkerNode]:
         """Get a worker by worker_id."""
-        return self.workers.get(worker_id)
+        with self._rwlock.read_lock(timeout=0.05):
+            return self.workers.get(worker_id)
 
     def get_worker_ids(self) -> list[int]:
         """Get sorted list of worker IDs."""
-        return sorted(self.workers.keys())
+        with self._rwlock.read_lock(timeout=0.05):
+            return sorted(self.workers.keys())
 
     def has_workers(self) -> bool:
         """Check if instance has any workers."""
-        return len(self.workers) > 0
+        with self._rwlock.read_lock(timeout=0.05):
+            return len(self.workers) > 0
 
     def get_all_worker_infos(self) -> list[WorkerInfo]:
         """Get WorkerInfo for all workers in this instance."""
-        return [
-            worker.to_worker_info(self.instance_id) for worker in self.workers.values()
-        ]
+        with self._rwlock.read_lock(timeout=0.05):
+            return [
+                worker.to_worker_info(self.instance_id)
+                for worker in self.workers.values()
+            ]
 
 
 class RegistryTree:
     """
     Central registry managing the tree structure of instances and workers.
     Structure: instance_id -> InstanceNode -> WorkerNode
+
+    Lock hierarchy (from coarse to fine):
+    1. RegistryTree._rwlock: protects instances dict access
+    2. InstanceNode._rwlock: protects workers dict access
+    3. WorkerNode._lock: protects kv_store and seq_tracker access
+
+    This fine-grained locking allows concurrent operations on different
+    instances/workers, improving throughput significantly.
     """
 
     def __init__(self):
+        # Guarded by _rwlock
         # instance_id -> InstanceNode
         self.instances: dict[str, InstanceNode] = {}
-        # Read-write lock for concurrent access
+        # RW lock only for protecting instances dict access
         self._rwlock = RWLockWithTimeout()
+
+    def _get_or_create_instance(self, instance_id: str) -> InstanceNode:
+        """Get or create an instance node. Internal use only."""
+        # First try with read lock
+        with self._rwlock.read_lock(timeout=0.05):
+            instance_node = self.instances.get(instance_id)
+            if instance_node is not None:
+                return instance_node
+
+        # Need to create, use write lock
+        with self._rwlock.write_lock(timeout=0.1):
+            # Double-check after acquiring write lock
+            instance_node = self.instances.get(instance_id)
+            if instance_node is None:
+                instance_node = InstanceNode(instance_id=instance_id)
+                self.instances[instance_id] = instance_node
+            return instance_node
+
+    def _get_instance(self, instance_id: str) -> Optional[InstanceNode]:
+        """Get an instance node with read lock. Internal use only."""
+        with self._rwlock.read_lock(timeout=0.05):
+            return self.instances.get(instance_id)
 
     def register_worker(
         self,
@@ -181,96 +226,88 @@ class RegistryTree:
         registration_time: float,
     ) -> WorkerNode:
         """Register a new worker, creating instance if needed."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.write_lock(timeout=0.1):  # 100ms timeout for write
-            # First check if instance already exists
-            instance_node = self.instances.get(instance_id)
+        # Get or create instance (locks instances dict)
+        instance_node = self._get_or_create_instance(instance_id)
 
-            if instance_node is None:
-                # Create new instance
-                instance_node = InstanceNode(instance_id=instance_id)
-                self.instances[instance_id] = instance_node
-
-            # Create and add worker
-            worker_node = WorkerNode(
-                worker_id=worker_id,
-                ip=ip,
-                port=port,
-                peer_init_url=peer_init_url,
-                socket=socket,
-                registration_time=registration_time,
-                last_heartbeat_time=registration_time,
-            )
-            instance_node.add_worker(worker_node)
-            return worker_node
+        # Create worker node
+        worker_node = WorkerNode(
+            worker_id=worker_id,
+            ip=ip,
+            port=port,
+            peer_init_url=peer_init_url,
+            socket=socket,
+            registration_time=registration_time,
+            last_heartbeat_time=registration_time,
+        )
+        # Add worker (locks workers dict in instance_node)
+        instance_node.add_worker(worker_node)
+        return worker_node
 
     def deregister_worker(
         self, instance_id: str, worker_id: int
     ) -> Optional[WorkerNode]:
         """Deregister a worker and clean up empty instances."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.write_lock(timeout=10):  # 100ms timeout
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return None
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return None
 
-            worker_node = instance_node.remove_worker(worker_id)
+        # Remove worker (locks workers dict in instance_node)
+        worker_node = instance_node.remove_worker(worker_id)
 
-            # Clean up empty instance
-            if not instance_node.has_workers():
-                del self.instances[instance_id]
+        # Clean up empty instance (need write lock on instances)
+        if not instance_node.has_workers():
+            # TODO(baoloongmao): Move timeout values to configuration
+            with self._rwlock.write_lock(timeout=100):
+                # Double-check after acquiring write lock
+                if not instance_node.has_workers():
+                    del self.instances[instance_id]
 
-            return worker_node
+        return worker_node
 
     def get_worker(self, instance_id: str, worker_id: int) -> Optional[WorkerNode]:
         """Get a specific worker."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.read_lock(timeout=0.05):  # 50ms timeout for read operations
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return None
-            return instance_node.get_worker(worker_id)
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return None
+        return instance_node.get_worker(worker_id)
 
     def get_instance(self, instance_id: str) -> Optional[InstanceNode]:
         """Get an instance by instance_id."""
-        return self.instances.get(instance_id)
+        return self._get_instance(instance_id)
 
     def get_instance_by_ip(self, ip: str) -> Optional[InstanceNode]:
         """Get an instance by IP address. Returns first instance if multiple exist."""
-        # TODO(baoloongmao): Move timeout values to configuration
         with self._rwlock.read_lock(timeout=0.05):
             for instance_node in self.instances.values():
-                # Check if any worker in this instance has the given IP
-                for worker_node in instance_node.workers.values():
-                    if worker_node.ip == ip:
-                        return instance_node
+                # Check workers with instance's lock
+                with instance_node._rwlock.read_lock(timeout=0.05):
+                    for worker_node in instance_node.workers.values():
+                        if worker_node.ip == ip:
+                            return instance_node
             return None
 
     def get_instances_by_ip(self, ip: str) -> list[InstanceNode]:
         """Get all instances by IP address."""
-        # TODO(baoloongmao): Move timeout values to configuration
         with self._rwlock.read_lock(timeout=0.05):
             result = []
             for instance_node in self.instances.values():
-                # Check if any worker in this instance has the given IP
-                for worker_node in instance_node.workers.values():
-                    if worker_node.ip == ip:
-                        result.append(instance_node)
-                        break  # Found this instance, move to next
+                # Check workers with instance's lock
+                with instance_node._rwlock.read_lock(timeout=0.05):
+                    for worker_node in instance_node.workers.values():
+                        if worker_node.ip == ip:
+                            result.append(instance_node)
+                            break
             return result
 
     def get_worker_ids(self, instance_id: str) -> list[int]:
         """Get sorted list of worker IDs for an instance."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.read_lock(timeout=0.05):
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return []
-            return instance_node.get_worker_ids()
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return []
+        return instance_node.get_worker_ids()
 
     def get_all_worker_infos(self) -> list[WorkerInfo]:
         """Get WorkerInfo for all workers across all instances."""
-        # TODO(baoloongmao): Move timeout values to configuration
         with self._rwlock.read_lock(timeout=0.05):
             result = []
             for instance_node in self.instances.values():
@@ -281,75 +318,66 @@ class RegistryTree:
         self, instance_id: str, worker_id: int, timestamp: float
     ) -> bool:
         """Update worker heartbeat timestamp. Returns True if successful."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        # Treat heartbeat update as a read operation as it only updates a timestamp
-        with self._rwlock.read_lock(timeout=0.1):  # Read operation
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return False
-            worker_node = instance_node.get_worker(worker_id)
-            if worker_node is None:
-                return False
-            worker_node.last_heartbeat_time = timestamp
-            return True
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return False
+        worker_node = instance_node.get_worker(worker_id)
+        if worker_node is None:
+            return False
+        worker_node.last_heartbeat_time = timestamp
+        return True
 
     def update_seq_num(
         self, instance_id: str, worker_id: int, location: str, seq_num: int
     ) -> bool:
         """Update sequence number for a worker location. Returns True if successful."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.write_lock(timeout=0.1):  # Write operation
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return False
-            worker_node = instance_node.get_worker(worker_id)
-            if worker_node is None:
-                return False
-            worker_node.update_seq_num(location, seq_num)
-            return True
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return False
+        worker_node = instance_node.get_worker(worker_id)
+        if worker_node is None:
+            return False
+        # update_seq_num uses WorkerNode's internal lock
+        worker_node.update_seq_num(location, seq_num)
+        return True
 
     def get_seq_num(
         self, instance_id: str, worker_id: int, location: str
     ) -> Optional[int]:
         """Get sequence number for a worker location."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.read_lock(timeout=0.05):  # Read operation
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return None
-            worker_node = instance_node.get_worker(worker_id)
-            if worker_node is None:
-                return None
-            return worker_node.get_seq_num(location)
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return None
+        worker_node = instance_node.get_worker(worker_id)
+        if worker_node is None:
+            return None
+        return worker_node.get_seq_num(location)
 
     def admit_kv(
         self, instance_id: str, worker_id: int, location: str, key: int
     ) -> bool:
         """Admit a KV chunk. Returns True if successful."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.write_lock(timeout=0.1):  # Write operation
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return False
-            worker_node = instance_node.get_worker(worker_id)
-            if worker_node is None:
-                return False
-            worker_node.admit_kv(location, key)
-            return True
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return False
+        worker_node = instance_node.get_worker(worker_id)
+        if worker_node is None:
+            return False
+        # admit_kv uses WorkerNode's internal lock
+        worker_node.admit_kv(location, key)
+        return True
 
     def evict_kv(
         self, instance_id: str, worker_id: int, location: str, key: int
     ) -> bool:
         """Evict a KV chunk. Returns True if successful."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.write_lock(timeout=0.1):  # Write operation
-            instance_node = self.instances.get(instance_id)
-            if instance_node is None:
-                return False
-            worker_node = instance_node.get_worker(worker_id)
-            if worker_node is None:
-                return False
-            return worker_node.evict_kv(location, key)
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return False
+        worker_node = instance_node.get_worker(worker_id)
+        if worker_node is None:
+            return False
+        return worker_node.evict_kv(location, key)
 
     def find_kv(
         self,
@@ -366,10 +394,7 @@ class RegistryTree:
 
         Returns: KVChunkInfo if found, None otherwise.
         """
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.read_lock(
-            timeout=0.1
-        ):  # Read operation, but may scan many keys
+        with self._rwlock.read_lock(timeout=0.1):
             for instance_id, instance_node in self.instances.items():
                 # Exclude all workers in the specified instance
                 if (
@@ -385,23 +410,22 @@ class RegistryTree:
 
     def get_total_kv_count(self) -> int:
         """Get total count of KV chunks across all workers."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.read_lock(
-            timeout=0.1
-        ):  # Read operation, but may scan many keys
-            return sum(
-                worker_node.get_kv_count()
-                for instance_node in self.instances.values()
-                for worker_node in instance_node.workers.values()
-            )
+        with self._rwlock.read_lock(timeout=0.1):
+            total = 0
+            for instance_node in self.instances.values():
+                with instance_node._rwlock.read_lock(timeout=0.05):
+                    for worker_node in instance_node.workers.values():
+                        total += worker_node.get_kv_count()
+            return total
 
     def get_worker_kv_keys(
         self, instance_id: str, worker_id: int, location: str
     ) -> set[int]:
         """Get all KV keys for a specific worker and location."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        with self._rwlock.read_lock(timeout=0.05):  # Read operation
-            worker_node = self.get_worker(instance_id, worker_id)
-            if worker_node is None:
-                return set()
-            return worker_node.get_kv_keys(location)
+        instance_node = self._get_instance(instance_id)
+        if instance_node is None:
+            return set()
+        worker_node = instance_node.get_worker(worker_id)
+        if worker_node is None:
+            return set()
+        return worker_node.get_kv_keys(location)
