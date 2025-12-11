@@ -140,6 +140,14 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
+   :maxdepth: 2
+   :caption: Controller WebUI
+   
+   controller/index
+
+:raw-html:`<br />`
+
+.. toctree::
    :caption: Developer Guide
 
    developer_guide/contributing
