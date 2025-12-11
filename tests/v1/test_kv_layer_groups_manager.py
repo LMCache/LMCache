@@ -227,7 +227,7 @@ class TestKVLayerGroupsManager:
         assert group2.layer_indices == [2]
         assert group2.layer_indices == [2]
 
-    def test_build_kv_layer_groups_with_set_kv_layer_groups(self):
+    def test_build_kv_layer_groups_with_build_kv_layer_groups(self):
         """Test the complete workflow with build_kv_layer_groups."""
         manager = KVLayerGroupsManager()
 

@@ -128,14 +128,6 @@ class KVLayerGroupsManager:
         group = self.get_group_by_layer_idx(layer_idx)
         return group.dtype if group else None
 
-    def set_kv_layer_groups(self, kv_layer_groups: list[KVLayerGroupInfo]) -> None:
-        """Set the KV layer groups list.
-
-        Args:
-            kv_layer_groups: The list of KVLayerGroupInfo objects to set.
-        """
-        self.kv_layer_groups = kv_layer_groups
-
     def build_kv_layer_groups(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Build KV layer groups structure by analyzing each layer's shape and dtype.
 

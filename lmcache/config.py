@@ -28,6 +28,7 @@ class LMCacheEngineMetadata:
     """ the format of kv tensors """
     fmt: str
     """ the data type of kv tensors """
+    # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
     kv_dtype: torch.dtype
     """ the shape of kv tensors """
     # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
