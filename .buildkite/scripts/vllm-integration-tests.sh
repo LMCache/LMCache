@@ -662,7 +662,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     if [ "$test_mode" = "dummy" ]; then
         test_vllmopenai_server_with_lmcache_integrated "$model"
     elif [ "$test_mode" = "long_doc_qa" ]; then
-        workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
+        workload_yaml="$(yq -o json "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
         has_expected_latency_gain=$(jq 'has("expected-latency-gain")' <<< "$workload_yaml")
         has_expected_latency=$(jq 'has("expected-latency")' <<< "$workload_yaml")
         has_expected_ttft_gain=$(jq 'has("expected-ttft-gain")' <<< "$workload_yaml")
