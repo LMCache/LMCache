@@ -372,7 +372,10 @@ class RegistryTree:
         ):  # Read operation, but may scan many keys
             for instance_id, instance_node in self.instances.items():
                 # Exclude all workers in the specified instance
-                if exclude_instance_id is not None and instance_id == exclude_instance_id:
+                if (
+                    exclude_instance_id is not None
+                    and instance_id == exclude_instance_id
+                ):
                     continue
                 for worker_id, worker_node in instance_node.workers.items():
                     for location, keys in worker_node.kv_store.items():
