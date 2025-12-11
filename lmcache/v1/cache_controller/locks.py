@@ -106,7 +106,10 @@ class FastLockWithTimeout:
     """
     A fast lock with timeout support for WorkerNode.
     Optimized for high frequency operations on small critical sections.
+    Uses non-blocking fast path for better performance.
     """
+
+    __slots__ = ("_lock",)
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -122,10 +125,15 @@ class FastLockWithTimeout:
         self._lock.release()
 
     def __enter__(self):
-        # TODO(baoloongmao): Move timeout values to configuration
-        if not self.acquire(timeout=0.1):  # Default 100ms timeout
-            raise RWLockTimeoutError("Failed to acquire WorkerNode lock within 100ms")
+        # Fast path: try non-blocking acquire first (no syscall overhead)
+        if self._lock.acquire(blocking=False):
+            return self
+        # Slow path: reduced timeout for faster failure detection
+        if not self._lock.acquire(timeout=10):  # 10s timeout
+            # TODO(baoloongmao): Mark as operation failed for metrics
+            #  and schedule full sync
+            raise RWLockTimeoutError("Failed to acquire WorkerNode lock within 10s")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.release()
+        self._lock.release()

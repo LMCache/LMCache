@@ -35,13 +35,10 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     ErrorMsg,
     HealthMsg,
     HeartbeatMsg,
-    KVAdmitMsg,
-    KVEvictMsg,
     LookupMsg,
     MoveMsg,
     Msg,
     MsgBase,
-    OpType,
     OrchMsg,
     OrchRetMsg,
     PinMsg,
@@ -141,33 +138,7 @@ class LMCacheControllerManager:
         elif isinstance(msg, DeRegisterMsg):
             await self.reg_controller.deregister(msg)
         elif isinstance(msg, BatchedKVOperationMsg):
-            # Reconstruct full KV messages from lightweight operations
-            instance_id = msg.instance_id
-            worker_id = msg.worker_id
-            location = msg.location
-            for op in msg.operations:
-                if op.op_type == OpType.ADMIT:
-                    admit_msg = KVAdmitMsg(
-                        instance_id=instance_id,
-                        worker_id=worker_id,
-                        key=op.key,
-                        location=location,
-                        seq_num=op.seq_num,
-                    )
-                    self.kv_controller.check_sequence_number(admit_msg)
-                    await self.kv_controller.admit(admit_msg)
-                elif op.op_type == OpType.EVICT:
-                    evict_msg = KVEvictMsg(
-                        instance_id=instance_id,
-                        worker_id=worker_id,
-                        key=op.key,
-                        location=location,
-                        seq_num=op.seq_num,
-                    )
-                    self.kv_controller.check_sequence_number(evict_msg)
-                    await self.kv_controller.evict(evict_msg)
-                else:
-                    logger.error("Unknown operation type: %s", op.op_type)
+            await self.kv_controller.handle_batched_kv_operations(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
 

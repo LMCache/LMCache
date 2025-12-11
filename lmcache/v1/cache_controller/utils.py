@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
+import threading
 
 # Third Party
 import zmq.asyncio
 
+if TYPE_CHECKING:
+    from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, OpType
+
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.locks import FastLockWithTimeout, RWLockWithTimeout
+
+logger = init_logger(__name__)
 
 
 class KVChunkInfo(NamedTuple):
@@ -55,22 +62,59 @@ class WorkerNode:
         # Fast lock with timeout for WorkerNode operations
         self._lock = FastLockWithTimeout()
 
-    def admit_kv(self, location: str, key: int) -> None:
-        """Admit a KV chunk to this worker."""
+    def handle_batched_kv_operations(
+        self,
+        msg: "BatchedKVOperationMsg",
+        on_seq_discontinuity: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """
+        Handle batched KV operations with single lock acquisition.
+        Logs warning and calls callback if sequence discontinuity is detected.
+        """
+        seq_warning: tuple[int, int, int] | None = None
         with self._lock:
+            location = msg.location
+
             if location not in self.kv_store:
                 self.kv_store[location] = set()
-            self.kv_store[location].add(key)
 
-    def evict_kv(self, location: str, key: int) -> bool:
-        """Evict a KV chunk from this worker. Returns True if evicted."""
-        with self._lock:
-            if location not in self.kv_store or key not in self.kv_store[location]:
-                return False
-            self.kv_store[location].remove(key)
+            for op in msg.operations:
+                # Sequence check
+                last_seq_num = self.seq_tracker.get(location)
+                if last_seq_num is not None:
+                    expected_seq = last_seq_num + 1
+                    if op.seq_num != expected_seq and seq_warning is None:
+                        seq_warning = (
+                            expected_seq,
+                            op.seq_num,
+                            op.seq_num - expected_seq,
+                        )
+                self.seq_tracker[location] = op.seq_num
+
+                # Apply operation
+                if op.op_type == OpType.ADMIT:
+                    self.kv_store[location].add(op.key)
+                elif op.op_type == OpType.EVICT:
+                    self.kv_store[location].discard(op.key)
+                else:
+                    logger.error(f"Unknown op_type: {op.op_type}")
+
+            # Clean up empty set
             if not self.kv_store[location]:
-                del self.kv_store[location]
-            return True
+                self.kv_store.pop(location, None)
+
+        # Log warning and call callback outside lock
+        if seq_warning is not None:
+            if on_seq_discontinuity is not None:
+                on_seq_discontinuity()
+            logger.warning(
+                "KV batch sequence discontinuity detected: "
+                "key=%s, expected_seq=%s, actual_seq=%s, gap=%s",
+                (msg.instance_id, msg.worker_id, msg.location),
+                seq_warning[0],
+                seq_warning[1],
+                seq_warning[2],
+            )
 
     def has_kv(self, location: str, key: int) -> bool:
         """Check if a KV chunk exists in this worker."""
@@ -149,27 +193,25 @@ class InstanceNode:
             return self.workers.pop(worker_id, None)
 
     def get_worker(self, worker_id: int) -> Optional[WorkerNode]:
-        """Get a worker by worker_id."""
-        with self._rwlock.read_lock(timeout=0.05):
-            return self.workers.get(worker_id)
+        """Get a worker by worker_id. Uses optimistic locking (lock-free read)."""
+        # Optimistic read: workers dict rarely changes
+        return self.workers.get(worker_id)
 
     def get_worker_ids(self) -> list[int]:
         """Get sorted list of worker IDs."""
-        with self._rwlock.read_lock(timeout=0.05):
-            return sorted(self.workers.keys())
+        # Snapshot keys to avoid RuntimeError if dict changes during iteration
+        return sorted(list(self.workers.keys()))
 
     def has_workers(self) -> bool:
         """Check if instance has any workers."""
-        with self._rwlock.read_lock(timeout=0.05):
-            return len(self.workers) > 0
+        # Optimistic read: workers dict rarely changes
+        return len(self.workers) > 0
 
     def get_all_worker_infos(self) -> list[WorkerInfo]:
         """Get WorkerInfo for all workers in this instance."""
-        with self._rwlock.read_lock(timeout=0.05):
-            return [
-                worker.to_worker_info(self.instance_id)
-                for worker in self.workers.values()
-            ]
+        # Snapshot values to avoid RuntimeError if dict changes during iteration
+        workers_snapshot = list(self.workers.values())
+        return [worker.to_worker_info(self.instance_id) for worker in workers_snapshot]
 
 
 class RegistryTree:
@@ -192,14 +234,26 @@ class RegistryTree:
         self.instances: dict[str, InstanceNode] = {}
         # RW lock only for protecting instances dict access
         self._rwlock = RWLockWithTimeout()
+        # Atomic counter for sequence discontinuity (protected by _counter_lock)
+        self._seq_discontinuity_count = 0
+        self._counter_lock = threading.Lock()
+
+    def get_seq_discontinuity_count(self) -> int:
+        """Get the count of sequence discontinuities (thread-safe)."""
+        # Lock-free read, no need for lock
+        return self._seq_discontinuity_count
+
+    def _incr_seq_discontinuity_count(self) -> None:
+        """Increment the sequence discontinuity counter (thread-safe)."""
+        with self._counter_lock:
+            self._seq_discontinuity_count += 1
 
     def _get_or_create_instance(self, instance_id: str) -> InstanceNode:
         """Get or create an instance node. Internal use only."""
-        # First try with read lock
-        with self._rwlock.read_lock(timeout=0.05):
-            instance_node = self.instances.get(instance_id)
-            if instance_node is not None:
-                return instance_node
+        # Optimistic read first: instances dict rarely changes
+        instance_node = self.instances.get(instance_id)
+        if instance_node is not None:
+            return instance_node
 
         # Need to create, use write lock
         with self._rwlock.write_lock(timeout=0.1):
@@ -211,9 +265,9 @@ class RegistryTree:
             return instance_node
 
     def _get_instance(self, instance_id: str) -> Optional[InstanceNode]:
-        """Get an instance node with read lock. Internal use only."""
-        with self._rwlock.read_lock(timeout=0.05):
-            return self.instances.get(instance_id)
+        """Get an instance node. Uses optimistic locking (lock-free read)."""
+        # Optimistic read: instances dict rarely changes
+        return self.instances.get(instance_id)
 
     def register_worker(
         self,
@@ -277,27 +331,23 @@ class RegistryTree:
 
     def get_instance_by_ip(self, ip: str) -> Optional[InstanceNode]:
         """Get an instance by IP address. Returns first instance if multiple exist."""
-        with self._rwlock.read_lock(timeout=0.05):
-            for instance_node in self.instances.values():
-                # Check workers with instance's lock
-                with instance_node._rwlock.read_lock(timeout=0.05):
-                    for worker_node in instance_node.workers.values():
-                        if worker_node.ip == ip:
-                            return instance_node
-            return None
+        # Snapshot to avoid RuntimeError if dict changes during iteration
+        for instance_node in list(self.instances.values()):
+            for worker_node in list(instance_node.workers.values()):
+                if worker_node.ip == ip:
+                    return instance_node
+        return None
 
     def get_instances_by_ip(self, ip: str) -> list[InstanceNode]:
         """Get all instances by IP address."""
-        with self._rwlock.read_lock(timeout=0.05):
-            result = []
-            for instance_node in self.instances.values():
-                # Check workers with instance's lock
-                with instance_node._rwlock.read_lock(timeout=0.05):
-                    for worker_node in instance_node.workers.values():
-                        if worker_node.ip == ip:
-                            result.append(instance_node)
-                            break
-            return result
+        # Snapshot to avoid RuntimeError if dict changes during iteration
+        result = []
+        for instance_node in list(self.instances.values()):
+            for worker_node in list(instance_node.workers.values()):
+                if worker_node.ip == ip:
+                    result.append(instance_node)
+                    break
+        return result
 
     def get_worker_ids(self, instance_id: str) -> list[int]:
         """Get sorted list of worker IDs for an instance."""
@@ -308,11 +358,11 @@ class RegistryTree:
 
     def get_all_worker_infos(self) -> list[WorkerInfo]:
         """Get WorkerInfo for all workers across all instances."""
-        with self._rwlock.read_lock(timeout=0.05):
-            result = []
-            for instance_node in self.instances.values():
-                result.extend(instance_node.get_all_worker_infos())
-            return result
+        # Snapshot to avoid RuntimeError if dict changes during iteration
+        result = []
+        for instance_node in list(self.instances.values()):
+            result.extend(instance_node.get_all_worker_infos())
+        return result
 
     def update_heartbeat(
         self, instance_id: str, worker_id: int, timestamp: float
@@ -327,57 +377,21 @@ class RegistryTree:
         worker_node.last_heartbeat_time = timestamp
         return True
 
-    def update_seq_num(
-        self, instance_id: str, worker_id: int, location: str, seq_num: int
-    ) -> bool:
-        """Update sequence number for a worker location. Returns True if successful."""
-        instance_node = self._get_instance(instance_id)
+    def handle_batched_kv_operations(self, msg: "BatchedKVOperationMsg") -> bool:
+        """
+        Handle batched KV operations by forwarding to WorkerNode.
+        Returns True if worker found, False otherwise.
+        """
+        instance_node = self._get_instance(msg.instance_id)
         if instance_node is None:
             return False
-        worker_node = instance_node.get_worker(worker_id)
+        worker_node = instance_node.get_worker(msg.worker_id)
         if worker_node is None:
             return False
-        # update_seq_num uses WorkerNode's internal lock
-        worker_node.update_seq_num(location, seq_num)
+        worker_node.handle_batched_kv_operations(
+            msg, on_seq_discontinuity=self._incr_seq_discontinuity_count
+        )
         return True
-
-    def get_seq_num(
-        self, instance_id: str, worker_id: int, location: str
-    ) -> Optional[int]:
-        """Get sequence number for a worker location."""
-        instance_node = self._get_instance(instance_id)
-        if instance_node is None:
-            return None
-        worker_node = instance_node.get_worker(worker_id)
-        if worker_node is None:
-            return None
-        return worker_node.get_seq_num(location)
-
-    def admit_kv(
-        self, instance_id: str, worker_id: int, location: str, key: int
-    ) -> bool:
-        """Admit a KV chunk. Returns True if successful."""
-        instance_node = self._get_instance(instance_id)
-        if instance_node is None:
-            return False
-        worker_node = instance_node.get_worker(worker_id)
-        if worker_node is None:
-            return False
-        # admit_kv uses WorkerNode's internal lock
-        worker_node.admit_kv(location, key)
-        return True
-
-    def evict_kv(
-        self, instance_id: str, worker_id: int, location: str, key: int
-    ) -> bool:
-        """Evict a KV chunk. Returns True if successful."""
-        instance_node = self._get_instance(instance_id)
-        if instance_node is None:
-            return False
-        worker_node = instance_node.get_worker(worker_id)
-        if worker_node is None:
-            return False
-        return worker_node.evict_kv(location, key)
 
     def find_kv(
         self,
@@ -408,15 +422,40 @@ class RegistryTree:
                             return KVChunkInfo(instance_id, worker_id, location)
             return None
 
+    def find_kv_with_worker_info(
+        self,
+        key: int,
+        exclude_instance_id: Optional[str] = None,
+    ) -> Optional[tuple[KVChunkInfo, Optional[str], set[int]]]:
+        """
+        Find a KV chunk and return worker info in one lookup.
+        Optimized for batched_p2p_lookup to avoid multiple lookups.
+
+        Returns: (KVChunkInfo, peer_init_url, kv_keys) if found, None otherwise.
+        """
+        # Snapshot dicts to avoid RuntimeError if dict changes during iteration
+        for instance_id, instance_node in list(self.instances.items()):
+            if exclude_instance_id is not None and instance_id == exclude_instance_id:
+                continue
+            for worker_id, worker_node in list(instance_node.workers.items()):
+                kv_store = worker_node.kv_store
+                for location, keys in list(kv_store.items()):
+                    if key in keys:
+                        return (
+                            KVChunkInfo(instance_id, worker_id, location),
+                            worker_node.peer_init_url,
+                            keys,
+                        )
+        return None
+
     def get_total_kv_count(self) -> int:
         """Get total count of KV chunks across all workers."""
-        with self._rwlock.read_lock(timeout=0.1):
-            total = 0
-            for instance_node in self.instances.values():
-                with instance_node._rwlock.read_lock(timeout=0.05):
-                    for worker_node in instance_node.workers.values():
-                        total += worker_node.get_kv_count()
-            return total
+        # Snapshot to avoid RuntimeError if dict changes during iteration
+        total = 0
+        for instance_node in list(self.instances.values()):
+            for worker_node in list(instance_node.workers.values()):
+                total += worker_node.get_kv_count()
+        return total
 
     def get_worker_kv_keys(
         self, instance_id: str, worker_id: int, location: str
