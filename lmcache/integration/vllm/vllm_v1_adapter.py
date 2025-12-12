@@ -903,6 +903,13 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
+        # Build KV layer groups structure if not already built
+        if self.lmcache_engine is not None:
+            kv_layer_groups_manager = (
+                self.lmcache_engine.metadata.kv_layer_groups_manager
+            )
+            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+
     ####################
     # Worker side APIs
     ####################
@@ -1280,7 +1287,8 @@ class LMCacheConnectorV1Impl:
             slot_mapping = slot_mapping.to(self.device)
 
             skip_leading_tokens = save_spec.skip_leading_tokens
-            if self.kv_role == "kv_producer":
+            # shared storage disaggregation will not have a disagg_spec passed in
+            if self.kv_role == "kv_producer" and request.disagg_spec:
                 skip_leading_tokens = min(
                     skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )

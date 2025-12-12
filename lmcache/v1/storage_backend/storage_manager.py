@@ -86,8 +86,8 @@ def allocate_and_copy_objects(
         if allocator_backend.contains(key):
             continue
         memory_obj = allocator_backend.allocate(
-            shape=src_memory_obj.get_shape(),
-            dtype=src_memory_obj.get_dtype(),
+            src_memory_obj.get_shape(),
+            src_memory_obj.get_dtype(),
             fmt=src_memory_obj.meta.fmt,
             eviction=True,
             busy_loop=False,
@@ -313,8 +313,8 @@ class StorageManager:
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
         busy_loop=True,
@@ -327,14 +327,14 @@ class StorageManager:
         # disk in a similar way as CPU.
         assert self.allocator_backend is not None
         return self.allocator_backend.allocate(
-            shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
+            shapes, dtypes, fmt, eviction=eviction, busy_loop=busy_loop
         )
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
@@ -349,7 +349,7 @@ class StorageManager:
         if self.allocator_backend is None:
             raise RuntimeError("Allocator backend not available for scheduler role")
         return self.allocator_backend.batched_allocate(
-            shape, dtype, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
+            shapes, dtypes, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
         )
 
     def put(

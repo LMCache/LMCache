@@ -44,7 +44,7 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     assert not future.result()
 
     num_tokens = 1000
-    mem_obj_shape = [2, 32, num_tokens, 1024]
+    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
     dtype = torch.bfloat16
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
@@ -121,11 +121,13 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         # Test 2: Create and store test data
         # The size of the full chunk is 256.
         # If test unfull chunk, use 100 (<256) to allocate memory_obj.
-        memory_obj_shape = (
-            kv_shape[1],
-            kv_shape[0],
-            kv_shape[2] if full_chunk else 100,
-            kv_shape[3] * kv_shape[4],
+        memory_obj_shape = torch.Size(
+            [
+                kv_shape[1],
+                kv_shape[0],
+                kv_shape[2] if full_chunk else 100,
+                kv_shape[3] * kv_shape[4],
+            ]
         )
         memory_obj = memory_allocator.allocate(memory_obj_shape, dtype)
         memory_obj.ref_count_up()
@@ -204,7 +206,7 @@ def test_redis_connector(url, autorelease_v1):
 
     # Test 2: Create and store test data
     num_tokens = 1000
-    mem_obj_shape = [2, 32, num_tokens, 1024]
+    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
     dtype = torch.bfloat16
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
@@ -271,7 +273,7 @@ def test_redis_sentinel_connector(url, autorelease_v1):
 
     # Test 2: Create and store test data
     num_tokens = 1000
-    mem_obj_shape = [2, 32, num_tokens, 1024]
+    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
     dtype = torch.bfloat16
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
@@ -333,7 +335,7 @@ def test_redis_cluster_connector(url, autorelease_v1):
 
     # Test 2: Create and store test data
     num_tokens = 1000
-    mem_obj_shape = [2, 32, num_tokens, 1024]
+    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
     dtype = torch.bfloat16
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
@@ -372,7 +374,7 @@ def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
 
     random_key = dumb_cache_engine_key()
     # build a small mem obj to get correct metadata bytes
-    memory_obj = memory_allocator.allocate([2, 32, 8, 64], torch.bfloat16)
+    memory_obj = memory_allocator.allocate(torch.Size([2, 32, 8, 64]), torch.bfloat16)
     kv_bytes = memory_obj.byte_array
     meta = RemoteMetadata(
         len(kv_bytes),

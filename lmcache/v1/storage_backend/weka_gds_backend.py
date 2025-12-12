@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
 import os
@@ -578,8 +578,8 @@ class WekaGdsBackend(AllocatorBackendInterface):
 
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -589,12 +589,12 @@ class WekaGdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("Weka Backend does not support eviction")
 
-        return self.memory_allocator.allocate(shape, dtype, fmt)
+        return self.memory_allocator.allocate(shapes, dtypes, fmt)
 
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -605,7 +605,7 @@ class WekaGdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("Weka Backend does not support eviction")
 
-        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        return self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
 
     def close(self) -> None:
         self.memory_allocator.close()

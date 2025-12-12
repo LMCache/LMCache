@@ -1581,8 +1581,8 @@ class LMCacheEngineBuilder:
 
             return PagedTensorMemoryAllocator(
                 buffer,
-                torch.Size(metadata.kv_shape),
-                metadata.kv_dtype,
+                [torch.Size(metadata.kv_shape)],
+                [metadata.kv_dtype],
                 MemoryFormat.KV_2LTD,
             )
 

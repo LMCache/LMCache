@@ -36,8 +36,8 @@ def create_mock_memory_obj(backend: LocalCPUBackend, data: bytes) -> MemoryObj:
         tensor = torch.tensor([0], dtype=torch.uint8)
 
     memory_obj = backend.allocate(
-        shape=tensor.shape,
-        dtype=tensor.dtype,
+        shapes=[tensor.shape],
+        dtypes=[tensor.dtype],
         fmt=MemoryFormat.KV_2LTD,
     )
 
