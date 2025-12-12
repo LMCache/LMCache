@@ -421,7 +421,7 @@ class TensorMemoryObj(MemoryObj):
         self.group_length = [0]
         if self.meta.shapes is not None and self.meta.dtypes is not None:
             size_in_bytes = 0
-            for shape, dtype in zip(self.meta.shapes, self.meta.dtypes, strict=False):
+            for shape, dtype in zip(self.meta.shapes, self.meta.dtypes, strict=True):
                 size_in_bytes += shape.numel() * dtype.itemsize
                 self.group_length.append(size_in_bytes)
         else:
@@ -847,15 +847,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
     @staticmethod
     @_lmcache_nvtx_annotate
-    def _Compute_raw_size(shapes: list[torch.Size], dtypes: list[torch.dtype]) -> int:
-        assert len(shapes) == len(dtypes)
-        return sum(
-            shape.numel() * dtype.itemsize
-            for shape, dtype in zip(shapes, dtypes, strict=False)
-        )
-
-    @staticmethod
-    @_lmcache_nvtx_annotate
     def _Compute_aligned_size(raw_size: int, align: int) -> int:
         return (raw_size + align - 1) & ~(align - 1)
 
@@ -917,7 +908,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
-        raw_size = TensorMemoryAllocator._Compute_raw_size(shapes, dtypes)
+        raw_size = get_size_bytes(shapes, dtypes)
         if raw_size % self.align_bytes != 0:
             aligned_size = TensorMemoryAllocator._Compute_aligned_size(
                 raw_size, self.align_bytes
@@ -991,7 +982,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
-        unit_raw_size = TensorMemoryAllocator._Compute_raw_size(shapes, dtypes)
+        unit_raw_size = get_size_bytes(shapes, dtypes)
 
         if unit_raw_size % self.align_bytes != 0:
             unit_aligned_size = TensorMemoryAllocator._Compute_aligned_size(
@@ -1252,11 +1243,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.total_allocated_size = 0
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-
-    @staticmethod
-    @_lmcache_nvtx_annotate
-    def _Compute_raw_size(shape: torch.Size, dtype: torch.dtype) -> int:
-        return shape.numel() * dtype.itemsize
 
     @_lmcache_nvtx_annotate
     def allocate(

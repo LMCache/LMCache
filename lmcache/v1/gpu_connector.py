@@ -581,7 +581,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.group_layers is not None
         assert self.group_hidden_dim_sizes is not None
         for num_layers, hidden_dim_size in zip(
-            self.group_layers, self.group_hidden_dim_sizes, strict=False
+            self.group_layers, self.group_hidden_dim_sizes, strict=True
         ):
             shapes.append(
                 torch.Size([kv_size, num_layers, num_tokens, hidden_dim_size])
