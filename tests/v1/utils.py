@@ -17,7 +17,7 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import GPUConnectorInterface, VLLMPagedMemGPUConnectorV2
+from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 
 
 def recover_engine_states(engine):
@@ -457,39 +457,6 @@ class DummyLMCacheAsyncLookupServer:
         retrieved_length: int,
     ) -> None:
         pass
-
-
-class MockGPUConnector(GPUConnectorInterface):
-    """
-    Mock GPU connector that works on CPU for testing purposes.
-    This allows testing the cache engine without requiring CUDA.
-    """
-
-    def __init__(self, hidden_dim_size: int, num_layers: int, **kwargs):
-        self.hidden_dim_size = hidden_dim_size
-        self.num_layers = num_layers
-        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
-        self.kvcaches = None
-        self.stored_data: dict = {}
-
-    def from_gpu(self, memory_obj, start: int, end: int, **kwargs):
-        """Mock from_gpu operation."""
-        pass
-
-    def to_gpu(self, memory_obj, start: int, end: int, **kwargs):
-        """Mock to_gpu operation."""
-        pass
-
-    def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
-        """Mock batched_from_gpu operation."""
-        pass
-
-    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
-        """Mock batched_to_gpu operation."""
-        pass
-
-    def get_shape(self, num_tokens: int) -> torch.Size:
-        return torch.Size([self.num_layers, 2, num_tokens, 8, 128])
 
 
 class MockAdapter:

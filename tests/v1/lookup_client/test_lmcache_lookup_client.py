@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import random
-from unittest.mock import MagicMock
 import tempfile
 import time
 import uuid
@@ -12,21 +11,17 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
 )
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
-
-# Local
-from ..utils import (
-    MockGPUConnector,
+from tests.v1.utils import (
     create_mock_vllm_config,
     create_test_config,
+    create_test_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
     recover_engine_states,
@@ -41,6 +36,11 @@ class TestLMCacheLookupClientServer:
         """Create a temporary directory for testing."""
         temp_dir = tempfile.mkdtemp()
         yield temp_dir
+
+    @pytest.fixture
+    def lmcache_engine_metadata(self):
+        """Create test metadata for LMCacheEngine."""
+        return create_test_metadata()
 
     @pytest.fixture
     def lmcache_engine(self, temp_dir, lmcache_engine_metadata):
