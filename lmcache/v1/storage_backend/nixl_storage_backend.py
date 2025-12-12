@@ -16,7 +16,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Set, cast
+from typing import Any, List, Optional, Sequence, Set, Union, cast
 import asyncio
 import os
 import threading
@@ -629,8 +629,8 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         return PagedTensorMemoryAllocator(
             self.buffer,
-            torch.Size(metadata.kv_shape),
-            metadata.kv_dtype,
+            [torch.Size(metadata.kv_shape)],
+            [metadata.kv_dtype],
             MemoryFormat.KV_2LTD,
         )
 
@@ -639,8 +639,8 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -648,12 +648,12 @@ class NixlStorageBackend(AllocatorBackendInterface):
         if busy_loop:
             logger.warning("NixlStorageBackend does not support busy loop for now")
 
-        return self.memory_allocator.allocate(shape, dtype, fmt)
+        return self.memory_allocator.allocate(shapes, dtypes, fmt)
 
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -662,7 +662,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         if busy_loop:
             logger.warning("NixlStorageBackend does not support busy loop for now")
 
-        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        return self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
 
     def get_allocator_backend(self):
         return self

@@ -7,6 +7,7 @@ import abc
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -161,6 +162,41 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.store_stream = torch.cuda.Stream()
         self.load_stream = torch.cuda.Stream()
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: LMCacheEngineMetadata,
+        use_gpu: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> "VLLMPagedMemGPUConnectorV2":
+        """Create a connector from LMCacheEngineMetadata.
+
+        Args:
+            metadata: The LMCache engine metadata containing model configuration.
+            use_gpu: Whether to use GPU intermediate buffer.
+            device: The device to use for the connector.
+
+        Returns:
+            A new instance of VLLMPagedMemGPUConnectorV2.
+        """
+        # Extract parameters from metadata
+        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
+        num_layers = metadata.kv_shape[0]
+        chunk_size = metadata.kv_shape[2]
+        num_kv_head = metadata.kv_shape[3]
+        head_size = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_head * head_size
+
+        return cls(
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=metadata.kv_dtype,
+            device=device,
+            use_mla=metadata.use_mla,
+        )
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.device = kv_caches[0].device
@@ -362,6 +398,38 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         self.use_gpu = use_gpu
         self.gpu_buffer_allocator = None
         self.element_size = torch.tensor([], dtype=self.dtype).element_size()
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: LMCacheEngineMetadata,
+        use_gpu: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> "VLLMBufferLayerwiseGPUConnector":
+        """Create a connector from LMCacheEngineMetadata.
+
+        Args:
+            metadata: The LMCache engine metadata containing model configuration.
+            use_gpu: Whether to use GPU intermediate buffer.
+            device: The device to use for the connector.
+
+        Returns:
+            A new instance of VLLMBufferLayerwiseGPUConnector.
+        """
+        # Extract parameters from metadata
+        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
+        num_layers = metadata.kv_shape[0]
+        num_kv_head = metadata.kv_shape[3]
+        head_size = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_head * head_size
+
+        return cls(
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            dtype=metadata.kv_dtype,
+            device=device,
+        )
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
@@ -734,6 +802,41 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         self.store_stream = torch.cuda.Stream()
 
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: LMCacheEngineMetadata,
+        use_gpu: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> "VLLMPagedMemLayerwiseGPUConnector":
+        """Create a connector from LMCacheEngineMetadata.
+
+        Args:
+            metadata: The LMCache engine metadata containing model configuration.
+            use_gpu: Whether to use GPU intermediate buffer.
+            device: The device to use for the connector.
+
+        Returns:
+            A new instance of VLLMPagedMemLayerwiseGPUConnector.
+        """
+        # Extract parameters from metadata
+        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
+        num_layers = metadata.kv_shape[0]
+        chunk_size = metadata.kv_shape[2]
+        num_kv_head = metadata.kv_shape[3]
+        head_size = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_head * head_size
+
+        return cls(
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=metadata.kv_dtype,
+            device=device,
+            use_mla=metadata.use_mla,
+        )
 
     def _lazy_initialize_buffer(self, kv_caches):
         """

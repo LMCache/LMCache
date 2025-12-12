@@ -5,10 +5,22 @@ from typing import Dict, List, Optional, Tuple
 import argparse
 import asyncio
 import json
+import os
+import sys
 import uuid
+
+# Add project root to Python path for local development
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ),
+)
 
 # Third Party
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 
@@ -76,6 +88,39 @@ def create_app(
     # Register internal APIs (only common APIs, not vllm-specific ones)
     registry = APIRegistry(app)
     registry.register_all_apis(categories=["common", "controller"])
+
+    # Add static files for frontend
+    project_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    )
+    static_dir = os.path.join(
+        project_root,
+        "lmcache",
+        "v1",
+        "cache_controller",
+        "frontend",
+        "static",
+    )
+    if os.path.exists(static_dir):
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+        logger.info("Controller frontend static files mounted at /static")
+    else:
+        logger.warning("Controller frontend static directory not found: %s", static_dir)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def serve_frontend():
+        """Serve the Controller frontend HTML page."""
+        index_path = os.path.join(static_dir, "index.html")
+        if os.path.exists(index_path):
+            with open(index_path, "r") as f:
+                html_content = f.read()
+            return HTMLResponse(content=html_content)
+        else:
+            return HTMLResponse(
+                content="<h1>Controller Frontend not found</h1>"
+                "<p>Please build the frontend first.</p>",
+                status_code=404,
+            )
 
     class QueryInstRequest(BaseModel):
         event_id: str
@@ -244,7 +289,7 @@ def create_app(
         old_position: Tuple[str, str]
         new_position: Tuple[str, str]
         tokens: Optional[List[int]] = []
-        copy: Optional[bool] = False
+        should_copy: Optional[bool] = False
 
     class MoveResponse(BaseModel):
         event_id: str
@@ -259,7 +304,7 @@ def create_app(
                 old_position=req.old_position,
                 new_position=req.new_position,
                 tokens=req.tokens,
-                copy=req.copy,
+                copy=req.should_copy,
             )
             ret_msg = await lmcache_controller_manager.handle_orchestration_message(msg)
             assert not isinstance(ret_msg, ErrorMsg), ret_msg.error
@@ -317,7 +362,7 @@ def create_app(
 
     class QueryWorkerInfoRequest(BaseModel):
         instance_id: str
-        worker_ids: Optional[list[int]]
+        worker_ids: Optional[list[int]] = None
 
     class QueryWorkerInfoResponse(BaseModel):
         event_id: str

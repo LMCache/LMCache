@@ -17,11 +17,11 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import GPUConnectorInterface
 from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
 )
+from lmcache.v1.mock_gpu_connector import MockGPUConnector
 
 # Local
 from ..utils import (
@@ -63,35 +63,6 @@ def create_test_config(
     config.extra_config = extra_config.copy() if extra_config else {}
     config.extra_config["lmcache_rpc_port"] = rpc_port
     return config
-
-
-class MockGPUConnector(GPUConnectorInterface):
-    """Mock GPU connector for testing without real GPU."""
-
-    def __init__(self, hidden_dim_size: int, num_layers: int, **kwargs):
-        self.hidden_dim_size = hidden_dim_size
-        self.num_layers = num_layers
-        self.stored_data: dict = {}
-
-    def from_gpu(self, memory_obj, start: int, end: int, **kwargs):
-        """Mock from_gpu operation."""
-        pass
-
-    def to_gpu(self, memory_obj, start: int, end: int, **kwargs):
-        """Mock to_gpu operation."""
-        pass
-
-    def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
-        """Mock batched_from_gpu operation."""
-        pass
-
-    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
-        """Mock batched_to_gpu operation."""
-        pass
-
-    def get_shape(self, num_tokens=None):
-        """Mock get_shape operation."""
-        return (self.num_layers, 2, 256, 8, 128)
 
 
 def create_mock_vllm_config(rank: int = 0, world_size: int = 1, rpc_port: int = 0):
@@ -153,7 +124,7 @@ class TestLMCacheLookupClientServer:
         config = create_test_config(instance_id=instance_id)
 
         # Use mock connector for CPU testing
-        connector = MockGPUConnector(hidden_dim_size=1024, num_layers=32)
+        connector = MockGPUConnector(kv_shape=(32, 2, 256, 8, 128))
 
         engine = LMCacheEngineBuilder.get_or_create(
             instance_id=instance_id,

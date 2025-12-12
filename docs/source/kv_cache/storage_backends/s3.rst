@@ -70,7 +70,7 @@ Configuration Parameters
 ------------------------
 
 * **remote_url**: S3 bucket URL (`s3://bucket-name`)
-* **save_unfull_chunk**: Save partial chunks (default: True, **must be False for S3**)
+* **save_unfull_chunk**: Save partial chunks (default: False, **must be False for S3**)
 * **enable_async_loading**: Async loading (default: False)
 * **blocking_timeout_secs**: Timeout seconds (default: 10)
 
