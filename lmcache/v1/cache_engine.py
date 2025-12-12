@@ -257,7 +257,7 @@ class LMCacheEngine:
             enabled (bool): Whether to enable hot cache freeze mode
         """
         if self.storage_manager is not None:
-            self.storage_manager.set_hot_cache_freeze_mode(enabled)
+            self.storage_manager.set_freeze(enabled)
             logger.info(
                 "Hot cache freeze mode %s", "enabled" if enabled else "disabled"
             )
@@ -270,7 +270,7 @@ class LMCacheEngine:
             bool: True if hot cache freeze mode is enabled, False otherwise
         """
         if self.storage_manager is not None:
-            return self.storage_manager.get_hot_cache_freeze_mode()
+            return self.storage_manager.is_frozen()
         return False
 
     @_lmcache_nvtx_annotate

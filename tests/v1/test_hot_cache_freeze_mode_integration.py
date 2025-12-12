@@ -278,14 +278,14 @@ def test_hot_cache_freeze_mode_direct_api(autorelease_v1):
 
     try:
         # Verify initial state
-        assert engine.get_hot_cache_freeze_mode() is False
+        assert engine.is_frozen() is False
 
         # Test set/get methods
-        engine.set_hot_cache_freeze_mode(True)
-        assert engine.get_hot_cache_freeze_mode() is True
+        engine.freeze(True)
+        assert engine.is_frozen() is True
 
-        engine.set_hot_cache_freeze_mode(False)
-        assert engine.get_hot_cache_freeze_mode() is False
+        engine.freeze(False)
+        assert engine.is_frozen() is False
 
         # Test store behavior with freeze mode
         tokens = generate_tokens(num_tokens, device)
@@ -309,7 +309,7 @@ def test_hot_cache_freeze_mode_direct_api(autorelease_v1):
         assert engine.lookup(tokens) == num_tokens
 
         # Enable freeze mode
-        engine.set_hot_cache_freeze_mode(True)
+        engine.freeze(True)
 
         # Try to store new data
         new_tokens = generate_tokens(num_tokens, device)
