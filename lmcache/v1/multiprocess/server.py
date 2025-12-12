@@ -204,7 +204,15 @@ class GPUCacheContext:
 
 
 class MPCacheEngine:
-    def __init__(self, chunk_size: int = 256, cpu_buffer_size: float = 5.0):
+    def __init__(
+        self,
+        chunk_size: int = 256,
+        cpu_buffer_size: float = 5.0,
+        enable_lazy_memory: bool = False,
+        lazy_memory_initial_ratio: float = 0.2,
+        lazy_memory_expand_trigger_ratio: float = 0.5,
+        lazy_memory_step_ratio: float = 0.1,
+    ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
 
@@ -214,8 +222,14 @@ class MPCacheEngine:
         # thread lock to avoid tmp buffer conflicts
         self.lock = threading.Lock()
 
-        # storage manager
-        self.storage_manager = MPStorageManager(cpu_buffer_size)
+        # storage manager (with optional lazy memory allocator for faster init)
+        self.storage_manager = MPStorageManager(
+            cpu_buffer_size,
+            enable_lazy_memory=enable_lazy_memory,
+            lazy_memory_initial_ratio=lazy_memory_initial_ratio,
+            lazy_memory_expand_trigger_ratio=lazy_memory_expand_trigger_ratio,
+            lazy_memory_step_ratio=lazy_memory_step_ratio,
+        )
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -509,9 +523,20 @@ def run_cache_server(
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
+    enable_lazy_memory: bool = False,
+    lazy_memory_initial_ratio: float = 0.2,
+    lazy_memory_expand_trigger_ratio: float = 0.5,
+    lazy_memory_step_ratio: float = 0.1,
 ):
-    # Initialize the engine
-    engine = MPCacheEngine(chunk_size, cpu_buffer_size)
+    # Initialize the engine with optional lazy memory allocator
+    engine = MPCacheEngine(
+        chunk_size=chunk_size,
+        cpu_buffer_size=cpu_buffer_size,
+        enable_lazy_memory=enable_lazy_memory,
+        lazy_memory_initial_ratio=lazy_memory_initial_ratio,
+        lazy_memory_expand_trigger_ratio=lazy_memory_expand_trigger_ratio,
+        lazy_memory_step_ratio=lazy_memory_step_ratio,
+    )
 
     # Initialize the message queue server
     context = zmq.Context.instance()
@@ -562,6 +587,31 @@ def parse_args():
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
+    # Lazy memory allocator options for faster initialization
+    parser.add_argument(
+        "--enable-lazy-memory",
+        action="store_true",
+        default=False,
+        help="Enable lazy memory allocator for faster server startup",
+    )
+    parser.add_argument(
+        "--lazy-memory-initial-ratio",
+        type=float,
+        default=0.2,
+        help="Initial memory allocation ratio (0.0-1.0). Default: 0.2 (20%%)",
+    )
+    parser.add_argument(
+        "--lazy-memory-trigger-ratio",
+        type=float,
+        default=0.5,
+        help="Memory usage ratio that triggers expansion. Default: 0.5 (50%%)",
+    )
+    parser.add_argument(
+        "--lazy-memory-step-ratio",
+        type=float,
+        default=0.1,
+        help="Memory expansion step ratio. Default: 0.1 (10%%)",
+    )
     return parser.parse_args()
 
 
@@ -573,4 +623,8 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
+        enable_lazy_memory=args.enable_lazy_memory,
+        lazy_memory_initial_ratio=args.lazy_memory_initial_ratio,
+        lazy_memory_expand_trigger_ratio=args.lazy_memory_trigger_ratio,
+        lazy_memory_step_ratio=args.lazy_memory_step_ratio,
     )

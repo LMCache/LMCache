@@ -17,19 +17,45 @@ from lmcache.v1.multiprocess.mp_storage_manager import (
 
 
 # Fixtures
-@pytest.fixture
-def storage_manager():
-    """Create a storage manager with 1GB buffer for testing."""
-    manager = MPStorageManager(cpu_buffer_size=1.0)
+@pytest.fixture(params=[False, True], ids=["regular", "lazy"])
+def storage_manager(request):
+    """Create a storage manager with 1GB buffer for testing.
+
+    Parametrized to test both regular MixedMemoryAllocator and LazyMixedMemoryAllocator.
+    """
+    enable_lazy = request.param
+    if enable_lazy:
+        manager = MPStorageManager(
+            cpu_buffer_size=1.0,
+            enable_lazy_memory=True,
+            lazy_memory_initial_ratio=0.2,
+            lazy_memory_expand_trigger_ratio=0.5,
+            lazy_memory_step_ratio=0.2,
+        )
+    else:
+        manager = MPStorageManager(cpu_buffer_size=1.0)
     yield manager
     # Cleanup after test
     manager.close()
 
 
-@pytest.fixture
-def small_storage_manager():
-    """Create a storage manager with very small buffer to test memory exhaustion."""
-    manager = MPStorageManager(cpu_buffer_size=0.001)  # 1MB
+@pytest.fixture(params=[False, True], ids=["regular", "lazy"])
+def small_storage_manager(request):
+    """Create a storage manager with very small buffer to test memory exhaustion.
+
+    Parametrized to test both regular and lazy allocators.
+    """
+    enable_lazy = request.param
+    if enable_lazy:
+        manager = MPStorageManager(
+            cpu_buffer_size=0.001,  # 1MB
+            enable_lazy_memory=True,
+            lazy_memory_initial_ratio=0.5,
+            lazy_memory_expand_trigger_ratio=0.7,
+            lazy_memory_step_ratio=0.3,
+        )
+    else:
+        manager = MPStorageManager(cpu_buffer_size=0.001)  # 1MB
     yield manager
     # Cleanup after test
     manager.close()

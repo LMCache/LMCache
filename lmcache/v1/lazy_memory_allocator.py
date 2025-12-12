@@ -162,6 +162,46 @@ class CompositeTensorMemoryAllocator(TensorMemoryAllocator):
         """Override: Use composite buffer for multi-segment access."""
         return self.composite_buffer.get_slice(start, size)
 
+    def memcheck(self):
+        """Override: Use composite buffer's total size for consistency check.
+
+        For debug purposes.
+        Returns True if everything is fine, otherwise False.
+        """
+        clear = True
+        logger.info("Checking memory allocator consistency")
+        logger.info(f" - Total active allocations: {self.num_active_allocations}")
+        logger.info(
+            f" - Total allocated size: {self.total_allocated_size / 1048576} MB"
+        )
+
+        # Check the real total free size
+        total_free_size = sum([block.size for block in self.explicit_list])
+        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
+
+        # Use composite buffer's numel() for total size
+        # (not self.buffer which is only first segment)
+        total_buffer_size = self.composite_buffer.numel()
+        logger.info(f" - Total buffer size: {total_buffer_size / 1048576} MB")
+
+        # Check if the numbers are consistent
+        if total_free_size + self.total_allocated_size != total_buffer_size:
+            logger.error("Memory allocator size is inconsistent")
+            logger.error("This implies a bug in the memory allocator")
+            clear = False
+
+        # Check if the blocks are coalesced (excluding segment boundaries)
+        for prev, succ in zip(
+            self.explicit_list[:-1], self.explicit_list[1:], strict=False
+        ):
+            # Only check coalescing if they are NOT separated by a segment boundary
+            if not self._is_segment_boundary(prev.start + prev.size):
+                if prev.can_be_coalesced(succ):
+                    logger.error("Memory allocator has non-coalesced blocks")
+                    logger.error("This implies a bug in the memory allocator")
+                    clear = False
+        return clear
+
 
 class AsyncMemoryExpander:
     """Asynchronously expands memory in background.
@@ -319,15 +359,24 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
     def __init__(
         self,
         size: int,
-        config: "LMCacheEngineConfig",
+        config: Optional["LMCacheEngineConfig"] = None,
         use_paging: bool = False,
         memory_limit_callback: Optional[Callable] = None,
+        initial_ratio: Optional[float] = None,
+        expand_trigger_ratio: Optional[float] = None,
+        step_ratio: Optional[float] = None,
         **kwargs,
     ):
-        # Extract configuration values from config
-        initial_ratio = config.lazy_memory_initial_ratio
-        expand_trigger_ratio = config.lazy_memory_expand_trigger_ratio
-        step_ratio = config.lazy_memory_step_ratio
+        # Extract configuration values from config or use direct parameters
+        # Direct parameters take precedence over config values
+        if initial_ratio is None:
+            initial_ratio = config.lazy_memory_initial_ratio if config else 0.2
+        if expand_trigger_ratio is None:
+            expand_trigger_ratio = (
+                config.lazy_memory_expand_trigger_ratio if config else 0.5
+            )
+        if step_ratio is None:
+            step_ratio = config.lazy_memory_step_ratio if config else 0.1
 
         self.total_size = size
         self.initial_ratio = initial_ratio

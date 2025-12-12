@@ -17,7 +17,13 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
+from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+    MixedMemoryAllocator,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 
@@ -184,11 +190,26 @@ class LRUCachePolicyWithLock(LRUCachePolicy[IPCCacheEngineKey]):
 
 
 class MPStorageManager:
-    def __init__(self, cpu_buffer_size: float):
+    def __init__(
+        self,
+        cpu_buffer_size: float,
+        enable_lazy_memory: bool = False,
+        lazy_memory_initial_ratio: float = 0.2,
+        lazy_memory_expand_trigger_ratio: float = 0.5,
+        lazy_memory_step_ratio: float = 0.1,
+    ):
         """
         Args:
             cpu_buffer_size: the total size (in GB) of CPU memory buffer
                 to be used for storage
+            enable_lazy_memory: if True, uses LazyMixedMemoryAllocator for
+                faster initialization by deferring memory allocation.
+            lazy_memory_initial_ratio: initial memory allocation ratio (0.0-1.0).
+                Only used when enable_lazy_memory is True. Default: 0.2 (20%)
+            lazy_memory_expand_trigger_ratio: memory usage ratio that triggers
+                automatic expansion. Default: 0.5 (50%)
+            lazy_memory_step_ratio: memory expansion step ratio per expansion.
+                Default: 0.1 (10%)
         """
         # Lock manager for locking memory objects
         # TODO: have separate lock manager for different storage backends
@@ -198,7 +219,24 @@ class MPStorageManager:
         # Allocator for CPU memory (note: this will be moved to storage backend
         # implementation in the future)
         size_in_bytes = int(cpu_buffer_size * (1 << 30))  # Convert GB to bytes
-        self._memory_allocator = MixedMemoryAllocator(size_in_bytes)
+
+        if enable_lazy_memory:
+            logger.info(
+                "Using LazyMixedMemoryAllocator for MPStorageManager "
+                "(initial=%.0f%%, trigger=%.0f%%, step=%.0f%%)",
+                lazy_memory_initial_ratio * 100,
+                lazy_memory_expand_trigger_ratio * 100,
+                lazy_memory_step_ratio * 100,
+            )
+            self._memory_allocator: MemoryAllocatorInterface = LazyMixedMemoryAllocator(
+                size=size_in_bytes,
+                initial_ratio=lazy_memory_initial_ratio,
+                expand_trigger_ratio=lazy_memory_expand_trigger_ratio,
+                step_ratio=lazy_memory_step_ratio,
+            )
+        else:
+            self._memory_allocator = MixedMemoryAllocator(size_in_bytes)
+
         self._allocator_lock = threading.Lock()
 
         # Reserved memory objects

@@ -92,3 +92,124 @@ class TestLazyAllocatorIntegration(unittest.TestCase):
         self.assertEqual(alloc.expand_trigger_ratio, 0.6)
         self.assertEqual(alloc.step_ratio, 0.15)
         backend.close()
+
+    def test_memcheck_before_expansion(self):
+        """Test memcheck passes before any memory expansion"""
+        backend = self._create_backend()
+        allocator = backend.memory_allocator
+        self.assertIsInstance(allocator, LazyMixedMemoryAllocator)
+
+        # memcheck should pass with initial allocation
+        self.assertTrue(allocator.pin_allocator.memcheck())
+        backend.close()
+
+    def test_memcheck_after_allocation(self):
+        """Test memcheck passes after allocations"""
+        backend = self._create_backend()
+        allocator = backend.memory_allocator
+
+        # Allocate some memory
+        shape, dtype = torch.Size([256, 2, 4096]), torch.float16
+        mem_objs = []
+        for _ in range(3):
+            mem_obj = backend.allocate(shape, dtype, eviction=False, busy_loop=False)
+            if mem_obj:
+                mem_objs.append(mem_obj)
+
+        # memcheck should pass after allocations
+        self.assertTrue(allocator.pin_allocator.memcheck())
+
+        # Free all objects
+        for mem_obj in mem_objs:
+            allocator.free(mem_obj)
+
+        # memcheck should still pass after freeing
+        self.assertTrue(allocator.pin_allocator.memcheck())
+        backend.close()
+
+    def test_memcheck_after_expansion(self):
+        """Test memcheck passes after memory expansion with multiple segments"""
+        # Standard
+        import time
+
+        # Configure for quick expansion
+        cfg = LMCacheEngineConfig.from_defaults()
+        cfg.local_cpu = True
+        cfg.max_local_cpu_size = 0.1  # 100MB total
+        cfg.chunk_size = 256
+        cfg.enable_lazy_memory_allocator = True
+        cfg.lazy_memory_initial_ratio = 0.2  # Start with 20MB
+        cfg.lazy_memory_expand_trigger_ratio = 0.3  # Trigger at 30%
+        cfg.lazy_memory_step_ratio = 0.2  # Add 20% each step
+
+        backend = self._create_backend(cfg)
+        allocator = backend.memory_allocator
+        self.assertIsInstance(allocator, LazyMixedMemoryAllocator)
+
+        initial_segments = len(allocator.composite_buffer.segments)
+        self.assertEqual(initial_segments, 1)
+
+        # Allocate memory to trigger expansion
+        shape, dtype = torch.Size([256, 2, 8192]), torch.float16
+        mem_objs = []
+        for _ in range(5):
+            mem_obj = backend.allocate(shape, dtype, eviction=False, busy_loop=False)
+            if mem_obj:
+                mem_objs.append(mem_obj)
+
+        # Wait for async expansion
+        time.sleep(0.5)
+
+        # If expansion was triggered, we should have more segments
+        if allocator.expansion_triggered:
+            final_segments = len(allocator.composite_buffer.segments)
+            self.assertGreaterEqual(final_segments, initial_segments)
+
+        # memcheck should pass even with multiple segments
+        self.assertTrue(allocator.pin_allocator.memcheck())
+
+        # Free all objects
+        for mem_obj in mem_objs:
+            allocator.free(mem_obj)
+
+        # memcheck should pass after freeing with multiple segments
+        self.assertTrue(allocator.pin_allocator.memcheck())
+        backend.close()
+
+    def test_memcheck_segment_boundary_no_coalesce(self):
+        """
+        Test that free blocks at segment boundaries are not
+        flagged as non-coalesced.
+        """
+        # Standard
+        import time
+
+        cfg = LMCacheEngineConfig.from_defaults()
+        cfg.local_cpu = True
+        cfg.max_local_cpu_size = 0.05  # 50MB total
+        cfg.chunk_size = 256
+        cfg.enable_lazy_memory_allocator = True
+        cfg.lazy_memory_initial_ratio = 0.3
+        cfg.lazy_memory_expand_trigger_ratio = 0.4
+        cfg.lazy_memory_step_ratio = 0.3
+
+        backend = self._create_backend(cfg)
+        allocator = backend.memory_allocator
+
+        # Allocate to trigger expansion
+        shape, dtype = torch.Size([256, 2, 4096]), torch.float16
+        mem_objs = []
+        for _ in range(3):
+            mem_obj = backend.allocate(shape, dtype, eviction=False, busy_loop=False)
+            if mem_obj:
+                mem_objs.append(mem_obj)
+
+        time.sleep(0.5)
+
+        # Free all - this creates free blocks at segment boundaries
+        for mem_obj in mem_objs:
+            allocator.free(mem_obj)
+
+        # memcheck should NOT report non-coalesced blocks at segment boundaries
+        self.assertTrue(allocator.pin_allocator.memcheck())
+        backend.close()
