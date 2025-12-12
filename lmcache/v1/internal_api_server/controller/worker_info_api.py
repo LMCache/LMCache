@@ -17,6 +17,7 @@ class WorkerInfoResponse(BaseModel):
     peer_init_url: Optional[str]
     registration_time: float
     last_heartbeat_time: float
+    key_count: int
 
 
 class WorkerListResponse(BaseModel):
@@ -63,6 +64,7 @@ async def get_workers(
                 )
 
             worker_info = worker_node.to_worker_info(instance_id)
+            key_count = worker_node.get_kv_count()
             return WorkerInfoResponse(
                 instance_id=worker_info.instance_id,
                 worker_id=worker_info.worker_id,
@@ -71,6 +73,7 @@ async def get_workers(
                 peer_init_url=worker_info.peer_init_url,
                 registration_time=worker_info.registration_time,
                 last_heartbeat_time=worker_info.last_heartbeat_time,
+                key_count=key_count,
             )
 
         # Case 2: Get all workers for a specific instance
@@ -83,36 +86,48 @@ async def get_workers(
                 )
 
             worker_infos = instance_node.get_all_worker_infos()
-            workers = [
-                WorkerInfoResponse(
-                    instance_id=worker_info.instance_id,
-                    worker_id=worker_info.worker_id,
-                    ip=worker_info.ip,
-                    port=worker_info.port,
-                    peer_init_url=worker_info.peer_init_url,
-                    registration_time=worker_info.registration_time,
-                    last_heartbeat_time=worker_info.last_heartbeat_time,
+            workers = []
+            for worker_info in worker_infos:
+                worker_node = reg_controller.registry.get_worker(
+                    instance_id, worker_info.worker_id
                 )
-                for worker_info in worker_infos
-            ]
+                key_count = worker_node.get_kv_count() if worker_node else 0
+                workers.append(
+                    WorkerInfoResponse(
+                        instance_id=worker_info.instance_id,
+                        worker_id=worker_info.worker_id,
+                        ip=worker_info.ip,
+                        port=worker_info.port,
+                        peer_init_url=worker_info.peer_init_url,
+                        registration_time=worker_info.registration_time,
+                        last_heartbeat_time=worker_info.last_heartbeat_time,
+                        key_count=key_count,
+                    )
+                )
 
             return WorkerListResponse(workers=workers, total_count=len(workers))
 
         # Case 3: Get all workers across all instances
         else:
             worker_infos = reg_controller.registry.get_all_worker_infos()
-            workers = [
-                WorkerInfoResponse(
-                    instance_id=worker_info.instance_id,
-                    worker_id=worker_info.worker_id,
-                    ip=worker_info.ip,
-                    port=worker_info.port,
-                    peer_init_url=worker_info.peer_init_url,
-                    registration_time=worker_info.registration_time,
-                    last_heartbeat_time=worker_info.last_heartbeat_time,
+            workers = []
+            for worker_info in worker_infos:
+                worker_node = reg_controller.registry.get_worker(
+                    worker_info.instance_id, worker_info.worker_id
                 )
-                for worker_info in worker_infos
-            ]
+                key_count = worker_node.get_kv_count() if worker_node else 0
+                workers.append(
+                    WorkerInfoResponse(
+                        instance_id=worker_info.instance_id,
+                        worker_id=worker_info.worker_id,
+                        ip=worker_info.ip,
+                        port=worker_info.port,
+                        peer_init_url=worker_info.peer_init_url,
+                        registration_time=worker_info.registration_time,
+                        last_heartbeat_time=worker_info.last_heartbeat_time,
+                        key_count=key_count,
+                    )
+                )
 
             return WorkerListResponse(workers=workers, total_count=len(workers))
     except HTTPException:
