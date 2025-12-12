@@ -178,6 +178,37 @@ By default, all tests found within the tests directory are run. However, specifi
 
     The `NVIDIA Inference Xfer Library (NIXL) <https://github.com/ai-dynamo/nixl>`_ unit tests require NIXL to be to be installed. This is not installed by LMCache by and therefore requires you to install it separately. Please follow the details in the NIXL GitHub repo to install.
     If the NIXL package is not installed, the NIXL unit tests are skipped.
+    
+You can also run only certain backends/connectors by using pytest markers:
+
+.. code-block:: bash
+
+    # Core / low-dependency
+    pytest -m local_cpu        # Local CPU backend
+    pytest -m local_disk       # Local Disk backend
+    pytest -m mock_connector   # Mock connector
+    pytest -m redis            # Redis connector (requires a Redis service)
+    pytest -m p2p              # P2P backend
+    pytest -m pd               # PD/disaggregated setups
+
+    # Optional / environment-specific
+    pytest -m nixl             # Nixl backend (requires nixl installed/configured)
+    pytest -m gds              # GDS backend (requires GDS/cufile setup)
+    pytest -m weka             # Weka GDS backend (requires Weka + GDS)
+
+You can combine or negate markers with standard pytest expressions:
+
+.. code-block:: bash
+
+    pytest -m "local_cpu or local_disk"
+    pytest -m "not redis"             # run everything except redis-tagged tests
+    pytest -m "nixl and not gds"
+
+.. note::
+
+    - Missing optional dependencies (e.g., ``nixl``, GDS/cufile, Weka) will cause the tagged tests to skip or fail, depending on the test. Run only the markers your environment supports.
+    - Redis marker assumes a reachable Redis service at the configured URL; without it, tests may fail rather than skip.
+    - P2P/PD rely on local ports and multi-process behavior; in constrained environments they may be flaky or slow.
 
 Building the docs
 ^^^^^^^^^^^^^^^^^
@@ -201,4 +232,3 @@ Thank You
 ---------
 
 Thank you for your contribution to LMCache and making it a better, and accessible framework for all. 
-
