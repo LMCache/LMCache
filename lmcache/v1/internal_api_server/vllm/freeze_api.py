@@ -10,12 +10,12 @@ from starlette.responses import PlainTextResponse
 router = APIRouter()
 
 
-@router.put("/hot_cache_freeze_mode/enable")
-async def enable_hot_cache_freeze_mode(request: Request):
+@router.put("/freeze/enable")
+async def enable_freeze(request: Request):
     """
-    Enable hot cache freeze mode for the LMCache engine.
+    Enable freeze mode for the LMCache engine.
 
-    When hot cache freeze mode is enabled:
+    When freeze mode is enabled:
     - All store operations will be skipped (no new data stored)
     - Only local_cpu backend will be used for retrieval
     - No admit/evict messages will be generated
@@ -29,8 +29,8 @@ async def enable_hot_cache_freeze_mode(request: Request):
 
     Example:
         ```bash
-        curl -X PUT "http://localhost:8000/hot_cache_freeze_mode/enable"
-        # Response: {"status": "success", "hot_cache_freeze_mode": true}
+        curl -X PUT "http://localhost:8000/freeze/enable"
+        # Response: {"status": "success", "freeze": true}
         ```
     """
     try:
@@ -38,7 +38,7 @@ async def enable_hot_cache_freeze_mode(request: Request):
         lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
         if not lmcache_engine:
             error_info = {
-                "error": "/hot_cache_freeze_mode/enable API is unavailable",
+                "error": "/freeze/enable API is unavailable",
                 "message": "LMCache engine not configured.",
             }
             return PlainTextResponse(
@@ -47,18 +47,18 @@ async def enable_hot_cache_freeze_mode(request: Request):
                 status_code=503,  # Service Unavailable
             )
 
-        lmcache_engine.set_hot_cache_freeze_mode(True)
+        lmcache_engine.freeze(True)
         success_info = {
             "status": "success",
-            "hot_cache_freeze_mode": True,
-            "message": "Hot cache freeze mode enabled successfully",
+            "freeze": True,
+            "message": "Freeze mode enabled successfully",
         }
         return PlainTextResponse(
             content=json.dumps(success_info, indent=2),
             media_type="application/json",
         )
     except Exception as e:
-        error_msg = "Failed to enable hot cache freeze mode"
+        error_msg = "Failed to enable freeze mode"
         error_info = {"error": error_msg, "message": str(e)}
         return PlainTextResponse(
             content=json.dumps(error_info, indent=2),
@@ -67,12 +67,12 @@ async def enable_hot_cache_freeze_mode(request: Request):
         )
 
 
-@router.put("/hot_cache_freeze_mode/disable")
-async def disable_hot_cache_freeze_mode(request: Request):
+@router.put("/freeze/disable")
+async def disable_freeze(request: Request):
     """
-    Disable hot cache freeze mode for the LMCache engine.
+    Disable freeze mode for the LMCache engine.
 
-    When hot cache freeze mode is disabled, store operations will proceed normally.
+    When freeze mode is disabled, store operations will proceed normally.
 
     Args:
         request (Request): The FastAPI request object containing application state.
@@ -82,8 +82,8 @@ async def disable_hot_cache_freeze_mode(request: Request):
 
     Example:
         ```bash
-        curl -X PUT "http://localhost:8000/hot_cache_freeze_mode/disable"
-        # Response: {"status": "success", "hot_cache_freeze_mode": false}
+        curl -X PUT "http://localhost:8000/freeze/disable"
+        # Response: {"status": "success", "freeze": false}
         ```
     """
     try:
@@ -91,7 +91,7 @@ async def disable_hot_cache_freeze_mode(request: Request):
         lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
         if not lmcache_engine:
             error_info = {
-                "error": "/hot_cache_freeze_mode/disable API is unavailable",
+                "error": "/freeze/disable API is unavailable",
                 "message": "LMCache engine not configured.",
             }
             return PlainTextResponse(
@@ -100,18 +100,18 @@ async def disable_hot_cache_freeze_mode(request: Request):
                 status_code=503,  # Service Unavailable
             )
 
-        lmcache_engine.set_hot_cache_freeze_mode(False)
+        lmcache_engine.freeze(False)
         success_info = {
             "status": "success",
-            "hot_cache_freeze_mode": False,
-            "message": "Hot cache freeze mode disabled successfully",
+            "freeze": False,
+            "message": "Freeze mode disabled successfully",
         }
         return PlainTextResponse(
             content=json.dumps(success_info, indent=2),
             media_type="application/json",
         )
     except Exception as e:
-        error_msg = "Failed to disable hot cache freeze mode"
+        error_msg = "Failed to disable freeze mode"
         error_info = {"error": error_msg, "message": str(e)}
         return PlainTextResponse(
             content=json.dumps(error_info, indent=2),
@@ -120,21 +120,21 @@ async def disable_hot_cache_freeze_mode(request: Request):
         )
 
 
-@router.get("/hot_cache_freeze_mode/status")
-async def get_hot_cache_freeze_mode_status(request: Request):
+@router.get("/freeze/status")
+async def get_freeze_status(request: Request):
     """
-    Get the current hot cache freeze mode status of the LMCache engine.
+    Get the current freeze mode status of the LMCache engine.
 
     Args:
         request (Request): The FastAPI request object containing application state.
 
     Returns:
-        PlainTextResponse: JSON response with current hot cache freeze mode status.
+        PlainTextResponse: JSON response with current freeze mode status.
 
     Example:
         ```bash
-        curl -X GET "http://localhost:8000/hot_cache_freeze_mode/status"
-        # Response: {"status": "success", "hot_cache_freeze_mode": true}
+        curl -X GET "http://localhost:8000/freeze/status"
+        # Response: {"status": "success", "freeze": true}
         ```
     """
     try:
@@ -142,7 +142,7 @@ async def get_hot_cache_freeze_mode_status(request: Request):
         lmcache_engine = getattr(lmcache_adapter, "lmcache_engine", None)
         if not lmcache_engine:
             error_info = {
-                "error": "/hot_cache_freeze_mode/status API is unavailable",
+                "error": "/freeze/status API is unavailable",
                 "message": "LMCache engine not configured.",
             }
             return PlainTextResponse(
@@ -151,19 +151,19 @@ async def get_hot_cache_freeze_mode_status(request: Request):
                 status_code=503,  # Service Unavailable
             )
 
-        hot_cache_freeze_mode = lmcache_engine.get_hot_cache_freeze_mode()
-        mode_str = "enabled" if hot_cache_freeze_mode else "disabled"
+        freeze_mode = lmcache_engine.is_frozen()
+        mode_str = "enabled" if freeze_mode else "disabled"
         success_info = {
             "status": "success",
-            "hot_cache_freeze_mode": hot_cache_freeze_mode,
-            "message": "Hot cache freeze mode is " + mode_str,
+            "freeze": freeze_mode,
+            "message": "Freeze mode is " + mode_str,
         }
         return PlainTextResponse(
             content=json.dumps(success_info, indent=2),
             media_type="application/json",
         )
     except Exception as e:
-        error_msg = "Failed to get hot cache freeze mode status"
+        error_msg = "Failed to get freeze mode status"
         error_info = {"error": error_msg, "message": str(e)}
         return PlainTextResponse(
             content=json.dumps(error_info, indent=2),

@@ -267,7 +267,7 @@ class StorageManager:
         else:
             self.internal_copy_stream = None
 
-        # Hot cache freeze mode: only use local_cpu backend for retrieval
+        # freeze mode: only use local_cpu backend for retrieval
         self._freeze = False
 
         self._setup_metrics()
@@ -746,19 +746,19 @@ class StorageManager:
 
     def set_freeze(self, enabled: bool) -> None:
         """
-        Set hot cache freeze mode.
+        Set freeze mode.
 
         When enabled, only local_cpu backend will be used for retrieval.
         """
         self._freeze = enabled
-        logger.info("StorageManager hot cache freeze mode set to %s", enabled)
+        logger.info("StorageManager freeze mode set to %s", enabled)
 
     def is_frozen(self) -> bool:
         """
-        Get hot cache freeze mode status.
+        Get freeze mode status.
 
         Returns:
-            bool: True if hot cache freeze mode is enabled, False otherwise
+            bool: True if freeze mode is enabled, False otherwise
         """
         return self._freeze
 
@@ -1004,7 +1004,7 @@ class StorageManager:
         :return: Generator of (backend_name, backend) tuples.
         """
         for backend_name, backend in self.storage_backends.items():
-            # In hot cache freeze mode, only use local_cpu backend
+            # In freeze mode, only use local_cpu backend
             if self._freeze and backend_name != "LocalCPUBackend":
                 continue
             if location and backend_name != location:

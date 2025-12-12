@@ -243,31 +243,29 @@ class LMCacheEngine:
                 self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
 
-    def set_hot_cache_freeze_mode(self, enabled: bool) -> None:
+    def freeze(self, enabled: bool) -> None:
         """
-        Set the hot cache freeze mode for the cache engine.
+        Set the freeze mode for the cache engine.
 
-        When hot cache freeze mode is enabled:
+        When freeze mode is enabled:
         - All store operations will be skipped (no new data stored)
         - Only local_cpu backend will be used for retrieval
         - No admit/evict messages will be generated
         This protects the local_cpu hot cache from changes.
 
         Args:
-            enabled (bool): Whether to enable hot cache freeze mode
+            enabled (bool): Whether to enable freeze mode
         """
         if self.storage_manager is not None:
             self.storage_manager.set_freeze(enabled)
-            logger.info(
-                "Hot cache freeze mode %s", "enabled" if enabled else "disabled"
-            )
+            logger.info("freeze mode %s", "enabled" if enabled else "disabled")
 
-    def get_hot_cache_freeze_mode(self) -> bool:
+    def is_frozen(self) -> bool:
         """
-        Get the current hot cache freeze mode status.
+        Get the current freeze mode status.
 
         Returns:
-            bool: True if hot cache freeze mode is enabled, False otherwise
+            bool: True if freeze mode is enabled, False otherwise
         """
         if self.storage_manager is not None:
             return self.storage_manager.is_frozen()
@@ -332,10 +330,10 @@ class LMCacheEngine:
             "Either 'tokens' or 'hashes' must be provided."
         )
 
-        # Check if hot cache freeze mode is enabled
-        if self.get_hot_cache_freeze_mode():
+        # Check if freeze mode is enabled
+        if self.is_frozen():
             logger.debug(
-                "Hot cache freeze mode enabled, skipping store operation for %d tokens",
+                "Freeze mode enabled, skipping store operation for %d tokens",
                 num_to_store_tokens,
             )
             return
@@ -489,10 +487,10 @@ class LMCacheEngine:
             num_to_store_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
-        # Check if hot cache freeze mode is enabled
-        if self.get_hot_cache_freeze_mode():
+        # Check if freeze mode is enabled
+        if self.is_frozen():
             logger.debug(
-                "Hot cache freeze mode enabled, skipping store_layer for %d tokens",
+                "Freeze mode enabled, skipping store_layer for %d tokens",
                 num_to_store_tokens,
             )
             # Still need to yield to avoid StopIteration

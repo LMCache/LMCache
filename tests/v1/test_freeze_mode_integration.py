@@ -26,13 +26,13 @@ from .utils import (
 )
 
 
-def test_hot_cache_freeze_mode_with_real_cache_engine(autorelease_v1):
+def test_freeze_with_real_cache_engine(autorelease_v1):
     """
-    Integration test for hot cache freeze mode with real cache engine.
+    Integration test for freeze mode with real cache engine.
 
     This test verifies:
     1. Normal mode stores KV cache correctly to local_cpu backend
-    2. Enable hot cache freeze mode via HTTP API
+    2. Enable freeze mode via HTTP API
     3. Store operations are skipped in freeze mode (no new allocations)
     4. Only local_cpu backend is accessible in freeze mode
     5. Disable freeze mode and verify store works again
@@ -97,9 +97,7 @@ def test_hot_cache_freeze_mode_with_real_cache_engine(autorelease_v1):
         # Wait for server to be responsive
         for i in range(max_retries):
             try:
-                response = requests.get(
-                    "%s/hot_cache_freeze_mode/status" % base_url, timeout=1
-                )
+                response = requests.get("%s/freeze/status" % base_url, timeout=1)
                 if response.status_code in [200, 503]:
                     server_ready = True
                     break
@@ -112,9 +110,9 @@ def test_hot_cache_freeze_mode_with_real_cache_engine(autorelease_v1):
         # ============================================
         # Step 1: Verify initial freeze mode is OFF
         # ============================================
-        response = requests.get("%s/hot_cache_freeze_mode/status" % base_url)
+        response = requests.get("%s/freeze/status" % base_url)
         assert response.status_code == 200
-        assert response.json()["hot_cache_freeze_mode"] is False
+        assert response.json()["freeze"] is False
 
         # ============================================
         # Step 2: Normal mode - Store should work
@@ -152,16 +150,16 @@ def test_hot_cache_freeze_mode_with_real_cache_engine(autorelease_v1):
         # ============================================
         # Step 3: Enable freeze mode via HTTP API
         # ============================================
-        response = requests.put("%s/hot_cache_freeze_mode/enable" % base_url)
+        response = requests.put("%s/freeze/enable" % base_url)
         assert response.status_code == 200
         result = response.json()
-        assert result["hot_cache_freeze_mode"] is True
+        assert result["freeze"] is True
         assert result["status"] == "success"
 
         # Verify status
-        response = requests.get("%s/hot_cache_freeze_mode/status" % base_url)
+        response = requests.get("%s/freeze/status" % base_url)
         assert response.status_code == 200
-        assert response.json()["hot_cache_freeze_mode"] is True
+        assert response.json()["freeze"] is True
 
         # ============================================
         # Step 4: Read-only mode - Store should be skipped
@@ -193,10 +191,10 @@ def test_hot_cache_freeze_mode_with_real_cache_engine(autorelease_v1):
         # ============================================
         # Step 5: Disable freeze mode via HTTP API
         # ============================================
-        response = requests.put("%s/hot_cache_freeze_mode/disable" % base_url)
+        response = requests.put("%s/freeze/disable" % base_url)
         assert response.status_code == 200
         result = response.json()
-        assert result["hot_cache_freeze_mode"] is False
+        assert result["freeze"] is False
         assert result["status"] == "success"
 
         # ============================================
@@ -237,9 +235,9 @@ def test_hot_cache_freeze_mode_with_real_cache_engine(autorelease_v1):
         LMCacheEngineBuilder.destroy(instance_id)
 
 
-def test_hot_cache_freeze_mode_direct_api(autorelease_v1):
+def test_freeze_direct_api(autorelease_v1):
     """
-    Test hot cache freeze mode via direct engine API (without HTTP server).
+    Test freeze mode via direct engine API (without HTTP server).
 
     This test verifies:
     1. Freeze mode can be enabled/disabled via direct API
