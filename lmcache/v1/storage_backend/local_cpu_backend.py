@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -367,7 +367,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 ]
             )
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-            chunk_size_bytes = get_size_bytes(new_shape, metadata.kv_dtype)
+            chunk_size_bytes = get_size_bytes([new_shape], [metadata.kv_dtype])
             origin_cpu_size_bytes = int(cpu_size * 1024**3)
             align_cpu_size_bytes = (
                 origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
@@ -378,8 +378,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             paged_mem_allocator.init_cpu_memory_allocator(
                 align_cpu_size_bytes,
-                shape=new_shape,
-                dtype=metadata.kv_dtype,
+                shapes=[new_shape],
+                dtypes=[metadata.kv_dtype],
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 numa_mapping=numa_mapping,
             )
@@ -425,8 +425,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -461,7 +461,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             else:
                 fmt = MemoryFormat.KV_2LTD
 
-        memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
+        memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
 
@@ -512,7 +512,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 
-            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
+            memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
             if memory_obj is not None:
                 break
 
@@ -528,8 +528,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
@@ -567,7 +567,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 fmt = MemoryFormat.KV_2LTD
 
         memory_objs = self.memory_allocator.batched_allocate(
-            shape, dtype, batch_size, fmt
+            shapes, dtypes, batch_size, fmt
         )
 
         if memory_objs is not None or not eviction:
@@ -637,7 +637,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 time.sleep(time_to_wait)
 
             memory_objs = self.memory_allocator.batched_allocate(
-                shape, dtype, batch_size, fmt
+                shapes, dtypes, batch_size, fmt
             )
             if memory_objs:
                 break

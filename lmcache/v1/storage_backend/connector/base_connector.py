@@ -69,7 +69,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         self.meta_fmt = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
-        self.full_chunk_size = get_size_bytes(self.meta_shape, self.meta_dtype)
+        self.full_chunk_size = get_size_bytes([self.meta_shape], [self.meta_dtype])
         assert self.full_chunk_size is not None
         assert self.full_chunk_size % metadata.kv_shape[2] == 0
         self.single_token_size = self.full_chunk_size // metadata.kv_shape[2]
