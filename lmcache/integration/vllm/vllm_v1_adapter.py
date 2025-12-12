@@ -1710,12 +1710,11 @@ class LMCacheConnectorV1Impl:
             for i, req in enumerate(cached_reqs):
                 load_spec = self.load_specs.pop(req.req_id, None)
                 lmcache_cached_tokens = 0
+                vllm_cached_tokens = 0
                 if load_spec is not None:
                     lmcache_cached_tokens = load_spec.lmcache_cached_tokens
-                request_tracker = self._request_trackers[req.req_id]
-                vllm_cached_tokens = -1  # unused unless preempted
-                if load_spec is not None:
                     vllm_cached_tokens = load_spec.vllm_cached_tokens
+                request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(
                     req.new_token_ids,
                     req.new_block_ids,
@@ -1753,8 +1752,10 @@ class LMCacheConnectorV1Impl:
 
             load_spec = self.load_specs.pop(req_id, None)
             lmcache_cached_tokens = 0
+            vllm_cached_tokens = 0
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+                vllm_cached_tokens = load_spec.vllm_cached_tokens
 
             # Handle both old and new versions of CachedRequestData
             if hasattr(cached_reqs, "resumed_req_ids"):
@@ -1770,17 +1771,14 @@ class LMCacheConnectorV1Impl:
                     f"Unable to determine preemption status for request {req_id}. "
                     f"This might be due to an unsupported vLLM version."
                 )
-            vllm_cached_tokens = -1  # unused unless preempted
             if preempted:
                 assert load_spec is not None, (
                     f"Request {req_id} is preempted but was not given a load spec"
                 )
-                vllm_cached_tokens = load_spec.vllm_cached_tokens
                 # num_computed_tokens should be reset to 0 during preemption
                 # and then set to the number of already cached tokens (maxxing
                 # prefix caching and lmcache)
                 # this assumption is crucial for the update() call of RequestTracker
-
                 assert request.num_computed_tokens == max(
                     lmcache_cached_tokens, load_spec.vllm_cached_tokens
                 )
