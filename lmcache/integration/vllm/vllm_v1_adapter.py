@@ -231,9 +231,13 @@ class RequestTracker:
         new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
         preempted: bool = False,
         lmcache_cached_tokens: int = 0,
+        vllm_cached_tokens: int = 0,
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
+
+        vllm_cached_tokens: the number of tokens that are cached in vLLM
+        is only used for preempted requests
         """
 
         if new_block_ids is None:
@@ -260,7 +264,7 @@ class RequestTracker:
             # to be less than the total number of tokens (partial cache hit)
             # so we may need to truncate
             self.token_ids = self.token_ids[
-                : lmcache_cached_tokens + len(new_token_ids)
+                : max(lmcache_cached_tokens, vllm_cached_tokens) + len(new_token_ids)
             ]
         else:
             self.allocated_block_ids.extend(new_block_ids)
@@ -1706,14 +1710,17 @@ class LMCacheConnectorV1Impl:
             for i, req in enumerate(cached_reqs):
                 load_spec = self.load_specs.pop(req.req_id, None)
                 lmcache_cached_tokens = 0
+                vllm_cached_tokens = 0
                 if load_spec is not None:
                     lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+                    vllm_cached_tokens = load_spec.vllm_cached_tokens
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(
                     req.new_token_ids,
                     req.new_block_ids,
                     req.resumed_from_preemption,
                     lmcache_cached_tokens=lmcache_cached_tokens,
+                    vllm_cached_tokens=vllm_cached_tokens,
                 )
 
                 req_meta = ReqMeta.from_request_tracker(
@@ -1745,8 +1752,10 @@ class LMCacheConnectorV1Impl:
 
             load_spec = self.load_specs.pop(req_id, None)
             lmcache_cached_tokens = 0
+            vllm_cached_tokens = 0
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+                vllm_cached_tokens = load_spec.vllm_cached_tokens
 
             # Handle both old and new versions of CachedRequestData
             if hasattr(cached_reqs, "resumed_req_ids"):
@@ -1763,14 +1772,21 @@ class LMCacheConnectorV1Impl:
                     f"This might be due to an unsupported vLLM version."
                 )
             if preempted:
+                assert load_spec is not None, (
+                    f"Request {req_id} is preempted but was not given a load spec"
+                )
                 # num_computed_tokens should be reset to 0 during preemption
-                # and then set to the number of external tokens (from vllm
-                # scheduler's perspective)
+                # and then set to the number of already cached tokens (maxxing
+                # prefix caching and lmcache)
                 # this assumption is crucial for the update() call of RequestTracker
-                assert request.num_computed_tokens == lmcache_cached_tokens, (
+                assert request.num_computed_tokens == max(
+                    lmcache_cached_tokens, load_spec.vllm_cached_tokens
+                )
+                (
                     f"Preempted request {req_id} has "
                     f"num_computed_tokens {request.num_computed_tokens} "
-                    f"but lmcache_cached_tokens {lmcache_cached_tokens}"
+                    "but max(lmcache_cached_tokens, vllm_cached_tokens) = "
+                    f"{max(lmcache_cached_tokens, vllm_cached_tokens)}"
                 )
 
             request_tracker.update(
@@ -1778,6 +1794,7 @@ class LMCacheConnectorV1Impl:
                 new_block_ids,
                 preempted=preempted,
                 lmcache_cached_tokens=lmcache_cached_tokens,
+                vllm_cached_tokens=vllm_cached_tokens,
             )
 
             req_meta = ReqMeta.from_request_tracker(
