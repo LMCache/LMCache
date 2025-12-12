@@ -209,7 +209,7 @@ class P2PBackend(StorageBackendInterface):
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
         self.dtype = metadata.kv_dtype
-        self.full_size_shape = list(self.memory_allocator.cpu_allocator.shape)
+        self.full_size_shape = list(self.memory_allocator.cpu_allocator.shapes[0])
         self.fmt: MemoryFormat = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )

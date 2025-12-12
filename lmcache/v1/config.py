@@ -329,7 +329,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "save_unfull_chunk": {
         "type": bool,
-        "default": True,
+        "default": False,
         "env_converter": _to_bool,
     },
     "blocking_timeout_secs": {"type": int, "default": 10, "env_converter": int},
@@ -624,6 +624,23 @@ def _validate_config(self):
             "PD only supports save_decode_cache=False"
         )
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
+
+        # PD requires save_unfull_chunk=True for complete KV cache transfer
+        # from prefill node to decode node. Without this, partial chunks would
+        # be discarded, causing incomplete KV cache transfer and wrong results
+        # on the decode node.
+        if not self.save_unfull_chunk:
+            logger.warning(
+                "PD (Peer-to-Peer Disaggregation) requires save_unfull_chunk=True "
+                "for complete KV cache transfer. Automatically setting "
+                "save_unfull_chunk=True."
+            )
+            self.save_unfull_chunk = True
+        else:
+            logger.info(
+                "PD mode enabled with save_unfull_chunk=True - all KV cache "
+                "including partial chunks will be transferred to decode node"
+            )
 
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
