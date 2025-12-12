@@ -52,17 +52,17 @@ def patch_pin_allocator():
         self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
         if use_paging:
-            assert "shape" in kwargs, (
-                "shape must be specified for paged memory allocator"
+            assert "shapes" in kwargs, (
+                "shapes must be specified for paged memory allocator"
             )
-            assert "dtype" in kwargs, (
-                "dtype must be specified for paged memory allocator"
+            assert "dtypes" in kwargs, (
+                "dtypes must be specified for paged memory allocator"
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
-                shape=kwargs["shape"],
-                dtype=kwargs["dtype"],
+                shapes=kwargs["shapes"],
+                dtypes=kwargs["dtypes"],
                 fmt=kwargs["fmt"],
             )
         else:

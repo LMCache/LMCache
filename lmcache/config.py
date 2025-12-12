@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple
 import os
 import re
@@ -11,6 +11,7 @@ import yaml
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
 logger = init_logger(__name__)
 
@@ -27,8 +28,10 @@ class LMCacheEngineMetadata:
     """ the format of kv tensors """
     fmt: str
     """ the data type of kv tensors """
+    # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
     kv_dtype: torch.dtype
     """ the shape of kv tensors """
+    # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
     """ (num_layer, 2, chunk_size, num_kv_head, head_size) """
     kv_shape: tuple[int, int, int, int, int]
     """ whether use MLA"""
@@ -39,6 +42,10 @@ class LMCacheEngineMetadata:
     # TODO(baoloongmao): first_rank should be configurable
     first_rank = 0
     served_model_name: Optional[str] = None
+    """ Manager for groups of layers with identical KV cache structure """
+    kv_layer_groups_manager: KVLayerGroupsManager = field(
+        default_factory=KVLayerGroupsManager
+    )
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""

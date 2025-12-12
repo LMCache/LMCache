@@ -122,7 +122,7 @@ class TestLazyMemoryAllocator:
         allocator = self._create_allocator()
         try:
             mem_obj = allocator.allocate(
-                torch.Size([1024]), None, MemoryFormat.BINARY_BUFFER
+                torch.Size([1024]), [], MemoryFormat.BINARY_BUFFER
             )
             assert mem_obj and mem_obj.get_memory_format() == MemoryFormat.BINARY_BUFFER
             mem_obj.ref_count_down()

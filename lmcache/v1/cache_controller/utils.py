@@ -99,7 +99,6 @@ class InstanceNode:
     """
 
     instance_id: str
-    ip: str
     workers: dict[int, WorkerNode] = field(
         default_factory=dict
     )  # worker_id -> WorkerNode
@@ -134,14 +133,12 @@ class InstanceNode:
 class RegistryTree:
     """
     Central registry managing the tree structure of instances and workers.
-    Root structure: ip -> instance_id -> InstanceNode -> WorkerNode
+    Structure: instance_id -> InstanceNode -> WorkerNode
     """
 
     def __init__(self):
-        # Root level: ip -> instance_id -> InstanceNode
-        self.instances: dict[str, dict[str, InstanceNode]] = {}
-        # Quick lookup: instance_id -> InstanceNode
-        self.instance_id_index: dict[str, InstanceNode] = {}
+        # instance_id -> InstanceNode
+        self.instances: dict[str, InstanceNode] = {}
 
     def register_worker(
         self,
@@ -155,15 +152,11 @@ class RegistryTree:
     ) -> WorkerNode:
         """Register a new worker, creating instance if needed."""
         # Get or create instance
-        if ip not in self.instances:
-            self.instances[ip] = {}
-
-        if instance_id not in self.instances[ip]:
-            instance_node = InstanceNode(instance_id=instance_id, ip=ip)
-            self.instances[ip][instance_id] = instance_node
-            self.instance_id_index[instance_id] = instance_node
+        if instance_id not in self.instances:
+            instance_node = InstanceNode(instance_id=instance_id)
+            self.instances[instance_id] = instance_node
         else:
-            instance_node = self.instances[ip][instance_id]
+            instance_node = self.instances[instance_id]
 
         # Create and add worker
         worker_node = WorkerNode(
@@ -182,7 +175,7 @@ class RegistryTree:
         self, instance_id: str, worker_id: int
     ) -> Optional[WorkerNode]:
         """Deregister a worker and clean up empty instances."""
-        instance_node = self.instance_id_index.get(instance_id)
+        instance_node = self.instances.get(instance_id)
         if instance_node is None:
             return None
 
@@ -190,44 +183,32 @@ class RegistryTree:
 
         # Clean up empty instance
         if not instance_node.has_workers():
-            ip = instance_node.ip
-            if ip in self.instances:
-                self.instances[ip].pop(instance_id, None)
-                # Clean up empty ip entry
-                if not self.instances[ip]:
-                    del self.instances[ip]
-            self.instance_id_index.pop(instance_id, None)
+            del self.instances[instance_id]
 
         return worker_node
 
     def get_worker(self, instance_id: str, worker_id: int) -> Optional[WorkerNode]:
         """Get a specific worker."""
-        instance_node = self.instance_id_index.get(instance_id)
+        instance_node = self.instances.get(instance_id)
         if instance_node is None:
             return None
         return instance_node.get_worker(worker_id)
 
     def get_instance(self, instance_id: str) -> Optional[InstanceNode]:
         """Get an instance by instance_id."""
-        return self.instance_id_index.get(instance_id)
+        return self.instances.get(instance_id)
 
     def get_instance_by_ip(self, ip: str) -> Optional[InstanceNode]:
-        """Get an instance by IP address. Returns first instance if multiple exist."""
-        ip_instances = self.instances.get(ip)
-        if ip_instances:
-            return next(iter(ip_instances.values()), None)
+        """Get an instance by IP address."""
+        for instance_node in self.instances.values():
+            for worker_node in instance_node.workers.values():
+                if worker_node.ip == ip:
+                    return instance_node
         return None
-
-    def get_instances_by_ip(self, ip: str) -> list[InstanceNode]:
-        """Get all instances by IP address."""
-        ip_instances = self.instances.get(ip)
-        if ip_instances:
-            return list(ip_instances.values())
-        return []
 
     def get_worker_ids(self, instance_id: str) -> list[int]:
         """Get sorted list of worker IDs for an instance."""
-        instance_node = self.instance_id_index.get(instance_id)
+        instance_node = self.instances.get(instance_id)
         if instance_node is None:
             return []
         return instance_node.get_worker_ids()
@@ -235,9 +216,8 @@ class RegistryTree:
     def get_all_worker_infos(self) -> list[WorkerInfo]:
         """Get WorkerInfo for all workers across all instances."""
         result = []
-        for ip_instances in self.instances.values():
-            for instance_node in ip_instances.values():
-                result.extend(instance_node.get_all_worker_infos())
+        for instance_node in self.instances.values():
+            result.extend(instance_node.get_all_worker_infos())
         return result
 
     def update_heartbeat(
@@ -293,37 +273,32 @@ class RegistryTree:
         self,
         key: int,
         exclude_instance_id: Optional[str] = None,
-        exclude_location: Optional[str] = None,
     ) -> Optional[KVChunkInfo]:
         """
         Find a KV chunk across all workers.
 
+        Args:
+            key: The KV chunk key to find.
+            exclude_instance_id: Instance ID to exclude
+            (all workers in this instance will be excluded).
+
         Returns: KVChunkInfo if found, None otherwise.
         """
-        for ip_instances in self.instances.values():
-            for instance_id, instance_node in ip_instances.items():
-                if (
-                    exclude_instance_id is not None
-                    and instance_id == exclude_instance_id
-                ):
-                    continue
-                for worker_id, worker_node in instance_node.workers.items():
-                    for location, keys in worker_node.kv_store.items():
-                        if (
-                            exclude_location is not None
-                            and location == exclude_location
-                        ):
-                            continue
-                        if key in keys:
-                            return KVChunkInfo(instance_id, worker_id, location)
+        for instance_id, instance_node in self.instances.items():
+            # Exclude all workers in the specified instance
+            if exclude_instance_id is not None and instance_id == exclude_instance_id:
+                continue
+            for worker_id, worker_node in instance_node.workers.items():
+                for location, keys in worker_node.kv_store.items():
+                    if key in keys:
+                        return KVChunkInfo(instance_id, worker_id, location)
         return None
 
     def get_total_kv_count(self) -> int:
         """Get total count of KV chunks across all workers."""
         return sum(
             worker_node.get_kv_count()
-            for ip_instances in self.instances.values()
-            for instance_node in ip_instances.values()
+            for instance_node in self.instances.values()
             for worker_node in instance_node.workers.values()
         )
 
