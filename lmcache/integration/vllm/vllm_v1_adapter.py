@@ -570,8 +570,6 @@ def _init_lmcache_engine(
             "We haven't supported MLA with Cacheblend yet. Please disable blending."
         )
 
-    # When use_mla is True, num_kv_head is 1
-    hidden_dim_size = num_kv_head * head_size
     if role == "scheduler":
         vllm_gpu_connector = None
         # Create a dummy tpg object with broadcast and broadcast_object methods
@@ -581,42 +579,25 @@ def _init_lmcache_engine(
     elif lmcache_config.use_layerwise:
         if lmcache_config.enable_blending:
             # Use layerwise connector for blending
-            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
+            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector.from_metadata(
+                metadata, use_gpu, device
             )
         else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-                use_mla=use_mla,
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector.from_metadata(
+                metadata, use_gpu, device
             )
         tpg = get_tp_group()
     else:
         if current_platform.is_cuda_alike():
-            connector_cls = VLLMPagedMemGPUConnectorV2
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
+                metadata, use_gpu, device
+            )
         elif current_platform.is_xpu():
-            connector_cls = VLLMPagedMemXPUConnectorV2
+            vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
+                metadata, use_gpu, device
+            )
         else:
             raise RuntimeError("No supported connector found for the current platform.")
-
-        vllm_gpu_connector = connector_cls(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
         tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
