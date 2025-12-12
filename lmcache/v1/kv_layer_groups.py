@@ -2,7 +2,7 @@
 # Standard
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 # Third Party
 import torch
@@ -22,9 +22,9 @@ class KVLayerGroupInfo:
     """
 
     """ List of layer names belonging to this group """
-    layer_names: List[str]
+    layer_names: list[str]
     """ List of layer indices (0-based) belonging to this group """
-    layer_indices: List[int]
+    layer_indices: list[int]
     """ Shape of the KV cache tensor for layers in this group """
     """ For MHA: typically [2, num_blocks, block_size, num_heads, head_size] """
     """ For MLA: typically [num_blocks, block_size, head_size] """
@@ -150,7 +150,7 @@ class KVLayerGroupsManager:
             return
 
         # Group layers by (shape, dtype) in a single loop
-        groups_dict: dict[tuple[tuple, torch.dtype], list[tuple[str, int]]] = (
+        groups_dict: dict[tuple[torch.Size, torch.dtype], list[tuple[str, int]]] = (
             defaultdict(list)
         )
 
@@ -176,12 +176,11 @@ class KVLayerGroupsManager:
         kv_layer_groups: list[KVLayerGroupInfo] = []
         for shape, dtype in sorted_keys:
             layers = groups_dict[(shape, dtype)]
-            layer_names = [name for name, _ in layers]
-            layer_indices = [idx for _, idx in layers]
+            layer_names, layer_indices = zip(*layers, strict=False)
 
             group_info = KVLayerGroupInfo(
-                layer_names=layer_names,
-                layer_indices=layer_indices,
+                layer_names=list(layer_names),
+                layer_indices=list(layer_indices),
                 shape=shape,
                 dtype=dtype,
             )
