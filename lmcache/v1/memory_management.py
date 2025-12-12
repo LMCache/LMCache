@@ -209,6 +209,20 @@ class MemoryObj(metaclass=abc.ABCMeta):
         return None
 
     @abc.abstractmethod
+    def get_shapes(self) -> list[torch.Size]:
+        """
+        Get the shapes of the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_dtypes(self) -> list[torch.dtype]:
+        """
+        Get the dtypes of the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get_memory_format(self) -> MemoryFormat:
         """
         Get the memory format of the MemoryObj.
@@ -410,6 +424,14 @@ class TensorMemoryObj(MemoryObj):
     def get_dtype(self) -> torch.dtype:
         return self.meta.dtype
 
+    def get_shapes(self) -> list[torch.Size]:
+        assert self.meta.shapes is not None
+        return self.meta.shapes
+
+    def get_dtypes(self) -> list[torch.dtype]:
+        assert self.meta.dtypes is not None
+        return self.meta.dtypes
+
     def get_memory_format(self) -> MemoryFormat:
         with self.lock:
             return self.meta.fmt
@@ -562,6 +584,12 @@ class BytesBufferMemoryObj(MemoryObj):
 
     def get_dtype(self) -> Optional[torch.dtype]:
         return None
+
+    def get_shapes(self) -> list[torch.Size]:
+        return [self.get_shape()]
+
+    def get_dtypes(self) -> list[torch.dtype]:
+        return []
 
     def get_memory_format(self) -> MemoryFormat:
         return self.metadata.fmt
