@@ -50,11 +50,19 @@ class LoadMetadata:
 def init_lmcache_engine(
     model_config: ModelConfig,
     tp_size: int,
-    rank: int,
+    local_rank: int,
+    global_rank: int,
     kv_dtype: torch.dtype,
 ) -> LMCacheEngine:
     """
-    TODO: ADD COMMENTS
+    Initialize LMCache engine for SGLang integration.
+
+    Args:
+        model_config: SGLang model configuration
+        tp_size: Tensor parallel size
+        local_rank: Local GPU device index (for device selection)
+        global_rank: Global tensor parallel rank (for metadata)
+        kv_dtype: Data type for KV cache tensors
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -72,13 +80,14 @@ def init_lmcache_engine(
 
     kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
 
-    # Change current device.
-    torch.cuda.device(rank)
-    device = torch.device(f"cuda:{rank}")
+    # Change current device using local GPU index
+    torch.cuda.device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    # Use global rank for metadata (tensor parallel rank)
     metadata = LMCacheEngineMetadata(
         model_config.model_path,
         tp_size,
-        rank,
+        global_rank,
         "sgl",
         kv_dtype,
         kv_shape,
@@ -129,16 +138,27 @@ class LMCacheConnector:
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
     ):
+        if not k_pool:
+            raise ValueError("k_pool cannot be empty during initialization.")
         kv_dtype = k_pool[0].dtype
+        if k_pool[0].is_cuda and k_pool[0].device.index is not None:
+            local_rank = k_pool[0].device.index
+        else:
+            # Fallback for CPU / odd cases
+            local_rank = rank
+
+        # rank is the global tensor parallel rank (tp_rank) from SGLang
+        # local_rank is the local GPU device index
         self.lmcache_engine = init_lmcache_engine(
             sgl_config,
             tp_size,
-            rank,
+            local_rank,
+            rank,  # global_rank (tp_rank) for metadata
             kv_dtype,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
-        self.rank = rank
+        self.rank = local_rank  # Use local_rank for torch.device() calls
         self.kvcaches = k_pool + v_pool
         self.num_layer = sgl_config.num_hidden_layers
 

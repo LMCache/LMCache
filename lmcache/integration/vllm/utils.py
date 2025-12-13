@@ -111,7 +111,11 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
 
 
 def create_lmcache_metadata(
-    vllm_config=None, model_config=None, parallel_config=None, cache_config=None
+    vllm_config=None,
+    model_config=None,
+    parallel_config=None,
+    cache_config=None,
+    role=None,
 ):
     """
     Create LMCacheEngineMetadata from vLLM configuration.
@@ -173,6 +177,8 @@ def create_lmcache_metadata(
         kv_dtype,
         kv_shape,
         use_mla,
+        role,
+        served_model_name=model_cfg.served_model_name,
     )
 
     return metadata, config
@@ -220,8 +226,12 @@ def extract_mm_features(
         return ([], [])
 
 
-def get_size_bytes(shape: torch.Size, kv_dtype: torch.dtype):
+def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     """
-    Calculate the size in bytes with the given shape and dtype.
+    Calculate the size in bytes with the given shapes and dtypes.
     """
-    return shape.numel() * kv_dtype.itemsize
+    assert len(shapes) == len(kv_dtypes)
+    return sum(
+        shape.numel() * kv_dtype.itemsize
+        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=False)
+    )

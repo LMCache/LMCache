@@ -11,7 +11,7 @@ import torch
 from lmcache.v1.memory_management import PinMemoryAllocator
 
 pytest.importorskip(
-    "lmc_ops",
+    "lmcache.c_ops",
     reason="TODO: require non CUDA implementations for CUDA enhanced functions",
 )
 
@@ -94,7 +94,7 @@ def test_extract_and_load_back(num_tokens):
     kv_blob = _tuple_kv_to_blob(kv_tuple_list)
     kv_chunked = _slice_kv_at(0, kv_blob, chunk_size)
     for chunk_id, chunk in enumerate(kv_chunked):
-        mem_obj_shape = [2, 32, chunk.shape[2], num_heads * head_size]
+        mem_obj_shape = torch.Size([2, 32, chunk.shape[2], num_heads * head_size])
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         chunk = chunk.contiguous()
@@ -118,7 +118,9 @@ def test_extract_and_load_back(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(32):
@@ -197,7 +199,9 @@ def test_multi_layer_kernel(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(32):
@@ -228,7 +232,9 @@ def test_multi_layer_kernel(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -312,7 +318,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
 
         for layer_id in range(num_layers):
@@ -346,7 +352,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -454,6 +460,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             True,
             token_major,
             True,
+            False,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -462,6 +469,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             False,
             token_major,
             True,
+            False,
         )
 
     check_paged_kv_cache_equal(
