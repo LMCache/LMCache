@@ -226,7 +226,7 @@ class GdsBackend(AllocatorBackendInterface):
             else:
                 logger.info("Automatic disabling of cufile usage due to fstype")
                 self.use_cufile = False
-        elif self.fstype == "weka":
+        elif self.fstype == "wekafs":
             logger.info("Weka filesystem detected, cufile usage is enforced")
             assert self.use_cufile
             self.data_suffix = _WEKA_DATA_FILE_SUFFIX
