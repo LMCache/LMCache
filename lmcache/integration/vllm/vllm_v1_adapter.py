@@ -689,7 +689,7 @@ class LMCacheConnectorV1Impl:
                 self.lmcache_engine_metadata, _ = create_lmcache_metadata(
                     vllm_config, role="scheduler"
                 )
-                PrometheusLogger.GetOrCreate(self.lmcache_engine_metadata)
+                PrometheusLogger.GetOrCreate(self.lmcache_engine_metadata, config)
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine_metadata, self.lmcache_engine

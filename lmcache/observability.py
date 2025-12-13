@@ -152,6 +152,7 @@ class P2PTransferRequestStats:
         return self.num_tokens / self.time_to_transfer()
 
 
+# TODO: auto clear when stats entries exceed a threshold
 class LMCStatsMonitor:
     def __init__(self):
         # Interval metrics that will be reset after each log
@@ -1302,9 +1303,12 @@ class PrometheusMetrics:
 
 
 class PrometheusLogger:
-    def __init__(self, metadata: LMCacheEngineMetadata):
+    def __init__(self, metadata: LMCacheEngineMetadata, config: LMCacheEngineConfig):
         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+        if (
+            not config.disable_stats_logger
+            and not "PROMETHEUS_MULTIPROC_DIR" not in os.environ
+        ):
             default_dir = "/tmp/lmcache_prometheus"
             os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
             if not os.path.exists(default_dir):
@@ -1330,9 +1334,11 @@ class PrometheusLogger:
     _instance = None
 
     @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "PrometheusLogger":
+    def GetOrCreate(
+        metadata: LMCacheEngineMetadata, config: LMCacheEngineConfig
+    ) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
-            PrometheusLogger._instance = PrometheusLogger(metadata)
+            PrometheusLogger._instance = PrometheusLogger(metadata, config)
         # assert PrometheusLogger._instance.metadata == metadata, \
         #    "PrometheusLogger instance already created with different metadata"
         if PrometheusLogger._instance.metadata != metadata:
@@ -1369,13 +1375,15 @@ class LMCacheStatsLogger:
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
-        self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata)
+        self.prometheus_logger = PrometheusLogger.GetOrCreate(metadata, config)
         self.lmc_usage_logger = ContinuousUsageContext.GetOrCreate(metadata)
         self.is_running = True
         # Event for interruptible sleep during shutdown
         self.shutdown_event = threading.Event()
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
+
+        # Causes memory leak if LMCStatsMonitor is not cleared by another way.
         if config.disable_stats_logger:
             logger.info("LMCacheStatsLogger thread is disabled via config.")
         else:
