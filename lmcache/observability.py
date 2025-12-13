@@ -15,6 +15,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
+from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
@@ -1359,7 +1360,12 @@ class PrometheusLogger:
 
 
 class LMCacheStatsLogger:
-    def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
+    def __init__(
+        self,
+        metadata: LMCacheEngineMetadata,
+        log_interval: int,
+        config: LMCacheEngineConfig,
+    ):
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
@@ -1370,10 +1376,8 @@ class LMCacheStatsLogger:
         self.shutdown_event = threading.Event()
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
-        if bool(os.environ.get("LMCACHE_DISABLE_STATS_LOGGER_THREAD", False)):
-            logger.info(
-                "LMCacheStatsLogger thread is disabled via environment variable."
-            )
+        if config.disable_stats_logger:
+            logger.info("LMCacheStatsLogger thread is disabled via config.")
         else:
             self.thread.start()
 

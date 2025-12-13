@@ -505,6 +505,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
+    "disable_stats_logger": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
 }
 
 
