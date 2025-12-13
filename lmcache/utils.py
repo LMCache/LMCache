@@ -51,6 +51,59 @@ def round_down(x: int, y: int) -> int:
     return (x // y) * y
 
 
+def compress_slot_mapping(slots: List[int]) -> List[List[int]]:
+    """Compress a list of slot indices into ranges.
+
+    Consecutive slots are represented as [start, end] ranges.
+    For example: [1, 2, 3, 4, 5, 9, 10, 11, 12] -> [[1, 5], [9, 12]]
+
+    Args:
+        slots: List of slot indices (can be unsorted).
+
+    Returns:
+        List of [start, end] ranges representing consecutive sequences.
+    """
+    if not slots:
+        return []
+
+    sorted_slots = sorted(slots)
+    ranges: List[List[int]] = []
+    range_start = sorted_slots[0]
+    range_end = sorted_slots[0]
+
+    for slot in sorted_slots[1:]:
+        if slot == range_end + 1:
+            # Extend current range
+            range_end = slot
+        else:
+            # Close current range and start a new one
+            ranges.append([range_start, range_end])
+            range_start = slot
+            range_end = slot
+
+    # Append the last range
+    ranges.append([range_start, range_end])
+    return ranges
+
+
+def decompress_slot_mapping(ranges: List[List[int]]) -> List[int]:
+    """Decompress slot ranges back to a list of slot indices.
+
+    Inverse operation of compress_slot_mapping.
+    For example: [[1, 5], [9, 12]] -> [1, 2, 3, 4, 5, 9, 10, 11, 12]
+
+    Args:
+        ranges: List of [start, end] ranges from compress_slot_mapping.
+
+    Returns:
+        List of slot indices.
+    """
+    slots: List[int] = []
+    for start, end in ranges:
+        slots.extend(range(start, end + 1))
+    return slots
+
+
 try:
     # First Party
     from lmcache import _version  # type: ignore[attr-defined]

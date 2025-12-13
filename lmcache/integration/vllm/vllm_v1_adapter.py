@@ -1232,6 +1232,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
                     sync=is_first,
+                    req_id=request.req_id,
                 )
                 self.layerwise_storers.append(layerwise_storer)
                 if is_first:
@@ -1336,6 +1337,7 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
+                req_id=request.req_id,
             )
 
             # Update skip_leading_tokens only on last rank to ensure

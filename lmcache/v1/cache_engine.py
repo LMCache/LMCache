@@ -29,6 +29,7 @@ from lmcache.utils import (
     CacheEngineKey,
     CacheStoreEvent,
     _lmcache_nvtx_annotate,
+    compress_slot_mapping,
     convert_tokens_to_list,
 )
 from lmcache.v1.config import LMCacheEngineConfig
@@ -228,6 +229,9 @@ class LMCacheEngine:
             "force_store_wait", False
         )
 
+        # Flag to control KVCache Check logging (can be toggled via API)
+        self.kvcache_check_log_enabled = False
+
         gc.collect()
         if not config.py_enable_gc:
             gc.disable()
@@ -329,6 +333,22 @@ class LMCacheEngine:
         assert tokens is not None or hashes is not None, (
             "Either 'tokens' or 'hashes' must be provided."
         )
+
+        # KVCache Check logging
+        if self.kvcache_check_log_enabled:
+            slot_mapping = kwargs.get("slot_mapping")
+            if slot_mapping is not None:
+                # Convert slot_mapping to list if it's a tensor
+                slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
+                # slot_mapping_list should not be None when slot_mapping is not None
+                assert slot_mapping_list is not None
+                req_id = kwargs.get("req_id", "unspecified")
+                logger.info(
+                    "[KVCache Check] Store request %s, tokens=%d, slot_mapping: %s",
+                    req_id,
+                    num_to_store_tokens,
+                    compress_slot_mapping(slot_mapping_list),
+                )
 
         # Check if freeze mode is enabled
         if self.is_frozen():
@@ -485,6 +505,25 @@ class LMCacheEngine:
             num_to_store_tokens = torch.sum(mask).item()
         else:
             num_to_store_tokens = len(tokens)
+
+        req_id = kwargs.get("req_id", "unspecified")
+
+        # KVCache Check logging
+        if self.kvcache_check_log_enabled:
+            slot_mapping = kwargs.get("slot_mapping")
+            if req_id is not None and slot_mapping is not None:
+                # Convert slot_mapping to list if it's a tensor
+                slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
+                # slot_mapping_list should not be None when slot_mapping is not None
+                assert slot_mapping_list is not None
+                logger.info(
+                    "[KVCache Check] Layerwise store request %s, "
+                    "tokens=%d, slot_mapping: %s",
+                    req_id,
+                    num_to_store_tokens,
+                    compress_slot_mapping(slot_mapping_list),
+                )
+
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
         # Check if freeze mode is enabled
@@ -642,6 +681,24 @@ class LMCacheEngine:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
+
+        req_id = kwargs.get("req_id", "unspecified")
+
+        # KVCache Check logging
+        if self.kvcache_check_log_enabled:
+            slot_mapping = kwargs.get("slot_mapping")
+            if req_id is not None and slot_mapping is not None:
+                # Convert slot_mapping to list if it's a tensor
+                slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
+                # slot_mapping_list should not be None when slot_mapping is not None
+                assert slot_mapping_list is not None
+                logger.info(
+                    "[KVCache Check] retrieve request %s, tokens=%d, slot_mapping: %s",
+                    req_id,
+                    num_required_tokens,
+                    compress_slot_mapping(slot_mapping_list),
+                )
+
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
@@ -1580,6 +1637,26 @@ class LMCacheEngine:
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
+
+    def _get_slot_mapping_list(
+        self,
+        slot_mapping: Optional[Union[torch.Tensor, List[int]]],
+    ) -> Optional[List[int]]:
+        """
+        Convert slot_mapping to list if it's a tensor, otherwise return as is.
+
+        :param slot_mapping: The slot_mapping to convert,
+            can be a torch.Tensor or List[int], or None
+        :type slot_mapping: Optional[Union[torch.Tensor, List[int]]]
+        :return: The slot_mapping as a List[int], or None if input is None
+        :rtype: Optional[List[int]]
+        """
+        if slot_mapping is None:
+            return None
+        if isinstance(slot_mapping, torch.Tensor):
+            return slot_mapping.tolist()
+        # At this point, slot_mapping must be List[int]
+        return slot_mapping
 
 
 class LMCacheEngineBuilder:
