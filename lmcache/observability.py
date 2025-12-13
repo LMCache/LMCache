@@ -1307,7 +1307,7 @@ class PrometheusLogger:
         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
         if (
             not config.disable_stats_logger
-            and not "PROMETHEUS_MULTIPROC_DIR" not in os.environ
+            and "PROMETHEUS_MULTIPROC_DIR" not in os.environ
         ):
             default_dir = "/tmp/lmcache_prometheus"
             os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
