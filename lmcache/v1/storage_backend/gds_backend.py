@@ -845,8 +845,8 @@ class GdsBackend(AllocatorBackendInterface):
 
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -856,12 +856,12 @@ class GdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        return self.memory_allocator.allocate(shape, dtype, fmt)
+        return self.memory_allocator.allocate(shapes, dtypes, fmt)
 
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -872,7 +872,7 @@ class GdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        return self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
+        return self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
 
     def get_allocator_backend(self):
         return self

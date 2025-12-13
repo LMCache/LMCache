@@ -57,7 +57,7 @@ Basic cache settings that control the core functionality of LMCache.
      - Hash algorithm for prefix-caching. Default: "builtin"
    * - save_unfull_chunk
      - LMCACHE_SAVE_UNFULL_CHUNK
-     - Whether to save unfull chunks. Values: true/false. Default: true
+     - Whether to save unfull chunks. Values: true/false. Default: false
    * - blocking_timeout_secs
      - LMCACHE_BLOCKING_TIMEOUT_SECS
      - Timeout for blocking operations in seconds. Default: 10
