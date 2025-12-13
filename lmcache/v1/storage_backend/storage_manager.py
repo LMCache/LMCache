@@ -269,6 +269,7 @@ class StorageManager:
 
         # freeze mode: only use local_cpu backend for retrieval
         self._freeze = False
+        self._freeze_lock = threading.RLock()
 
         self._setup_metrics()
 
@@ -369,12 +370,6 @@ class StorageManager:
         raise RuntimeError(
             "StorageManager.put is deprecated and should not be called anymore"
         )
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
-            backend.submit_put_task(key, memory_obj)
-
-        memory_obj.ref_count_down()
 
     def batched_put(
         self,
@@ -750,7 +745,8 @@ class StorageManager:
 
         When enabled, only local_cpu backend will be used for retrieval.
         """
-        self._freeze = enabled
+        with self._freeze_lock:
+            self._freeze = enabled
         logger.info("StorageManager freeze mode set to %s", enabled)
 
     def is_frozen(self) -> bool:
@@ -760,7 +756,8 @@ class StorageManager:
         Returns:
             bool: True if freeze mode is enabled, False otherwise
         """
-        return self._freeze
+        with self._freeze_lock:
+            return self._freeze
 
     def contains(
         self,
@@ -1005,8 +1002,9 @@ class StorageManager:
         """
         for backend_name, backend in self.storage_backends.items():
             # In freeze mode, only use local_cpu backend
-            if self._freeze and backend_name != "LocalCPUBackend":
-                continue
+            with self._freeze_lock:
+                if self._freeze and backend_name != "LocalCPUBackend":
+                    continue
             if location and backend_name != location:
                 continue
             if search_range and backend_name not in search_range:
