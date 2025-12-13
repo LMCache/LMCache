@@ -224,7 +224,7 @@ class TestGdsBackend:
             with (
                 mock.patch(
                     "lmcache.v1.storage_backend.gds_backend.get_fstype",
-                    return_value="weka",
+                    return_value="wekafs",
                 ),
                 mock.patch.object(
                     GdsBackend,
@@ -261,7 +261,7 @@ class TestGdsBackend:
         with (
             mock.patch(
                 "lmcache.v1.storage_backend.gds_backend.get_fstype",
-                return_value="weka",
+                return_value="wekafs",
             ),
             mock.patch.object(
                 GdsBackend,
