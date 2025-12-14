@@ -1804,8 +1804,7 @@ class LMCacheConnectorV1Impl:
                 # this assumption is crucial for the update() call of RequestTracker
                 assert request.num_computed_tokens == max(
                     lmcache_cached_tokens, load_spec.vllm_cached_tokens
-                )
-                (
+                ), (
                     f"Preempted request {req_id} has "
                     f"num_computed_tokens {request.num_computed_tokens} "
                     "but max(lmcache_cached_tokens, vllm_cached_tokens) = "
