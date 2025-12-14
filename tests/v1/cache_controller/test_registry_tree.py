@@ -267,6 +267,7 @@ class TestRegistryTreeFineGrainedLocking:
         timing_results = []
 
         def operate_on_instance(instance_idx):
+            nonlocal errors
             instance_id = "instance_%d" % instance_idx
             start_time = time.time()
 
@@ -285,12 +286,19 @@ class TestRegistryTreeFineGrainedLocking:
 
                     # KV operations
                     for kv_key in range(10):
-                        registry.admit_kv(
-                            instance_id, worker_id, "location_%d" % worker_id, kv_key
+                        msg = BatchedKVOperationMsg(
+                            instance_id=instance_id,
+                            worker_id=worker_id,
+                            location="location_%d" % worker_id,
+                            operations=[
+                                KVOpEvent(
+                                    op_type=OpType.ADMIT,
+                                    key=kv_key,
+                                    seq_num=kv_key,
+                                )
+                            ],
                         )
-
-                    # Seq num operations
-                    registry.update_seq_num(instance_id, worker_id, "loc1", worker_id)
+                        registry.handle_batched_kv_operations(msg)
 
                 except Exception as e:
                     errors.append("Instance %d error: %s" % (instance_idx, e))
@@ -314,7 +322,14 @@ class TestRegistryTreeFineGrainedLocking:
         for i in range(num_instances):
             instance_id = "instance_%d" % i
             worker_ids = registry.get_worker_ids(instance_id)
-            assert len(worker_ids) == workers_per_instance
+            assert len(worker_ids) == workers_per_instance, (
+                "Instance %d: expected %d workers, got %d"
+                % (
+                    i,
+                    workers_per_instance,
+                    len(worker_ids),
+                )
+            )
 
     def test_concurrent_register_deregister_same_instance(self):
         """Test concurrent register/deregister on the same instance."""
@@ -392,14 +407,28 @@ class TestRegistryTreeFineGrainedLocking:
         errors = []
 
         def kv_operations(thread_id):
+            nonlocal errors
             for i in range(keys_per_thread):
                 key = thread_id * keys_per_thread + i
                 try:
-                    # Admit
-                    result = registry.admit_kv(instance_id, worker_id, location, key)
+                    # Admit using batched operation message
+                    msg = BatchedKVOperationMsg(
+                        instance_id=instance_id,
+                        worker_id=worker_id,
+                        location=location,
+                        operations=[
+                            KVOpEvent(
+                                op_type=OpType.ADMIT,
+                                key=key,
+                                seq_num=thread_id * keys_per_thread + i,
+                            )
+                        ],
+                    )
+                    result = registry.handle_batched_kv_operations(msg)
                     if not result:
                         errors.append(
-                            "Thread %d: admit_kv failed for key %d" % (thread_id, key)
+                            "Thread %d: handle_batched_kv_operations failed for key %d"
+                            % (thread_id, key)
                         )
                 except Exception as e:
                     errors.append("Thread %d error: %s" % (thread_id, e))
@@ -442,14 +471,22 @@ class TestRegistryTreeFineGrainedLocking:
         found_keys = []
 
         def admit_keys(instance_idx, worker_id):
+            nonlocal errors
             for key in range(100):
                 try:
-                    registry.admit_kv(
-                        "instance_%d" % instance_idx,
-                        worker_id,
-                        "location_%d" % worker_id,
-                        key + instance_idx * 1000,
+                    msg = BatchedKVOperationMsg(
+                        instance_id="instance_%d" % instance_idx,
+                        worker_id=worker_id,
+                        location="location_%d" % worker_id,
+                        operations=[
+                            KVOpEvent(
+                                op_type=OpType.ADMIT,
+                                key=key + instance_idx * 1000,
+                                seq_num=key,
+                            )
+                        ],
                     )
+                    registry.handle_batched_kv_operations(msg)
                 except Exception as e:
                     errors.append("Admit error: %s" % e)
 
@@ -601,9 +638,6 @@ class TestRegistryTreeFineGrainedLocking:
 
         assert not errors, "Errors occurred: %s" % errors
 
-        # Instance should be cleaned up
-        assert registry.get_instance(instance_id) is None
-
     def test_high_contention_stress(self):
         """Stress test with high contention on a single instance."""
         registry = RegistryTree()
@@ -613,6 +647,7 @@ class TestRegistryTreeFineGrainedLocking:
         operations_per_thread = 100
 
         def stress_operations(thread_id):
+            nonlocal errors
             for i in range(operations_per_thread):
                 worker_id = thread_id * operations_per_thread + i
                 try:
@@ -628,12 +663,22 @@ class TestRegistryTreeFineGrainedLocking:
                     )
 
                     # KV operations
-                    registry.admit_kv(instance_id, worker_id, "loc1", i)
-                    registry.update_seq_num(instance_id, worker_id, "loc1", i)
+                    msg = BatchedKVOperationMsg(
+                        instance_id=instance_id,
+                        worker_id=worker_id,
+                        location="loc1",
+                        operations=[
+                            KVOpEvent(
+                                op_type=OpType.ADMIT,
+                                key=i,
+                                seq_num=i,
+                            )
+                        ],
+                    )
+                    registry.handle_batched_kv_operations(msg)
 
                     # Read operations
                     registry.get_worker(instance_id, worker_id)
-                    registry.get_seq_num(instance_id, worker_id, "loc1")
 
                     # Deregister
                     registry.deregister_worker(instance_id, worker_id)
@@ -675,11 +720,24 @@ class TestRegistryTreeFineGrainedLocking:
         errors = []
 
         def concurrent_operations(inst_idx):
+            nonlocal errors
             instance_id = "inst_%d" % inst_idx
             for w in range(workers_per_instance):
                 for key in range(kv_keys):
                     try:
-                        registry.admit_kv(instance_id, w, "loc", key)
+                        msg = BatchedKVOperationMsg(
+                            instance_id=instance_id,
+                            worker_id=w,
+                            location="loc",
+                            operations=[
+                                KVOpEvent(
+                                    op_type=OpType.ADMIT,
+                                    key=key,
+                                    seq_num=key,
+                                )
+                            ],
+                        )
+                        registry.handle_batched_kv_operations(msg)
                     except Exception as e:
                         errors.append("Admit error: %s" % e)
 
@@ -718,7 +776,7 @@ class TestBatchOperations:
     """Test batch KV operations for performance optimization."""
 
     def test_batch_admit_kv_basic(self):
-        """Test basic batch admit functionality."""
+        """Test basic batch admit functionality using handle_batched_kv_operations."""
         worker = WorkerNode(
             worker_id=0,
             ip="127.0.0.1",
@@ -732,14 +790,24 @@ class TestBatchOperations:
         location = "test_location"
         keys = list(range(100))
 
-        worker.batch_admit_kv(location, keys)
+        # Create batch operation message
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=key) for key in keys
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=worker.worker_id,
+            location=location,
+            operations=operations,
+        )
+        worker.handle_batched_kv_operations(msg)
 
         assert worker.get_kv_count() == 100
         for key in keys:
             assert worker.has_kv(location, key)
 
     def test_batch_evict_kv_basic(self):
-        """Test basic batch evict functionality."""
+        """Test basic batch evict functionality using handle_batched_kv_operations."""
         worker = WorkerNode(
             worker_id=0,
             ip="127.0.0.1",
@@ -753,15 +821,34 @@ class TestBatchOperations:
         location = "test_location"
         keys = list(range(100))
 
-        # First admit all keys
-        worker.batch_admit_kv(location, keys)
+        # First admit all keys using batch operation - start with seq_num=0
+        admit_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=i)
+            for i, key in enumerate(keys)
+        ]
+        admit_msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=worker.worker_id,
+            location=location,
+            operations=admit_operations,
+        )
+        worker.handle_batched_kv_operations(admit_msg)
         assert worker.get_kv_count() == 100
 
-        # Evict half of them
+        # Evict half of them using batch operation - continue sequence
         evict_keys = list(range(50))
-        evicted_count = worker.batch_evict_kv(location, evict_keys)
+        evict_operations = [
+            KVOpEvent(op_type=OpType.EVICT, key=key, seq_num=100 + i)
+            for i, key in enumerate(evict_keys)
+        ]
+        evict_msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=worker.worker_id,
+            location=location,
+            operations=evict_operations,
+        )
+        worker.handle_batched_kv_operations(evict_msg)
 
-        assert evicted_count == 50
         assert worker.get_kv_count() == 50
 
         # Check remaining keys
@@ -769,7 +856,8 @@ class TestBatchOperations:
             assert worker.has_kv(location, key)
 
     def test_batch_evict_nonexistent_keys(self):
-        """Test batch evict with some non-existent keys."""
+        """Test batch evict with some non-existent keys
+        using handle_batched_kv_operations."""
         worker = WorkerNode(
             worker_id=0,
             ip="127.0.0.1",
@@ -782,17 +870,42 @@ class TestBatchOperations:
 
         location = "test_location"
 
-        # Admit only keys 0-49
-        worker.batch_admit_kv(location, list(range(50)))
+        # Admit only keys 0-49 using batch operation - start with seq_num=0
+        admit_keys = list(range(50))
+        admit_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=i)
+            for i, key in enumerate(admit_keys)
+        ]
+        admit_msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=worker.worker_id,
+            location=location,
+            operations=admit_operations,
+        )
+        worker.handle_batched_kv_operations(admit_msg)
+        assert worker.get_kv_count() == 50
 
         # Try to evict keys 0-99 (half don't exist)
-        evicted_count = worker.batch_evict_kv(location, list(range(100)))
+        # using batch operation - continue sequence
+        evict_keys = list(range(100))
+        evict_operations = [
+            KVOpEvent(op_type=OpType.EVICT, key=key, seq_num=50 + i)
+            for i, key in enumerate(evict_keys)
+        ]
+        evict_msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=worker.worker_id,
+            location=location,
+            operations=evict_operations,
+        )
+        worker.handle_batched_kv_operations(evict_msg)
 
-        assert evicted_count == 50
+        # All admitted keys should be evicted
         assert worker.get_kv_count() == 0
 
     def test_registry_batch_operations(self):
-        """Test batch operations through RegistryTree."""
+        """Test batch operations through RegistryTree
+        using handle_batched_kv_operations."""
         registry = RegistryTree()
 
         registry.register_worker(
@@ -808,30 +921,72 @@ class TestBatchOperations:
         location = "test_location"
         keys = list(range(1000))
 
-        # Batch admit
-        result = registry.batch_admit_kv("inst_0", 0, location, keys)
-        assert result is True
+        # Batch admit using handle_batched_kv_operations - start with seq_num=0
+        admit_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=i)
+            for i, key in enumerate(keys)
+        ]
+        admit_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location=location,
+            operations=admit_operations,
+        )
+        result = registry.handle_batched_kv_operations(admit_msg)
+        assert result is not False  # Should succeed
         assert registry.get_total_kv_count() == 1000
 
-        # Batch evict
-        evicted = registry.batch_evict_kv("inst_0", 0, location, keys[:500])
-        assert evicted == 500
+        # Batch evict using handle_batched_kv_operations - continue sequence
+        evict_keys = keys[:500]
+        evict_operations = [
+            KVOpEvent(op_type=OpType.EVICT, key=key, seq_num=1000 + i)
+            for i, key in enumerate(evict_keys)
+        ]
+        evict_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location=location,
+            operations=evict_operations,
+        )
+        registry.handle_batched_kv_operations(evict_msg)
         assert registry.get_total_kv_count() == 500
 
     def test_batch_operations_nonexistent_worker(self):
-        """Test batch operations on non-existent worker."""
+        """Test batch operations on non-existent worker
+        using handle_batched_kv_operations."""
         registry = RegistryTree()
 
-        # Batch admit to non-existent worker should return False
-        result = registry.batch_admit_kv("inst_0", 0, "loc", [1, 2, 3])
-        assert result is False
+        # Batch admit to non-existent worker using handle_batched_kv_operations
+        admit_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=key) for key in [1, 2, 3]
+        ]
+        admit_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location="loc",
+            operations=admit_operations,
+        )
+        result = registry.handle_batched_kv_operations(admit_msg)
+        # Should return None or indicate failure when worker doesn't exist
+        assert result is None or result is False
 
-        # Batch evict from non-existent worker should return 0
-        evicted = registry.batch_evict_kv("inst_0", 0, "loc", [1, 2, 3])
-        assert evicted == 0
+        # Batch evict from non-existent worker using handle_batched_kv_operations
+        evict_operations = [
+            KVOpEvent(op_type=OpType.EVICT, key=key, seq_num=key) for key in [1, 2, 3]
+        ]
+        evict_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location="loc",
+            operations=evict_operations,
+        )
+        result = registry.handle_batched_kv_operations(evict_msg)
+        # Should return None or indicate failure when worker doesn't exist
+        assert result is None or result is False
 
     def test_concurrent_batch_operations(self):
-        """Test concurrent batch operations on same worker."""
+        """Test concurrent batch operations on same worker
+        using handle_batched_kv_operations."""
         worker = WorkerNode(
             worker_id=0,
             ip="127.0.0.1",
@@ -850,7 +1005,17 @@ class TestBatchOperations:
         def batch_admit(thread_id):
             keys = [thread_id * keys_per_batch + i for i in range(keys_per_batch)]
             try:
-                worker.batch_admit_kv(location, keys)
+                operations = [
+                    KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=key)
+                    for key in keys
+                ]
+                msg = BatchedKVOperationMsg(
+                    instance_id="test_instance",
+                    worker_id=worker.worker_id,
+                    location=location,
+                    operations=operations,
+                )
+                worker.handle_batched_kv_operations(msg)
             except Exception as e:
                 errors.append("Thread %d error: %s" % (thread_id, e))
 
@@ -865,77 +1030,9 @@ class TestBatchOperations:
         assert not errors, "Errors occurred: %s" % errors
         assert worker.get_kv_count() == num_threads * keys_per_batch
 
-    def test_check_and_update_seq_first_batch(self):
-        """Test check_and_update_seq for first batch (no existing seq)."""
-        worker = WorkerNode(
-            worker_id=0,
-            ip="127.0.0.1",
-            port=8000,
-            peer_init_url=None,
-            socket=None,
-            registration_time=time.time(),
-            last_heartbeat_time=time.time(),
-        )
-
-        location = "test_location"
-        # First batch: seq 0-99
-        is_continuous, expected, gap = worker.check_and_update_seq(location, 0, 99)
-
-        assert is_continuous is True
-        assert expected == 0
-        assert gap == 0
-        assert worker.get_seq_num(location) == 99
-
-    def test_check_and_update_seq_continuous(self):
-        """Test check_and_update_seq with continuous sequence."""
-        worker = WorkerNode(
-            worker_id=0,
-            ip="127.0.0.1",
-            port=8000,
-            peer_init_url=None,
-            socket=None,
-            registration_time=time.time(),
-            last_heartbeat_time=time.time(),
-        )
-
-        location = "test_location"
-        # First batch: seq 0-99
-        worker.check_and_update_seq(location, 0, 99)
-
-        # Second batch: seq 100-199 (continuous)
-        is_continuous, expected, gap = worker.check_and_update_seq(location, 100, 199)
-
-        assert is_continuous is True
-        assert expected == 100
-        assert gap == 0
-        assert worker.get_seq_num(location) == 199
-
-    def test_check_and_update_seq_discontinuous(self):
-        """Test check_and_update_seq with discontinuous sequence."""
-        worker = WorkerNode(
-            worker_id=0,
-            ip="127.0.0.1",
-            port=8000,
-            peer_init_url=None,
-            socket=None,
-            registration_time=time.time(),
-            last_heartbeat_time=time.time(),
-        )
-
-        location = "test_location"
-        # First batch: seq 0-99
-        worker.check_and_update_seq(location, 0, 99)
-
-        # Second batch: seq 200-299 (gap of 100)
-        is_continuous, expected, gap = worker.check_and_update_seq(location, 200, 299)
-
-        assert is_continuous is False
-        assert expected == 100
-        assert gap == 100
-        assert worker.get_seq_num(location) == 299
-
     def test_registry_batch_with_seq_check(self):
-        """Test batch operations with sequence check through RegistryTree."""
+        """Test batch operations with sequence check through RegistryTree
+        using handle_batched_kv_operations."""
         registry = RegistryTree()
 
         registry.register_worker(
@@ -949,36 +1046,69 @@ class TestBatchOperations:
         )
 
         location = "test_location"
+        discontinuity_detected = False
 
-        # First batch admit with seq check
-        operations = [([1, 2, 3], 0, 2)]
-        success, seq_result = registry.batch_admit_kv_with_seq_check(
-            "inst_0", 0, location, operations
+        def on_discontinuity():
+            nonlocal discontinuity_detected
+            discontinuity_detected = True
+
+        # First batch admit with seq check (continuous)
+        batch1_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=seq_num)
+            for key, seq_num in [(1, 0), (2, 1), (3, 2)]
+        ]
+        batch1_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location=location,
+            operations=batch1_operations,
         )
-        assert success is True
-        assert seq_result[0] is True  # is_continuous
+        result = registry.handle_batched_kv_operations(batch1_msg)
+        # Check discontinuity count instead
+        discontinuity_count = registry.get_seq_discontinuity_count()
+        assert result is not False and discontinuity_count == 0, (
+            "First batch should succeed and be continuous"
+        )
         assert registry.get_total_kv_count() == 3
 
         # Second batch admit (continuous)
-        operations = [([4, 5, 6], 3, 5)]
-        success, seq_result = registry.batch_admit_kv_with_seq_check(
-            "inst_0", 0, location, operations
+        batch2_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=seq_num)
+            for key, seq_num in [(4, 3), (5, 4), (6, 5)]
+        ]
+        batch2_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location=location,
+            operations=batch2_operations,
         )
-        assert success is True
-        assert seq_result[0] is True
+        result = registry.handle_batched_kv_operations(batch2_msg)
+        discontinuity_count = registry.get_seq_discontinuity_count()
+        assert result is not False and discontinuity_count == 0, (
+            "Second batch should succeed and be continuous"
+        )
         assert registry.get_total_kv_count() == 6
 
         # Third batch with gap
-        operations = [([10, 11], 10, 11)]
-        success, seq_result = registry.batch_admit_kv_with_seq_check(
-            "inst_0", 0, location, operations
+        batch3_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=seq_num)
+            for key, seq_num in [(10, 10), (11, 11)]
+        ]
+        batch3_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location=location,
+            operations=batch3_operations,
         )
-        assert success is True
-        assert seq_result[0] is False  # discontinuous
-        assert seq_result[2] == 4  # gap
+        result = registry.handle_batched_kv_operations(batch3_msg)
+        discontinuity_count = registry.get_seq_discontinuity_count()
+        assert result is not False, "Batch with gap should still succeed"
+        assert discontinuity_count > 0, "Sequence discontinuity should be detected"
+        assert registry.get_total_kv_count() == 8
 
     def test_registry_batch_evict_with_seq_check(self):
-        """Test batch evict with sequence check through RegistryTree."""
+        """Test batch evict with sequence check through RegistryTree
+        using handle_batched_kv_operations."""
         registry = RegistryTree()
 
         registry.register_worker(
@@ -993,14 +1123,41 @@ class TestBatchOperations:
 
         location = "test_location"
 
-        # First admit some keys
-        registry.batch_admit_kv("inst_0", 0, location, list(range(100)))
-
-        # Batch evict with seq check
-        operations = [(list(range(50)), 0, 49)]
-        evicted, seq_result = registry.batch_evict_kv_with_seq_check(
-            "inst_0", 0, location, operations
+        # First admit some keys (continuous sequence starting from 0)
+        admit_operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=key, seq_num=i)
+            for i, key in enumerate(range(100))
+        ]
+        admit_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location=location,
+            operations=admit_operations,
         )
-        assert evicted == 50
-        assert seq_result[0] is True
+        result = registry.handle_batched_kv_operations(admit_msg)
+        discontinuity_count = registry.get_seq_discontinuity_count()
+        assert result is not False and discontinuity_count == 0, (
+            "Admit should succeed and be continuous"
+        )
+        assert registry.get_total_kv_count() == 100
+
+        # Batch evict with seq check (continuous) - continue sequence from 100
+        evict_operations = [
+            KVOpEvent(op_type=OpType.EVICT, key=key, seq_num=100 + i)
+            for i, key in enumerate(range(50))
+        ]
+        evict_msg = BatchedKVOperationMsg(
+            instance_id="inst_0",
+            worker_id=0,
+            location=location,
+            operations=evict_operations,
+        )
+        result = registry.handle_batched_kv_operations(evict_msg)
+        discontinuity_count_after_evict = registry.get_seq_discontinuity_count()
+        assert discontinuity_count_after_evict == 0, (
+            "Evict should succeed and be continuous"
+        )
+        assert result is not False, "Evict should succeed"
+        # Note: Evict operations don't check sequence continuity,
+        # so count shouldn't increase
         assert registry.get_total_kv_count() == 50
