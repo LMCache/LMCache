@@ -8,11 +8,12 @@ import threading
 import zmq.asyncio
 
 if TYPE_CHECKING:
-    from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, OpType
+    from lmcache.v1.cache_controller.message import BatchedKVOperationMsg
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.locks import FastLockWithTimeout, RWLockWithTimeout
+from lmcache.v1.cache_controller.message import WorkerInfo
 
 logger = init_logger(__name__)
 
@@ -26,17 +27,6 @@ class KVChunkInfo(NamedTuple):
     instance_id: str
     worker_id: int
     location: str
-
-
-@dataclass
-class WorkerInfo:
-    instance_id: str
-    worker_id: int
-    ip: str
-    port: int
-    peer_init_url: Optional[str]
-    registration_time: float
-    last_heartbeat_time: float
 
 
 @dataclass
@@ -92,9 +82,9 @@ class WorkerNode:
                 self.seq_tracker[location] = op.seq_num
 
                 # Apply operation
-                if op.op_type == OpType.ADMIT:
+                if op.op_type.value == "admit":
                     self.kv_store[location].add(op.key)
-                elif op.op_type == OpType.EVICT:
+                elif op.op_type.value == "evict":
                     self.kv_store[location].discard(op.key)
                 else:
                     logger.error(f"Unknown op_type: {op.op_type}")

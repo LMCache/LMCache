@@ -52,7 +52,7 @@ class TestWorkerNodeLocking:
                         KVOpEvent(
                             op_type=OpType.ADMIT,
                             key=key,
-                            seq_num=0,
+                            seq_num=thread_id * keys_per_thread + i,
                         )
                     ],
                 )
@@ -99,7 +99,7 @@ class TestWorkerNodeLocking:
                                 KVOpEvent(
                                     op_type=OpType.ADMIT,
                                     key=key,
-                                    seq_num=0,
+                                    seq_num=thread_id * operations_per_thread + i,
                                 )
                             ],
                         )
@@ -112,7 +112,7 @@ class TestWorkerNodeLocking:
                                 KVOpEvent(
                                     op_type=OpType.EVICT,
                                     key=key,
-                                    seq_num=0,
+                                    seq_num=thread_id * operations_per_thread + i,
                                 )
                             ],
                         )

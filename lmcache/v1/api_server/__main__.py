@@ -49,8 +49,8 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     QueryInstRetMsg,
     QueryWorkerInfoMsg,
     QueryWorkerInfoRetMsg,
+    WorkerInfo,
 )
-from lmcache.v1.cache_controller.utils import WorkerInfo
 from lmcache.v1.internal_api_server.api_registry import APIRegistry
 
 logger = init_logger(__name__)

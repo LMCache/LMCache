@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -97,6 +98,19 @@ class KVEvictMsg(KVOperationMsg):
 
     def describe(self) -> str:
         return f"kv_evict {self.key} from {self.instance_id}"
+
+
+@dataclass
+class WorkerInfo:
+    """Information about a worker for external API consumption."""
+
+    instance_id: str
+    worker_id: int
+    ip: str
+    port: int
+    peer_init_url: Optional[str]
+    registration_time: float
+    last_heartbeat_time: float
 
 
 class OpType(Enum):
