@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional
 import threading
 
 # Third Party
 import zmq.asyncio
 
-if TYPE_CHECKING:
-    from lmcache.v1.cache_controller.message import BatchedKVOperationMsg
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.locks import FastLockWithTimeout, RWLockWithTimeout
-from lmcache.v1.cache_controller.message import WorkerInfo
+from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, WorkerInfo
 
 logger = init_logger(__name__)
 
@@ -54,7 +51,7 @@ class WorkerNode:
 
     def handle_batched_kv_operations(
         self,
-        msg: "BatchedKVOperationMsg",
+        msg: BatchedKVOperationMsg,
         on_seq_discontinuity: Optional[Callable[[], None]] = None,
     ) -> None:
         """
@@ -140,18 +137,49 @@ class WorkerNode:
         with self._lock:
             return self.seq_tracker.get(location)
 
+    def find_key(
+        self, key: int
+    ) -> Optional[tuple[KVChunkInfo, Optional[str], set[int]]]:
+        """
+        Find a key in this worker's kv_store.
+        Returns: (KVChunkInfo, peer_init_url, keys) if found, None otherwise.
+        KVChunkInfo will have instance_id="" since WorkerNode doesn't know its instance.
+        """
+        with self._lock:
+            for location, keys in self.kv_store.items():
+                if key in keys:
+                    # WorkerNode doesn't know its instance_id, so we leave it empty
+                    # The caller should fill in the instance_id
+                    return (
+                        KVChunkInfo("", self.worker_id, location),
+                        self.peer_init_url,
+                        keys,
+                    )
+        return None
+
+    def find_key_simple(self, key: int) -> Optional[KVChunkInfo]:
+        """
+        Find a key in this worker's kv_store, returning only KVChunkInfo.
+        KVChunkInfo will have instance_id="" since WorkerNode doesn't know its instance.
+        """
+        with self._lock:
+            for location, keys in self.kv_store.items():
+                if key in keys:
+                    return KVChunkInfo("", self.worker_id, location)
+        return None
+
     def to_worker_info(self, instance_id: str) -> WorkerInfo:
         """Convert to WorkerInfo for backward compatibility."""
-        with self._lock:
-            return WorkerInfo(
-                instance_id=instance_id,
-                worker_id=self.worker_id,
-                ip=self.ip,
-                port=self.port,
-                peer_init_url=self.peer_init_url,
-                registration_time=self.registration_time,
-                last_heartbeat_time=self.last_heartbeat_time,
-            )
+        # No need to lock here
+        return WorkerInfo(
+            instance_id=instance_id,
+            worker_id=self.worker_id,
+            ip=self.ip,
+            port=self.port,
+            peer_init_url=self.peer_init_url,
+            registration_time=self.registration_time,
+            last_heartbeat_time=self.last_heartbeat_time,
+        )
 
 
 @dataclass
@@ -174,12 +202,12 @@ class InstanceNode:
 
     def add_worker(self, worker_node: WorkerNode) -> None:
         """Add a worker to this instance."""
-        with self._rwlock.write_lock(timeout=0.1):
+        with self._rwlock.write_lock(timeout=10):
             self.workers[worker_node.worker_id] = worker_node
 
     def remove_worker(self, worker_id: int) -> Optional[WorkerNode]:
         """Remove and return a worker from this instance."""
-        with self._rwlock.write_lock(timeout=0.1):
+        with self._rwlock.write_lock(timeout=10):
             return self.workers.pop(worker_id, None)
 
     def get_worker(self, worker_id: int) -> Optional[WorkerNode]:
@@ -202,6 +230,61 @@ class InstanceNode:
         # Snapshot values to avoid RuntimeError if dict changes during iteration
         workers_snapshot = list(self.workers.values())
         return [worker.to_worker_info(self.instance_id) for worker in workers_snapshot]
+
+    def find_key(
+        self, key: int
+    ) -> Optional[tuple[KVChunkInfo, Optional[str], set[int]]]:
+        """
+        Find a key in any worker within this instance.
+        Returns: (KVChunkInfo, peer_init_url, keys) if found, None otherwise.
+        """
+        # Snapshot workers to avoid RuntimeError if dict changes during iteration
+        workers_snapshot = list(self.workers.items())
+        for worker_id, worker_node in workers_snapshot:
+            result = worker_node.find_key(key)
+            if result is not None:
+                # Fill in the instance_id in KVChunkInfo
+                kv_info, peer_init_url, keys = result
+                return (
+                    KVChunkInfo(self.instance_id, worker_id, kv_info.location),
+                    peer_init_url,
+                    keys,
+                )
+        return None
+
+    def find_key_simple(self, key: int) -> Optional[KVChunkInfo]:
+        """
+        Find a key in any worker within this instance, returning only KVChunkInfo.
+        """
+        # Snapshot workers to avoid RuntimeError if dict changes during iteration
+        workers_snapshot = list(self.workers.items())
+        for worker_id, worker_node in workers_snapshot:
+            kv_info = worker_node.find_key_simple(key)
+            if kv_info is not None:
+                return KVChunkInfo(self.instance_id, worker_id, kv_info.location)
+        return None
+
+    def has_worker_with_ip(self, ip: str) -> bool:
+        """
+        Check if any worker in this instance has the specified IP address.
+        """
+        # Snapshot workers to avoid RuntimeError if dict changes during iteration
+        workers_snapshot = list(self.workers.values())
+        for worker_node in workers_snapshot:
+            if worker_node.ip == ip:
+                return True
+        return False
+
+    def get_total_kv_count(self) -> int:
+        """
+        Get total count of KV chunks across all workers in this instance.
+        """
+        # Snapshot workers to avoid RuntimeError if dict changes during iteration
+        workers_snapshot = list(self.workers.values())
+        total = 0
+        for worker_node in workers_snapshot:
+            total += worker_node.get_kv_count()
+        return total
 
 
 class RegistryTree:
@@ -246,7 +329,7 @@ class RegistryTree:
             return instance_node
 
         # Need to create, use write lock
-        with self._rwlock.write_lock(timeout=0.1):
+        with self._rwlock.write_lock(timeout=10):
             # Double-check after acquiring write lock
             instance_node = self.instances.get(instance_id)
             if instance_node is None:
@@ -323,9 +406,8 @@ class RegistryTree:
         """Get an instance by IP address. Returns first instance if multiple exist."""
         # Snapshot to avoid RuntimeError if dict changes during iteration
         for instance_node in list(self.instances.values()):
-            for worker_node in list(instance_node.workers.values()):
-                if worker_node.ip == ip:
-                    return instance_node
+            if instance_node.has_worker_with_ip(ip):
+                return instance_node
         return None
 
     def get_instances_by_ip(self, ip: str) -> list[InstanceNode]:
@@ -333,10 +415,8 @@ class RegistryTree:
         # Snapshot to avoid RuntimeError if dict changes during iteration
         result = []
         for instance_node in list(self.instances.values()):
-            for worker_node in list(instance_node.workers.values()):
-                if worker_node.ip == ip:
-                    result.append(instance_node)
-                    break
+            if instance_node.has_worker_with_ip(ip):
+                result.append(instance_node)
         return result
 
     def get_worker_ids(self, instance_id: str) -> list[int]:
@@ -367,7 +447,7 @@ class RegistryTree:
         worker_node.last_heartbeat_time = timestamp
         return True
 
-    def handle_batched_kv_operations(self, msg: "BatchedKVOperationMsg") -> bool:
+    def handle_batched_kv_operations(self, msg: BatchedKVOperationMsg) -> bool:
         """
         Handle batched KV operations by forwarding to WorkerNode.
         Returns True if worker found, False otherwise.
@@ -398,7 +478,7 @@ class RegistryTree:
 
         Returns: KVChunkInfo if found, None otherwise.
         """
-        with self._rwlock.read_lock(timeout=0.1):
+        with self._rwlock.read_lock(timeout=1):
             for instance_id, instance_node in self.instances.items():
                 # Exclude all workers in the specified instance
                 if (
@@ -406,10 +486,9 @@ class RegistryTree:
                     and instance_id == exclude_instance_id
                 ):
                     continue
-                for worker_id, worker_node in instance_node.workers.items():
-                    for location, keys in worker_node.kv_store.items():
-                        if key in keys:
-                            return KVChunkInfo(instance_id, worker_id, location)
+                result = instance_node.find_key_simple(key)
+                if result is not None:
+                    return result
             return None
 
     def find_kv_with_worker_info(
@@ -423,19 +502,13 @@ class RegistryTree:
 
         Returns: (KVChunkInfo, peer_init_url, kv_keys) if found, None otherwise.
         """
-        # Snapshot dicts to avoid RuntimeError if dict changes during iteration
+        # Snapshot instances to avoid RuntimeError if dict changes during iteration
         for instance_id, instance_node in list(self.instances.items()):
             if exclude_instance_id is not None and instance_id == exclude_instance_id:
                 continue
-            for worker_id, worker_node in list(instance_node.workers.items()):
-                kv_store = worker_node.kv_store
-                for location, keys in list(kv_store.items()):
-                    if key in keys:
-                        return (
-                            KVChunkInfo(instance_id, worker_id, location),
-                            worker_node.peer_init_url,
-                            keys,
-                        )
+            result = instance_node.find_key(key)
+            if result is not None:
+                return result
         return None
 
     def get_total_kv_count(self) -> int:
@@ -443,8 +516,7 @@ class RegistryTree:
         # Snapshot to avoid RuntimeError if dict changes during iteration
         total = 0
         for instance_node in list(self.instances.values()):
-            for worker_node in list(instance_node.workers.values()):
-                total += worker_node.get_kv_count()
+            total += instance_node.get_total_kv_count()
         return total
 
     def get_worker_kv_keys(
