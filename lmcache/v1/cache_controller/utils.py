@@ -386,8 +386,9 @@ class RegistryTree:
             # TODO(baoloongmao): Move timeout values to configuration
             with self._rwlock.write_lock(timeout=100):
                 # Double-check after acquiring write lock
-                if not instance_node.has_workers():
-                    del self.instances[instance_id]
+                # Use pop to avoid KeyError if another thread already removed it
+                if not instance_node.has_workers() and instance_id in self.instances:
+                    self.instances.pop(instance_id, None)
 
         return worker_node
 
