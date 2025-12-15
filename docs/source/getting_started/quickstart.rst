@@ -78,12 +78,13 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 (Terminal 2) Test LMCache in Action
 -----------------------------------
 
-Open a new terminal and send your first request. Pick the matching engine tab:
+Open a new terminal. Pick your engine tab, send the first request, then an overlapping second request:
 
 .. tab-set::
-   :sync-group: engine
 
    .. tab-item:: vLLM
+
+      **First request**
 
       .. code-block:: bash
 
@@ -96,31 +97,7 @@ Open a new terminal and send your first request. Pick the matching engine tab:
              "temperature": 0.7
            }'
 
-   .. tab-item:: SGLang
-
-      .. code-block:: bash
-
-         curl http://localhost:30000/v1/chat/completions \
-           -H "Content-Type: application/json" \
-           -d '{
-             "model": "Qwen/Qwen3-8B-Instruct",
-             "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
-             "max_tokens": 100,
-             "temperature": 0.7
-           }'
-
-You should see LMCache logs like this:
-
-.. code-block:: text
-
-   (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 27 out of total 27 tokens. size: 0.0037 gb, cost 1.8470 ms, throughput: 2.0075 GB/s; offload_time: 1.7962 ms, put_time: 0.0509 ms
-
-**What this means:** The 27 tokens from your prompt are cached (first request). Now send a second request with overlapping prefix:
-
-.. tab-set::
-   :sync-group: engine
-
-   .. tab-item:: vLLM
+      **Second request (overlap)**
 
       .. code-block:: bash
 
@@ -135,6 +112,21 @@ You should see LMCache logs like this:
 
    .. tab-item:: SGLang
 
+      **First request**
+
+      .. code-block:: bash
+
+         curl http://localhost:30000/v1/chat/completions \
+           -H "Content-Type: application/json" \
+           -d '{
+             "model": "Qwen/Qwen3-8B-Instruct",
+             "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
+             "max_tokens": 100,
+             "temperature": 0.7
+           }'
+
+      **Second request (overlap)**
+
       .. code-block:: bash
 
          curl http://localhost:30000/v1/chat/completions \
@@ -146,7 +138,13 @@ You should see LMCache logs like this:
              "temperature": 0.7
            }'
 
-You should see logs like this:
+You should see LMCache logs like this:
+
+.. code-block:: text
+
+   (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 27 out of total 27 tokens. size: 0.0037 gb, cost 1.8470 ms, throughput: 2.0075 GB/s; offload_time: 1.7962 ms, put_time: 0.0509 ms
+
+**What this means:** The first request caches the prompt. The second reuses the cached prefix and only loads the missing chunk. You should see logs like this:
 
 .. code-block:: text
 
