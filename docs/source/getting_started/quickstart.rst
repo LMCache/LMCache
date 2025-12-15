@@ -3,55 +3,103 @@
 Quickstart
 ==========
 
-This guide will help you get LMCache up and running quickly within 2 minutes. You'll see LMCache in action with a complete end-to-end example.
+This guide helps you get LMCache running end-to-end in a couple of minutes. Use the tabs below to choose vLLM or SGLang.
 
-(Terminal 1) Install LMCache
-----------------------------
+.. tab-set::
+   :sync-group: engine
 
-First, install LMCache with these three commands:
+   .. tab-item:: vLLM
+      :sync-group: engine
 
-.. code-block:: bash
+      **(Terminal 1) Install LMCache**
 
-   uv venv --python 3.12
-   source .venv/bin/activate
-   uv pip install lmcache vllm
+      .. code-block:: bash
 
-Start vLLM with LMCache using a single command:
+         uv venv --python 3.12
+         source .venv/bin/activate
+         uv pip install lmcache vllm
 
-.. code-block:: bash
+      **Start vLLM with LMCache:**
 
-   # The chunk size here is only for illustration purpose, use default one (256) later
-   LMCACHE_CHUNK_SIZE=8 \
-   vllm serve Qwen/Qwen3-8B \
-       --port 8000 --kv-transfer-config \
-       '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+      .. code-block:: bash
 
-.. note::
-   If you want to customize configurations further, you can create a configuration file. See the :doc:`../api_reference/configurations` page to learn about all available options.
+         # The chunk size here is only for illustration purpose, use default one (256) later
+         LMCACHE_CHUNK_SIZE=8 \
+         vllm serve Qwen/Qwen3-8B \
+             --port 8000 --kv-transfer-config \
+             '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
-Alternatively, you can start LMCache with vLLM using a simpler command:
+      .. note::
+         To customize further, create a config file. See :doc:`../api_reference/configurations` for all options.
 
-.. code-block:: bash
+      **Alternative simpler command:**
 
-   vllm serve <MODEL NAME> \
-       --kv-offloading-backend lmcache \
-       --kv-offloading-size <SIZE IN GB> \
-       --disable-hybrid-kv-cache-manager
+      .. code-block:: bash
 
-The ``--disable-hybrid-kv-cache-manager`` flag is mandatory. All configuration options from the :doc:`../api_reference/configurations` page still apply.
+         vllm serve <MODEL NAME> \
+             --kv-offloading-backend lmcache \
+             --kv-offloading-size <SIZE IN GB> \
+             --disable-hybrid-kv-cache-manager
+
+      The ``--disable-hybrid-kv-cache-manager`` flag is mandatory. All configuration options from the :doc:`../api_reference/configurations` page still apply.
+
+   .. tab-item:: SGLang
+      :sync-group: engine
+
+      **(Terminal 1) Install LMCache and SGLang**
+
+      .. code-block:: bash
+
+         uv venv --python 3.12
+         source .venv/bin/activate
+         uv pip install --prerelease=allow lmcache "sglang"
+
+      **Start SGLang with LMCache (demo chunk size 8; use 256 for real runs):**
+
+      .. code-block:: bash
+
+         cat > lmc_config.yaml <<'EOF'
+         chunk_size: 8  # demo only; use 256 for production
+         local_cpu: true
+         use_layerwise: true
+         max_local_cpu_size: "auto"
+         EOF
+
+         export LMCACHE_USE_EXPERIMENTAL=True
+         export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
+
+         python -m sglang.launch_server \
+           --model-path Qwen/Qwen3-8B-Instruct \
+           --host 0.0.0.0 \
+           --port 30000 \
+           --enable-lmcache
+
+      .. note::
+         Configure LMCache via the config file. See :doc:`../api_reference/configurations` for the full list.
 
 (Terminal 2) Test LMCache in Action
 -----------------------------------
 
-Now let's see LMCache working! Open a new terminal and send your first request:
+Open a new terminal and send your first request:
 
 .. code-block:: bash
 
+   # vLLM endpoint
    curl http://localhost:8000/v1/completions \
      -H "Content-Type: application/json" \
      -d '{
        "model": "Qwen/Qwen3-8B",
        "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
+       "max_tokens": 100,
+       "temperature": 0.7
+     }'
+
+   # SGLang endpoint
+   curl http://localhost:30000/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{
+       "model": "Qwen/Qwen3-8B-Instruct",
+       "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
        "max_tokens": 100,
        "temperature": 0.7
      }'
@@ -62,17 +110,26 @@ You should see LMCache logs like this:
 
    (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 27 out of total 27 tokens. size: 0.0037 gb, cost 1.8470 ms, throughput: 2.0075 GB/s; offload_time: 1.7962 ms, put_time: 0.0509 ms
 
-**What this means:** The 27 tokens from your prompt are being stored in CPU RAM because this is the first time the system processes this text. LMCache is caching the KV cache for future reuse.
-
-Now send a second request with a prefix that overlaps with the first:
+**What this means:** The 27 tokens from your prompt are cached (first request). Now send a second request with overlapping prefix:
 
 .. code-block:: bash
 
+   # vLLM endpoint
    curl http://localhost:8000/v1/completions \
      -H "Content-Type: application/json" \
      -d '{
        "model": "Qwen/Qwen3-8B",
        "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
+       "max_tokens": 100,
+       "temperature": 0.7
+     }'
+
+   # SGLang endpoint
+   curl http://localhost:30000/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{
+       "model": "Qwen/Qwen3-8B-Instruct",
+       "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
        "max_tokens": 100,
        "temperature": 0.7
      }'
@@ -90,11 +147,11 @@ You should see logs like this:
 
 - **Total tokens 32**: The new prompt has 32 tokens after tokenization
 - **LMCache hit tokens: 24**: 24 tokens were found in the cache (24 is a multiple of 8, our chunk size in this example)
-- **Need to load: 8**: vLLM has automatic prefix caching enabled with block size 16. Although there are 24 hit tokens, 16 are already in GPU RAM managed by vLLM, so LMCache only needs to load 24-16=8 tokens
-- **Why 24 hit tokens instead of 27?** LMCache hashes every 8 tokens incrementally (8, 16, 24, 27). When the new request comes in, it checks every 8-token chunk, so it uses the 24-token hash instead of checking the 27-token hash
-- **Stored another 8 tokens**: The new 8 tokens form a complete chunk that gets hashed and stored in CPU RAM for future use
+- **Need to load: 8**: vLLM auto prefix caching uses block size 16. Although there are 24 hit tokens, 16 are already in GPU RAM, so LMCache only needs to load 24-16=8 tokens
+- **Why 24 hit tokens instead of 27?** LMCache hashes every 8 tokens (8, 16, 24, 27). It checks page-aligned chunks, so it uses the 24-token hash
+- **Stored another 8 tokens**: The new 8 tokens form a full chunk and are stored for future reuse
 
-🎉 **Congratulations!** You've just seen LMCache automatically cache and reuse KV caches, reducing computation for overlapping text.
+🎉 **You now have LMCache caching and reusing KV caches for both engines.**
 
 Next Steps
 ----------
