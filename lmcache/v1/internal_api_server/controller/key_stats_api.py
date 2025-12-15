@@ -54,23 +54,22 @@ async def get_key_stats(request: Request):
         total_instance_count = 0
         total_worker_count = 0
 
-        for ip_instances in registry.instances.values():
-            for instance_id, instance_node in ip_instances.items():
-                total_instance_count += 1
-                instance_key_count = 0
+        for instance_id, instance_node in registry.instances.items():
+            total_instance_count += 1
+            instance_key_count = 0
 
-                # Calculate key count for this instance
-                for worker_node in instance_node.workers.values():
-                    total_worker_count += 1
-                    instance_key_count += worker_node.get_kv_count()
+            # Calculate key count for this instance
+            for worker_node in instance_node.workers.values():
+                total_worker_count += 1
+                instance_key_count += worker_node.get_kv_count()
 
-                instances.append(
-                    InstanceKeyStats(
-                        instance_id=instance_id,
-                        key_count=instance_key_count,
-                        worker_count=len(instance_node.workers),
-                    )
+            instances.append(
+                InstanceKeyStats(
+                    instance_id=instance_id,
+                    key_count=instance_key_count,
+                    worker_count=len(instance_node.workers),
                 )
+            )
 
         return KeyStatsResponse(
             total_key_count=total_key_count,
