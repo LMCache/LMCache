@@ -335,20 +335,12 @@ class LMCacheEngine:
         )
 
         # KVCache Check logging
-        if self.kvcache_check_log_enabled:
-            slot_mapping = kwargs.get("slot_mapping")
-            if slot_mapping is not None:
-                # Convert slot_mapping to list if it's a tensor
-                slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
-                # slot_mapping_list should not be None when slot_mapping is not None
-                assert slot_mapping_list is not None
-                req_id = kwargs.get("req_id", "unspecified")
-                logger.info(
-                    "[KVCache Check] Store request %s, tokens=%d, slot_mapping: %s",
-                    req_id,
-                    num_to_store_tokens,
-                    compress_slot_mapping(slot_mapping_list),
-                )
+        self._log_kvcache_for_check(
+            operation="Store",
+            kwargs=kwargs,
+            token_count=num_to_store_tokens,
+            require_req_id=False,
+        )
 
         # Check if freeze mode is enabled
         if self.is_frozen():
@@ -506,23 +498,13 @@ class LMCacheEngine:
         else:
             num_to_store_tokens = len(tokens)
 
-        req_id = kwargs.get("req_id", "unspecified")
-
         # KVCache Check logging
-        if self.kvcache_check_log_enabled:
-            slot_mapping = kwargs.get("slot_mapping")
-            if req_id is not None and slot_mapping is not None:
-                # Convert slot_mapping to list if it's a tensor
-                slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
-                # slot_mapping_list should not be None when slot_mapping is not None
-                assert slot_mapping_list is not None
-                logger.info(
-                    "[KVCache Check] Layerwise store request %s, "
-                    "tokens=%d, slot_mapping: %s",
-                    req_id,
-                    num_to_store_tokens,
-                    compress_slot_mapping(slot_mapping_list),
-                )
+        self._log_kvcache_for_check(
+            operation="Layerwise store",
+            kwargs=kwargs,
+            token_count=num_to_store_tokens,
+            require_req_id=True,
+        )
 
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
@@ -682,22 +664,13 @@ class LMCacheEngine:
         else:
             num_required_tokens = len(tokens)
 
-        req_id = kwargs.get("req_id", "unspecified")
-
         # KVCache Check logging
-        if self.kvcache_check_log_enabled:
-            slot_mapping = kwargs.get("slot_mapping")
-            if req_id is not None and slot_mapping is not None:
-                # Convert slot_mapping to list if it's a tensor
-                slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
-                # slot_mapping_list should not be None when slot_mapping is not None
-                assert slot_mapping_list is not None
-                logger.info(
-                    "[KVCache Check] retrieve request %s, tokens=%d, slot_mapping: %s",
-                    req_id,
-                    num_required_tokens,
-                    compress_slot_mapping(slot_mapping_list),
-                )
+        self._log_kvcache_for_check(
+            operation="retrieve",
+            kwargs=kwargs,
+            token_count=num_required_tokens,
+            require_req_id=True,
+        )
 
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
@@ -1657,6 +1630,52 @@ class LMCacheEngine:
             return slot_mapping.tolist()
         # At this point, slot_mapping must be List[int]
         return slot_mapping
+
+    def _log_kvcache_for_check(
+        self,
+        operation: str,
+        kwargs: dict,
+        token_count: int,
+        require_req_id: bool = False,
+    ) -> None:
+        """
+        Helper method to log KVCache Check information.
+
+        This method centralizes the KVCache Check logging logic that was
+        duplicated in multiple methods.
+
+        Args:
+            operation: The operation being performed (e.g., "Store", "retrieve")
+            kwargs: The keyword arguments containing slot_mapping and req_id
+            token_count: The number of tokens involved in the operation
+            require_req_id: Whether req_id must be present (default: False)
+        """
+        if not self.kvcache_check_log_enabled:
+            return
+
+        slot_mapping = kwargs.get("slot_mapping")
+        if slot_mapping is None:
+            return
+
+        if require_req_id:
+            req_id = kwargs.get("req_id")
+            if req_id is None:
+                return
+        else:
+            req_id = kwargs.get("req_id", "unspecified")
+
+        # Convert slot_mapping to list if it's a tensor
+        slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
+        # slot_mapping_list should not be None when slot_mapping is not None
+        assert slot_mapping_list is not None
+
+        logger.info(
+            "[KVCache Check] %s request %s, tokens=%d, slot_mapping: %s",
+            operation,
+            req_id,
+            token_count,
+            compress_slot_mapping(slot_mapping_list),
+        )
 
 
 class LMCacheEngineBuilder:
