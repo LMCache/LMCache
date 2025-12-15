@@ -24,7 +24,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
          # The chunk size here is only for illustration purpose, use default one (256) later
          LMCACHE_CHUNK_SIZE=8 \
-         vllm serve Qwen/Qwen3-8B \
+         vllm serve Qwen/Qwen3-14B-Instruct \
              --port 8000 --kv-transfer-config \
              '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
@@ -60,14 +60,14 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          chunk_size: 8  # demo only; use 256 for production
          local_cpu: true
          use_layerwise: true
-         max_local_cpu_size: "auto"
+         max_local_cpu_size: 10  # GB
          EOF
 
          export LMCACHE_USE_EXPERIMENTAL=True
          export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
 
          python -m sglang.launch_server \
-           --model-path Qwen/Qwen3-8B-Instruct \
+           --model-path Qwen/Qwen3-14B-Instruct \
            --host 0.0.0.0 \
            --port 30000 \
            --enable-lmcache
@@ -91,7 +91,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:8000/v1/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-8B",
+             "model": "Qwen/Qwen3-14B-Instruct",
              "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
              "max_tokens": 100,
              "temperature": 0.7
@@ -104,7 +104,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:8000/v1/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-8B",
+             "model": "Qwen/Qwen3-14B-Instruct",
              "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
              "max_tokens": 100,
              "temperature": 0.7
@@ -119,7 +119,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-8B-Instruct",
+             "model": "Qwen/Qwen3-14B-Instruct",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
              "max_tokens": 100,
              "temperature": 0.7
@@ -132,7 +132,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-8B-Instruct",
+             "model": "Qwen/Qwen3-14B-Instruct",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
              "max_tokens": 100,
              "temperature": 0.7
@@ -142,16 +142,16 @@ You should see LMCache logs like this:
 
 .. code-block:: text
 
-   (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 27 out of total 27 tokens. size: 0.0037 gb, cost 1.8470 ms, throughput: 2.0075 GB/s; offload_time: 1.7962 ms, put_time: 0.0509 ms
+   (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 31 out of total 31 tokens. size: 0.0040 gb, cost 1.95 ms, throughput: 1.98 GB/s; offload_time: 1.88 ms, put_time: 0.07 ms
 
 **What this means:** The first request caches the prompt. The second reuses the cached prefix and only loads the missing chunk. You should see logs like this:
 
 .. code-block:: text
 
    Reqid: cmpl-6709d8795d3c4464b01999c9f3fffede-0, Total tokens 32, LMCache hit tokens: 24, need to load: 8
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,502] LMCache INFO: Retrieved 8 out of total 8 out of total 24 tokens. size: 0.0011 gb, cost 0.5547 ms, throughput: 1.9808 GB/s;
+   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,502] LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s;
    (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,509] LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.4274 ms, throughput: 2.5702 GB/s; offload_time: 0.4013 ms, put_time: 0.0262 ms
+   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
 
 **What this means:**
 
