@@ -127,6 +127,7 @@ Documentation
 
    production/docker_deployment
    production/kubernetes_deployment
+   production/kv_cache_events
    production/observability/index
 
 :raw-html:`<br />`

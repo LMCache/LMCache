@@ -515,6 +515,22 @@ def _init_lmcache_engine(
     ):
         raise ValueError("MLA only works with naive serde mode..")
 
+    # MLA requires save_unfull_chunk=True for correct KV cache storage and retrieval.
+    # Without this, partial chunks would be discarded, causing incomplete cache
+    # and incorrect results in MLA mode.
+    if use_mla and not lmcache_config.save_unfull_chunk:
+        logger.warning(
+            "MLA (Multi-Level Attention) requires save_unfull_chunk=True "
+            "for correct KV cache storage. Automatically setting "
+            "save_unfull_chunk=True."
+        )
+        lmcache_config.save_unfull_chunk = True
+    elif use_mla:
+        logger.info(
+            "MLA mode enabled with save_unfull_chunk=True - all KV cache "
+            "including partial chunks will be stored"
+        )
+
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
@@ -568,8 +584,6 @@ def _init_lmcache_engine(
             "We haven't supported MLA with Cacheblend yet. Please disable blending."
         )
 
-    # When use_mla is True, num_kv_head is 1
-    hidden_dim_size = num_kv_head * head_size
     if role == "scheduler":
         vllm_gpu_connector = None
         # Create a dummy tpg object with broadcast and broadcast_object methods
@@ -579,42 +593,25 @@ def _init_lmcache_engine(
     elif lmcache_config.use_layerwise:
         if lmcache_config.enable_blending:
             # Use layerwise connector for blending
-            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
+            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector.from_metadata(
+                metadata, use_gpu, device
             )
         else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-                use_mla=use_mla,
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector.from_metadata(
+                metadata, use_gpu, device
             )
         tpg = get_tp_group()
     else:
         if current_platform.is_cuda_alike():
-            connector_cls = VLLMPagedMemGPUConnectorV2
+            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
+                metadata, use_gpu, device
+            )
         elif current_platform.is_xpu():
-            connector_cls = VLLMPagedMemXPUConnectorV2
+            vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
+                metadata, use_gpu, device
+            )
         else:
             raise RuntimeError("No supported connector found for the current platform.")
-
-        vllm_gpu_connector = connector_cls(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
         tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
@@ -919,6 +916,13 @@ class LMCacheConnectorV1Impl:
                 self.kv_caches[layer_name] = attn_layer.kv_cache[
                     forward_context.virtual_engine
                 ]
+
+        # Build KV layer groups structure if not already built
+        if self.lmcache_engine is not None:
+            kv_layer_groups_manager = (
+                self.lmcache_engine.metadata.kv_layer_groups_manager
+            )
+            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
 
     ####################
     # Worker side APIs
@@ -1297,7 +1301,8 @@ class LMCacheConnectorV1Impl:
             slot_mapping = slot_mapping.to(self.device)
 
             skip_leading_tokens = save_spec.skip_leading_tokens
-            if self.kv_role == "kv_producer":
+            # shared storage disaggregation will not have a disagg_spec passed in
+            if self.kv_role == "kv_producer" and request.disagg_spec:
                 skip_leading_tokens = min(
                     skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )

@@ -15,7 +15,7 @@ vllm:
     - "dummy"
     - "--no-enable-prefix-caching"
     - "--kv-transfer-config"
-    - '{"kv_connector":"LMCacheConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache.integration.vllm.lmcache_connector_v1","kv_connector_extra_config":{"discard_partial_chunks":true}}'
+    - '{"kv_connector":"LMCacheConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache.integration.vllm.lmcache_connector_v1","kv_connector_extra_config":{"discard_partial_chunks":false}}'
     - "--tensor-parallel-size"
     - "2"
     - "--block-size"
