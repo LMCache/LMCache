@@ -653,7 +653,7 @@ async def retrieve(
     )
 
 
-@router.post("/cache/kvcache/check")
+@router.get("/cache/kvcache/check")
 async def kvcache_check(
     request: Request,
     slot_mapping: Optional[str] = None,
@@ -680,7 +680,7 @@ async def kvcache_check(
     Example:
         ```bash
         # layerwise=false (default): one checksum per chunk (all layers combined)
-        curl -X POST "http://localhost:8000/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
+        curl -X GET "http://localhost:8000/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
         # Response: {
         #   "status": "success",
         #   "slot_mapping_ranges": [[0, 3]],
@@ -691,7 +691,7 @@ async def kvcache_check(
         # }
 
         # layerwise=true: per-layer checksums for each chunk
-        curl -X POST "http://localhost:8000/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2&layerwise=true"
+        curl -X GET "http://localhost:8000/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2&layerwise=true"
         # Response: {
         #   "status": "success",
         #   "slot_mapping_ranges": [[0, 3]],

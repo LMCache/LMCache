@@ -98,7 +98,7 @@ class TestKVCacheCheckAPI:
 
     def test_kvcache_check_success_layer_only(self, client_with_adapter):
         """Test successful kvcache check with layer-level checksums."""
-        response = client_with_adapter.post(
+        response = client_with_adapter.get(
             "/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
         )
         assert response.status_code == 200
@@ -124,7 +124,7 @@ class TestKVCacheCheckAPI:
         self, client_with_adapter, url, expected_error
     ):
         """Test kvcache check with various invalid parameters."""
-        response = client_with_adapter.post(url)
+        response = client_with_adapter.get(url)
         assert response.status_code == 400
         assert json.loads(response.text)["error"] == expected_error
 
@@ -141,7 +141,7 @@ class TestKVCacheCheckAPI:
         self, client_with_adapter, slots, chunk_size, expected_chunks
     ):
         """Test kvcache check with various chunk sizes."""
-        response = client_with_adapter.post(
+        response = client_with_adapter.get(
             f"/cache/kvcache/check?slot_mapping={slots}&chunk_size={chunk_size}"
         )
         assert response.status_code == 200
@@ -151,8 +151,8 @@ class TestKVCacheCheckAPI:
     def test_kvcache_check_consistency(self, client_with_adapter):
         """Test that checksums are consistent across calls."""
         url = "/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
-        data1 = json.loads(client_with_adapter.post(url).text)
-        data2 = json.loads(client_with_adapter.post(url).text)
+        data1 = json.loads(client_with_adapter.get(url).text)
+        data2 = json.loads(client_with_adapter.get(url).text)
         assert data1["chunk_checksums"] == data2["chunk_checksums"]
 
     # ==========================================================================
@@ -162,7 +162,7 @@ class TestKVCacheCheckAPI:
     @pytest.mark.parametrize(
         "method,url",
         [
-            ("post", "/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"),
+            ("get", "/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"),
             ("get", "/cache/kvcache/info"),
             ("post", "/cache/kvcache/record_slot?enabled=true"),
         ],
@@ -182,7 +182,7 @@ class TestKVCacheCheckAPI:
         adapter.kvcaches = {}
         adapter.compute_kvcache_checksums = MagicMock(return_value=None)
         app.state.lmcache_adapter = adapter
-        response = TestClient(app).post(
+        response = TestClient(app).get(
             "/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
         )
         assert response.status_code == 404
