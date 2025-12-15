@@ -113,11 +113,19 @@ _CONFIG_ALIASES = {
     "nixl_role": "pd_role",
     "controller_url": "controller_pull_url",
     "lmcache_worker_port": "lmcache_worker_ports",
+    "plugin_locations": "runtime_plugin_locations",
+    "external_backends": "storage_plugins",
 }
 
 _DEPRECATED_CONFIGS = {
     # Maps deprecated names to warning messages
     "nixl_peer_port": "nixl_peer_port is deprecated, use nixl_receiver_port instead",
+    "plugin_locations": (
+        "plugin_locations is deprecated, use runtime_plugin_locations instead",
+    ),
+    "external_backends": (
+        "external_backends is deprecated, use storage_plugins instead",
+    ),
 }
 
 # Single configuration definition center - add new config items only here
@@ -321,7 +329,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "save_unfull_chunk": {
         "type": bool,
-        "default": True,
+        "default": False,
         "env_converter": _to_bool,
     },
     "blocking_timeout_secs": {"type": int, "default": 10, "env_converter": int},
@@ -375,12 +383,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": str,
     },
-    "plugin_locations": {
+    "runtime_plugin_locations": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": lambda x: x if isinstance(x, list) else [x] if x else [],
     },
-    "external_backends": {
+    "storage_plugins": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
@@ -491,6 +499,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
         "description": "Recording strategy: memory_bloom_filter or file_hash.",
     },
+    # KV events configuration
+    "enable_kv_events": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
 }
 
 
@@ -569,14 +583,15 @@ def _create_config_class():
 def _validate_config(self):
     """Validate configuration"""
 
-    # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
-    if self.enable_async_loading:
-        logger.warning(
-            "Automatically setting save_unfull_chunk=False because "
-            "enable_async_loading=True or use_layerwise=True to prevent "
-            "CPU memory fragmentation"
-        )
-        self.save_unfull_chunk = False
+    # needed for the old async serializer implementation
+    # # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
+    # if self.enable_async_loading:
+    #     logger.warning(
+    #         "Automatically setting save_unfull_chunk=False because "
+    #         "enable_async_loading=True or use_layerwise=True to prevent "
+    #         "CPU memory fragmentation"
+    #     )
+    #     self.save_unfull_chunk = False
 
     if self.enable_blending:
         if not self.save_unfull_chunk:
@@ -609,6 +624,23 @@ def _validate_config(self):
             "PD only supports save_decode_cache=False"
         )
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
+
+        # PD requires save_unfull_chunk=True for complete KV cache transfer
+        # from prefill node to decode node. Without this, partial chunks would
+        # be discarded, causing incomplete KV cache transfer and wrong results
+        # on the decode node.
+        if not self.save_unfull_chunk:
+            logger.warning(
+                "PD (Peer-to-Peer Disaggregation) requires save_unfull_chunk=True "
+                "for complete KV cache transfer. Automatically setting "
+                "save_unfull_chunk=True."
+            )
+            self.save_unfull_chunk = True
+        else:
+            logger.info(
+                "PD mode enabled with save_unfull_chunk=True - all KV cache "
+                "including partial chunks will be transferred to decode node"
+            )
 
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None

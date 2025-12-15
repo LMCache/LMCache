@@ -47,7 +47,9 @@ def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
 
 
 def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
-    return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(device)
+    return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(
+        device, non_blocking=True
+    )
 
 
 class GPUCacheContext:

@@ -265,8 +265,8 @@ def cpu_allocator():
     allocator = PagedCpuGpuMemoryAllocator()
     allocator.init_cpu_memory_allocator(
         size=1120 * 1024 * 1024,
-        shape=torch.Size([28, 2, 256, 8, 128]),
-        dtype=torch.bfloat16,
+        shapes=[torch.Size([28, 2, 256, 8, 128])],
+        dtypes=[torch.bfloat16],
         fmt=MemoryFormat.KV_2LTD,
     )
     try:
@@ -283,8 +283,8 @@ def local_cpu_backend():
         allocator = PagedCpuGpuMemoryAllocator()
         allocator.init_cpu_memory_allocator(
             size=1120 * 1024 * 1024,
-            shape=torch.Size([28, 2, 256, 8, 128]),
-            dtype=torch.bfloat16,
+            shapes=[torch.Size([28, 2, 256, 8, 128])],
+            dtypes=[torch.bfloat16],
             fmt=MemoryFormat.KV_2LTD,
         )
         return LocalCPUBackend(config=config, memory_allocator=allocator)
