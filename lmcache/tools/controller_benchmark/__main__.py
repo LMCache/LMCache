@@ -72,7 +72,6 @@ def aggregate_results(
 
             # Average latencies (weighted by RPS would be more accurate,
             # but simple average is acceptable)
-            avg_latencies = [s.avg_latency for s in op_stats_list if s.avg_latency > 0]
             min_latencies = [s.min_latency for s in op_stats_list if s.min_latency > 0]
             max_latencies = [s.max_latency for s in op_stats_list if s.max_latency > 0]
             p95_latencies = [s.p95_latency for s in op_stats_list if s.p95_latency > 0]
@@ -80,10 +79,14 @@ def aggregate_results(
             aggregated.operations[op_name] = OperationStats(
                 qps=total_qps,
                 rps=total_rps,
-                avg_latency=(statistics.mean(avg_latencies) if avg_latencies else 0.0),
+                avg_latency=(
+                    sum(s.avg_latency * s.rps for s in op_stats_list) / total_rps
+                    if total_rps > 0
+                    else 0.0
+                ),
                 min_latency=min(min_latencies) if min_latencies else 0.0,
                 max_latency=max(max_latencies) if max_latencies else 0.0,
-                p95_latency=(statistics.mean(p95_latencies) if p95_latencies else 0.0),
+                p95_latency=max(p95_latencies) if p95_latencies else 0.0,
                 errors=sum(s.errors for s in op_stats_list),
             )
 
@@ -270,59 +273,36 @@ def main():
 
     num_processes = args.num_processes
 
-    if num_processes == 1:
-        # Single process mode (original behavior)
-        config = ZMQBenchmarkConfig(
-            controller_pull_url=controller_pull_url,
-            controller_reply_url=controller_reply_url,
-            duration=args.duration,
-            batch_size=args.batch_size,
-            operations=operations,
-            num_instances=args.num_instances,
-            num_workers=args.num_workers,
-            num_locations=args.num_locations,
-            num_keys=args.num_keys,
-            num_hashes=args.num_hashes,
-            register_first=not args.no_register_first,
-            num_processes=1,
-            process_id=0,
-        )
+    # Create a base config dict
+    base_config_kwargs = {
+        "controller_pull_url": controller_pull_url,
+        "controller_reply_url": controller_reply_url,
+        "duration": args.duration,
+        "batch_size": args.batch_size,
+        "operations": operations,
+        "num_instances": args.num_instances,
+        "num_workers": args.num_workers,
+        "num_locations": args.num_locations,
+        "num_keys": args.num_keys,
+        "num_hashes": args.num_hashes,
+        "register_first": not args.no_register_first,
+        "num_processes": num_processes,
+    }
 
-        benchmark = ZMQControllerBenchmark(config)
-
-        try:
-            asyncio.run(benchmark.run_benchmark())
-            benchmark.print_results()
-        except KeyboardInterrupt:
-            print("\nBenchmark interrupted by user")
-        except Exception as e:
-            logger.error("Benchmark failed: %s", e)
-            raise e
-    else:
-        # Multi-process mode
-        logger.info("Starting multi-process benchmark with %d processes", num_processes)
-
-        # Create configs for each process
-        configs = []
-        for i in range(num_processes):
-            config = ZMQBenchmarkConfig(
-                controller_pull_url=controller_pull_url,
-                controller_reply_url=controller_reply_url,
-                duration=args.duration,
-                batch_size=args.batch_size,
-                operations=operations,
-                num_instances=args.num_instances,
-                num_workers=args.num_workers,
-                num_locations=args.num_locations,
-                num_keys=args.num_keys,
-                num_hashes=args.num_hashes,
-                register_first=not args.no_register_first,
-                num_processes=num_processes,
-                process_id=i,
+    try:
+        if num_processes == 1:
+            # Single process mode
+            config = ZMQBenchmarkConfig(**base_config_kwargs, process_id=0)
+            run_single_process(config)
+        else:
+            # Multi-process mode
+            logger.info(
+                "Starting multi-process benchmark with %d processes", num_processes
             )
-            configs.append(config)
-
-        try:
+            configs = [
+                ZMQBenchmarkConfig(**base_config_kwargs, process_id=i)
+                for i in range(num_processes)
+            ]
             # Use multiprocessing pool to run benchmarks in parallel
             with multiprocessing.Pool(processes=num_processes) as pool:
                 results_list = pool.map(run_single_process, configs)
@@ -331,11 +311,11 @@ def main():
             aggregated = aggregate_results(results_list, operations)
             print_aggregated_results(aggregated, configs[0], num_processes)
 
-        except KeyboardInterrupt:
-            print("\nBenchmark interrupted by user")
-        except Exception as e:
-            logger.error("Benchmark failed: %s", e)
-            raise e
+    except KeyboardInterrupt:
+        print("\nBenchmark interrupted by user")
+    except Exception as e:
+        logger.error("Benchmark failed: %s", e)
+        raise e
 
 
 if __name__ == "__main__":
