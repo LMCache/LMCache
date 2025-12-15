@@ -56,18 +56,15 @@ async def get_key_stats(request: Request):
 
         for instance_id, instance_node in registry.instances.items():
             total_instance_count += 1
-            instance_key_count = 0
-
-            # Calculate key count for this instance
-            for worker_node in instance_node.workers.values():
-                total_worker_count += 1
-                instance_key_count += worker_node.get_kv_count()
-
+            workers = instance_node.workers.values()
+            num_workers = len(workers)
+            instance_key_count = sum(w.get_kv_count() for w in workers)
+            total_worker_count += num_workers
             instances.append(
                 InstanceKeyStats(
                     instance_id=instance_id,
                     key_count=instance_key_count,
-                    worker_count=len(instance_node.workers),
+                    worker_count=num_workers,
                 )
             )
 
