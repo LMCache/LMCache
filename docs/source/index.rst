@@ -72,6 +72,7 @@ Documentation
 
    getting_started/installation
    getting_started/quickstart
+   getting_started/quickstart_sglang
    getting_started/quickstart/index
    getting_started/benchmarking
    getting_started/kv_cache_calculator
