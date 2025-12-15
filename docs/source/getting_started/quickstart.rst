@@ -9,7 +9,6 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
    :sync-group: engine
 
    .. tab-item:: vLLM
-      :sync-group: engine
 
       **(Terminal 1) Install LMCache**
 
@@ -44,7 +43,6 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       The ``--disable-hybrid-kv-cache-manager`` flag is mandatory. All configuration options from the :doc:`../api_reference/configurations` page still apply.
 
    .. tab-item:: SGLang
-      :sync-group: engine
 
       **(Terminal 1) Install LMCache and SGLang**
 
@@ -86,7 +84,6 @@ Open a new terminal and send your first request. Pick the matching engine tab:
    :sync-group: engine
 
    .. tab-item:: vLLM
-      :sync-group: engine
 
       .. code-block:: bash
 
@@ -100,7 +97,6 @@ Open a new terminal and send your first request. Pick the matching engine tab:
            }'
 
    .. tab-item:: SGLang
-      :sync-group: engine
 
       .. code-block:: bash
 
@@ -125,7 +121,6 @@ You should see LMCache logs like this:
    :sync-group: engine
 
    .. tab-item:: vLLM
-      :sync-group: engine
 
       .. code-block:: bash
 
@@ -139,7 +134,6 @@ You should see LMCache logs like this:
            }'
 
    .. tab-item:: SGLang
-      :sync-group: engine
 
       .. code-block:: bash
 
