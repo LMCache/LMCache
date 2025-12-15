@@ -549,10 +549,11 @@ def _init_lmcache_engine(
     local_rank = parallel_config.rank % num_gpus
     torch_dev.set_device(local_rank)
     device = torch.device(f"{dev_name}:{local_rank}")
+    tp_rank = parallel_config.rank % parallel_config.tensor_parallel_size
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
-        parallel_config.rank,
+        tp_rank,
         "vllm",
         kv_dtype,
         kv_shape,

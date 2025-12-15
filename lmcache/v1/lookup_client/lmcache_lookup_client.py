@@ -306,8 +306,9 @@ class LMCacheLookupServer:
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
+        tp_rank = vllm_config.parallel_config.rank % vllm_config.parallel_config.tensor_parallel_size
         socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup", rpc_port, vllm_config.parallel_config.rank
+            vllm_config, "lookup", rpc_port, tp_rank
         )
         self.socket = get_zmq_socket(
             self.ctx,
