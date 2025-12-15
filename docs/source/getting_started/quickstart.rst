@@ -3,7 +3,7 @@
 Quickstart
 ==========
 
-This guide helps you get LMCache running end-to-end in a couple of minutes. Use the tabs below to choose vLLM or SGLang.
+This guide helps you get LMCache running end-to-end in a couple of minutes. Use the tabs below to switch the engine (similar to an environment toggle). Steps are the same; only the libraries and launch commands change.
 
 .. tab-set::
    :sync-group: engine
@@ -80,29 +80,38 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 (Terminal 2) Test LMCache in Action
 -----------------------------------
 
-Open a new terminal and send your first request:
+Open a new terminal and send your first request. Pick the matching engine tab:
 
-.. code-block:: bash
+.. tab-set::
+   :sync-group: engine
 
-   # vLLM endpoint
-   curl http://localhost:8000/v1/completions \
-     -H "Content-Type: application/json" \
-     -d '{
-       "model": "Qwen/Qwen3-8B",
-       "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
-       "max_tokens": 100,
-       "temperature": 0.7
-     }'
+   .. tab-item:: vLLM
+      :sync-group: engine
 
-   # SGLang endpoint
-   curl http://localhost:30000/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -d '{
-       "model": "Qwen/Qwen3-8B-Instruct",
-       "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
-       "max_tokens": 100,
-       "temperature": 0.7
-     }'
+      .. code-block:: bash
+
+         curl http://localhost:8000/v1/completions \
+           -H "Content-Type: application/json" \
+           -d '{
+             "model": "Qwen/Qwen3-8B",
+             "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
+             "max_tokens": 100,
+             "temperature": 0.7
+           }'
+
+   .. tab-item:: SGLang
+      :sync-group: engine
+
+      .. code-block:: bash
+
+         curl http://localhost:30000/v1/chat/completions \
+           -H "Content-Type: application/json" \
+           -d '{
+             "model": "Qwen/Qwen3-8B-Instruct",
+             "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
+             "max_tokens": 100,
+             "temperature": 0.7
+           }'
 
 You should see LMCache logs like this:
 
@@ -112,27 +121,36 @@ You should see LMCache logs like this:
 
 **What this means:** The 27 tokens from your prompt are cached (first request). Now send a second request with overlapping prefix:
 
-.. code-block:: bash
+.. tab-set::
+   :sync-group: engine
 
-   # vLLM endpoint
-   curl http://localhost:8000/v1/completions \
-     -H "Content-Type: application/json" \
-     -d '{
-       "model": "Qwen/Qwen3-8B",
-       "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
-       "max_tokens": 100,
-       "temperature": 0.7
-     }'
+   .. tab-item:: vLLM
+      :sync-group: engine
 
-   # SGLang endpoint
-   curl http://localhost:30000/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -d '{
-       "model": "Qwen/Qwen3-8B-Instruct",
-       "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
-       "max_tokens": 100,
-       "temperature": 0.7
-     }'
+      .. code-block:: bash
+
+         curl http://localhost:8000/v1/completions \
+           -H "Content-Type: application/json" \
+           -d '{
+             "model": "Qwen/Qwen3-8B",
+             "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
+             "max_tokens": 100,
+             "temperature": 0.7
+           }'
+
+   .. tab-item:: SGLang
+      :sync-group: engine
+
+      .. code-block:: bash
+
+         curl http://localhost:30000/v1/chat/completions \
+           -H "Content-Type: application/json" \
+           -d '{
+             "model": "Qwen/Qwen3-8B-Instruct",
+             "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
+             "max_tokens": 100,
+             "temperature": 0.7
+           }'
 
 You should see logs like this:
 
