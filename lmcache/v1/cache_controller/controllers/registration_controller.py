@@ -9,11 +9,13 @@ import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_controller.commands import FullSyncCommand, HeartbeatCommand
 from lmcache.v1.cache_controller.message import (
     DeRegisterMsg,
     HealthMsg,
     HealthRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     QueryInstMsg,
     QueryInstRetMsg,
     QueryWorkerInfoMsg,
@@ -175,21 +177,37 @@ class RegistrationController:
             msg,
         )
 
-    # TODO: add more worker info in heartbeat
-    async def heartbeat(self, msg: HeartbeatMsg) -> None:
+    async def heartbeat(self, msg: HeartbeatMsg) -> HeartbeatRetMsg:
         """
-        Heartbeat from lmcache worker.
+        Heartbeat from lmcache worker (REQ-REP mode).
+
+        Returns HeartbeatRetMsg with optional commands for the worker to execute.
+        Commands are executed sequentially by the worker.
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
         success = self.registry.update_heartbeat(instance_id, worker_id, time.time())
+
+        commands: list[HeartbeatCommand] = []
+
         if not success:
             logger.warning(
                 "%s has not been registered, re-register the worker.",
                 (instance_id, worker_id),
             )
             # re-register the worker
-            await self.register(msg)
+            register_msg = RegisterMsg(
+                instance_id=msg.instance_id,
+                worker_id=msg.worker_id,
+                ip=msg.ip,
+                port=msg.port,
+                peer_init_url=msg.peer_init_url,
+            )
+            await self.register(register_msg)
+            # New worker needs full sync
+            commands.append(FullSyncCommand(reason="worker_re_registered"))
+
+        return HeartbeatRetMsg(commands=commands)
 
     async def query_worker_info(self, msg: QueryWorkerInfoMsg) -> QueryWorkerInfoRetMsg:
         """
