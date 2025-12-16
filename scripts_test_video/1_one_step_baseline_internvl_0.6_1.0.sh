@@ -1,12 +1,12 @@
 echo "Waiting for server to start..."
 model=OpenGVLab/InternVL3-14B
 model_name="InternVL3-14B"
-SERVER_LOG=server_baseline.log     
+SERVER_LOG=server_baseline_0.6_1.0.log     
 source /opt/venv/bin/activate
 
 # 2. anomaly detection
 WIN_SIZES=(40)
-STRIDE_SIZES=(0.2)
+STRIDE_SIZES=(0.6 0.7)
 dataset_root=/home/users/ntu/wenyanch/dataset/Anomaly-Detection-Dataset
 dataset_json="datasets/small_dataset.json"
 results_dir=results_analysis/logs_baselines/${model_name}/small_dataset
@@ -25,10 +25,11 @@ vllm serve $model \
   --trust-remote-code \
   --chat-template-content-format openai \
   --disable-log-requests \
-  --max-num-batched-tokens 102400 \
-  --max-model-len 30656 \
+  --max-num-batched-tokens 65536 \
+  --max-model-len 8192 \
   --gpu-memory-utilization 0.9 \
   --tensor-parallel-size 2 \
+  --disable-chunked-mm-input \
   --enforce-eager \
   --no-enable-prefix-caching \
   --mm-processor-kwargs '{"max_dynamic_patch": 4}' > $SERVER_LOG 2>&1 &

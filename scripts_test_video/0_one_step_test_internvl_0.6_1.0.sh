@@ -18,7 +18,7 @@ if [ "$change_recompute_ratio" = True ] ; then
 fi  
 model=OpenGVLab/InternVL3-14B
 model_name="InternVL3-14B"
-SERVER_LOG=server.log
+SERVER_LOG=server_0.6_1.0.log
 dataset_root=/home/users/ntu/wenyanch/dataset/Anomaly-Detection-Dataset
 dataset_json="datasets/small_dataset.json"
 
@@ -32,7 +32,7 @@ dataset_json="datasets/small_dataset.json"
 
 # 2. anomaly detection
 WIN_SIZES=(40)
-STRIDE_SIZES=(0.2)
+STRIDE_SIZES=(0.6 0.7)
 blend_recompute_ratios=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
 
 if [ "$change_recompute_ratio" = False ] ; then
