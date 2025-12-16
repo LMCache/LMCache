@@ -350,7 +350,7 @@ class LMCacheStandaloneStarter:
         chunk_size = self.config.chunk_size
         num_layers, kv_dim, _, num_heads, head_size = self.metadata.kv_shape
         chunk_shape = torch.Size([num_layers, kv_dim, chunk_size, num_heads, head_size])
-        chunk_storage_bytes = get_size_bytes(chunk_shape, self.metadata.kv_dtype)
+        chunk_storage_bytes = get_size_bytes([chunk_shape], [self.metadata.kv_dtype])
         chunk_storage_mb = chunk_storage_bytes / (1024 * 1024)
         logger.info(
             "Chunk storage size: %d bytes (%.2f MB) for chunk_size=%d",
