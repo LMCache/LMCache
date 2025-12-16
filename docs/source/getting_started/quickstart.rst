@@ -140,29 +140,41 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
 
 You should see LMCache logs like this (examples for each engine):
 
-.. code-block:: text
+.. tab-set::
 
-   # vLLM
-   (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 31 out of total 31 tokens. size: 0.0040 gb, cost 1.95 ms, throughput: 1.98 GB/s; offload_time: 1.88 ms, put_time: 0.07 ms
+   .. tab-item:: vLLM
 
-   # SGLang
-   [2025-12-15 16:15:39] LMCache INFO: Stored 35 out of total 35 tokens. size: 0.0045 gb, cost 2.10 ms, throughput: 2.14 GB/s; offload_time: 2.00 ms, put_time: 0.10 ms
+      .. code-block:: text
+
+         (EngineCore_DP0 pid=458469) [2025-09-30 00:08:43,982] LMCache INFO: Stored 31 out of total 31 tokens. size: 0.0040 gb, cost 1.95 ms, throughput: 1.98 GB/s; offload_time: 1.88 ms, put_time: 0.07 ms
+
+   .. tab-item:: SGLang
+
+      .. code-block:: text
+
+         LMCache INFO: Stored 35 out of total 35 tokens. size: 0.0045 gb, cost 2.10 ms, throughput: 2.14 GB/s; offload_time: 2.00 ms, put_time: 0.10 ms
 
 **What this means:** The first request caches the prompt. The second reuses the cached prefix and only loads the missing chunk. You should see logs like this:
 
-.. code-block:: text
+.. tab-set::
 
-   # vLLM
-   Reqid: cmpl-6709d8795d3c4464b01999c9f3fffede-0, Total tokens 32, LMCache hit tokens: 24, need to load: 8
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,502] LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s;
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,509] LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
-   (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
+   .. tab-item:: vLLM
 
-   # SGLang
-   Prefill batch: new-token=1, cached-token=34
-   LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s
-   LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
-   LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
+      .. code-block:: text
+
+         Reqid: cmpl-6709d8795d3c4464b01999c9f3fffede-0, Total tokens 32, LMCache hit tokens: 24, need to load: 8
+         (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,502] LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s;
+         (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,509] LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
+         (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
+
+   .. tab-item:: SGLang
+
+      .. code-block:: text
+
+         Prefill batch: new-token=1, cached-token=34
+         LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s
+         LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
+         LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
 
 **What this means:**
 
