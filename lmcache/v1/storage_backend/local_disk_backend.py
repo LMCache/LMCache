@@ -224,32 +224,20 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         force: bool = True,
     ) -> bool:
-        if force:
-            self.disk_lock.acquire()
+        path = None
+        with self.disk_lock:
+            meta = self.dict.pop(key, None)
+            if not meta:
+                return False
 
-        if not (meta := self.dict.pop(key, None)):
+            path = meta.path
+            size = meta.size
+            self.usage -= size
+            self.stats_monitor.update_local_storage_usage(self.usage)
             if force:
-                self.disk_lock.release()
-            return False
-
-        path = meta.path
-        size = meta.size
-        self.usage -= size
-        self.stats_monitor.update_local_storage_usage(self.usage)
-
-        # NOTE: The following code will cause deadlock
-        # res = asyncio.run_coroutine_threadsafe(
-        #     self.disk_worker.submit_task("delete", os.remove, path),
-        #     self.loop,
-        # )
-        # res.result()
+                self.cache_policy.update_on_force_evict(key)
 
         os.remove(path)
-
-        if force:
-            self.cache_policy.update_on_force_evict(key)
-            self.disk_lock.release()
-
         # Push kv evict msg with batching
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.add_kv_op(
@@ -360,23 +348,21 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
-        self.disk_lock.acquire()
-        if key not in self.dict:
-            self.disk_lock.release()
-            return None
+        with self.disk_lock:
+            if key not in self.dict:
+                return None
 
-        # Update cache recency
-        self.cache_policy.update_on_hit(key, self.dict)
+            # Update cache recency
+            self.cache_policy.update_on_hit(key, self.dict)
 
-        disk_meta = self.dict[key]
-        path = disk_meta.path
-        dtype = disk_meta.dtype
-        shape = disk_meta.shape
-        fmt = disk_meta.fmt
-        assert dtype is not None
-        assert shape is not None
+            disk_meta = self.dict[key]
+            path = disk_meta.path
+            dtype = disk_meta.dtype
+            shape = disk_meta.shape
+            fmt = disk_meta.fmt
+            assert dtype is not None
+            assert shape is not None
 
-        self.disk_lock.release()
         memory_obj = self.load_bytes_from_disk(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
@@ -394,16 +380,25 @@ class LocalDiskBackend(StorageBackendInterface):
 
         logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
-            self.disk_lock.acquire()
-            assert key in self.dict, f"Key {key} not found in disk cache after pinning"
+            path, dtype, shape, fmt = None, None, None, None
+            with self.disk_lock:
+                assert key in self.dict, (
+                    f"Key {key} not found in disk cache after pinning"
+                )
 
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
+                path = self.dict[key].path
+                dtype = self.dict[key].dtype
+                shape = self.dict[key].shape
+                fmt = self.dict[key].fmt
 
-            assert dtype is not None
-            assert shape is not None
+                assert dtype is not None
+                assert shape is not None
+
+                self.dict[key].pin()
+
+                # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
 
             memory_obj = self.local_cpu_backend.allocate(
                 shape,
@@ -414,14 +409,6 @@ class LocalDiskBackend(StorageBackendInterface):
             assert memory_obj is not None, (
                 "Memory allocation failed during async disk load."
             )
-
-            self.dict[key].pin()
-
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
-
-            self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
 
             mem_objs.append(memory_obj)
@@ -513,9 +500,8 @@ class LocalDiskBackend(StorageBackendInterface):
             cached_positions = self.dict[key].cached_positions
             mem_obj.metadata.cached_positions = cached_positions
 
-            self.disk_lock.acquire()
-            self.dict[key].unpin()
-            self.disk_lock.release()
+            with self.disk_lock:
+                self.dict[key].unpin()
 
         return memory_objs
 
