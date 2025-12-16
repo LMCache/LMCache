@@ -19,6 +19,7 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
+    ErrorMsg,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -295,7 +296,17 @@ class P2PBackend(StorageBackendInterface):
             hashes=hashes,
         )
         ret_msg = await self.lmcache_worker.async_put_and_wait_msg(msg)
-        assert isinstance(ret_msg, BatchedP2PLookupRetMsg)
+
+        if isinstance(ret_msg, ErrorMsg):
+            logger.error(
+                "Controller returned error for batched P2P lookup: %s",
+                ret_msg.error,
+            )
+            return 0
+
+        assert isinstance(ret_msg, BatchedP2PLookupRetMsg), (
+            f"Expected BatchedP2PLookupRetMsg, got {type(ret_msg)}"
+        )
 
         # NOTE(Jiayi): For now we only support one peer hit.
         layout_info = ret_msg.layout_info[0]
