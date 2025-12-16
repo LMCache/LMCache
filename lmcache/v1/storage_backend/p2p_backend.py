@@ -199,6 +199,9 @@ class P2PBackend(StorageBackendInterface):
         self.local_lookup_cache: dict[int, tuple[str, str, str]] = {}
         # the target peer info mapping
         self.target_peer_info_mapping: dict[str, PeerInfo] = {}
+        # the lock for updating target peer info mapping
+        self.update_peer_lock = asyncio.Lock()
+
         # A lookup_id -> (peer_init_url, location)
         # TODO(chunxiaozheng): location is not used for now
         self.lookup_id_to_peer_mapping: dict[str, tuple[str, str]] = {}
@@ -480,36 +483,45 @@ class P2PBackend(StorageBackendInterface):
     ) -> None:
         if not force_update and target_peer_init_url in self.target_peer_info_mapping:
             return
-        init_side_msg = P2PInitSideMsg()
-        init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
-            local_id=self.peer_init_url,
-            peer_id=target_peer_init_url,
-            peer_init_url=target_peer_init_url,
-            init_side_msg=init_side_msg,
-        )
-        assert isinstance(init_ret_msg, P2PInitSideRetMsg)
 
-        peer_lookup_url = init_ret_msg.peer_lookup_url
-        peer_info = self.target_peer_info_mapping.get(target_peer_init_url, None)
-        lookup_socket = get_zmq_socket_with_timeout(
-            self.async_context,
-            peer_lookup_url,
-            "tcp",
-            zmq.REQ,
-            "connect",
-            self.socket_recv_timeout_ms,
-            self.socket_send_timeout_ms,
-        )
-        if peer_info is not None:
-            peer_info.update_peer_lookup_url(peer_lookup_url)
-            peer_info.update_lookup_socket(lookup_socket)
-        else:
-            self.target_peer_info_mapping[target_peer_init_url] = PeerInfo(
+        async with self.update_peer_lock:
+            # double check
+            if (
+                not force_update
+                and target_peer_init_url in self.target_peer_info_mapping
+            ):
+                return
+
+            init_side_msg = P2PInitSideMsg()
+            init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
+                local_id=self.peer_init_url,
+                peer_id=target_peer_init_url,
                 peer_init_url=target_peer_init_url,
-                peer_lookup_url=peer_lookup_url,
-                lookup_lock=asyncio.Lock(),
-                lookup_socket=lookup_socket,
+                init_side_msg=init_side_msg,
             )
+            assert isinstance(init_ret_msg, P2PInitSideRetMsg)
+
+            peer_lookup_url = init_ret_msg.peer_lookup_url
+            peer_info = self.target_peer_info_mapping.get(target_peer_init_url, None)
+            lookup_socket = get_zmq_socket_with_timeout(
+                self.async_context,
+                peer_lookup_url,
+                "tcp",
+                zmq.REQ,
+                "connect",
+                self.socket_recv_timeout_ms,
+                self.socket_send_timeout_ms,
+            )
+            if peer_info is not None:
+                peer_info.update_peer_lookup_url(peer_lookup_url)
+                peer_info.update_lookup_socket(lookup_socket)
+            else:
+                self.target_peer_info_mapping[target_peer_init_url] = PeerInfo(
+                    peer_init_url=target_peer_init_url,
+                    peer_lookup_url=peer_lookup_url,
+                    lookup_lock=asyncio.Lock(),
+                    lookup_socket=lookup_socket,
+                )
 
         logger.info(
             "Established connection to peer_init_url: %s, peer_lookup_url: %s",
@@ -556,9 +568,9 @@ class P2PBackend(StorageBackendInterface):
         retry_count = 0
         while retry_count < self.max_retry_count:
             peer_info = self.target_peer_info_mapping[target_peer_init_url]
-            lookup_socket = peer_info.lookup_socket
             lookup_lock = peer_info.lookup_lock
             async with lookup_lock:
+                lookup_socket = peer_info.lookup_socket
                 try:
                     retry_count += 1
                     await lookup_socket.send(msgspec.msgpack.encode(msg))
@@ -646,10 +658,9 @@ class P2PBackend(StorageBackendInterface):
         )
 
         peer_info = self.target_peer_info_mapping[target_peer_init_url]
-        lookup_socket = peer_info.lookup_socket
         lookup_lock = peer_info.lookup_lock
-
         async with lookup_lock:
+            lookup_socket = peer_info.lookup_socket
             await lookup_socket.send(msgspec.msgpack.encode(msg))
             ret_msg_bytes = await lookup_socket.recv()
         ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=P2PMsg)
