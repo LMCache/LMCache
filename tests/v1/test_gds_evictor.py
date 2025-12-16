@@ -60,7 +60,7 @@ def test_gds_backend_eviction_lru():
     BASE_DIR = Path(__file__).parent
     GDS_DIR = "/tmp/gds/test-cache-evict"
     BACKEND_NAME = "GdsBackend"
-    BLOCK_SHAPE = [2048, 2048]  # ~4MB per block (uint8)
+    BLOCK_SHAPE = (2048, 2048)  # ~4MB per block (uint8)
 
     try:
         os.makedirs(GDS_DIR, exist_ok=True)
@@ -160,7 +160,7 @@ def test_gds_backend_eviction_fifo():
     BASE_DIR = Path(__file__).parent
     GDS_DIR = "/tmp/gds/test-cache-evict-fifo"
     BACKEND_NAME = "GdsBackend"
-    BLOCK_SHAPE = [2048, 2048]
+    BLOCK_SHAPE = (2048, 2048)
 
     try:
         os.makedirs(GDS_DIR, exist_ok=True)
@@ -226,7 +226,7 @@ def test_gds_backend_no_eviction():
     BASE_DIR = Path(__file__).parent
     GDS_DIR = "/tmp/gds/test-cache-no-evict"
     BACKEND_NAME = "GdsBackend"
-    BLOCK_SHAPE = [2048, 2048]
+    BLOCK_SHAPE = (2048, 2048)
 
     try:
         os.makedirs(GDS_DIR, exist_ok=True)
