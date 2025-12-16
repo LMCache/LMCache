@@ -98,9 +98,7 @@ def test_gds_backend_eviction_lru():
 
         # Store block 1 and block 2
         for i in range(2):
-            memory_obj = gds_backend.memory_allocator.allocate(
-                BLOCK_SHAPE, dtype=torch.uint8
-            )
+            memory_obj = gds_backend.memory_allocator.allocate(BLOCK_SHAPE, torch.uint8)
             print(
                 f"[TEST DEBUG] Allocated memory for key {i}: "
                 f"physical_size={memory_obj.get_physical_size()}"
@@ -121,9 +119,7 @@ def test_gds_backend_eviction_lru():
         print(f"[TEST DEBUG] After get_blocking keys[0]: hot_cache_keys={cache_keys}")
 
         # Store block 3 -> block 2 should be evicted (LRU)
-        memory_obj = gds_backend.memory_allocator.allocate(
-            BLOCK_SHAPE, dtype=torch.uint8
-        )
+        memory_obj = gds_backend.memory_allocator.allocate(BLOCK_SHAPE, torch.uint8)
         print(
             f"[TEST DEBUG] Allocated memory for key 2: "
             f"physical_size={memory_obj.get_physical_size()}"
@@ -203,9 +199,7 @@ def test_gds_backend_eviction_fifo():
 
         # Store all 3 blocks
         for i in range(3):
-            memory_obj = gds_backend.memory_allocator.allocate(
-                BLOCK_SHAPE, dtype=torch.uint8
-            )
+            memory_obj = gds_backend.memory_allocator.allocate(BLOCK_SHAPE, torch.uint8)
             future = gds_backend.submit_put_task(keys[i], memory_obj)
             future.result()
 
@@ -266,9 +260,7 @@ def test_gds_backend_no_eviction():
                 dtype=torch.uint8,
             )
             keys.append(key)
-            memory_obj = gds_backend.memory_allocator.allocate(
-                BLOCK_SHAPE, dtype=torch.uint8
-            )
+            memory_obj = gds_backend.memory_allocator.allocate(BLOCK_SHAPE, torch.uint8)
             future = gds_backend.submit_put_task(key, memory_obj)
             future.result()
 

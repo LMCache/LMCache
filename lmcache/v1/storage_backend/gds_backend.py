@@ -26,8 +26,6 @@ from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annot
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     CuFileMemoryAllocator,
-    GPUMemoryAllocator,
-    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
 )
@@ -258,18 +256,7 @@ class GdsBackend(AllocatorBackendInterface):
         # Cache policy and size tracking for GDS eviction
         # Use max_cache_size as the GDS cache size limit (unified naming)
         self.cache_policy = get_cache_policy(config.cache_policy)
-        max_gds_size: float = getattr(config, "max_gds_size", None) or 0
-        if max_gds_size == 0:
-            env_val = os.environ.get("LMCACHE_MAX_GDS_SIZE")
-            if env_val is not None:
-                try:
-                    max_gds_size = float(env_val)
-                except ValueError as e:
-                    logger.warning(
-                        f"[GDS CACHE] Failed to parse LMCACHE_MAX_GDS_SIZE: "
-                        f"{env_val}, error: {e}"
-                    )
-                    max_gds_size = 0
+        max_gds_size: float = config.max_gds_size or 0.0
         self.max_cache_size = int(max_gds_size * 1024**3)
         self.current_cache_size = 0
 
@@ -662,7 +649,7 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             # TODO(Jiayi): need to support `cached_positions`.
             self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
-            logger.info(
+            logger.debug(
                 f"[GDS CACHE] Inserted key={key}, size={size / 1024 / 1024:.2f} MB. "
                 f"Total hot_cache entries: {len(self.hot_cache)}, "
                 f"current_cache_size={self.current_cache_size / 1024 / 1024:.2f} MB"
@@ -925,14 +912,9 @@ class GdsBackend(AllocatorBackendInterface):
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
-    ) -> MemoryAllocatorInterface:
+    ) -> CuFileMemoryAllocator:
         assert config.cufile_buffer_size is not None
-        size = config.cufile_buffer_size * 1024**2
-        if self.use_cufile:
-            return CuFileMemoryAllocator(size)
-        else:
-            logger.debug("Using GPUMemoryAllocator instead of CuFileMemoryAllocator")
-            return GPUMemoryAllocator(size, device=self.dst_device)
+        return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
     def allocate(
         self,
