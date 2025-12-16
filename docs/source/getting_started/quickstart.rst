@@ -176,13 +176,24 @@ You should see LMCache logs like this (examples for each engine):
          LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
          LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
 
-**What this means:**
+**What this means (per engine):**
 
-- **Total tokens 32**: The new prompt has 32 tokens after tokenization
-- **LMCache hit tokens: 24**: 24 tokens were found in the cache (24 is a multiple of 8, our chunk size in this example)
-- **Need to load: 8**: vLLM auto prefix caching uses block size 16. Although there are 24 hit tokens, 16 are already in GPU RAM, so LMCache only needs to load 24-16=8 tokens
-- **Why 24 hit tokens instead of 27?** LMCache hashes every 8 tokens (8, 16, 24, 27). It checks page-aligned chunks, so it uses the 24-token hash
-- **Stored another 8 tokens**: The new 8 tokens form a full chunk and are stored for future reuse
+.. tab-set::
+
+   .. tab-item:: vLLM
+
+      - **Total tokens 32**: The new prompt has 32 tokens after tokenization.
+      - **LMCache hit tokens: 24**: 24 tokens (full 8-token chunks) were found in the cache from the first request that stored 31 tokens.
+      - **Need to load: 8**: vLLM auto prefix caching uses block size 16; 16 tokens already sit in GPU RAM, so LMCache only loads 24-16=8.
+      - **Why 24 hit tokens instead of 31?** LMCache hashes every 8 tokens (8, 16, 24, 31). It matches page-aligned chunks, so it uses the 24-token hash.
+      - **Stored another 8 tokens**: The new 8 tokens form a full chunk and are stored for future reuse.
+
+   .. tab-item:: SGLang
+
+      - **Prefill batch line**: Shows new-token=1, cached-token=34, meaning most of the prefix is reused.
+      - **Retrieved 8 of 24**: With chunk size 8, LMCache pulled the missing chunk(s) for the overlapping prefix.
+      - **Store 8 of 32 tokens**: The new tail chunk is written back for future requests.
+      - Chunk alignment and reuse follow the same 8-token hashing; counts differ slightly because SGLang reports prefill/cache stats explicitly.
 
 🎉 **You now have LMCache caching and reusing KV caches for both engines.**
 
