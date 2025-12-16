@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import asyncio
 import threading
 
@@ -22,6 +22,10 @@ from lmcache.v1.cache_controller.message import (
     DecompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
+    FullSyncStartMsg,
+    FullSyncStartRetMsg,
+    FullSyncStatusMsg,
+    FullSyncStatusRetMsg,
     HealthWorkerMsg,
     HealthWorkerRetMsg,
     HeartbeatMsg,
@@ -50,6 +54,7 @@ from lmcache.v1.rpc_utils import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
 
 logger = init_logger(__name__)
 
@@ -141,6 +146,10 @@ class LMCacheWorker:
 
         self.msg_queue: asyncio.Queue[WorkerMsg] = asyncio.Queue()
 
+        # Full sync sender (initialized lazily when needed)
+        self._full_sync_sender: Optional["FullSyncSender"] = None
+        self._full_sync_in_progress = False
+
         self.register()
 
     def register(self):
@@ -218,11 +227,41 @@ class LMCacheWorker:
             logger.error("Error closing req socket: %s", e)
         self._create_req_socket()
 
+    def _get_full_sync_sender(self):
+        """Lazy initialization of FullSyncSender"""
+        if self._full_sync_sender is None:
+            # Import here to avoid circular imports
+            # First Party
+            from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
+
+            # Get the local_cpu_backend from lmcache_engine
+            local_cpu_backend = self.lmcache_engine.storage_manager.local_cpu_backend
+            self._full_sync_sender = FullSyncSender(
+                config=self.config,
+                worker=self,
+                lmcache_engine=self.lmcache_engine,
+                local_cpu_backend=local_cpu_backend,
+            )
+        return self._full_sync_sender
+
     def _create_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
         if isinstance(msg, BatchedP2PLookupMsg):
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
         elif isinstance(msg, HeartbeatMsg):
             return HeartbeatRetMsg()  # No command by default
+        elif isinstance(msg, FullSyncStartMsg):
+            return FullSyncStartRetMsg(
+                sync_id=msg.sync_id,
+                accepted=False,
+                error_msg="Communication error",
+            )
+        elif isinstance(msg, FullSyncStatusMsg):
+            return FullSyncStatusRetMsg(
+                sync_id=msg.sync_id,
+                is_complete=False,
+                global_progress=0.0,
+                can_exit_freeze=False,
+            )
         else:
             raise ValueError(f"Unknown message type: {type(msg)}")
 
