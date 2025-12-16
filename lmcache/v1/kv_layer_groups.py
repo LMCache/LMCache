@@ -76,6 +76,11 @@ class KVLayerGroupsManager:
 
     kv_layer_groups: list[KVLayerGroupInfo] = field(default_factory=list)
 
+    @property
+    def num_groups(self) -> int:
+        """Return the number of KV layer groups."""
+        return len(self.kv_layer_groups)
+
     def get_group_by_layer_idx(self, layer_idx: int) -> Optional[KVLayerGroupInfo]:
         """Get the KVLayerGroupInfo for a given layer index.
 

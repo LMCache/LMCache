@@ -113,7 +113,16 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
             self.kvcaches = kwargs["kvcaches"]
 
     def init_group_info(self):  # noqa: B027
-        """Initialize the group info."""
+        """
+        Initialize the group info.
+
+        By default, the shape and dtype of all layers in the model are the same,
+        but when using deepseek v3.2, DSA adds an indexer layer, which has a
+        different shape and dtype. In this case, it is necessary to use `
+        VLLMPagedMemGPUConnectorV3` and initialize the layers and hidden_dim_size
+        of different groups(all layers in the same group have the same shape and
+        dtype) through this method.
+        """
         pass
 
 
@@ -406,12 +415,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.metadata.kv_layer_groups_manager.kv_layer_groups
         self.group_layers = []
         self.group_hidden_dim_sizes = []
-        if self.use_gpu:
-            self.group_tmp_buffer = []
         for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
             # init layers
-            num_layers = len(group.layer_indices)
-            self.group_layers.append(num_layers)
+            self.group_layers.append(group.num_layers)
 
             # init hidden dim size
             num_kv_head = 1 if self.metadata.use_mla else group.shape[3]
@@ -419,64 +425,66 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             hidden_dim_size = num_kv_head * group.shape[-1]
             self.group_hidden_dim_sizes.append(hidden_dim_size)
 
+        if self.use_gpu:
             # init tmp buffer
-            if self.use_gpu:
-                tmp_buf_shape = torch.Size(
-                    [
-                        1 if self.use_mla else 2,
-                        num_layers,
-                        self.chunk_size,
-                        hidden_dim_size,
-                    ]
+            tmp_buf_shapes = self.get_shapes(self.chunk_size)
+            tmp_buf_dtypes = self.metadata.get_dtypes()
+            assert len(tmp_buf_shapes) == len(tmp_buf_dtypes)
+            self.group_tmp_buffer = [
+                torch.empty(tmp_buf_shape, dtype=tmp_buf_dtype, device=self.device)
+                for tmp_buf_shape, tmp_buf_dtype in zip(
+                    tmp_buf_shapes, tmp_buf_dtypes, strict=True
                 )
-                tmp_buf = torch.empty(
-                    tmp_buf_shape, dtype=group.dtype, device=self.device
-                )
-                self.group_tmp_buffer.append(tmp_buf)
+            ]
         logger.info("init group info success in VLLMPagedMemGPUConnectorV3")
 
     def _initialize_kv_cache_pointers(self):
-        if self.group_kv_cache_pointers_on_gpu is None:
-            assert self.metadata.kv_layer_groups_manager.kv_layer_groups
-            assert self.group_layers is not None
-            assert self.group_hidden_dim_sizes is not None
-            assert len(self.group_layers) == len(
-                self.metadata.kv_layer_groups_manager.kv_layer_groups
+        if self.group_kv_cache_pointers_on_gpu is not None:
+            return
+        assert self.metadata.kv_layer_groups_manager.kv_layer_groups
+        assert self.group_layers is not None
+        assert self.group_hidden_dim_sizes is not None
+        assert (
+            len(self.group_layers) == self.metadata.kv_layer_groups_manager.num_groups
+        )
+        assert (
+            len(self.group_hidden_dim_sizes)
+            == self.metadata.kv_layer_groups_manager.num_groups
+        )
+        if self.use_gpu:
+            assert (
+                len(self.group_tmp_buffer)
+                == self.metadata.kv_layer_groups_manager.num_groups
             )
-            assert len(self.group_hidden_dim_sizes) == len(
-                self.metadata.kv_layer_groups_manager.kv_layer_groups
+        self.group_kv_cache_pointers_on_gpu = []
+        for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
+            # init kv cache pointers
+            num_layers = group.num_layers
+            kv_cache_pointers = torch.empty(num_layers, dtype=torch.int64, device="cpu")
+            kv_cache_pointers.numpy()[:] = [
+                t.data_ptr()
+                for i, t in enumerate(self.kvcaches)
+                if i in group.layer_indices
+            ]
+            kv_cache_pointers_on_gpu = torch.empty(
+                num_layers, dtype=torch.int64, device=self.device
             )
-            self.group_kv_cache_pointers_on_gpu = []
-            for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
-                # init kv cache pointers
-                num_layers = len(group.layer_indices)
-                kv_cache_pointers = torch.empty(
-                    num_layers, dtype=torch.int64, device="cpu"
-                )
-                kv_cache_pointers.numpy()[:] = [
-                    t.data_ptr()
-                    for i, t in enumerate(self.kvcaches)
-                    if i in group.layer_indices
-                ]
-                kv_cache_pointers_on_gpu = torch.empty(
-                    num_layers, dtype=torch.int64, device=self.device
-                )
-                kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
-                self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
+            kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
+            self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-            if self.use_mla:
-                # kvcaches[0].shape: [num_pages, page_size, head_size]
-                assert self.kvcaches[0].dim() == 3
-                self.page_buffer_size = (
-                    self.kvcaches[0].shape[0] * self.kvcaches[0].shape[1]
-                )
-            else:
-                # kvcaches[0].shape: [2, num_pages, page_size, num_heads, head_size]
-                assert self.kvcaches[0].dim() == 5
-                self.page_buffer_size = (
-                    self.kvcaches[0].shape[1] * self.kvcaches[0].shape[2]
-                )
-            logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
+        if self.use_mla:
+            # kvcaches[0].shape: [num_pages, page_size, head_size]
+            assert self.kvcaches[0].dim() == 3
+            self.page_buffer_size = (
+                self.kvcaches[0].shape[0] * self.kvcaches[0].shape[1]
+            )
+        else:
+            # kvcaches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            assert self.kvcaches[0].dim() == 5
+            self.page_buffer_size = (
+                self.kvcaches[0].shape[1] * self.kvcaches[0].shape[2]
+            )
+        logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):

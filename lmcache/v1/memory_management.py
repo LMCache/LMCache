@@ -85,6 +85,7 @@ class FreeBlock:
 
 @dataclass
 class MemoryObjMetadata:
+    # TODO(chunxiaozheng): use shapes and dtypes to replace shape and dtype
     # The 'logical' shape of the tensor
     shape: torch.Size
 
@@ -418,14 +419,17 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
-        self.group_length = [0]
+        # Calculate the prefix sum of the group sizes
+        # If there are two groups, the prefix sum will be
+        # [0, size_of_group_1, size_of_group_1 + size_of_group_2]
+        self.group_prefix_sum = [0]
         if self.meta.shapes is not None and self.meta.dtypes is not None:
             size_in_bytes = 0
             for shape, dtype in zip(self.meta.shapes, self.meta.dtypes, strict=True):
                 size_in_bytes += shape.numel() * dtype.itemsize
-                self.group_length.append(size_in_bytes)
+                self.group_prefix_sum.append(size_in_bytes)
         else:
-            self.group_length.append(self.meta.get_size())
+            self.group_prefix_sum.append(self.meta.get_size())
 
     def invalidate(self):
         self.valid = False
@@ -434,8 +438,10 @@ class TensorMemoryObj(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        return self.group_length[-1]
+        return self.group_prefix_sum[-1]
 
+    # TODO(chunxiaozheng): use get_shapes and get_dtypes to replace
+    #  get_shape and get_dtype
     def get_shape(self) -> torch.Size:
         return self.meta.shape
 
@@ -579,8 +585,8 @@ class TensorMemoryObj(MemoryObj):
             return None
         assert self.meta.shapes is not None
         assert self.meta.dtypes is not None
-        begin = self.group_length[index]
-        end = self.group_length[index + 1]
+        begin = self.group_prefix_sum[index]
+        end = self.group_prefix_sum[index + 1]
         return (
             self.raw_data[begin:end]
             .view(self.meta.dtypes[index])
