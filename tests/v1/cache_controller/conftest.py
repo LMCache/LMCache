@@ -277,6 +277,10 @@ def mock_reg_controller():
                 count += len(keys)
         return count
 
+    def mock_get_seq_discontinuity_count():
+        # Simple implementation for testing
+        return getattr(mock_registry, '_seq_discontinuity_count', 0)
+
     def mock_deregister_worker(instance_id, worker_id):
         report_id = (instance_id, worker_id)
         if report_id in mock_registry.kv_pool:
@@ -287,6 +291,56 @@ def mock_reg_controller():
             del mock_registry.seq_tracker[key]
         return True
 
+    def mock_find_kv_with_worker_info(key, exclude_instance_id=None):
+        """Find KV and return (kv_info, peer_init_url, current_keys)"""
+        for report_id, locations in mock_registry.kv_pool.items():
+            instance_id, worker_id = report_id
+            if exclude_instance_id and instance_id == exclude_instance_id:
+                continue
+            for location, keys in locations.items():
+                if key in keys:
+                    from lmcache.v1.cache_controller.utils import KVChunkInfo
+                    kv_info = KVChunkInfo(instance_id, worker_id, location)
+                    # Get peer_init_url from controller
+                    peer_init_url = controller.get_peer_init_url(instance_id, worker_id)
+                    return (kv_info, peer_init_url, keys)
+        return None
+
+    def mock_handle_batched_kv_operations(msg):
+        """Handle batched KV operations"""
+        from lmcache.v1.cache_controller.message import OpType
+        report_id = (msg.instance_id, msg.worker_id)
+
+        for op in msg.operations:
+            # Check for sequence discontinuity
+            key = (msg.instance_id, msg.worker_id, msg.location)
+            last_seq_num = mock_registry.seq_tracker.get(key)
+            if last_seq_num is not None:
+                expected_seq = last_seq_num + 1
+                if op.seq_num != expected_seq:
+                    # Increment discontinuity counter
+                    mock_registry._seq_discontinuity_count += 1
+
+            # Update sequence number
+            mock_registry.seq_tracker[key] = op.seq_num
+
+            # Handle operation
+            if op.op_type == OpType.ADMIT:
+                if report_id not in mock_registry.kv_pool:
+                    mock_registry.kv_pool[report_id] = {}
+                if msg.location not in mock_registry.kv_pool[report_id]:
+                    mock_registry.kv_pool[report_id][msg.location] = set()
+                mock_registry.kv_pool[report_id][msg.location].add(op.key)
+            elif op.op_type == OpType.EVICT:
+                if report_id in mock_registry.kv_pool:
+                    if msg.location in mock_registry.kv_pool[report_id]:
+                        mock_registry.kv_pool[report_id][msg.location].discard(op.key)
+                        if not mock_registry.kv_pool[report_id][msg.location]:
+                            del mock_registry.kv_pool[report_id][msg.location]
+                        if not mock_registry.kv_pool[report_id]:
+                            del mock_registry.kv_pool[report_id]
+        return True
+
     mock_registry.get_seq_num = Mock(side_effect=mock_get_seq_num)
     mock_registry.update_seq_num = Mock(side_effect=mock_update_seq_num)
     mock_registry.admit_kv = Mock(side_effect=mock_admit_kv)
@@ -294,7 +348,11 @@ def mock_reg_controller():
     mock_registry.find_kv = Mock(side_effect=mock_find_kv)
     mock_registry.get_worker_kv_keys = Mock(side_effect=mock_get_worker_kv_keys)
     mock_registry.get_total_kv_count = Mock(side_effect=mock_get_total_kv_count)
+    mock_registry.get_seq_discontinuity_count = Mock(side_effect=mock_get_seq_discontinuity_count)
     mock_registry.deregister_worker = Mock(side_effect=mock_deregister_worker)
+    mock_registry.find_kv_with_worker_info = Mock(side_effect=mock_find_kv_with_worker_info)
+    mock_registry.handle_batched_kv_operations = Mock(side_effect=mock_handle_batched_kv_operations)
+    mock_registry._seq_discontinuity_count = 0
 
     controller.registry = mock_registry
     return controller

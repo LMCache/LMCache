@@ -10,6 +10,7 @@ import pytest
 # First Party
 from lmcache.v1.cache_controller.controllers.kv_controller import KVController
 from lmcache.v1.cache_controller.message import (
+    BatchedKVOperationMsg,
     BatchedP2PLookupMsg,
     CheckFinishMsg,
     ClearMsg,
@@ -17,8 +18,10 @@ from lmcache.v1.cache_controller.message import (
     DecompressMsg,
     KVAdmitMsg,
     KVEvictMsg,
+    KVOpEvent,
     LookupMsg,
     MoveMsg,
+    OpType,
     PinMsg,
 )
 
@@ -40,15 +43,16 @@ class TestKVControllerAdmit:
     @pytest.mark.asyncio
     async def test_admit_new_key(self, kv_controller):
         """Test admitting a new KV chunk to the controller."""
-        msg = KVAdmitMsg(
+        msg = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
 
-        await kv_controller.admit(msg)
+        await kv_controller.handle_batched_kv_operations(msg)
 
         # Access kv_pool through the registry mock
         report_id = ("test_instance", 0)
@@ -59,23 +63,25 @@ class TestKVControllerAdmit:
     @pytest.mark.asyncio
     async def test_admit_duplicate_key(self, kv_controller):
         """Test admitting same key to different instances."""
-        msg1 = KVAdmitMsg(
+        msg1 = BatchedKVOperationMsg(
             instance_id="instance1",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
-        msg2 = KVAdmitMsg(
+        msg2 = BatchedKVOperationMsg(
             instance_id="instance2",
             worker_id=1,
-            key=12345,
             location="LocalDiskBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
 
-        await kv_controller.admit(msg1)
-        await kv_controller.admit(msg2)
+        await kv_controller.handle_batched_kv_operations(msg1)
+        await kv_controller.handle_batched_kv_operations(msg2)
 
         report_id1 = ("instance1", 0)
         report_id2 = ("instance2", 1)
@@ -85,15 +91,17 @@ class TestKVControllerAdmit:
     @pytest.mark.asyncio
     async def test_admit_multiple_keys(self, kv_controller):
         """Test admitting multiple different keys."""
-        for i in range(5):
-            msg = KVAdmitMsg(
-                instance_id="test_instance",
-                worker_id=0,
-                key=1000 + i,
-                location="LocalCPUBackend",
-                seq_num=i + 1,
-            )
-            await kv_controller.admit(msg)
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=1000 + i, seq_num=i + 1)
+            for i in range(5)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=0,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
 
         report_id = ("test_instance", 0)
         assert report_id in kv_controller.registry.kv_pool
@@ -109,24 +117,26 @@ class TestKVControllerEvict:
     async def test_evict_existing_key(self, kv_controller):
         """Test evicting an existing KV chunk."""
         # First admit
-        admit_msg = KVAdmitMsg(
+        admit_msg = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
-        await kv_controller.admit(admit_msg)
+        await kv_controller.handle_batched_kv_operations(admit_msg)
 
         # Then evict
-        evict_msg = KVEvictMsg(
+        evict_msg = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=2,
+            operations=[
+                KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=2)
+            ],
         )
-        await kv_controller.evict(evict_msg)
+        await kv_controller.handle_batched_kv_operations(evict_msg)
 
         report_id = ("test_instance", 0)
         assert report_id not in kv_controller.registry.kv_pool or \
@@ -135,16 +145,17 @@ class TestKVControllerEvict:
     @pytest.mark.asyncio
     async def test_evict_nonexistent_key(self, kv_controller):
         """Test evicting a non-existent key does nothing."""
-        evict_msg = KVEvictMsg(
+        evict_msg = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=99999,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.EVICT, key=99999, seq_num=1)
+            ],
         )
 
         # Should not raise an error
-        await kv_controller.evict(evict_msg)
+        await kv_controller.handle_batched_kv_operations(evict_msg)
         # Verify key doesn't exist in registry
         result = kv_controller.registry.find_kv(99999)
         assert result is None
@@ -153,32 +164,35 @@ class TestKVControllerEvict:
     async def test_evict_partial_metadata(self, kv_controller):
         """Test evicting from one instance while another instance still has it."""
         # Admit two entries for the same key from different instances
-        msg1 = KVAdmitMsg(
+        msg1 = BatchedKVOperationMsg(
             instance_id="instance1",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
-        msg2 = KVAdmitMsg(
+        msg2 = BatchedKVOperationMsg(
             instance_id="instance2",
             worker_id=1,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
-        await kv_controller.admit(msg1)
-        await kv_controller.admit(msg2)
+        await kv_controller.handle_batched_kv_operations(msg1)
+        await kv_controller.handle_batched_kv_operations(msg2)
 
         # Evict only from the first instance
-        evict_msg = KVEvictMsg(
+        evict_msg = BatchedKVOperationMsg(
             instance_id="instance1",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=2,
+            operations=[
+                KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=2)
+            ],
         )
-        await kv_controller.evict(evict_msg)
+        await kv_controller.handle_batched_kv_operations(evict_msg)
 
         # Key should still exist in instance2
         report_id1 = ("instance1", 0)
@@ -194,32 +208,35 @@ class TestKVControllerEvict:
     async def test_evict_by_location(self, kv_controller):
         """Test evicting only matches specific location."""
         # Admit same key to different locations
-        msg1 = KVAdmitMsg(
+        msg1 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
-        msg2 = KVAdmitMsg(
+        msg2 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalDiskBackend",
-            seq_num=2,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=2)
+            ],
         )
-        await kv_controller.admit(msg1)
-        await kv_controller.admit(msg2)
+        await kv_controller.handle_batched_kv_operations(msg1)
+        await kv_controller.handle_batched_kv_operations(msg2)
 
         # Evict only from CPU backend
-        evict_msg = KVEvictMsg(
+        evict_msg = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=3,
+            operations=[
+                KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=3)
+            ],
         )
-        await kv_controller.evict(evict_msg)
+        await kv_controller.handle_batched_kv_operations(evict_msg)
 
         # Key should still exist in disk backend
         report_id = ("test_instance", 0)
@@ -235,89 +252,102 @@ class TestKVControllerEvict:
 class TestKVControllerSequenceTracking:
     """Test KVController sequence number tracking."""
 
-    def test_sequence_number_first_message(self, kv_controller):
+    @pytest.mark.asyncio
+    async def test_sequence_number_first_message(self, kv_controller):
         """Test first message from a source initializes sequence tracker."""
-        msg = KVAdmitMsg(
+        msg = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=5,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=5)
+            ],
         )
 
-        kv_controller.check_sequence_number(msg)
+        await kv_controller.handle_batched_kv_operations(msg)
 
         seq_num = kv_controller.reg_controller.registry.get_seq_num(
             "test_instance", 0, "LocalCPUBackend"
         )
         assert seq_num == 5
 
-    def test_sequence_number_continuous(self, kv_controller):
+    @pytest.mark.asyncio
+    async def test_sequence_number_continuous(self, kv_controller):
         """Test continuous sequence numbers don't trigger warnings."""
-        for i in range(1, 6):
-            msg = KVAdmitMsg(
-                instance_id="test_instance",
-                worker_id=0,
-                key=12345 + i,
-                location="LocalCPUBackend",
-                seq_num=i,
-            )
-            kv_controller.check_sequence_number(msg)
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=12345 + i, seq_num=i)
+            for i in range(1, 6)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=0,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
 
         seq_num = kv_controller.reg_controller.registry.get_seq_num(
             "test_instance", 0, "LocalCPUBackend"
         )
         assert seq_num == 5
-        assert kv_controller.seq_discontinuity_count == 0
+        # Sequence discontinuity is now tracked in the registry
+        assert kv_controller.registry.get_seq_discontinuity_count() == 0
 
-    def test_sequence_discontinuity_detection(self, kv_controller):
+    @pytest.mark.asyncio
+    async def test_sequence_discontinuity_detection(self, kv_controller):
         """Test detection of gaps in sequence numbers."""
         # First message
-        msg1 = KVAdmitMsg(
+        msg1 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12345,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
+            ],
         )
-        kv_controller.check_sequence_number(msg1)
+        await kv_controller.handle_batched_kv_operations(msg1)
 
         # Skip to sequence 5 (gap of 3)
-        msg2 = KVAdmitMsg(
+        msg2 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=12346,
             location="LocalCPUBackend",
-            seq_num=5,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=12346, seq_num=5)
+            ],
         )
-        kv_controller.check_sequence_number(msg2)
+        await kv_controller.handle_batched_kv_operations(msg2)
 
-        assert kv_controller.seq_discontinuity_count == 1
+        # Sequence discontinuity is now tracked in the registry
+        assert kv_controller.registry.get_seq_discontinuity_count() == 1
         seq_num = kv_controller.reg_controller.registry.get_seq_num(
             "test_instance", 0, "LocalCPUBackend"
         )
         assert seq_num == 5
 
-    def test_sequence_tracking_per_source(self, kv_controller):
+    @pytest.mark.asyncio
+    async def test_sequence_tracking_per_source(self, kv_controller):
         """Test sequence tracking is independent per source."""
         # Different sources should have independent tracking
-        msg1 = KVAdmitMsg(
+        msg1 = BatchedKVOperationMsg(
             instance_id="instance1",
             worker_id=0,
-            key=100,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=100, seq_num=1)
+            ],
         )
-        msg2 = KVAdmitMsg(
+        msg2 = BatchedKVOperationMsg(
             instance_id="instance2",
             worker_id=0,
-            key=200,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=200, seq_num=1)
+            ],
         )
 
-        kv_controller.check_sequence_number(msg1)
-        kv_controller.check_sequence_number(msg2)
+        await kv_controller.handle_batched_kv_operations(msg1)
+        await kv_controller.handle_batched_kv_operations(msg2)
 
         seq_num1 = kv_controller.reg_controller.registry.get_seq_num(
             "instance1", 0, "LocalCPUBackend"
@@ -337,15 +367,17 @@ class TestKVControllerLookup:
     async def test_lookup_hit(self, kv_controller):
         """Test successful lookup with prefix match."""
         # Admit some chunks
-        for i in range(3):
-            msg = KVAdmitMsg(
-                instance_id="test_instance",
-                worker_id=0,
-                key=1000 + i,
-                location="LocalCPUBackend",
-                seq_num=i + 1,
-            )
-            await kv_controller.admit(msg)
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=1000 + i, seq_num=i + 1)
+            for i in range(3)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=0,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
 
         # Mock token database to return our keys
         with patch.object(
@@ -390,14 +422,15 @@ class TestKVControllerLookup:
     async def test_lookup_partial_match(self, kv_controller):
         """Test lookup with partial prefix match."""
         # Admit only first chunk
-        msg = KVAdmitMsg(
+        msg = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=1000,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
+            ],
         )
-        await kv_controller.admit(msg)
+        await kv_controller.handle_batched_kv_operations(msg)
 
         with patch.object(
             kv_controller.token_database, "process_tokens"
@@ -427,15 +460,17 @@ class TestKVControllerBatchedP2PLookup:
     async def test_batched_p2p_lookup_success(self, kv_controller):
         """Test successful batched P2P lookup."""
         # Admit chunks from different instance
-        for i in range(3):
-            msg = KVAdmitMsg(
-                instance_id="remote_instance",
-                worker_id=0,
-                key=1000 + i,
-                location="LocalCPUBackend",
-                seq_num=i + 1,
-            )
-            await kv_controller.admit(msg)
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=1000 + i, seq_num=i + 1)
+            for i in range(3)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="remote_instance",
+            worker_id=0,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
 
         # Query from different instance
         lookup_msg = BatchedP2PLookupMsg(
@@ -475,14 +510,15 @@ class TestKVControllerBatchedP2PLookup:
     async def test_batched_p2p_lookup_same_instance(self, kv_controller):
         """Test batched P2P lookup filters out same instance."""
         # Admit chunks from same instance as query
-        msg = KVAdmitMsg(
+        msg = BatchedKVOperationMsg(
             instance_id="query_instance",
             worker_id=0,
-            key=1000,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
+            ],
         )
-        await kv_controller.admit(msg)
+        await kv_controller.handle_batched_kv_operations(msg)
 
         lookup_msg = BatchedP2PLookupMsg(
             hashes=[1000],
@@ -503,15 +539,17 @@ class TestKVControllerBatchedP2PLookup:
     async def test_batched_p2p_lookup_partial_match(self, kv_controller):
         """Test batched P2P lookup with partial matches."""
         # Admit only first two chunks
-        for i in range(2):
-            msg = KVAdmitMsg(
-                instance_id="remote_instance",
-                worker_id=0,
-                key=1000 + i,
-                location="LocalCPUBackend",
-                seq_num=i + 1,
-            )
-            await kv_controller.admit(msg)
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=1000 + i, seq_num=i + 1)
+            for i in range(2)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="remote_instance",
+            worker_id=0,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
 
         # Query for three chunks
         lookup_msg = BatchedP2PLookupMsg(
@@ -534,16 +572,17 @@ class TestKVControllerDeregister:
     async def test_deregister_cleanup(self, kv_controller):
         """Test deregister cleans up KV pool and sequence tracker."""
         # Admit some chunks
-        for i in range(3):
-            msg = KVAdmitMsg(
-                instance_id="test_instance",
-                worker_id=0,
-                key=1000 + i,
-                location="LocalCPUBackend",
-                seq_num=i + 1,
-            )
-            kv_controller.check_sequence_number(msg)
-            await kv_controller.admit(msg)
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=1000 + i, seq_num=i + 1)
+            for i in range(3)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="test_instance",
+            worker_id=0,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
 
         # Verify data exists
         report_id = ("test_instance", 0)
@@ -565,23 +604,25 @@ class TestKVControllerDeregister:
     async def test_deregister_partial_cleanup(self, kv_controller):
         """Test deregister only removes specific instance-worker."""
         # Admit chunks from different workers
-        msg1 = KVAdmitMsg(
+        msg1 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
-            key=1000,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
+            ],
         )
-        msg2 = KVAdmitMsg(
+        msg2 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=1,
-            key=1000,
             location="LocalCPUBackend",
-            seq_num=1,
+            operations=[
+                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
+            ],
         )
 
-        await kv_controller.admit(msg1)
-        await kv_controller.admit(msg2)
+        await kv_controller.handle_batched_kv_operations(msg1)
+        await kv_controller.handle_batched_kv_operations(msg2)
 
         # Deregister only worker 0 directly through registry
         kv_controller.registry.deregister_worker("test_instance", 0)

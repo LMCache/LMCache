@@ -214,10 +214,7 @@ class TestRegistrationControllerDeregister:
             instance_node = reg_controller.registry.get_instance("test_instance")
             assert instance_node is None
 
-            # Verify KV controller deregister was called
-            reg_controller.kv_controller.deregister.assert_called_once_with(
-                "test_instance", 0
-            )
+            # Note: KV cleanup is now handled directly by the registry's deregister_worker method
 
     @pytest.mark.asyncio
     async def test_deregister_nonexistent_worker(self, reg_controller):
