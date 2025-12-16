@@ -77,8 +77,9 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         An async function to put the MemoryObj into the storage backend.
 
-        :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+        :param Sequence[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
+        :param transfer_spec: Additional specifications for the transfer.
 
         :return:  Union[List[Future], None]: A list of `Future` objects if the
         storage persistence operation is asynchronous and is successful.
@@ -135,6 +136,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         Check whether keys are in the storage backend.
 
+        :param str lookup_id: The unique id (e.g., request id) for the request.
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
 
         :param bool pin: Whether to pin the keys.
@@ -152,9 +154,11 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
-        A non-blcocking function to get the kv cache from the storage backend.
+        A non-blocking function to get the kv cache from the storage backend.
 
+        :param str lookup_id: The unique id (e.g., request id) for the request.
         :param list[CacheEngineKey] keys: The keys of the list of MemoryObjs.
+        :param transfer_spec: Additional specifications for the transfer.
 
         :return: a list of Memoryobjs.
         """
@@ -171,7 +175,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
 
-        :return: a list of memory objects.
+        :return: a list of memory objects. None if the keys do not exist.
         """
         mem_objs = []
         for key in keys:
@@ -212,7 +216,7 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         remove a memory object.
 
         :param CacheEngineKey key: The key of the MemoryObj.
-        :param bool force: Whether to it is a forced remove from the external.
+        :param bool force: Whether to force remove the memory object.
 
         :return: a bool indicates whether remove is successful.
         """

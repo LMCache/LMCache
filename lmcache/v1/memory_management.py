@@ -282,7 +282,7 @@ class MemoryObj(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def metadata(self) -> MemoryObjMetadata:
         """
-        Get the metada of the MemoryObj.
+        Get the metadata of the MemoryObj.
         """
         raise NotImplementedError
 
@@ -299,7 +299,7 @@ class MemoryObj(metaclass=abc.ABCMeta):
     def byte_array(self) -> bytes:
         """
         Get the byte array from the MemoryObj.
-        The size is will be the physical size instead of the unaligned size.
+        The size will be the physical size instead of the unaligned size.
         """
         raise NotImplementedError
 
