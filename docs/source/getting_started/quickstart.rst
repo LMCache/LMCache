@@ -44,7 +44,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
    .. tab-item:: SGLang
 
-      **(Terminal 1) Install LMCache and SGLang**
+      **(Terminal 1) Install SGLang**
 
       .. code-block:: bash
 
@@ -52,7 +52,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          source .venv/bin/activate
          uv pip install --prerelease=allow lmcache "sglang"
 
-      **Start SGLang with LMCache (demo chunk size 8; use 256 for real runs):**
+      **Start SGLang with LMCache**
 
       .. code-block:: bash
 
