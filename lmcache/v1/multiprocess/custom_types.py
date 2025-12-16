@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 import pickle
+import threading
 
 # Third Party
 import msgspec
@@ -16,6 +17,7 @@ communications.
 
 class CudaIPCWrapper:
     _discovered_device_mapping: dict[str, int] = {}
+    _device_mapping_lock = threading.Lock()
 
     @staticmethod
     def _get_device_uuid(device_index: int) -> str:
@@ -27,11 +29,32 @@ class CudaIPCWrapper:
         """Discover all available GPU devices and map their UUIDs to
         the physical device ordinals.
         """
-        if torch.cuda.is_available():
-            num_devices = torch.cuda.device_count()
-            for i in range(num_devices):
-                device_uuid = CudaIPCWrapper._get_device_uuid(i)
+        if not torch.cuda.is_available():
+            return
+
+        num_devices = torch.cuda.device_count()
+        for i in range(num_devices):
+            device_uuid = CudaIPCWrapper._get_device_uuid(i)
+            with CudaIPCWrapper._device_mapping_lock:
                 CudaIPCWrapper._discovered_device_mapping[device_uuid] = i
+
+    @staticmethod
+    def _get_device_index_from_uuid(device_uuid: str) -> int:
+        """Get the physical device ordinal from its UUID."""
+        if not CudaIPCWrapper._discovered_device_mapping:
+            CudaIPCWrapper._discover_gpu_devices()
+
+        with CudaIPCWrapper._device_mapping_lock:
+            device_index = CudaIPCWrapper._discovered_device_mapping.get(
+                device_uuid, None
+            )
+
+        if device_index is None:
+            raise RuntimeError(
+                f"Device UUID {device_uuid} not found in the discovered devices."
+                "Please make sure the process can see all the GPU devices"
+            )
+        return device_index
 
     def __init__(self, tensor: torch.Tensor):
         assert tensor.storage_offset() == 0
@@ -51,16 +74,7 @@ class CudaIPCWrapper:
             This function may break if torch cuda is not initialized.
             We should call `torch.cuda.init()` before using this function.
         """
-        if not CudaIPCWrapper._discovered_device_mapping:
-            CudaIPCWrapper._discover_gpu_devices()
-
-        device = CudaIPCWrapper._discovered_device_mapping.get(self.device_uuid, None)
-        if device is None:
-            raise RuntimeError(
-                f"Device UUID {self.device_uuid} not found in the discovered devices."
-                "Please make sure the process can see all the GPU devices"
-            )
-
+        device = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
         storage = torch.UntypedStorage._new_shared_cuda(device, *self.handle[1:])
         t = torch.tensor(0, device=device, dtype=self.dtype)
         t.set_(storage)
