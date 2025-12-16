@@ -962,6 +962,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         page_stream=page_stream,
+                        sync=sync,
                     )
                     end_blending = time.perf_counter()
                     logger.info(

@@ -102,8 +102,9 @@ def generate_windows_by_frames(num_frames: int, win_frames: int, stride_frames: 
 def frames_to_user_content_qwen(frames: List[Image.Image], prompt_text: str, segment_token: str) -> List[dict]:
     """Build Qwen-style content: segment token + image_url pairs, followed by the prompt."""
     content = []
-    for img in frames:
-        content.append({"type": "text", "text": segment_token})
+    for i, img in enumerate(frames):
+        if i % 8 == 0:
+            content.append({"type": "text", "text": segment_token})
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -127,8 +128,9 @@ def frames_to_user_content_internvl(
 ) -> List[dict]:
     """InternVL via /v1/chat/completions: use text + image_url schema."""
     content = []
-    for img in frames:
-        content.append({"type": "text", "text": segment_token})
+    for i, img in enumerate(frames):
+        if i % 8 == 0:
+            content.append({"type": "text", "text": segment_token})
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -315,7 +317,7 @@ def run(args):
     cat_stats = {}
 
     categorys = list(prompts.keys())
-    
+    categorys = ["abuse"]
 
     try:
         for category in categorys:
@@ -475,7 +477,7 @@ def build_argparser():
     ap.add_argument("--stride-ratio", type=float, default=0.4, help="Stride ratio relative to window size.")
     ap.add_argument("--max-windows", type=int, default=0, help="Optional cap on number of windows per video (0 = all).")
     ap.add_argument("--blend-special-str", type=str, default="<<SEG>>", help="Segment token inserted before each frame.")
-    ap.add_argument("--base-url", type=str, default="http://localhost:8000/v1", help="OpenAI-compatible base URL.")
+    ap.add_argument("--base-url", type=str, default="http://localhost:8001/v1", help="OpenAI-compatible base URL.")
     ap.add_argument("--prompts", type=json.loads,
                     default={
                         "abuse": "Describe the frames and determine if they show any abuse. Start your response with 'Yes' or 'No'.",
