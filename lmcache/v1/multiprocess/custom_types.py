@@ -33,16 +33,18 @@ class CudaIPCWrapper:
             return
 
         num_devices = torch.cuda.device_count()
-        for i in range(num_devices):
-            device_uuid = CudaIPCWrapper._get_device_uuid(i)
-            with CudaIPCWrapper._device_mapping_lock:
+        with CudaIPCWrapper._device_mapping_lock:
+            if CudaIPCWrapper._discovered_device_mapping:
+                return  # Already discovered
+
+            for i in range(num_devices):
+                device_uuid = CudaIPCWrapper._get_device_uuid(i)
                 CudaIPCWrapper._discovered_device_mapping[device_uuid] = i
 
     @staticmethod
     def _get_device_index_from_uuid(device_uuid: str) -> int:
         """Get the physical device ordinal from its UUID."""
-        if not CudaIPCWrapper._discovered_device_mapping:
-            CudaIPCWrapper._discover_gpu_devices()
+        CudaIPCWrapper._discover_gpu_devices()
 
         with CudaIPCWrapper._device_mapping_lock:
             device_index = CudaIPCWrapper._discovered_device_mapping.get(
