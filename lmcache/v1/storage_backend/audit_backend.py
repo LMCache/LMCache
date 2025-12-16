@@ -26,6 +26,9 @@ class AuditBackend(StorageBackendInterface):
             f"[AUDIT_BACKEND] Initialized for backend: {str(real_backend)}"
         )
 
+    def post_init(self):
+        self.real_backend.post_init()
+
     def _log_operation(
         self,
         op_name: str,

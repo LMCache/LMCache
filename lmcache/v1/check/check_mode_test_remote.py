@@ -59,7 +59,7 @@ def create_test_memory_obj(
         connector = backend.connection
 
     return local_cpu_backend.allocate(
-        connector.meta_shape, connector.meta_dtype, connector.meta_fmt
+        connector.meta_shapes, connector.meta_dtypes, connector.meta_fmt
     )
 
 

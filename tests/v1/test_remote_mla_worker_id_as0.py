@@ -94,6 +94,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
         local_cpu_backend=local_cpu_backend,
     )
     backend.connection = MockConnector()
+    backend.post_init()
 
     # Start the event loop in a separate thread
     loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -116,6 +117,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
         local_cpu_backend=local_cpu_backend,
     )
     backend0.connection = backend.connection
+    backend0.post_init()
     # Create key
     key0 = CacheEngineKey(
         fmt="vllm",

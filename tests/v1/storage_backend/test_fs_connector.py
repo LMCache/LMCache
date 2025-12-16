@@ -112,6 +112,7 @@ def remote_backend_with_fs(temp_fs_path, async_loop, local_cpu_backend):
         local_cpu_backend=local_cpu_backend,
         dst_device="cpu",
     )
+    backend.post_init()
     yield backend
     backend.local_cpu_backend.memory_allocator.close()
     backend.close()
@@ -131,6 +132,7 @@ class TestFSConnector:
             local_cpu_backend=local_cpu_backend,
             dst_device="cpu",
         )
+        backend.post_init()
 
         assert backend.dst_device == "cpu"
         assert backend.local_cpu_backend == local_cpu_backend
@@ -234,6 +236,7 @@ class TestFSConnector:
                 local_cpu_backend=local_cpu_backend,
                 dst_device="cpu",
             )
+            backend.post_init()
 
             key = create_test_key(10)
             memory_obj = create_test_memory_obj()
@@ -275,6 +278,7 @@ class TestFSConnector:
             local_cpu_backend=local_cpu_backend,
             dst_device="cpu",
         )
+        backend.post_init()
 
         future = backend.submit_put_task(key, memory_obj)
         if future:
@@ -295,6 +299,7 @@ class TestFSConnector:
             local_cpu_backend=new_local_cpu_backend,
             dst_device="cpu",
         )
+        new_backend.post_init()
 
         assert new_backend.contains(key)
 

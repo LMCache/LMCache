@@ -72,9 +72,6 @@ class PerformanceTimer:
         logger.debug(f"== Perf op {self.op} size {self.size} =========")
 
 
-METADATA_BYTES_LEN = 28
-
-
 class FlexibleDRAMMemoryPool:
     def __init__(self, conn):
         self._init = False
@@ -303,7 +300,7 @@ class EICConnector(RemoteConnector):
         # Get Meta: generate meta buffer tensor
         perf_timer.start("alloc_mem")
         meta_key = key_str + "_meta"
-        meta_size = METADATA_BYTES_LEN
+        meta_size = self.remote_metadata_bytes
         meta_bytes = bytearray(meta_size)
         meta_bytes_ptr = self.bytes_get_ptr(meta_bytes)
 
@@ -339,7 +336,9 @@ class EICConnector(RemoteConnector):
         perf_timer.stop("eic_mget")
 
         perf_timer.start("serialize")
-        meta = RemoteMetadata.deserialize(meta_bytes[:meta_size])
+        meta = RemoteMetadata.deserialize(
+            meta_bytes[:meta_size], self.remote_metadata_fmt
+        )
         perf_timer.stop("serialize")
 
         perf_timer.stop("total_cost")
@@ -351,9 +350,12 @@ class EICConnector(RemoteConnector):
         perf_timer = PerformanceTimer(key_str, "get_data")
         perf_timer.start("total_cost")
         perf_timer.start("alloc_obj")
+
+        assert len(meta.shapes) == 1
+        assert len(meta.dtypes) == 1
         memory_obj = self.memory_allocator.allocate(
-            meta.shape,
-            meta.dtype,
+            meta.shapes,
+            meta.dtypes,
             meta.fmt,
         )
         if memory_obj is None:
@@ -438,8 +440,10 @@ class EICConnector(RemoteConnector):
         perf_timer.start("total_cost")
         kv_bytes = memory_obj.byte_array
         kv_tensor = memory_obj.tensor
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
+        assert len(kv_shapes) == 1
+        assert len(kv_dtypes) == 1
         memory_format = memory_obj.get_memory_format()
         value_size = memory_obj.get_physical_size()
 
@@ -455,12 +459,12 @@ class EICConnector(RemoteConnector):
 
         # generate meta bytes
         remote_meta = RemoteMetadata(
-            METADATA_BYTES_LEN, kv_shape, kv_dtype, memory_format
+            self.remote_metadata_bytes, kv_shapes, kv_dtypes, memory_format
         )
 
         logger.debug(f"eic meta {key_str} remote_meta{remote_meta}")
 
-        meta_bytes = remote_meta.serialize()
+        meta_bytes = remote_meta.serialize(self.remote_metadata_fmt)
 
         perf_timer.stop("serialize")
 
@@ -535,19 +539,22 @@ class EICConnector(RemoteConnector):
             logger.debug(f"eic batched_put processing {key_str}")
 
             # Get memory object data
+            # TODO(chunxiaozheng): support dsa
             kv_bytes = memory_obj.byte_array
             kv_tensor = memory_obj.tensor
-            kv_shape = memory_obj.get_shape()
-            kv_dtype = memory_obj.get_dtype()
+            kv_shapes = memory_obj.get_shapes()
+            kv_dtypes = memory_obj.get_dtypes()
+            assert len(kv_shapes) == 1
+            assert len(kv_dtypes) == 1
             memory_format = memory_obj.get_memory_format()
             if kv_tensor is None:
                 logger.error(f"Memory object tensor is None for key {key_str}")
                 return
 
             remote_meta = RemoteMetadata(
-                METADATA_BYTES_LEN, kv_shape, kv_dtype, memory_format
+                self.remote_metadata_bytes, kv_shapes, kv_dtypes, memory_format
             )
-            meta_bytes = remote_meta.serialize()
+            meta_bytes = remote_meta.serialize(self.remote_metadata_fmt)
             meta_list.append(meta_bytes)
             meta_ptr = self.bytes_get_ptr(meta_bytes)
             meta_size = len(meta_bytes)
@@ -555,7 +562,7 @@ class EICConnector(RemoteConnector):
             data_size = len(kv_bytes)
 
             logger.info(
-                f"eic batched_put {key_str} shape {kv_shape} dtype {kv_dtype}"
+                f"eic batched_put {key_str} shapes {kv_shapes} dtypes {kv_dtypes}"
                 " fmt {memory_format}"
             )
 

@@ -14,9 +14,11 @@ import aiohttp
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -27,7 +29,6 @@ logger = init_logger(__name__)
 
 
 # Constants
-METADATA_SIZE_BYTES = 28  # RemoteMetadata is 7 int32 fields
 METADATA_SHAPE_DIMS = 4  # Number of shape dimensions in metadata
 DEFAULT_CHUNK_SIZE_BYTES = 65536  # 64KB default for streaming
 HTTP_OK = 200
@@ -157,8 +158,13 @@ class SageMakerHyperPodConnector(RemoteConnector):
             f"connections={self.max_connections}, lease_ttl={lease_ttl_s}s"
         )
 
-    def post_init(self):
+    def post_init(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ):
         """Initialize shared memory connection after construction."""
+        super().post_init(config, metadata)
         if self.shared_memory_name:
             self._init_shared_memory()
 
@@ -458,31 +464,33 @@ class SageMakerHyperPodConnector(RemoteConnector):
         try:
             # Validate total size
             total_size = sum(length for _, length in lease_info.offsets)
-            if total_size < METADATA_SIZE_BYTES:
+            if total_size < self.remote_metadata_bytes:
                 logger.error(f"Insufficient data for metadata: {total_size} bytes")
                 return None
 
             # Read metadata header (may span multiple blocks)
             header = self._read_bytes_from_offsets(
-                lease_info.offsets, 0, METADATA_SIZE_BYTES
+                lease_info.offsets, 0, self.remote_metadata_bytes
             )
-            if len(header) < METADATA_SIZE_BYTES:
+            if len(header) < self.remote_metadata_bytes:
                 logger.error("Failed to read complete metadata header")
                 return None
 
             # Parse metadata
-            metadata = RemoteMetadata.deserialize(header)
+            metadata = RemoteMetadata.deserialize(header, self.remote_metadata_fmt)
             if metadata.length <= 0:
                 logger.error(f"Invalid payload length: {metadata.length}")
                 return None
 
+            assert len(metadata.shapes) == 1
+            assert len(metadata.dtypes) == 1
             # Restore original shape (remove padding zeros)
-            actual_shape = self._parse_shape(metadata.shape)
+            actual_shape = self._parse_shape(metadata.shapes[0])
 
             # Allocate local CPU memory
             memory_obj = self.local_cpu_backend.allocate(
                 actual_shape,
-                metadata.dtype,
+                metadata.dtypes[0],
                 metadata.fmt,
             )
             if memory_obj is None:
@@ -494,7 +502,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
             # Copy payload data from shared memory (skip header)
             copied = self._copy_bytes_from_offsets(
-                lease_info.offsets, METADATA_SIZE_BYTES, metadata.length, view
+                lease_info.offsets, self.remote_metadata_bytes, metadata.length, view
             )
 
             if copied != metadata.length:
@@ -506,7 +514,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
             logger.debug(
                 f"Read from shared memory: key={key.to_string()}, "
-                f"shape={actual_shape}, dtype={metadata.dtype},"
+                f"shape={actual_shape}, dtypes={metadata.dtypes},"
                 f"size={metadata.length} bytes"
             )
 
@@ -825,19 +833,24 @@ class SageMakerHyperPodConnector(RemoteConnector):
         kv_len = len(kv_view)
 
         # Prepare metadata
-        shape = list(memory_obj.get_shape())
+        # TODO(chunxiaozheng): support dsa
+        shapes = memory_obj.get_shapes()
+        dtypes = memory_obj.get_dtypes()
+        assert len(shapes) == 1
+        assert len(dtypes) == 1
+        shape = list(shapes[0])
         padded_shape = (shape + [0] * METADATA_SHAPE_DIMS)[:METADATA_SHAPE_DIMS]
 
         metadata = RemoteMetadata(
             kv_len,
-            torch.Size(padded_shape),
-            memory_obj.get_dtype(),
+            [torch.Size(padded_shape)],
+            dtypes,
             memory_obj.get_memory_format(),
         )
 
         # Serialize metadata header
-        header = bytearray(METADATA_SIZE_BYTES)
-        metadata.serialize_into(header)
+        header = bytearray(self.remote_metadata_bytes)
+        metadata.serialize_into(header, self.remote_metadata_fmt)
         header_bytes = bytes(header)
 
         total_len = len(header_bytes) + kv_len

@@ -751,9 +751,15 @@ class LMCacheConnectorV1Impl:
             )
 
             # In case of MLA, the lookup server is only created on worker 0
-            if self.async_loading and self.lookup_server is not None:
+            if (
+                self.async_loading
+                and self.lookup_server is not None
+                and self.lmcache_engine.storage_manager is not None
+            ):
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
-                self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
+                self.lmcache_engine.storage_manager.set_async_lookup_server(
+                    self.lookup_server
+                )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -949,10 +955,13 @@ class LMCacheConnectorV1Impl:
             The number of elements in kv_caches and layer_names should be
             the same.
         """
+        assert self.lmcache_engine is not None
         self.current_layer = 0
 
         if len(self.kv_caches) == 0:
+            logger.info("Initializing kv_caches")
             self._init_kv_caches_from_forward_context(forward_context)
+            self.lmcache_engine.post_init(kvcaches=list(self.kv_caches.values()))
 
         metadata = self._parent._get_connector_metadata()
         assert isinstance(metadata, LMCacheConnectorMetadata)
@@ -964,10 +973,6 @@ class LMCacheConnectorV1Impl:
         if attn_metadata is None:
             logger.debug("In connector.start_load_kv, but the attn_metadata is None")
             return
-
-        assert self.lmcache_engine is not None
-
-        self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
 

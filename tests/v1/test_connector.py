@@ -37,15 +37,19 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+    config = LMCacheEngineConfig.from_defaults()
+    metadata = _get_metadata(False)
+    connector = autorelease_v1(
+        CreateConnector(url, async_loop, memory_allocator, config, metadata)
+    )
+    connector.post_init(config, metadata)
 
     random_key = dumb_cache_engine_key()
     future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
     assert not future.result()
 
-    num_tokens = 1000
-    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
-    dtype = torch.bfloat16
+    mem_obj_shape = _get_memory_obj_shape(metadata.kv_shape, True)
+    dtype = metadata.kv_dtype
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
@@ -71,7 +75,6 @@ def test_lm_connector(url, autorelease_v1, lmserver_v1_process):
     )
 
     close_asyncio_loop(async_loop, async_thread)
-
     memory_allocator.close()
 
 
@@ -92,26 +95,16 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         url = f"fs://host:0/{temp_dir}/"
         async_loop, async_thread = init_asyncio_loop()
         memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-        # full chunk's kv_shape (num_layer, 2, chunk_size, num_kv_head, head_size)
-        kv_shape = (32, 1 if use_mla else 2, 256, 1 if use_mla else 8, 128)
-        dtype = torch.bfloat16
         config = LMCacheEngineConfig.from_defaults(
             extra_config={"save_chunk_meta": save_chunk_meta}
         )
-        metadata = LMCacheEngineMetadata(
-            "deepseek/DeepSeek-R1",
-            1,
-            0,
-            "vllm",
-            dtype,
-            kv_shape,
-            use_mla,
-        )
+        metadata = _get_metadata(use_mla)
         connector = autorelease_v1(
             CreateConnector(url, async_loop, memory_allocator, config, metadata)
         )
-        random_key = dumb_cache_engine_key()
+        connector.post_init(config, metadata)
 
+        random_key = dumb_cache_engine_key()
         # Test 1: Verify key doesn't exist initially
         future = asyncio.run_coroutine_threadsafe(
             connector.exists(random_key), async_loop
@@ -121,14 +114,8 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         # Test 2: Create and store test data
         # The size of the full chunk is 256.
         # If test unfull chunk, use 100 (<256) to allocate memory_obj.
-        memory_obj_shape = torch.Size(
-            [
-                kv_shape[1],
-                kv_shape[0],
-                kv_shape[2] if full_chunk else 100,
-                kv_shape[3] * kv_shape[4],
-            ]
-        )
+        memory_obj_shape = _get_memory_obj_shape(metadata.kv_shape, full_chunk)
+        dtype = metadata.kv_dtype
         memory_obj = memory_allocator.allocate(memory_obj_shape, dtype)
         memory_obj.ref_count_up()
         # Fill with deterministic test data
@@ -173,7 +160,6 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         assert files[0].stat().st_size == expected_file_size
 
         close_asyncio_loop(async_loop, async_thread)
-
         memory_allocator.close()
 
 
@@ -196,18 +182,21 @@ def test_redis_connector(url, autorelease_v1):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+    config = LMCacheEngineConfig.from_defaults()
+    metadata = _get_metadata(False)
+    connector = autorelease_v1(
+        CreateConnector(url, async_loop, memory_allocator, config, metadata)
+    )
+    connector.post_init(config, metadata)
 
     random_key = dumb_cache_engine_key()
-
     # Test 1: Verify key doesn't exist initially
     future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
     assert not future.result()
 
     # Test 2: Create and store test data
-    num_tokens = 1000
-    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
-    dtype = torch.bfloat16
+    mem_obj_shape = _get_memory_obj_shape(metadata.kv_shape, True)
+    dtype = metadata.kv_dtype
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
@@ -236,7 +225,6 @@ def test_redis_connector(url, autorelease_v1):
     )
 
     close_asyncio_loop(async_loop, async_thread)
-
     memory_allocator.close()
 
 
@@ -263,18 +251,21 @@ def test_redis_sentinel_connector(url, autorelease_v1):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+    config = LMCacheEngineConfig.from_defaults()
+    metadata = _get_metadata(False)
+    connector = autorelease_v1(
+        CreateConnector(url, async_loop, memory_allocator, config, metadata)
+    )
+    connector.post_init(config, metadata)
 
     random_key = dumb_cache_engine_key()
-
     # Test 1: Verify key doesn't exist initially
     future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
     assert not future.result()
 
     # Test 2: Create and store test data
-    num_tokens = 1000
-    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
-    dtype = torch.bfloat16
+    mem_obj_shape = _get_memory_obj_shape(metadata.kv_shape, True)
+    dtype = metadata.kv_dtype
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
@@ -298,7 +289,6 @@ def test_redis_sentinel_connector(url, autorelease_v1):
     future.result()
 
     close_asyncio_loop(async_loop, async_thread)
-
     memory_allocator.close()
 
 
@@ -324,19 +314,21 @@ def test_redis_cluster_connector(url, autorelease_v1):
 
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+    config = LMCacheEngineConfig.from_defaults()
+    metadata = _get_metadata(False)
+    connector = autorelease_v1(
+        CreateConnector(url, async_loop, memory_allocator, config, metadata)
+    )
+    connector.post_init(config, metadata)
 
     random_key = dumb_cache_engine_key()
-
     # Test 1: Verify key doesn't exist initially, test contains key not exist
     future = asyncio.run_coroutine_threadsafe(connector.exists(random_key), async_loop)
     assert not future.result()
 
     # Test 2: Create and store test data
-    num_tokens = 1000
-    mem_obj_shape = torch.Size([2, 32, num_tokens, 1024])
-    dtype = torch.bfloat16
+    mem_obj_shape = _get_memory_obj_shape(metadata.kv_shape, True)
+    dtype = metadata.kv_dtype
     memory_obj = memory_allocator.allocate(mem_obj_shape, dtype)
     memory_obj.ref_count_up()
 
@@ -370,7 +362,12 @@ def test_redis_cluster_connector(url, autorelease_v1):
 def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
-    connector = autorelease_v1(CreateConnector(url, async_loop, memory_allocator))
+    config = LMCacheEngineConfig.from_defaults()
+    metadata = _get_metadata(False)
+    connector = autorelease_v1(
+        CreateConnector(url, async_loop, memory_allocator, config, metadata)
+    )
+    connector.post_init(config, metadata)
 
     random_key = dumb_cache_engine_key()
     # build a small mem obj to get correct metadata bytes
@@ -378,11 +375,11 @@ def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
     kv_bytes = memory_obj.byte_array
     meta = RemoteMetadata(
         len(kv_bytes),
-        memory_obj.get_shape(),
-        memory_obj.get_dtype(),
+        memory_obj.get_shapes(),
+        memory_obj.get_dtypes(),
         memory_obj.get_memory_format(),
     )
-    metadata_bytes = meta.serialize()
+    metadata_bytes = meta.serialize("iiiiiii")
 
     # clean up memory object after getting metadata
     memory_obj.ref_count_down()
@@ -400,3 +397,29 @@ def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
 
     close_asyncio_loop(async_loop, async_thread)
     memory_allocator.close()
+
+
+def _get_metadata(use_mla: bool):
+    kv_shape = (32, 1 if use_mla else 2, 256, 1 if use_mla else 8, 128)
+    dtype = torch.bfloat16
+    metadata = LMCacheEngineMetadata(
+        "deepseek/DeepSeek-R1",
+        1,
+        0,
+        "vllm",
+        dtype,
+        kv_shape,
+        use_mla,
+    )
+    return metadata
+
+
+def _get_memory_obj_shape(kv_shape, full_chunk):
+    return torch.Size(
+        [
+            kv_shape[1],
+            kv_shape[0],
+            kv_shape[2] if full_chunk else 100,
+            kv_shape[3] * kv_shape[4],
+        ]
+    )

@@ -9,6 +9,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -463,21 +464,25 @@ class TestAuditConnector:
             remote_url="mock://test",
             extra_config={},
         )
+        metadata = LMCacheEngineMetadata(
+            "deepseek/DeepSeek-R1",
+            1,
+            0,
+            "vllm",
+            torch.bfloat16,
+            (32, 2, 256, 8, 128),
+            False,
+        )
         audit = AuditConnector(mock_connector, config)
 
         log_capture.clear()
 
-        audit.post_init()
-        audit.init_chunk_meta(None, None)
+        audit.post_init(config, metadata)
 
         print("\nAfter @NotAudit methods:")
         print(log_capture.get_logs())
 
-        operation_logs = [
-            r
-            for r in log_capture.get_records()
-            if "POST_INIT" in r.msg or "INIT_CHUNK_META" in r.msg
-        ]
+        operation_logs = [r for r in log_capture.get_records() if "POST_INIT" in r.msg]
         operation_logs = [r for r in operation_logs if "SUCCESS" in r.msg]
         assert len(operation_logs) == 0, (
             f"@NotAudit methods should not generate operation audit logs. "

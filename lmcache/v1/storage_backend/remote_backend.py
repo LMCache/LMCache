@@ -45,7 +45,6 @@ class RemoteBackend(StorageBackendInterface):
         self.loop = loop
         self.config = config
         self.metadata = metadata
-
         # Re-establish connection only when the connection
         # has been lost for 10 secs
         self.connection: Optional[RemoteConnector] = None
@@ -89,6 +88,11 @@ class RemoteBackend(StorageBackendInterface):
         self.remote_monitor.start()
 
         self._setup_metrics()
+
+    def post_init(self):
+        if self.connection is not None:
+            logger.info("Post initializing remote connection")
+            self.connection.post_init(self.config, self.metadata)
 
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()

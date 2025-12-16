@@ -12,7 +12,6 @@ import os
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -23,8 +22,6 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.system_detection import NUMADetector
 
 logger = init_logger(__name__)
-
-METADATA_BYTES_LEN = 28
 
 
 @dataclass
@@ -223,23 +220,6 @@ class MooncakestoreConnector(RemoteConnector):
 
         logger.info("MooncakeConnector initialized successfully.")
 
-    def init_chunk_meta(
-        self,
-        config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
-    ) -> None:
-        """Initialize chunk metadata and log the configuration."""
-        super().init_chunk_meta(config, metadata)
-
-        if self.meta_shape and self.meta_dtype and self.meta_fmt:
-            logger.info("MooncakeConnector using optimized mode")
-        else:
-            logger.info("MooncakeConnector using legacy mode")
-            logger.info(
-                "Try setting 'save_chunk_meta' to False in the configuration "
-                "for better performance"
-            )
-
     def _register_cpu_buffer(self):
         """Register CPU buffer for zero-copy operations."""
         try:
@@ -329,11 +309,11 @@ class MooncakestoreConnector(RemoteConnector):
         Zero-copy batch get using batch_get_into when metadata is available locally.
         This is used when save_chunk_meta=False (metadata not stored remotely).
         """
-        if not self.meta_shape or not self.meta_dtype or not self.meta_fmt:
+        if not self.meta_shapes or not self.meta_dtypes or not self.meta_fmt:
             logger.error(
                 f"Metadata required for batch_get_into but not available: "
-                f"meta_shape={self.meta_shape}, "
-                f"meta_dtype={self.meta_dtype}, "
+                f"meta_shapes={self.meta_shapes}, "
+                f"meta_dtypes={self.meta_dtypes}, "
                 f"meta_fmt={self.meta_fmt}"
             )
             return [None] * len(keys)
@@ -350,7 +330,7 @@ class MooncakestoreConnector(RemoteConnector):
 
         for i, _ in enumerate(keys):
             buf = self.local_cpu_backend.allocate(
-                self.meta_shape, self.meta_dtype, self.meta_fmt
+                self.meta_shapes, self.meta_dtypes, self.meta_fmt
             )
             memory_objs.append(buf)
             buf_tensor = buf.tensor
@@ -450,32 +430,32 @@ class MooncakestoreConnector(RemoteConnector):
         Used when save_chunk_meta=True (metadata stored remotely).
         """
         retrieved_view = memoryview(buffer)
-        metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]
-        if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
+        metadata_bytes = retrieved_view[: self.remote_metadata_bytes]
+        if metadata_bytes is None or len(metadata_bytes) != self.remote_metadata_bytes:
             return None
 
-        metadata = RemoteMetadata.deserialize(metadata_bytes)
-
+        metadata = RemoteMetadata.deserialize(metadata_bytes, self.remote_metadata_fmt)
+        assert len(metadata.shapes) == 1
+        assert len(metadata.dtypes) == 1
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
-        assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
+        assert len(retrieved_view) == metadata.length + self.remote_metadata_bytes
 
         if memory_obj is None:
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
         if memory_obj.tensor is not None:
-            assert metadata.dtype is not None
-            num_elements = reduce(operator.mul, metadata.shape)
+            num_elements = reduce(operator.mul, metadata.shapes[0])
             temp_tensor = torch.frombuffer(
                 buffer,
-                dtype=metadata.dtype,
-                offset=METADATA_BYTES_LEN,
+                dtype=metadata.dtypes[0],
+                offset=self.remote_metadata_bytes,
                 count=num_elements,
-            ).reshape(metadata.shape)
+            ).reshape(metadata.shapes[0])
 
             memory_obj.tensor.copy_(temp_tensor)
             return memory_obj
@@ -603,15 +583,18 @@ class MooncakestoreConnector(RemoteConnector):
         """
         try:
             # Serialize data and metadata
+            # TODO(chunxiaozheng): support dsa
             kv_bytes = memory_obj.byte_array
-            kv_shape = memory_obj.get_shape()
-            kv_dtype = memory_obj.get_dtype()
+            kv_shapes = memory_obj.get_shapes()
+            kv_dtypes = memory_obj.get_dtypes()
+            assert len(kv_shapes) == 1
+            assert len(kv_dtypes) == 1
             memory_format = memory_obj.get_memory_format()
 
             metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shape, kv_dtype, memory_format
-            ).serialize()
-            assert len(metadata_bytes) == METADATA_BYTES_LEN
+                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
+            ).serialize(self.remote_metadata_fmt)
+            assert len(metadata_bytes) == self.remote_metadata_bytes
 
             await asyncio.wait_for(
                 asyncio.to_thread(

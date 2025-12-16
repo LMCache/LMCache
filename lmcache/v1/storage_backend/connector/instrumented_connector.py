@@ -4,9 +4,11 @@ from typing import List, Optional
 import time
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
@@ -129,16 +131,17 @@ class InstrumentedRemoteConnector(RemoteConnector):
     def support_batched_contains(self) -> bool:
         return self._connector.support_batched_contains()
 
-    def init_chunk_meta(self, config, metadata) -> None:
-        return self._connector.init_chunk_meta(config, metadata)
-
     def reshape_partial_chunk(
         self, memory_obj: MemoryObj, bytes_read: int
     ) -> MemoryObj:
         return self._connector.reshape_partial_chunk(memory_obj, bytes_read)
 
-    def post_init(self):
-        return self._connector.post_init()
+    def post_init(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ):
+        return self._connector.post_init(config, metadata)
 
     def __repr__(self) -> str:
         return f"InstrumentedRemoteConnector({self._connector})"

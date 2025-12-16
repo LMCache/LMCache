@@ -211,7 +211,7 @@ async def _initialize_remote_backend(
             local_cpu_backend=local_cpu_backend,
             dst_device="cpu",
         )
-        remote_backend.init_connection()
+        remote_backend.post_init()
         return remote_backend
     except Exception as e:
         logger.error("Failed to initialize RemoteBackend: %s", e)

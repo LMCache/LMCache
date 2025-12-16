@@ -271,6 +271,11 @@ class StorageManager:
         self._freeze = False
         self._freeze_lock = threading.RLock()
 
+        # PDBackend hasn't supported calculate_chunk_budget
+        if not self.enable_pd and self.config.enable_async_loading:
+            assert self.allocator_backend is not None
+            self.async_serializer = AsyncSingleSerializer(self.loop)
+
         self._setup_metrics()
 
     def _setup_metrics(self):
@@ -296,13 +301,9 @@ class StorageManager:
                 )
             )
 
-    def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-        # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and self.config.enable_async_loading:
-            assert self.allocator_backend is not None
-            self.async_serializer = AsyncSingleSerializer(self.loop)
+    def post_init(self) -> None:
+        for backend in self.storage_backends.values():
+            backend.post_init()
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -1027,6 +1028,9 @@ class StorageManager:
                 continue
             storage_names.append(backend_name)
         return storage_names
+
+    def set_async_lookup_server(self, async_lookup_server: "LMCacheAsyncLookupServer"):
+        self.async_lookup_server = async_lookup_server
 
     def close(self):
         logger.info("Closing StorageManager...")

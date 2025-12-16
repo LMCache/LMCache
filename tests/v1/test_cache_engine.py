@@ -905,7 +905,9 @@ def test_paged_prefetch_retrieve(
         )
     )
     async_lookup_server = DummyLMCacheAsyncLookupServer()
-    engine.post_init(async_lookup_server=async_lookup_server)
+    if engine.storage_manager is not None:
+        engine.storage_manager.set_async_lookup_server(async_lookup_server)
+    engine.post_init()
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)

@@ -32,54 +32,49 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     Interface for remote connector
     """
 
-    save_chunk_meta: bool = True
-    meta_shape: Optional[torch.Size] = None
-    meta_dtype: Optional[torch.dtype] = None
-    meta_fmt: Optional[MemoryFormat] = None
-    full_chunk_size: Optional[int] = None
-    single_token_size: Optional[int] = None
-
     @NotAudit
-    def init_chunk_meta(
+    def post_init(
         self,
-        config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
-    ) -> None:
-        logger.info("initializing chunk meta for remote connector")
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ):
+        """
+        Post-initialization method to be called after the connector is created.
+        This can be used to perform any additional setup required by the connector.
+        """
         # TODO: support layerwise later
-        if (
-            config is None
-            or metadata is None
-            or config.extra_config is None
-            or config.extra_config.get("save_chunk_meta", True)
+        self.save_chunk_meta = (
+            config.get_extra_config_value("save_chunk_meta", True)
             or config.use_layerwise
-        ):
-            return
-
-        self.save_chunk_meta = False
-        self.meta_shape = torch.Size(
-            [
-                metadata.kv_shape[1],
-                metadata.kv_shape[0],
-                metadata.kv_shape[2],
-                metadata.kv_shape[3] * metadata.kv_shape[4],
-            ]
         )
-        self.meta_dtype = metadata.kv_dtype
+        self.meta_shapes = metadata.get_shapes()
+        self.meta_dtypes = metadata.get_dtypes()
         self.meta_fmt = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
-        self.full_chunk_size = get_size_bytes([self.meta_shape], [self.meta_dtype])
+        self.full_chunk_size = get_size_bytes(self.meta_shapes, self.meta_dtypes)
         assert self.full_chunk_size is not None
-        assert self.full_chunk_size % metadata.kv_shape[2] == 0
-        self.single_token_size = self.full_chunk_size // metadata.kv_shape[2]
+        assert self.full_chunk_size % metadata.chunk_size == 0
+        self.single_token_size = self.full_chunk_size // metadata.chunk_size
+
+        # post init remote metadata info
+        fmt_length = 2 + metadata.get_num_groups() * 5
+        self.remote_metadata_fmt = "i" * fmt_length
+        self.remote_metadata_bytes = fmt_length * 4
+
         logger.info(
-            f"init remote connector metadata info, "
-            f"shape: {self.meta_shape}, "
-            f"dtype: {self.meta_dtype}, "
-            f"fmt: {self.meta_fmt}, "
-            f"full chunk size: {self.full_chunk_size}, "
-            f"single token size: {self.single_token_size}"
+            "post init remote connector metadata info, "
+            "save chunk meta: %s, shapes: %s, dtypes: %s, fmt: %s, "
+            "full chunk size: %s, single token size: %s, "
+            "remote metadata fmt: %s, bytes: %s",
+            self.save_chunk_meta,
+            self.meta_shapes,
+            self.meta_dtypes,
+            self.meta_fmt,
+            self.full_chunk_size,
+            self.single_token_size,
+            self.remote_metadata_fmt,
+            self.remote_metadata_bytes,
         )
 
     @NotAudit
@@ -88,8 +83,6 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         memory_obj: MemoryObj,
         bytes_read: int,
     ) -> MemoryObj:
-        assert self.full_chunk_size is not None
-        assert self.single_token_size is not None
         if (
             bytes_read == 0
             or bytes_read % self.single_token_size != 0
@@ -106,21 +99,18 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             return memory_obj
 
         # NOTE: for unfull chunk, we have no way to verify
-        shape_list = list(memory_obj.meta.shape)
-        shape_list[2] = bytes_read // self.single_token_size
-        actual_shape = torch.Size(shape_list)
+        unfull_chunk_size = bytes_read // self.single_token_size
+        actual_shapes = []
+        assert memory_obj.meta.shapes is not None
+        for shape in memory_obj.meta.shapes:
+            shape_list = list(shape)
+            shape_list[2] = unfull_chunk_size
+            actual_shapes.append(torch.Size(shape_list))
         memory_obj.raw_data = memory_obj.raw_data[:bytes_read]
-        memory_obj.meta.shape = actual_shape
+        memory_obj.meta.shapes = actual_shapes
+        memory_obj.meta.shape = actual_shapes[0]
 
         return memory_obj
-
-    @NotAudit
-    def post_init(self):
-        """
-        Post-initialization method to be called after the connector is created.
-        This can be used to perform any additional setup required by the connector.
-        """
-        logger.info("Dummy post-initializing remote connector")
 
     @abc.abstractmethod
     async def exists(self, key: CacheEngineKey) -> bool:

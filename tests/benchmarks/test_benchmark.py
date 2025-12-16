@@ -178,6 +178,7 @@ def test_store_1GB(
             mock_up_broadcast_object_fn,
         )
     )
+    engine.post_init()
 
     # Run benchmark
     def run_func(tokens, slot_mappings):
@@ -300,6 +301,7 @@ def test_retrieve_1GB_allhit(
             mock_up_broadcast_object_fn,
         )
     )
+    engine.post_init()
 
     for t, s in zip(list_tokens, list_slot_mappings, strict=False):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)
@@ -419,6 +421,7 @@ def test_lookup_20K_tokens(
             mock_up_broadcast_object_fn,
         )
     )
+    engine.post_init()
 
     for t, s in zip(list_tokens, list_slot_mappings, strict=False):
         engine.store(t, kvcaches=kv_cache, slot_mapping=s)

@@ -161,6 +161,7 @@ class TestLoadFSChunksAPI:
             local_cpu_backend=local_cpu_backend,
             dst_device="cpu",
         )
+        remote_backend.post_init()
         try:
             for i in range(num_chunks):
                 key = self._create_test_key(i)

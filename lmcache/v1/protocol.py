@@ -9,8 +9,11 @@ import struct
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
+
+logger = init_logger(__name__)
 
 MAX_KEY_LENGTH = 150
 
@@ -71,53 +74,50 @@ INT_TO_LOCATION = {
 @dataclass
 class RemoteMetadata:
     length: int
-    shape: torch.Size
-    dtype: Optional[torch.dtype]
+    shapes: list[torch.Size]
+    dtypes: list[torch.dtype]
     fmt: MemoryFormat
 
-    def serialize_into(self, buffer):
-        assert len(self.shape) == 4, "Shape dimension should be 4"
+    def _prepare_params(self):
+        params = [self.length, int(self.fmt.value)]
+        for shape, dtype in zip(self.shapes, self.dtypes, strict=True):
+            assert len(shape) == 4, "Shape dimension should be 4"
+            params.append(DTYPE_TO_INT[dtype])
+            params.append(shape[0])
+            params.append(shape[1])
+            params.append(shape[2])
+            params.append(shape[3])
+        return params
 
-        struct.pack_into(
-            "iiiiiii",
-            buffer,
-            0,
-            self.length,
-            int(self.fmt.value),
-            DTYPE_TO_INT[self.dtype],
-            self.shape[0],
-            self.shape[1],
-            self.shape[2],
-            self.shape[3],
-        )
+    def serialize_into(self, buffer, fmt: str):
+        params = self._prepare_params()
+        assert len(fmt) == len(params)
+        struct.pack_into(fmt, buffer, 0, *params)
 
-    def serialize(self) -> bytes:
-        # NOTE(Jiayi): 4 is the maximum dimension of memory object.
-        # Pass in shape [x, 0, 0, 0] if it is a bytes memory object
-        assert len(self.shape) == 4, "Shape dimension should be 4"
-
-        packed_bytes = struct.pack(
-            "iiiiiii",
-            self.length,
-            int(self.fmt.value),
-            DTYPE_TO_INT[self.dtype],
-            self.shape[0],
-            self.shape[1],
-            self.shape[2],
-            self.shape[3],
-        )
+    def serialize(self, fmt: str) -> bytes:
+        params = self._prepare_params()
+        assert len(fmt) == len(params)
+        packed_bytes = struct.pack(fmt, *params)
         return packed_bytes
 
     @staticmethod
-    def deserialize(s: bytes) -> "RemoteMetadata":
-        length, fmt, dtype, shape0, shape1, shape2, shape3 = struct.unpack_from(
-            "iiiiiii", s
-        )
+    def deserialize(s: bytes, fmt: str) -> "RemoteMetadata":
+        # length, fmt, dtype, shape0, shape1, shape2, shape3
+        result = struct.unpack_from(fmt, s)
+        assert len(fmt) == len(result)
+        length = result[0]
+        memory_fmt = MemoryFormat(result[1])
+        shapes = []
+        dtypes = []
+        for i in range(2, len(result), 5):
+            shapes.append(torch.Size(result[i + 1 : i + 5]))
+            dtypes.append(INT_TO_DTYPE[result[i]])
+
         return RemoteMetadata(
             length,
-            torch.Size([shape0, shape1, shape2, shape3]),
-            INT_TO_DTYPE[dtype],
-            MemoryFormat(fmt),
+            shapes,
+            dtypes,
+            memory_fmt,
         )
 
 

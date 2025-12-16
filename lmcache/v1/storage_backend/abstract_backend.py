@@ -43,6 +43,10 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
 
         self.dst_device = dst_device
 
+    def post_init(self):  # noqa: B027
+        """Post initialize the storage backend."""
+        pass
+
     @abc.abstractmethod
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """

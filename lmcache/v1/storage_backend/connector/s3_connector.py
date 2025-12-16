@@ -12,8 +12,10 @@ from awscrt.http import HttpHeaders, HttpRequest
 from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
@@ -164,8 +166,13 @@ class S3Connector(RemoteConnector):
 
         self.pq_executor = AsyncPQExecutor(loop)
 
-    def post_init(self):
+    def post_init(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ):
         logger.info("Post-initializing S3 connector")
+        super().post_init(config, metadata)
 
         if self.s3_part_size is None:
             # Default to chunk size
@@ -173,8 +180,8 @@ class S3Connector(RemoteConnector):
         assert self.s3_part_size == self.full_chunk_size, (
             "S3 part size must be equal to chunk size in S3Connector"
         )
-        logger.info(f"s3 connector meta_shape: {self.meta_shape}")
-        logger.info(f"s3 connector meta_dtype: {self.meta_dtype}")
+        logger.info(f"s3 connector meta_shapes: {self.meta_shapes}")
+        logger.info(f"s3 connector meta_dtypes: {self.meta_dtypes}")
 
     def _format_safe_path(self, key_str: str) -> str:
         """
@@ -368,8 +375,8 @@ class S3Connector(RemoteConnector):
             self.object_size_cache[key_str] = obj_size
 
         memory_obj = self.local_cpu_backend.allocate(
-            self.meta_shape,
-            self.meta_dtype,
+            self.meta_shapes,
+            self.meta_dtypes,
             self.meta_fmt,
         )
 
@@ -463,8 +470,8 @@ class S3Connector(RemoteConnector):
                 self.object_size_cache[key_str] = obj_size
 
             memory_obj = self.local_cpu_backend.allocate(
-                self.meta_shape,
-                self.meta_dtype,
+                self.meta_shapes,
+                self.meta_dtypes,
                 self.meta_fmt,
             )
 
