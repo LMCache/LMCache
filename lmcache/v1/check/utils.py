@@ -66,8 +66,8 @@ def create_test_memory_obj_for_storage_manager(
     kv_2ltd_shape = torch.Size([kv_dim, num_layers, num_tokens, hidden_dim])
 
     memory_obj = storage_manager.allocate(
-        shape=kv_2ltd_shape,
-        dtype=metadata.kv_dtype,
+        kv_2ltd_shape,
+        metadata.kv_dtype,
         fmt=MemoryFormat.KV_2LTD,
         eviction=True,
         busy_loop=False,

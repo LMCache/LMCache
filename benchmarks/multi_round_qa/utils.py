@@ -40,6 +40,9 @@ class CustomFormatter(logging.Formatter):
 def init_logger(name: str, log_level=logging.DEBUG) -> Logger:
     logger = logging.getLogger(name)
 
+    logger.handlers.clear()
+    logger.propagate = False
+
     ch = logging.StreamHandler()
     ch.setLevel(log_level)
     ch.setFormatter(CustomFormatter())

@@ -936,8 +936,8 @@ class GdsBackend(AllocatorBackendInterface):
 
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -945,26 +945,12 @@ class GdsBackend(AllocatorBackendInterface):
         if busy_loop:
             logger.warning("GDS Backend does not support allocation with busy loop")
 
-        result = self.memory_allocator.allocate(shape, dtype, fmt)
-
-        if result is None:
-            # Calculate required size for logging
-            element_size = torch.tensor([], dtype=dtype).element_size()
-            required_size = shape.numel() * element_size
-            logger.warning(
-                f"[GDS GPU BUFFER] GPU staging allocator failed! "
-                f"This is unrelated to GDS disk eviction. "
-                f"Requested shape={shape}, dtype={dtype}, "
-                f"required_size={required_size / 1024 / 1024:.2f} MB. "
-                f"Consider increasing cufile_buffer_size or GPU memory."
-            )
-
-        return result
+        return self.memory_allocator.allocate(shapes, dtypes, fmt)
 
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -973,21 +959,7 @@ class GdsBackend(AllocatorBackendInterface):
         if busy_loop:
             logger.warning("GDS Backend does not support allocation with busy loop")
 
-        result = self.memory_allocator.batched_allocate(shape, dtype, batch_size, fmt)
-
-        if result is None:
-            # Calculate required size for logging
-            element_size = torch.tensor([], dtype=dtype).element_size()
-            required_size = shape.numel() * element_size * batch_size
-            logger.warning(
-                f"[GDS GPU BUFFER] Batched GPU staging allocator failed! "
-                f"This is unrelated to GDS disk eviction. "
-                f"Requested shape={shape}, dtype={dtype}, batch_size={batch_size}, "
-                f"required_size={required_size / 1024 / 1024:.2f} MB. "
-                f"Consider increasing cufile_buffer_size or GPU memory."
-            )
-
-        return result
+        return self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
 
     def get_allocator_backend(self):
         return self

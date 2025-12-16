@@ -11,3 +11,4 @@ Following is the current list of maintainers on this project
 - @1179548172@qq.com, Chunxiao Zheng, Tencent, Committer
 - @shaotingf@uchicago.edu, Shaoting Feng, UChicago, Committer
 - @slshen@uchicago.edu, Samuel Shen, UChicago, Committer
+- @dongjoo.seo1@samsung.com, Dongjoo Seo, Samsung, Committer

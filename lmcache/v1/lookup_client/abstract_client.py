@@ -34,6 +34,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
@@ -47,6 +48,9 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
             request_configs: The configs of the request,
             includes tags and the other configs
+
+            num_computed_tokens: The number of leading tokens that
+            the caller has already computed.
 
         Returns:
             The number of tokens that can be loaded from cache.
