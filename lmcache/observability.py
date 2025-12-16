@@ -1307,11 +1307,14 @@ class PrometheusLogger:
 
     @staticmethod
     def _metadata_to_labels(metadata: LMCacheEngineMetadata):
-        return {
+        labels = {
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
             "role": metadata.role,
         }
+        if metadata.served_model_name:
+            labels["served_model_name"] = metadata.served_model_name
+        return labels
 
     _instance = None
 

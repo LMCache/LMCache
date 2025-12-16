@@ -25,6 +25,7 @@ from lmcache.v1.cache_controller.message import (
     HealthWorkerMsg,
     HealthWorkerRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
@@ -220,6 +221,8 @@ class LMCacheWorker:
     def _create_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
         if isinstance(msg, BatchedP2PLookupMsg):
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
+        elif isinstance(msg, HeartbeatMsg):
+            return HeartbeatRetMsg()  # No command by default
         else:
             raise ValueError(f"Unknown message type: {type(msg)}")
 
@@ -254,6 +257,11 @@ class LMCacheWorker:
         return batch
 
     async def heartbeat(self):
+        """
+        Send periodic heartbeats to the controller (REQ-REP mode).
+
+        Process any commands received in the heartbeat response.
+        """
         enable_heartbeat = (
             self.config.lmcache_worker_heartbeat_time is not None
             and self.config.lmcache_worker_heartbeat_time > 0
@@ -266,16 +274,57 @@ class LMCacheWorker:
             )
             await asyncio.sleep(self.config.lmcache_worker_heartbeat_delay_time)
             while True:
-                self.put_msg(
-                    HeartbeatMsg(
-                        instance_id=self.lmcache_instance_id,
-                        worker_id=self.worker_id,
-                        ip=self.lmcache_worker_ip,
-                        port=self.lmcache_worker_port,
-                        peer_init_url=self.p2p_init_url,
-                    )
+                # Send heartbeat via REQ-REP and get response
+                heartbeat_msg = HeartbeatMsg(
+                    instance_id=self.lmcache_instance_id,
+                    worker_id=self.worker_id,
+                    ip=self.lmcache_worker_ip,
+                    port=self.lmcache_worker_port,
+                    peer_init_url=self.p2p_init_url,
                 )
+
+                try:
+                    ret_msg = await self.async_put_and_wait_msg(heartbeat_msg)
+
+                    if isinstance(ret_msg, HeartbeatRetMsg):
+                        self._handle_heartbeat_commands(ret_msg)
+                    else:
+                        logger.warning(
+                            "Unexpected heartbeat response type: %s", type(ret_msg)
+                        )
+                except Exception as e:
+                    logger.error("Error during heartbeat: %s", e)
+
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
+
+    def _handle_heartbeat_commands(self, ret_msg: HeartbeatRetMsg):
+        """
+        Handle commands received in heartbeat response.
+
+        Uses polymorphic dispatch - each command class implements its own
+        execute() method. Commands are executed sequentially.
+        """
+        if not ret_msg.has_commands():
+            return
+
+        for command in ret_msg.commands:
+            logger.info(
+                "Executing heartbeat command: %s",
+                command.describe(),
+            )
+            try:
+                command.execute(self)
+            except NotImplementedError:
+                logger.warning(
+                    "Command %s.execute() not implemented yet",
+                    type(command).__name__,
+                )
+            except Exception as e:
+                logger.error(
+                    "Error executing command %s: %s",
+                    type(command).__name__,
+                    e,
+                )
 
     async def push(self):
         while True:

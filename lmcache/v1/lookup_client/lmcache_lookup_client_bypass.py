@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -29,6 +29,8 @@ class LMCacheBypassLookupClient(LookupClientInterface):
     def __init__(
         self,
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
         lmcache_engine: LMCacheEngine,
     ):
         """
@@ -36,10 +38,10 @@ class LMCacheBypassLookupClient(LookupClientInterface):
 
         Args:
             vllm_config: The vLLM configuration
+            config: The LMCacheEngine configuration
+            metadata: The LMCacheEngine metadata
             lmcache_engine: The LMCacheEngine instance to use for lookups
         """
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration should be passed."
         )
@@ -58,25 +60,37 @@ class LMCacheBypassLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         try:
             if not self.enable_blending:
                 # Process tokens to get hashes and offsets
                 hashes = []
                 offsets = []
+                # We already have hashes here so we can skip the chunks that are already
+                # in GPU cache. Don't pass num_computed_tokens to engine.
+                aligned_computed_tokens = num_computed_tokens  # pre-aligned in adapter
+                result = aligned_computed_tokens
                 for start, end, key in self.token_database.process_tokens(
                     token_ids, make_key=False
                 ):
+                    if end <= aligned_computed_tokens:
+                        continue
                     hashes.append(key)
                     offsets.append(end - start)
+                # Return aligned_computed_tokens immediately if there is no token to
+                # lookup
+                if not hashes:
+                    return result
 
                 # Call LMCacheEngine lookup with hashes and offsets
-                result = self.lmcache_engine.lookup(
+                result += self.lmcache_engine.lookup(
                     hashes=hashes,
                     offsets=offsets,
                     lookup_id=lookup_id,
                     pin=True,
                     request_configs=request_configs,
+                    num_computed_tokens=0,
                 )
             else:
                 # For blending mode, pass tokens directly
@@ -85,6 +99,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     lookup_id=lookup_id,
                     pin=True,
                     request_configs=request_configs,
+                    num_computed_tokens=num_computed_tokens,
                 )
 
             return result

@@ -134,8 +134,8 @@ class BatchedMessageSender:
             op_type: Operation type (ADMIT or EVICT)
             key: Chunk hash key
         """
-        seq_num = self._get_next_sequence_number()
-        op = KVOpEvent(op_type=op_type, key=key, seq_num=seq_num)
+        # Create operation without sequence number (will be assigned during drain)
+        op = KVOpEvent(op_type=op_type, key=key, seq_num=-1)
 
         # Thread-safe queue put
         self.message_queue.put(op)
@@ -159,9 +159,9 @@ class BatchedMessageSender:
             try:
                 # Use a small timeout to avoid blocking indefinitely
                 op = self.message_queue.get(timeout=0.001)
+                # Assign sequence number at drain time to ensure strict ordering
+                op.seq_num = self._get_next_sequence_number()
                 ops_to_send.append(op)
-                # Mark task as done to maintain queue count accuracy
-                self.message_queue.task_done()
             except queue.Empty:
                 # Queue is empty, break the loop
                 break
@@ -169,49 +169,42 @@ class BatchedMessageSender:
         if not ops_to_send:
             return
 
-        # Ensure common fields are set
-        assert self.instance_id is not None, "instance_id must be set"
-        assert self.worker_id is not None, "worker_id must be set"
-        assert self.location is not None, "location must be set"
+        try:
+            # Ensure common fields are set
+            assert self.instance_id is not None, "instance_id must be set"
+            assert self.worker_id is not None, "worker_id must be set"
+            assert self.location is not None, "location must be set"
 
-        # Create batched message with common fields and lightweight operations
-        # This reduces redundancy: common fields are sent once instead of N times
-        batched_msg = BatchedKVOperationMsg(
-            instance_id=self.instance_id,
-            worker_id=self.worker_id,
-            location=self.location,
-            operations=ops_to_send,
-        )
-        self.lmcache_worker.put_msg(batched_msg)
+            # Create batched message with common fields and lightweight operations
+            # This reduces redundancy: common fields are sent once instead of N times
+            batched_msg = BatchedKVOperationMsg(
+                instance_id=self.instance_id,
+                worker_id=self.worker_id,
+                location=self.location,
+                operations=ops_to_send,
+            )
+            self.lmcache_worker.put_msg(batched_msg)
+        finally:
+            # Mark all tasks as done regardless of success/failure
+            # This ensures flush() doesn't hang if put_msg fails
+            for _ in ops_to_send:
+                self.message_queue.task_done()
 
     def flush(self):
         """Manually flush all pending messages.
 
         This method ensures all pending messages in the queue are processed
-        before returning. It repeatedly drains the queue until empty to handle
-        race conditions in high-throughput scenarios.
+        before returning. It triggers the consumer thread and waits for the
+        queue to be empty.
         """
-        # Notify consumer thread to wake up and process messages
         with self.cv:
             self.cv.notify()
 
-        # Keep draining until queue is truly empty
-        # This handles the race condition where messages are being added
-        # while we're trying to flush
-        max_attempts = 10
-        for _ in range(max_attempts):
-            self._drain_and_send()
-            # Small sleep to allow any in-flight messages to be queued
-            if not self.message_queue.empty():
-                threading.Event().wait(0.001)
-            else:
-                break
-
-        # Final drain to ensure we got everything
-        self._drain_and_send()
+        self.message_queue.join()
 
     def close(self):
         """Close the batched message sender and flush remaining messages."""
+        self.flush()
         self.running = False
 
         # Wake up consumer thread to exit
@@ -225,6 +218,3 @@ class BatchedMessageSender:
                 logger.warning(
                     "Batched message sender thread did not terminate within timeout"
                 )
-
-        # Flush remaining messages
-        self.flush()
