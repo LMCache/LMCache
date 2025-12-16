@@ -159,10 +159,10 @@ You should see LMCache logs like this (examples for each engine):
    (EngineCore_DP0 pid=494270) [2025-09-30 01:12:36,510] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
 
    # SGLang
-   [2025-12-15 16:15:48] Prefill batch: new-token=1, cached-token=34
-   [2025-12-15 16:15:48] LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s
-   [2025-12-15 16:15:48] LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
-   [2025-12-15 16:15:48] LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
+   Prefill batch: new-token=1, cached-token=34
+   LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s
+   LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
+   LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
 
 **What this means:**
 
