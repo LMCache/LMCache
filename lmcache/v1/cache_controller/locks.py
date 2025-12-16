@@ -22,6 +22,8 @@ class RWLockWithTimeout:
     """
     A simple read-write lock with timeout support.
     Multiple readers can hold the lock simultaneously, but only one writer.
+
+    Note: This lock is NOT reentrant.
     """
 
     def __init__(self):
@@ -32,13 +34,15 @@ class RWLockWithTimeout:
 
     def acquire_read(self, timeout: Optional[float] = None) -> bool:
         """Acquire a read lock with optional timeout."""
-        deadline = time.time() + timeout if timeout is not None else None
+        deadline = time.monotonic() + timeout if timeout is not None else None
 
         with self._condition:
+            # Note: Sustained write operations may starve reads if writers
+            # continuously arrive while readers are waiting
             while self._writer_active or self._writers_waiting > 0:
-                if deadline is not None and time.time() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     return False
-                remaining = deadline - time.time() if deadline else None
+                remaining = deadline - time.monotonic() if deadline else None
                 if remaining is not None and remaining <= 0:
                     return False
                 self._condition.wait(timeout=remaining)
@@ -54,15 +58,15 @@ class RWLockWithTimeout:
 
     def acquire_write(self, timeout: Optional[float] = None) -> bool:
         """Acquire a write lock with optional timeout."""
-        deadline = time.time() + timeout if timeout is not None else None
+        deadline = time.monotonic() + timeout if timeout is not None else None
 
         with self._condition:
             self._writers_waiting += 1
             try:
                 while self._readers > 0 or self._writer_active:
-                    if deadline is not None and time.time() >= deadline:
+                    if deadline is not None and time.monotonic() >= deadline:
                         return False
-                    remaining = deadline - time.time() if deadline else None
+                    remaining = deadline - time.monotonic() if deadline else None
                     if remaining is not None and remaining <= 0:
                         return False
                     self._condition.wait(timeout=remaining)
@@ -79,10 +83,12 @@ class RWLockWithTimeout:
 
     @contextmanager
     def read_lock(self, timeout: Optional[float] = None):
-        """Context manager for read lock with timeout."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        effective_timeout = 0.05 if timeout is None else timeout  # 50ms default
-        if not self.acquire_read(effective_timeout):
+        """Context manager for read lock with timeout.
+
+        Args:
+            timeout: Timeout in seconds. None means wait forever.
+        """
+        if not self.acquire_read(timeout):
             raise RWLockTimeoutError("Failed to acquire read lock within timeout")
         try:
             yield
@@ -91,10 +97,12 @@ class RWLockWithTimeout:
 
     @contextmanager
     def write_lock(self, timeout: Optional[float] = None):
-        """Context manager for write lock with timeout."""
-        # TODO(baoloongmao): Move timeout values to configuration
-        effective_timeout = 0.1 if timeout is None else timeout  # 100ms default
-        if not self.acquire_write(effective_timeout):
+        """Context manager for write lock with timeout.
+
+        Args:
+            timeout: Timeout in seconds. None means wait forever.
+        """
+        if not self.acquire_write(timeout):
             raise RWLockTimeoutError("Failed to acquire write lock within timeout")
         try:
             yield
@@ -107,6 +115,8 @@ class FastLockWithTimeout:
     A fast lock with timeout support for WorkerNode.
     Optimized for high frequency operations on small critical sections.
     Uses non-blocking fast path for better performance.
+
+    Note: This lock is NOT reentrant.
     """
 
     __slots__ = ("_lock",)
@@ -125,7 +135,7 @@ class FastLockWithTimeout:
         self._lock.release()
 
     def __enter__(self):
-        # Fast path: try non-blocking acquire first (no syscall overhead)
+        # Fast path: try non-blocking acquire first (no context switch overhead)
         if self._lock.acquire(blocking=False):
             return self
         # Slow path: reduced timeout for faster failure detection

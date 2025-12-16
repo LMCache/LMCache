@@ -10,7 +10,6 @@ import msgspec
 # First Party
 from lmcache.v1.cache_controller.commands.base import HeartbeatCommand
 from lmcache.v1.cache_controller.commands.full_sync import FullSyncCommand
-from lmcache.v1.cache_controller.utils import WorkerInfo
 
 # Type alias for all command types - msgspec needs Union for tagged unions
 AnyCommand = Union[FullSyncCommand, HeartbeatCommand]
