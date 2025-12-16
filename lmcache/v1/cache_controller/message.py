@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import Enum
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 # Third Party
 import msgspec
 
 # First Party
+from lmcache.v1.cache_controller.commands.base import HeartbeatCommand
+from lmcache.v1.cache_controller.commands.full_sync import FullSyncCommand
 from lmcache.v1.cache_controller.utils import WorkerInfo
+
+# Type alias for all command types - msgspec needs Union for tagged unions
+AnyCommand = Union[FullSyncCommand, HeartbeatCommand]
 
 
 class MsgBase(msgspec.Struct, tag=True):  # type: ignore
@@ -109,15 +114,6 @@ class KVOpEvent(msgspec.Struct):
     seq_num: int
 
 
-class HeartbeatMsg(RegisterMsg):
-    """Message for heartbeat, include register info for re-register"""
-
-    # TODO: add more heartbeat info
-
-    def describe(self) -> str:
-        return f"Heartbeat from instance {self.instance_id}, worker {self.worker_id}"
-
-
 class BatchedKVOperationMsg(WorkerMsg):
     """Batched KV operation message with common fields and lightweight operations
 
@@ -146,6 +142,19 @@ class WorkerReqMsg(MsgBase):
         return ""
 
 
+class HeartbeatMsg(WorkerReqMsg):
+    """Message for heartbeat (REQ-REP mode), include register info for re-register"""
+
+    instance_id: str
+    worker_id: int
+    ip: str
+    port: int
+    peer_init_url: Optional[str]
+
+    def describe(self) -> str:
+        return f"Heartbeat from instance {self.instance_id}, worker {self.worker_id}"
+
+
 class BatchedP2PLookupMsg(WorkerReqMsg):
     """Batched P2P lookup message"""
 
@@ -167,6 +176,31 @@ class BatchedP2PLookupMsg(WorkerReqMsg):
 class WorkerReqRetMsg(MsgBase):
     def describe(self) -> str:
         return ""
+
+
+class HeartbeatRetMsg(WorkerReqRetMsg):
+    """Heartbeat response message with optional commands
+
+    The controller can use this to send commands to workers through
+    the heartbeat mechanism. This provides a general-purpose way to
+    trigger actions on workers without adding new message types.
+
+    The commands field uses msgspec's tagged union for polymorphic
+    serialization - each command subclass is identified by its tag.
+    Commands are executed sequentially by the worker.
+    """
+
+    commands: List[AnyCommand] = []
+
+    def describe(self) -> str:
+        if not self.commands:
+            return "HeartbeatRet (no commands)"
+        cmd_descs = [cmd.describe() for cmd in self.commands]
+        return f"HeartbeatRet commands=[{', '.join(cmd_descs)}]"
+
+    def has_commands(self) -> bool:
+        """Check if there are commands to execute"""
+        return len(self.commands) > 0
 
 
 class BatchedP2PLookupRetMsg(WorkerReqRetMsg):
@@ -639,6 +673,7 @@ Msg = Union[
     QueryInstMsg,
     QueryInstRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
     QueryWorkerInfoMsg,

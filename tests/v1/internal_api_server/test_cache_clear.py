@@ -130,5 +130,5 @@ class TestCacheClearAPI:
         # Assert
         assert response.status_code == 503
         response_data = json.loads(response.text)
-        assert response_data["error"] == "/cache/clear API is unavailable"
+        assert response_data["error"] == "LMCache API is unavailable"
         assert response_data["message"] == "LMCache engine not configured."
