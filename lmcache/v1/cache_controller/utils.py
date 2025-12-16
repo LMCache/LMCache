@@ -52,11 +52,11 @@ class WorkerNode:
     def handle_batched_kv_operations(
         self,
         msg: BatchedKVOperationMsg,
-        on_seq_discontinuity: Optional[Callable[[], None]] = None,
+        on_seq_num_out_of_order: Optional[Callable[[], None]] = None,
     ) -> None:
         """
         Handle batched KV operations with single lock acquisition.
-        Logs warning and calls callback if sequence discontinuity is detected.
+        Logs warning and calls callback if sequence out of order is detected.
         """
         seq_warning: tuple[int, int, int] | None = None
         with self._lock:
@@ -92,10 +92,10 @@ class WorkerNode:
 
         # Log warning and call callback outside lock
         if seq_warning is not None:
-            if on_seq_discontinuity is not None:
-                on_seq_discontinuity()
+            if on_seq_num_out_of_order is not None:
+                on_seq_num_out_of_order()
             logger.warning(
-                "KV batch sequence discontinuity detected: "
+                "KV batch sequence out of order detected: "
                 "key=%s, expected_seq=%s, actual_seq=%s, gap=%s",
                 (msg.instance_id, msg.worker_id, msg.location),
                 seq_warning[0],
@@ -241,8 +241,7 @@ class InstanceNode:
         # Snapshot workers to avoid RuntimeError if dict changes during iteration
         workers_snapshot = list(self.workers.items())
         for worker_id, worker_node in workers_snapshot:
-            result = worker_node.find_key(key)
-            if result is not None:
+            if result := worker_node.find_key(key):
                 # Fill in the instance_id in KVChunkInfo
                 kv_info, peer_init_url, keys = result
                 return (
@@ -259,8 +258,7 @@ class InstanceNode:
         # Snapshot workers to avoid RuntimeError if dict changes during iteration
         workers_snapshot = list(self.workers.items())
         for worker_id, worker_node in workers_snapshot:
-            kv_info = worker_node.find_key_simple(key)
-            if kv_info is not None:
+            if kv_info := worker_node.find_key_simple(key):
                 return KVChunkInfo(self.instance_id, worker_id, kv_info.location)
         return None
 
@@ -269,22 +267,14 @@ class InstanceNode:
         Check if any worker in this instance has the specified IP address.
         """
         # Snapshot workers to avoid RuntimeError if dict changes during iteration
-        workers_snapshot = list(self.workers.values())
-        for worker_node in workers_snapshot:
-            if worker_node.ip == ip:
-                return True
-        return False
+        return any(worker.ip == ip for worker in list(self.workers.values()))
 
     def get_total_kv_count(self) -> int:
         """
         Get total count of KV chunks across all workers in this instance.
         """
         # Snapshot workers to avoid RuntimeError if dict changes during iteration
-        workers_snapshot = list(self.workers.values())
-        total = 0
-        for worker_node in workers_snapshot:
-            total += worker_node.get_kv_count()
-        return total
+        return sum(worker.get_kv_count() for worker in list(self.workers.values()))
 
 
 class RegistryTree:
@@ -460,7 +450,7 @@ class RegistryTree:
         if worker_node is None:
             return False
         worker_node.handle_batched_kv_operations(
-            msg, on_seq_discontinuity=self._incr_seq_discontinuity_count
+            msg, on_seq_num_out_of_order=self._incr_seq_discontinuity_count
         )
         return True
 
