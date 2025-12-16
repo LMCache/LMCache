@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Annotated, Callable, List, Optional, Tuple
+from typing import Annotated, Any, Callable, List, Optional, Tuple
+import asyncio
+import hashlib
 import json
 import traceback
 
@@ -12,6 +14,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import (
+    compress_slot_mapping,
+    parse_mixed_slot_mapping,
+)
 from lmcache.v1.cache_engine import LMCacheEngine
 
 logger = init_logger(__name__)
@@ -122,6 +128,189 @@ def _get_kvcaches_and_device(engine):
             )
 
     return kvcaches, device
+
+
+def _compute_tensor_checksum(tensor: torch.Tensor) -> str:
+    """Compute MD5 checksum of a tensor."""
+    # Move to CPU and convert to bytes for hashing
+    # Handle BFloat16 which is not supported by numpy
+    if tensor.dtype == torch.bfloat16:
+        # Convert bfloat16 to float32 for numpy compatibility
+        tensor = tensor.to(torch.float32)
+
+    tensor_bytes = tensor.detach().cpu().contiguous().numpy().tobytes()
+    return hashlib.md5(tensor_bytes).hexdigest()
+
+
+def _slice_by_slot_dim(
+    kv_at_slots: torch.Tensor, start_idx: int, end_idx: int
+) -> torch.Tensor:
+    """Slice tensor by slot dimension based on tensor ndim."""
+    if kv_at_slots.ndim == 4:
+        # MHA: [2, num_slots, num_heads, head_size]
+        return kv_at_slots[:, start_idx:end_idx, :, :]
+    elif kv_at_slots.ndim == 3:
+        # 4D format: [num_slots, num_heads, head_size]
+        return kv_at_slots[start_idx:end_idx, :, :]
+    else:
+        # MLA: [num_slots, head_size]
+        return kv_at_slots[start_idx:end_idx, :]
+
+
+def _extract_kv_at_slots(
+    kv_tensor: torch.Tensor, slot_tensor: torch.Tensor
+) -> torch.Tensor:
+    """Extract KV data at specified slot positions from kv_tensor.
+
+    Handles different kv_tensor formats:
+    - MHA (5D): [2, num_blocks, block_size, num_heads, head_size]
+    - MLA (3D): [num_blocks, block_size, head_size]
+
+    The slot_mapping is calculated as:
+        slot_idx = block_id * block_size + block_offset
+
+    This means we can reshape the tensor to flatten (num_blocks, block_size)
+    into a single slot dimension and index directly.
+
+    Args:
+        kv_tensor: The KV cache tensor for a single layer.
+        slot_tensor: Tensor of slot indices to extract.
+
+    Returns:
+        Tensor with KV data at the specified slots.
+        - MHA: shape [2, num_slots, num_heads, head_size]
+        - MLA: shape [num_slots, head_size]
+    """
+    ndim = kv_tensor.ndim
+
+    if ndim == 5:
+        # MHA format: [2, num_blocks, block_size, num_heads, head_size]
+        # Reshape to [2, num_blocks * block_size, num_heads, head_size]
+        # then index by slot_tensor on dimension 1
+        kv_2d = 2
+        num_heads = kv_tensor.shape[3]
+        head_size = kv_tensor.shape[4]
+        kv_reshaped = kv_tensor.reshape(kv_2d, -1, num_heads, head_size)
+        return kv_reshaped[:, slot_tensor, :, :]
+    elif ndim == 3:
+        # MLA format: [num_blocks, block_size, head_size]
+        # Reshape to [num_blocks * block_size, head_size]
+        head_size = kv_tensor.shape[2]
+        kv_reshaped = kv_tensor.reshape(-1, head_size)
+        return kv_reshaped[slot_tensor, :]
+    elif ndim == 4:
+        # Alternative format: [num_blocks, block_size, num_heads, head_size]
+        # (used in some test cases)
+        num_heads = kv_tensor.shape[2]
+        head_size = kv_tensor.shape[3]
+        kv_reshaped = kv_tensor.reshape(-1, num_heads, head_size)
+        return kv_reshaped[slot_tensor, :, :]
+    else:
+        # Fallback: try the original approach
+        logger.warning(
+            "Unknown kv_tensor ndim=%d, shape=%s. Using fallback indexing.",
+            ndim,
+            kv_tensor.shape,
+        )
+        return kv_tensor.view(-1, *kv_tensor.shape[2:])[slot_tensor]
+
+
+def compute_kvcache_checksums(
+    lmcache_adapter,
+    slot_indices: list[int],
+    chunk_size: Optional[int] = None,
+    layerwise: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Compute MD5 checksums for kvcaches at specified slot positions.
+
+    This method is used by the kvcache check API to verify that stored
+    and retrieved kvcaches are identical.
+
+    The slot_mapping is calculated in vllm_v1_adapter.py as:
+        slot_idx = block_id * block_size + block_offset
+
+    For vLLM kv_cache formats:
+    - MHA (5D): [2, num_blocks, block_size, num_heads, head_size]
+    - MLA (3D): [num_blocks, block_size, head_size]
+
+    Args:
+        lmcache_adapter: The LMCache adapter containing kv_caches.
+        slot_indices: List of slot indices to compute checksums for.
+        chunk_size: Optional chunk size for computing per-chunk checksums.
+            If provided, will compute checksums for each chunk.
+        layerwise: If True, output per-layer checksums for each chunk.
+            If False (default), output one checksum per chunk (all layers combined).
+
+    Returns:
+        Dictionary containing:
+        - 'chunk_checksums': (if layerwise=True) dict mapping layer names to
+          list of per-chunk checksums
+        - 'chunk_checksums': (if layerwise=False) list of checksums, one per chunk
+          (each checksum covers all layers for that chunk)
+        Returns None if kv_caches is not available.
+    """
+    if not lmcache_adapter.kv_caches:
+        logger.warning("kv_caches is empty, cannot compute checksums")
+        return None
+
+    if chunk_size is None or chunk_size <= 0:
+        return {"chunk_checksums": [], "chunk_size": chunk_size, "num_chunks": 0}
+
+    num_slots = len(slot_indices)
+    num_chunks = (num_slots + chunk_size - 1) // chunk_size
+
+    # Pre-extract all layer data at slot positions
+    layer_data_at_slots: dict[str, torch.Tensor] = {}
+    for layer_name, kv_tensor in lmcache_adapter.kv_caches.items():
+        try:
+            slot_tensor = torch.tensor(
+                slot_indices, dtype=torch.long, device=kv_tensor.device
+            )
+            layer_data_at_slots[layer_name] = _extract_kv_at_slots(
+                kv_tensor, slot_tensor
+            )
+        except Exception as e:
+            logger.error("Failed to extract data for layer %s: %s", layer_name, str(e))
+            layer_data_at_slots[layer_name] = None  # type: ignore
+
+    if layerwise:
+        # Output per-layer checksums for each chunk: {layer_name: [checksum1, ...]}
+        chunk_checksums: dict[str, list[str]] = {}
+        for layer_name, kv_at_slots in layer_data_at_slots.items():
+            if kv_at_slots is None:
+                chunk_checksums[layer_name] = ["error"] * num_chunks
+                continue
+            chunk_checksum_list: list[str] = []
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * chunk_size
+                end_idx = min(start_idx + chunk_size, num_slots)
+                chunk_data = _slice_by_slot_dim(kv_at_slots, start_idx, end_idx)
+                chunk_checksum_list.append(_compute_tensor_checksum(chunk_data))
+            chunk_checksums[layer_name] = chunk_checksum_list
+        return {
+            "chunk_checksums": chunk_checksums,
+            "chunk_size": chunk_size,
+            "num_chunks": num_chunks,
+        }
+    else:
+        # Output one checksum per chunk (all layers combined): [checksum1, ...]
+        chunk_checksums_list: list[str] = []
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, num_slots)
+            md5_hash = hashlib.md5()
+            for layer_name in sorted(layer_data_at_slots.keys()):
+                kv_at_slots = layer_data_at_slots[layer_name]
+                if kv_at_slots is None:
+                    continue
+                chunk_data = _slice_by_slot_dim(kv_at_slots, start_idx, end_idx)
+                md5_hash.update(_compute_tensor_checksum(chunk_data).encode())
+            chunk_checksums_list.append(md5_hash.hexdigest())
+        return {
+            "chunk_checksums": chunk_checksums_list,
+            "chunk_size": chunk_size,
+            "num_chunks": num_chunks,
+        }
 
 
 @router.delete("/cache/clear")
@@ -303,6 +492,7 @@ async def store(
         )
 
         engine.store(
+            req_id="cache_api_store",
             tokens=token_list,
             slot_mapping=slot_mapping,
             kvcaches=kvcaches,
@@ -356,10 +546,13 @@ async def retrieve(
         slot_mapping = torch.arange(len(token_list), dtype=torch.long, device=device)
 
         logger.debug(
-            f"Retrieving {len(token_list)} tokens with slot_mapping on device {device}"
+            "Retrieving %d tokens with slot_mapping on device %s",
+            len(token_list),
+            device,
         )
 
         ret_mask = engine.retrieve(
+            req_id="cache_api_retrieve",
             tokens=token_list,
             slot_mapping=slot_mapping,
             kvcaches=kvcaches,
@@ -370,3 +563,333 @@ async def retrieve(
     return _execute_cache_operation(
         "retrieve cache", _retrieve_operation, lmcache_engine, tokens
     )
+
+
+@router.get("/cache/kvcache/check")
+async def kvcache_check(
+    request: Request,
+    slot_mapping: Optional[str] = None,
+    chunk_size: Optional[int] = None,
+    layerwise: bool = False,
+):
+    """Compute checksum for kvcaches at specified slot_mapping positions.
+
+    This endpoint is used to verify that stored and retrieved kvcaches are identical.
+
+    Args:
+        request (Request): The FastAPI request object containing application state.
+        slot_mapping (Optional[str], optional): Slot indices in comma-separated format,
+            supports single numbers and range expressions.
+            Examples: "0,1,2,3", "1,2,3,[9,12],17,19". Defaults to None.
+        chunk_size (Optional[int], optional): Chunk size for computing checksums.
+            Each chunk contains `chunk_size` slots. Required parameter.
+        layerwise (bool, optional): If True, output per-layer checksums for each chunk.
+            If False (default), output one checksum per chunk (all layers combined).
+
+    Returns:
+        PlainTextResponse: A JSON response containing checksums.
+
+    Example:
+        ```bash
+        # layerwise=false (default): one checksum per chunk (all layers combined)
+        curl -X GET "http://localhost:8000/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2"
+        # Response: {
+        #   "status": "success",
+        #   "slot_mapping_ranges": [[0, 3]],
+        #   "chunk_size": 2,
+        #   "num_chunks": 2,
+        #   "chunk_checksums": ["checksum_chunk0", "checksum_chunk1"],
+        #   "layerwise": false
+        # }
+
+        # layerwise=true: per-layer checksums for each chunk
+        curl -X GET "http://localhost:8000/cache/kvcache/check?slot_mapping=0,1,2,3&chunk_size=2&layerwise=true"
+        # Response: {
+        #   "status": "success",
+        #   "slot_mapping_ranges": [[0, 3]],
+        #   "chunk_size": 2,
+        #   "num_chunks": 2,
+        #   "chunk_checksums": {
+        #       "layer_0": ["checksum_chunk0", "checksum_chunk1"],
+        #       "layer_1": ["checksum_chunk0", "checksum_chunk1"],
+        #   },
+        #   "layerwise": true
+        # }
+        ```
+    """
+    try:
+        lmcache_adapter = request.app.state.lmcache_adapter
+        if not lmcache_adapter:
+            return _create_error_response(
+                {
+                    "error": "LMCache adapter unavailable",
+                    "message": "LMCache adapter not configured.",
+                },
+                503,
+            )
+
+        if not slot_mapping:
+            return _create_error_response(
+                {
+                    "error": "Missing parameters",
+                    "message": "slot_mapping parameter is required",
+                },
+                400,
+            )
+
+        # Parse slot_mapping from mixed format string
+        # (supports single numbers and ranges)
+        slot_indices, error_info = parse_mixed_slot_mapping(slot_mapping)
+        if error_info:
+            return _create_error_response(error_info, 400)
+
+        # slot_indices is guaranteed to be non-None when error_info is None
+        assert slot_indices is not None
+
+        # Validate slot indices are within valid range
+        if lmcache_adapter.kv_caches:
+            # Get the first kv_tensor to check dimensions
+            first_kv_tensor = next(iter(lmcache_adapter.kv_caches.values()))
+            # Calculate total slots: num_blocks * block_size
+            # For different formats:
+            # - MHA (5D): [2, num_blocks, block_size, num_heads, head_size]
+            # - MLA (3D): [num_blocks, block_size, head_size]
+            # - 4D: [num_blocks, block_size, num_heads, head_size]
+            ndim = first_kv_tensor.ndim
+            if ndim == 5:
+                # MHA: [2, num_blocks, block_size, num_heads, head_size]
+                total_slots = first_kv_tensor.shape[1] * first_kv_tensor.shape[2]
+            elif ndim == 3:
+                # MLA: [num_blocks, block_size, head_size]
+                total_slots = first_kv_tensor.shape[0] * first_kv_tensor.shape[1]
+            elif ndim == 4:
+                # 4D: [num_blocks, block_size, num_heads, head_size]
+                total_slots = first_kv_tensor.shape[0] * first_kv_tensor.shape[1]
+            else:
+                # Fallback
+                reshaped = first_kv_tensor.view(-1, *first_kv_tensor.shape[2:])
+                total_slots = reshaped.shape[0]
+
+            # Check each slot index
+            invalid_indices = []
+            for slot_idx in slot_indices:
+                if slot_idx < 0 or slot_idx >= total_slots:
+                    invalid_indices.append(slot_idx)
+
+            if invalid_indices:
+                return _create_error_response(
+                    {
+                        "error": "Invalid slot indices",
+                        "message": (
+                            "Slot indices out of bounds: %s. Valid range: 0 to %d"
+                        )
+                        % (invalid_indices, total_slots - 1),
+                    },
+                    400,
+                )
+        else:
+            return _create_error_response(
+                {
+                    "error": "kv_caches not available",
+                    "message": "kv_caches is empty or not initialized",
+                },
+                404,
+            )
+
+        # Validate chunk_size if provided
+        if chunk_size is not None and chunk_size <= 0:
+            return _create_error_response(
+                {
+                    "error": "Invalid chunk_size",
+                    "message": "chunk_size must be a positive integer",
+                },
+                400,
+            )
+
+        # Get checksums from the adapter asynchronously to not block the loop
+        loop = asyncio.get_running_loop()
+        checksums_result = await loop.run_in_executor(
+            None,  # Uses default ThreadPoolExecutor
+            lambda: compute_kvcache_checksums(
+                lmcache_adapter, slot_indices, chunk_size, layerwise
+            ),
+        )
+
+        if checksums_result is None:
+            return _create_error_response(
+                {
+                    "error": "Failed to compute checksums",
+                    "message": "kv_caches not available or empty",
+                },
+                500,
+            )
+
+        # Compute slot mapping ranges using compress_slot_mapping
+        slot_mapping_ranges = compress_slot_mapping(slot_indices)
+
+        response_data: dict[str, Any] = {
+            "status": "success",
+            "slot_mapping_ranges": slot_mapping_ranges,
+        }
+
+        # Include chunk checksums
+        response_data["chunk_size"] = checksums_result.get("chunk_size")
+        response_data["num_chunks"] = checksums_result.get("num_chunks")
+        response_data["chunk_checksums"] = checksums_result.get("chunk_checksums")
+        response_data["layerwise"] = layerwise
+
+        return PlainTextResponse(
+            content=json.dumps(response_data, indent=2),
+            media_type="application/json",
+        )
+
+    except Exception as e:
+        logger.error("Failed to compute kvcache checksums: %s", str(e))
+        return _create_error_response(
+            {"error": "Failed to compute checksums", "message": str(e)},
+            500,
+        )
+
+
+@router.post("/cache/kvcache/record_slot")
+async def kvcache_record_slot(
+    request: Request,
+    enabled: Optional[str] = None,
+):
+    """Enable or disable KVCache Check slot_mapping logging.
+
+    This endpoint controls whether the KVCache Check logs (slot_mapping info)
+    are printed when store/retrieve operations are performed.
+
+    Args:
+        request (Request): The FastAPI request object containing application state.
+        enabled (Optional[str], optional): "true" to enable logging, "false" to
+            disable. Defaults to None.
+
+    Returns:
+        PlainTextResponse: A JSON response containing the current logging status.
+
+    Example:
+        ```bash
+        # Enable logging
+        curl -X POST "http://localhost:8000/cache/kvcache/record_slot?enabled=true"
+
+        # Disable logging
+        curl -X POST "http://localhost:8000/cache/kvcache/record_slot?enabled=false"
+
+        # Check current status
+        curl -X POST "http://localhost:8000/cache/kvcache/record_slot"
+        ```
+    """
+    try:
+        lmcache_adapter = request.app.state.lmcache_adapter
+        if not lmcache_adapter:
+            return _create_error_response(
+                {
+                    "error": "LMCache adapter unavailable",
+                    "message": "LMCache adapter not configured.",
+                },
+                503,
+            )
+
+        # Get current status from lmcache_engine
+        lmcache_engine = lmcache_adapter.lmcache_engine
+        current_status = getattr(lmcache_engine, "kvcache_check_log_enabled", False)
+
+        # Update status if enabled parameter is provided
+        if enabled is not None:
+            enabled_lower = enabled.lower()
+            if enabled_lower == "true":
+                lmcache_engine.kvcache_check_log_enabled = True
+                current_status = True
+                logger.info("KVCache Check logging enabled")
+            elif enabled_lower == "false":
+                lmcache_engine.kvcache_check_log_enabled = False
+                current_status = False
+                logger.info("KVCache Check logging disabled")
+            else:
+                return _create_error_response(
+                    {
+                        "error": "Invalid parameter",
+                        "message": "enabled must be 'true' or 'false'",
+                    },
+                    400,
+                )
+
+        response_data = {
+            "status": "success",
+            "kvcache_check_log_enabled": current_status,
+        }
+
+        return PlainTextResponse(
+            content=json.dumps(response_data, indent=2),
+            media_type="application/json",
+        )
+
+    except Exception as e:
+        logger.error("Failed to set kvcache record slot status: %s", str(e))
+        return _create_error_response(
+            {"error": "Failed to set record slot status", "message": str(e)},
+            500,
+        )
+
+
+@router.get("/cache/kvcache/info")
+async def kvcache_info(request: Request):
+    """Get information about the current kvcaches.
+
+    Returns information about the kvcaches structure including layer names,
+    shapes, and device information.
+
+    Args:
+        request (Request): The FastAPI request object containing application state.
+
+    Returns:
+        PlainTextResponse: A JSON response containing kvcache information.
+    """
+    try:
+        lmcache_adapter = request.app.state.lmcache_adapter
+        if not lmcache_adapter:
+            return _create_error_response(
+                {
+                    "error": "LMCache adapter unavailable",
+                    "message": "LMCache adapter not configured.",
+                },
+                503,
+            )
+
+        kv_caches = getattr(lmcache_adapter, "kvcaches", None)
+        if not kv_caches:
+            return _create_error_response(
+                {
+                    "error": "kv_caches not available",
+                    "message": "kv_caches is empty or not initialized",
+                },
+                404,
+            )
+
+        layers_info: dict = {}
+        for layer_name, kv_tensor in kv_caches.items():
+            layers_info[layer_name] = {
+                "shape": list(kv_tensor.shape),
+                "dtype": str(kv_tensor.dtype),
+                "device": str(kv_tensor.device),
+            }
+
+        info = {
+            "status": "success",
+            "num_layers": len(kv_caches),
+            "layers": layers_info,
+        }
+
+        return PlainTextResponse(
+            content=json.dumps(info, indent=2),
+            media_type="application/json",
+        )
+
+    except Exception as e:
+        logger.error("Failed to get kvcache info: %s", str(e))
+        return _create_error_response(
+            {"error": "Failed to get kvcache info", "message": str(e)},
+            500,
+        )

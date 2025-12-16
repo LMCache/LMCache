@@ -363,10 +363,11 @@ class LMCacheStandaloneStarter:
         logger.info("Starting LMCache engine with instance ID: %s", instance_id)
 
         # Generate fixed pattern kvcaches for testing
-        kvcaches = self._generate_fixed_kvcaches(device=self.device)
+        kv_caches = self._generate_fixed_kvcaches(device=self.device)
+        self.kv_caches = kv_caches
 
         # Initialize the engine with kvcaches
-        self.lmcache_engine.post_init(kvcaches=list(kvcaches.values()))
+        self.lmcache_engine.post_init(kvcaches=list(kv_caches.values()))
         logger.info("LMCache engine post-initialized with fixed kvcaches")
 
         # Start internal API server

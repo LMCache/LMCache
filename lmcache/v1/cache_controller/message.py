@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -9,7 +10,6 @@ import msgspec
 # First Party
 from lmcache.v1.cache_controller.commands.base import HeartbeatCommand
 from lmcache.v1.cache_controller.commands.full_sync import FullSyncCommand
-from lmcache.v1.cache_controller.utils import WorkerInfo
 
 # Type alias for all command types - msgspec needs Union for tagged unions
 AnyCommand = Union[FullSyncCommand, HeartbeatCommand]
@@ -97,6 +97,19 @@ class KVEvictMsg(KVOperationMsg):
 
     def describe(self) -> str:
         return f"kv_evict {self.key} from {self.instance_id}"
+
+
+@dataclass
+class WorkerInfo:
+    """Information about a worker for external API consumption."""
+
+    instance_id: str
+    worker_id: int
+    ip: str
+    port: int
+    peer_init_url: Optional[str]
+    registration_time: float
+    last_heartbeat_time: float
 
 
 class OpType(Enum):

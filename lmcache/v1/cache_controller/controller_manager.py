@@ -35,13 +35,10 @@ from lmcache.v1.cache_controller.message import (  # isort: skip
     ErrorMsg,
     HealthMsg,
     HeartbeatMsg,
-    KVAdmitMsg,
-    KVEvictMsg,
     LookupMsg,
     MoveMsg,
     Msg,
     MsgBase,
-    OpType,
     OrchMsg,
     OrchRetMsg,
     PinMsg,
@@ -141,33 +138,7 @@ class LMCacheControllerManager:
         elif isinstance(msg, DeRegisterMsg):
             await self.reg_controller.deregister(msg)
         elif isinstance(msg, BatchedKVOperationMsg):
-            # Reconstruct full KV messages from lightweight operations
-            instance_id = msg.instance_id
-            worker_id = msg.worker_id
-            location = msg.location
-            for op in msg.operations:
-                if op.op_type == OpType.ADMIT:
-                    admit_msg = KVAdmitMsg(
-                        instance_id=instance_id,
-                        worker_id=worker_id,
-                        key=op.key,
-                        location=location,
-                        seq_num=op.seq_num,
-                    )
-                    self.kv_controller.check_sequence_number(admit_msg)
-                    await self.kv_controller.admit(admit_msg)
-                elif op.op_type == OpType.EVICT:
-                    evict_msg = KVEvictMsg(
-                        instance_id=instance_id,
-                        worker_id=worker_id,
-                        key=op.key,
-                        location=location,
-                        seq_num=op.seq_num,
-                    )
-                    self.kv_controller.check_sequence_number(evict_msg)
-                    await self.kv_controller.evict(evict_msg)
-                else:
-                    logger.error("Unknown operation type: %s", op.op_type)
+            await self.kv_controller.handle_batched_kv_operations(msg)
         else:
             logger.error(f"Unknown worker message type: {msg}")
 
@@ -293,21 +264,26 @@ class LMCacheControllerManager:
         while True:
             part = await socket.recv()
             with SocketMetricsContext(self, SocketType.REPLY):
-                # Parse message based on format
-                if part.startswith(b"{"):
-                    # JSON format - typically from external systems like Mooncake
-                    msg_dict = json.loads(part)
-                    msg = msgspec.convert(msg_dict, type=Msg)
-                else:
-                    # MessagePack format - internal LMCache communication
-                    msg = msgspec.msgpack.decode(part, type=Msg)
+                try:
+                    # Parse message based on format
+                    if part.startswith(b"{"):
+                        # JSON format - typically from external systems like Mooncake
+                        msg_dict = json.loads(part)
+                        msg = msgspec.convert(msg_dict, type=Msg)
+                    else:
+                        # MessagePack format - internal LMCache communication
+                        msg = msgspec.msgpack.decode(part, type=Msg)
 
-                if isinstance(msg, WorkerReqMsg):
-                    ret_msg = await self.handle_worker_req_message(msg)
-                    await socket.send(msgspec.msgpack.encode(ret_msg))
-                else:
-                    logger.error(f"Unknown message type: {type(msg)}")
-                    err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
+                    if isinstance(msg, WorkerReqMsg):
+                        ret_msg = await self.handle_worker_req_message(msg)
+                        await socket.send(msgspec.msgpack.encode(ret_msg))
+                    else:
+                        logger.error("Unknown message type: %s", type(msg))
+                        err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
+                        await socket.send(msgspec.msgpack.encode(err_msg))
+                except Exception as e:
+                    logger.error("Error handling request message: %s", e, exc_info=True)
+                    err_msg = ErrorMsg(error=str(e))
                     await socket.send(msgspec.msgpack.encode(err_msg))
 
     async def health_check(self):
