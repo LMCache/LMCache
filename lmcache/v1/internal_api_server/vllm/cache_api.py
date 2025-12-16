@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Annotated, Any, Callable, List, Optional, Tuple
+import asyncio
 import hashlib
 import json
-import re
 import traceback
 
 # Third Party
@@ -14,7 +14,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import compress_slot_mapping, decompress_slot_mapping
+from lmcache.utils import (
+    compress_slot_mapping,
+    parse_mixed_slot_mapping,
+)
 from lmcache.v1.cache_engine import LMCacheEngine
 
 logger = init_logger(__name__)
@@ -56,97 +59,6 @@ def _parse_tokens_from_params(
         return None, {
             "error": "Missing parameters",
             "message": "Must specify either tokens_input or tokens_mock",
-        }
-
-
-def _parse_mixed_slot_mapping(
-    slot_mapping_str: str,
-) -> Tuple[Optional[List[int]], Optional[dict]]:
-    """Parse mixed format slot_mapping string.
-
-    Supports two formats:
-    1. Single numbers: "1,2,3,17,19"
-    2. Range format: "[9,12]" (represents 9,10,11,12)
-    3. Mixed format: "1,2,3,[9,12],17,19" (represents 1,2,3,9,10,11,12,17,19)
-
-    Args:
-        slot_mapping_str: String containing slot mapping information.
-
-    Returns:
-        Tuple of (slot_indices list, error dict).
-        If error dict is not None, slot_indices will be None.
-    """
-    try:
-        # Remove all whitespace
-        clean_str = "".join(slot_mapping_str.split())
-
-        # Split by comma but preserve range expressions
-        parts = []
-        buffer = ""
-        in_brackets = False
-
-        for char in clean_str:
-            if char == "[":
-                if in_brackets:
-                    raise ValueError("Nested brackets not allowed")
-                in_brackets = True
-                buffer += char
-            elif char == "]":
-                if not in_brackets:
-                    raise ValueError("Unmatched closing bracket")
-                in_brackets = False
-                buffer += char
-                parts.append(buffer)
-                buffer = ""
-            elif char == "," and not in_brackets:
-                if buffer:
-                    parts.append(buffer)
-                    buffer = ""
-            else:
-                buffer += char
-
-        # Add the last part if any
-        if buffer:
-            parts.append(buffer)
-
-        if in_brackets:
-            raise ValueError("Unclosed bracket")
-
-        # Parse each part
-        ranges: List[List[int]] = []
-
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-
-            # Check if it's a range format [start,end]
-            range_match = re.match(r"^\[(\d+),(\d+)\]$", part)
-            if range_match:
-                start = int(range_match.group(1))
-                end = int(range_match.group(2))
-                if start > end:
-                    raise ValueError(f"Range start {start} must be <= end {end}")
-                ranges.append([start, end])
-            else:
-                # Single number
-                try:
-                    num = int(part)
-                    ranges.append([num, num])
-                except ValueError as ve:
-                    raise ValueError(f"Invalid slot format: '{part}'") from ve
-
-        # Decompress ranges to individual slot indices
-        slot_indices = decompress_slot_mapping(ranges)
-        return slot_indices, None
-
-    except Exception as e:
-        return None, {
-            "error": "Invalid slot_mapping format",
-            "message": (
-                f"slot_mapping must be comma-separated integers "
-                f"or ranges like [start,end]: {str(e)}"
-            ),
         }
 
 
@@ -727,7 +639,7 @@ async def kvcache_check(
 
         # Parse slot_mapping from mixed format string
         # (supports single numbers and ranges)
-        slot_indices, error_info = _parse_mixed_slot_mapping(slot_mapping)
+        slot_indices, error_info = parse_mixed_slot_mapping(slot_mapping)
         if error_info:
             return _create_error_response(error_info, 400)
 
@@ -794,9 +706,13 @@ async def kvcache_check(
                 400,
             )
 
-        # Get checksums from the adapter
-        checksums_result = compute_kvcache_checksums(
-            lmcache_adapter, slot_indices, chunk_size, layerwise
+        # Get checksums from the adapter asynchronously to not block the loop
+        loop = asyncio.get_running_loop()
+        checksums_result = await loop.run_in_executor(
+            None,  # Uses default ThreadPoolExecutor
+            lambda: compute_kvcache_checksums(
+                lmcache_adapter, slot_indices, chunk_size, layerwise
+            ),
         )
 
         if checksums_result is None:

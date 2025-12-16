@@ -244,12 +244,17 @@ class TestCompressSlotMapping:
         [
             ([1, 2, 3, 4, 5], [[1, 5]]),
             ([1, 2, 3, 4, 5, 9, 10, 11, 12], [[1, 5], [9, 12]]),
-            ([1, 3, 5, 7], [[1, 1], [3, 3], [5, 5], [7, 7]]),
-            ([1, 2, 3, 5, 7, 8, 9], [[1, 3], [5, 5], [7, 9]]),
+            # No consecutive elements, no compression
+            ([1, 3, 5, 7], [1, 3, 5, 7]),
+            # 5 is single, not compressed
+            ([1, 2, 3, 5, 7, 8, 9], [[1, 3], 5, [7, 9]]),
             ([], []),
-            ([42], [[42, 42]]),
-            ([5, 3, 1, 2, 4, 9, 12, 10, 11], [[1, 5], [9, 12]]),
+            ([42], [42]),  # Single element, not compressed
+            # Mixed order
+            ([5, 3, 1, 2, 4, 9, 10, 11, 13], [5, 3, 1, 2, 4, [9, 11], 13]),
             ([0, 1, 2, 100, 101, 102], [[0, 2], [100, 102]]),
+            ([1, 2], [1, 2]),  # Two elements, not compressed
+            ([1, 2, 3], [[1, 3]]),  # Three elements, compressed
         ],
     )
     def test_compress_slot_mapping(self, input_slots, expected):
