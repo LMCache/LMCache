@@ -349,6 +349,16 @@ def _allocate_cpu_memory(
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
+
+    # Log allocation request
+    logger = init_logger(__name__)
+    size_gb = size / (1024**3)
+    logger.info(
+        "[Python] _allocate_cpu_memory called: size=%.2f GB, pid=%d",
+        size_gb,
+        os.getpid(),
+    )
+
     if numa_mapping:
         if torch.cuda.is_available():
             current_device_id = torch.cuda.current_device()
@@ -359,9 +369,28 @@ def _allocate_cpu_memory(
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
+        logger.info(
+            "[Python] Calling alloc_pinned_numa_ptr: size=%.2f GB, numa_id=%d, pid=%d",
+            size_gb,
+            numa_id,
+            os.getpid(),
+        )
         ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+        logger.info(
+            "[Python] alloc_pinned_numa_ptr returned: ptr=0x%x, pid=%d",
+            ptr,
+            os.getpid(),
+        )
     else:
+        logger.info(
+            "[Python] Calling alloc_pinned_ptr: size=%.2f GB, pid=%d",
+            size_gb,
+            os.getpid(),
+        )
         ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        logger.info(
+            "[Python] alloc_pinned_ptr returned: ptr=0x%x, pid=%d", ptr, os.getpid()
+        )
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
