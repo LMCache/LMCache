@@ -6,12 +6,11 @@
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>  // for strerror
+#include <cstdio>   // for fprintf, stderr
 #include <thread>
 #include <vector>
 #include <algorithm>
 #include <chrono>
-#include <iostream>
-#include <iomanip>
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
 #include <pybind11/pybind11.h>
 #include "mem_alloc.h"
@@ -58,9 +57,9 @@ static void first_touch(void* p, size_t size) {
   const size_t threshold = 1UL << 30;  // 1GB
   if (size < threshold) {
     // Small allocation: single-threaded
-    std::cout << "[first_touch] Size: " << std::fixed << std::setprecision(2)
-              << (size / (1024.0 * 1024.0 * 1024.0))
-              << " GB, Mode: single-threaded" << std::endl;
+    fprintf(stderr, "[first_touch] Size: %.2f GB, Mode: single-threaded\n",
+            size / (1024.0 * 1024.0 * 1024.0));
+    fflush(stderr);
     first_touch_range(p, 0, size);
 
     auto end_time = std::chrono::steady_clock::now();
@@ -69,9 +68,10 @@ static void first_touch(void* p, size_t size) {
                         .count();
     double throughput =
         (size / (1024.0 * 1024.0 * 1024.0)) / (duration / 1000.0);
-    std::cout << "[first_touch] Completed in " << duration << " ms, "
-              << "Throughput: " << std::fixed << std::setprecision(2)
-              << throughput << " GB/s" << std::endl;
+    fprintf(stderr,
+            "[first_touch] Completed in %ld ms, Throughput: %.2f GB/s\n",
+            duration, throughput);
+    fflush(stderr);
     return;
   }
 
@@ -80,10 +80,11 @@ static void first_touch(void* p, size_t size) {
   const unsigned int hw_threads = std::thread::hardware_concurrency();
   const unsigned int num_threads = std::min(8u, std::max(1u, hw_threads / 2));
 
-  std::cout << "[first_touch] Size: " << std::fixed << std::setprecision(2)
-            << (size / (1024.0 * 1024.0 * 1024.0)) << " GB, "
-            << "Mode: multi-threaded, Threads: " << num_threads
-            << " (hw_threads: " << hw_threads << ")" << std::endl;
+  fprintf(stderr,
+          "[first_touch] Size: %.2f GB, Mode: multi-threaded, Threads: %u "
+          "(hw_threads: %u)\n",
+          size / (1024.0 * 1024.0 * 1024.0), num_threads, hw_threads);
+  fflush(stderr);
 
   const size_t chunk_size = (size + num_threads - 1) / num_threads;
   const size_t aligned_chunk = ((chunk_size + ps - 1) / ps) * ps;
@@ -108,9 +109,9 @@ static void first_touch(void* p, size_t size) {
                       end_time - start_time)
                       .count();
   double throughput = (size / (1024.0 * 1024.0 * 1024.0)) / (duration / 1000.0);
-  std::cout << "[first_touch] Completed in " << duration << " ms, "
-            << "Throughput: " << std::fixed << std::setprecision(2)
-            << throughput << " GB/s" << std::endl;
+  fprintf(stderr, "[first_touch] Completed in %ld ms, Throughput: %.2f GB/s\n",
+          duration, throughput);
+  fflush(stderr);
 }
 
 static inline int mbind_sys(void* addr, unsigned long len, int mode,
@@ -123,9 +124,11 @@ static inline int mbind_sys(void* addr, unsigned long len, int mode,
 uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
   auto total_start = std::chrono::steady_clock::now();
 
-  std::cout << "[alloc_pinned_numa_ptr] Starting allocation: " << std::fixed
-            << std::setprecision(2) << (size / (1024.0 * 1024.0 * 1024.0))
-            << " GB on NUMA node " << node << std::endl;
+  fprintf(stderr,
+          "[alloc_pinned_numa_ptr] Starting allocation: %.2f GB on NUMA node "
+          "%d\n",
+          size / (1024.0 * 1024.0 * 1024.0), node);
+  fflush(stderr);
 
   auto step_start = std::chrono::steady_clock::now();
   void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
@@ -137,8 +140,9 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
   auto mmap_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                            step_end - step_start)
                            .count();
-  std::cout << "[alloc_pinned_numa_ptr] mmap completed in " << mmap_duration
-            << " ms" << std::endl;
+  fprintf(stderr, "[alloc_pinned_numa_ptr] mmap completed in %ld ms\n",
+          mmap_duration);
+  fflush(stderr);
 
   // Maximum of 64 numa nodes
   step_start = std::chrono::steady_clock::now();
@@ -155,14 +159,16 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
   auto mbind_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                             step_end - step_start)
                             .count();
-  std::cout << "[alloc_pinned_numa_ptr] mbind completed in " << mbind_duration
-            << " ms" << std::endl;
+  fprintf(stderr, "[alloc_pinned_numa_ptr] mbind completed in %ld ms\n",
+          mbind_duration);
+  fflush(stderr);
 
   // Release GIL during time-consuming operations to avoid blocking Python
   // interpreter
-  std::cout << "[alloc_pinned_numa_ptr] Releasing GIL for first_touch and "
-               "cudaHostRegister"
-            << std::endl;
+  fprintf(stderr,
+          "[alloc_pinned_numa_ptr] Releasing GIL for first_touch and "
+          "cudaHostRegister\n");
+  fflush(stderr);
   {
     pybind11::gil_scoped_release release;
 
@@ -173,8 +179,9 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
         std::chrono::duration_cast<std::chrono::milliseconds>(step_end -
                                                               step_start)
             .count();
-    std::cout << "[alloc_pinned_numa_ptr] first_touch total: "
-              << first_touch_duration << " ms" << std::endl;
+    fprintf(stderr, "[alloc_pinned_numa_ptr] first_touch total: %ld ms\n",
+            first_touch_duration);
+    fflush(stderr);
 
     step_start = std::chrono::steady_clock::now();
     cudaError_t st = cudaHostRegister(ptr, size, 0);
@@ -187,18 +194,22 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
     auto cuda_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                              step_end - step_start)
                              .count();
-    std::cout << "[alloc_pinned_numa_ptr] cudaHostRegister completed in "
-              << cuda_duration << " ms" << std::endl;
+    fprintf(stderr,
+            "[alloc_pinned_numa_ptr] cudaHostRegister completed in %ld ms\n",
+            cuda_duration);
+    fflush(stderr);
   }
-  std::cout << "[alloc_pinned_numa_ptr] GIL reacquired" << std::endl;
+  fprintf(stderr, "[alloc_pinned_numa_ptr] GIL reacquired\n");
+  fflush(stderr);
 
   auto total_end = std::chrono::steady_clock::now();
   auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                             total_end - total_start)
                             .count();
-  std::cout << "[alloc_pinned_numa_ptr] Total allocation time: "
-            << total_duration << " ms (" << std::fixed << std::setprecision(2)
-            << (total_duration / 1000.0) << " s)" << std::endl;
+  fprintf(stderr,
+          "[alloc_pinned_numa_ptr] Total allocation time: %ld ms (%.2f s)\n",
+          total_duration, total_duration / 1000.0);
+  fflush(stderr);
 
   return reinterpret_cast<uintptr_t>(ptr);
 }
