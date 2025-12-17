@@ -1035,9 +1035,10 @@ class LMCacheConnectorV1Impl:
 
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                num_expected_tokens = (
-                    lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
-                )
+                # use token_mask to calculate expected tokens, matching what retrieve()
+                # calculates internally as num_required_tokens
+                token_mask_slice = token_mask[:lmcache_cached_tokens]
+                num_expected_tokens = token_mask_slice.sum().item()
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
                         "Request %s"
@@ -1060,7 +1061,6 @@ class LMCacheConnectorV1Impl:
                         slot_mapping[:lmcache_cached_tokens],
                     )
                     self._invalid_block_ids.update(missing_blocks)
-
             self._stats_monitor.update_interval_vllm_hit_tokens(
                 request.load_spec.vllm_cached_tokens
             )
@@ -1109,7 +1109,6 @@ class LMCacheConnectorV1Impl:
         ret_mask_cpu = ret_mask.to(device="cpu", dtype=torch.bool)
 
         if ret_mask_cpu.shape[0] != expected_mask_cpu.shape[0]:
-            logger.debug("expected_mask_cpu.shape[0] != ret_mask_cpu.shape[0]")
             return set()
 
         missing_mask = expected_mask_cpu & ~ret_mask_cpu
