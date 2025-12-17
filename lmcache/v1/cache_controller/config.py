@@ -9,7 +9,7 @@ Configuration system for LMCache Controller that:
 """
 
 # Standard
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 import ast
 import json
 
@@ -18,6 +18,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.config_base import (
     create_config_class,
     create_singleton_config,
+    load_config_with_overrides,
 )
 
 logger = init_logger(__name__)
@@ -136,3 +137,29 @@ def override_controller_config_from_dict(
                 )
         else:
             logger.warning(f"Unknown controller config key: {key}, ignoring")
+
+
+def load_controller_config_with_overrides(
+    config_file_path: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> "ControllerConfig":  # type: ignore[valid-type]
+    """
+    Load controller configuration with support for file, env vars, and overrides.
+
+    This function uses the generic load_config_with_overrides utility from
+    config_base.py to reduce code duplication.
+
+    Args:
+        config_file_path: Optional direct path to config file
+        overrides: Optional dictionary of configuration overrides
+
+    Returns:
+        Loaded and validated ControllerConfig instance
+    """
+    return load_config_with_overrides(
+        config_class=ControllerConfig,
+        config_file_env_var="LMCACHE_CONTROLLER_CONFIG_FILE",
+        env_prefix="LMCACHE_CONTROLLER_",
+        config_file_path=config_file_path,
+        overrides=overrides,
+    )

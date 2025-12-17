@@ -9,7 +9,7 @@ Configuration system for LMCache Engine that:
 """
 
 # Standard
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 import json
 import os
 
@@ -24,6 +24,7 @@ from lmcache.v1.config_base import (
     _to_int_list,
     _to_str_list,
     create_config_class,
+    load_config_with_overrides,
 )
 import lmcache.config as orig_config
 
@@ -721,3 +722,30 @@ LMCacheEngineConfig = create_config_class(
         "from_legacy": classmethod(_from_legacy),
     },
 )
+
+
+def load_engine_config_with_overrides(
+    config_file_path: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> "LMCacheEngineConfig":  # type: ignore[valid-type]
+    """
+    Load engine configuration with support for file, env vars, and overrides.
+
+    This function uses the generic load_config_with_overrides utility from
+    config_base.py to reduce code duplication.
+
+    Args:
+        config_file_path: Optional direct path to config file
+        overrides: Optional dictionary of configuration overrides
+
+    Returns:
+        Loaded and validated LMCacheEngineConfig instance
+    """
+
+    return load_config_with_overrides(
+        config_class=LMCacheEngineConfig,
+        config_file_env_var="LMCACHE_CONFIG_FILE",
+        env_prefix="LMCACHE_",
+        config_file_path=config_file_path,
+        overrides=overrides,
+    )

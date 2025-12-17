@@ -27,8 +27,7 @@ import uvicorn
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.config import (
-    ControllerConfig,
-    override_controller_config_from_dict,
+    load_controller_config_with_overrides,
 )
 from lmcache.v1.cache_controller.controller_manager import LMCacheControllerManager
 from lmcache.v1.cache_controller.message import (  # noqa: E501
@@ -55,6 +54,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     QueryWorkerInfoRetMsg,
     WorkerInfo,
 )
+from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.internal_api_server.api_registry import APIRegistry
 
 logger = init_logger(__name__)
@@ -449,21 +449,10 @@ def main():
 
     # Parse known args first, then handle extra parameters
     args, extra = parser.parse_known_args()
-    extra_params = parse_extra_params(extra)
+    extra_params = parse_command_line_extra_params(extra)
 
     try:
-        # Load configuration
-        config_path = args.config or os.getenv("LMCACHE_CONTROLLER_CONFIG_FILE")
-        if config_path:
-            logger.info(f"Loading controller config file: {config_path}")
-            config = ControllerConfig.from_file(config_path)
-            # Allow environment variables to override file settings
-            config.update_config_from_env()
-        else:
-            logger.info("No config file specified, loading from environment variables.")
-            config = ControllerConfig.from_env()
-
-        # Override with command-line arguments
+        # Build overrides dictionary from command-line arguments
         override_dict = {}
 
         # Map command-line arguments to config keys
@@ -483,13 +472,12 @@ def main():
         if extra_params:
             override_dict.update(extra_params)
 
-        # Apply overrides
-        if override_dict:
-            override_controller_config_from_dict(config, override_dict)
-
-        # Validate final configuration
-        config.validate()
-        config.log_config()
+        # Load configuration using the generic utility function
+        # This replaces the previous manual config loading code
+        config = load_controller_config_with_overrides(
+            config_file_path=args.config,
+            overrides=override_dict,
+        )
 
         # Build controller URLs from config or arguments
         if config.controller_monitor_ports is not None:

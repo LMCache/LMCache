@@ -7,7 +7,7 @@ for all LMCache configuration systems to avoid code duplication.
 """
 
 # Standard
-from typing import Any, Callable, Optional, Protocol, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 import ast
 import json
 import os
@@ -436,3 +436,92 @@ def create_singleton_config(
     get_or_create_config.reset = reset_config_instance  # type: ignore[attr-defined]
 
     return get_or_create_config  # type: ignore[return-value]
+
+
+def load_config_with_overrides(
+    config_class,
+    config_file_env_var: str = "LMCACHE_CONFIG_FILE",
+    env_prefix: str = "LMCACHE_",
+    config_file_path: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+):
+    """
+    Load configuration with support for file, environment variables, and overrides.
+
+    This is a generic utility function that can be reused across different
+    configuration classes (LMCacheEngineConfig, ControllerConfig, etc.)
+
+    Args:
+        config_class: The configuration class to instantiate
+        config_file_env_var: Environment variable name for config file path
+        env_prefix: Prefix for environment variables
+        config_file_path: Optional direct config file path (overrides env var)
+        overrides: Optional dictionary of configuration overrides
+
+    Returns:
+        Loaded and validated configuration instance
+    """
+    # Load configuration from file or environment
+    actual_config_path = config_file_path or os.getenv(config_file_env_var)
+
+    if actual_config_path:
+        logger.info("Loading config file: %s", actual_config_path)
+        config = config_class.from_file(actual_config_path)
+        # Allow environment variables to override file settings
+        config.update_config_from_env()
+    else:
+        logger.info("No config file specified, loading from environment variables.")
+        config = config_class.from_env()
+
+    # Apply any overrides
+    if overrides:
+        for key, value in overrides.items():
+            if hasattr(config, key):
+                old_value = getattr(config, key)
+                setattr(config, key, value)
+                if old_value != value:
+                    logger.info(
+                        "Override config: %s = %s (was %s)", key, value, old_value
+                    )
+            else:
+                logger.warning("Unknown config key: %s, ignoring", key)
+
+    # Validate configuration
+    if hasattr(config, "validate"):
+        config.validate()
+
+    # Log configuration
+    if hasattr(config, "log_config"):
+        config.log_config()
+
+    return config
+
+
+def parse_command_line_extra_params(extra_args: List[str]) -> Dict[str, Any]:
+    """
+    Parse extra command-line parameters in key=value format.
+
+    Args:
+        extra_args: List of strings in format "key=value"
+
+    Returns:
+        Dictionary of parsed parameters
+    """
+    params = {}
+    for arg in extra_args:
+        if "=" in arg:
+            key, value = arg.split("=", 1)
+            key = key.lstrip("-")
+            try:
+                if value.lower() in ("true", "false"):
+                    params[key] = value.lower() == "true"
+                elif value.isdigit():
+                    params[key] = int(value)  # type: ignore[assignment]
+                elif value.replace(".", "", 1).isdigit():
+                    params[key] = float(value)  # type: ignore[assignment]
+                else:
+                    params[key] = value  # type: ignore[assignment]
+            except ValueError:
+                params[key] = value  # type: ignore[assignment]
+            logger.info("Extra parameter: %s = %s", key, params[key])
+    return params
