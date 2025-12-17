@@ -1518,14 +1518,6 @@ class LMCacheConnectorV1Impl:
             logger.debug(f"Looking up cache for the first time for request {req_id}!")
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
-            # Align computed tokens once to avoid repeated
-            # chunk-size rounding downstream
-            aligned_num_computed_tokens = (
-                num_computed_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
-
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
             token_ids = request.all_token_ids
@@ -1542,11 +1534,21 @@ class LMCacheConnectorV1Impl:
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 
+            # this rounds down
+            # example diagram: vllm page size = 16, lmcache chunk size = 256 (brackets)
+            # [ vllm page 1 | ... | vllm page 16 ] [ vllm page 17 | vllm page 18 ]
+            # lmcache chunk 1                                     lmcache chunk 2
+            # total tokens = 512 (2 lmcache chunks)
+            # vllm num_computed_tokens = 288 (18 vllm pages)
+            # we can completely skip lmcache chunk 1 but we will still retrieve chunk 2
+            # and overwrite vllm page 17 and 18
+            # the need_to_allocate is 512 - 288 = 224
+            # and not 256 even though we will retrieve 256 tokens from lmcache
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
-                num_computed_tokens=aligned_num_computed_tokens,
+                num_computed_tokens=num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:

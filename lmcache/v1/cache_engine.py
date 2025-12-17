@@ -99,6 +99,7 @@ class LMCacheEngine:
     ):
         logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
+        self.chunk_size = config.chunk_size
         self.metadata = metadata
         self.token_database = token_database
         self.gpu_connector = gpu_connector
@@ -924,6 +925,8 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
+        # NOTE: the return statement is in the finally clause and
+        # subtracts away the overlap from the chunk aligned res
         assert self.storage_manager is not None
 
         if tokens is not None:
@@ -933,10 +936,12 @@ class LMCacheEngine:
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
-        # Skip the number of tokens that are already computed (aligned upstream to
-        # chunk size)
-        aligned_computed_tokens = num_computed_tokens
-        res = aligned_computed_tokens
+        aligned_computed_tokens = (
+            num_computed_tokens // self.chunk_size * self.chunk_size
+        )
+        # equivalent to: num_computed_tokens - aligned_computed_tokens
+        overlap = num_computed_tokens % self.chunk_size
+        aligned_res = aligned_computed_tokens
         try:
             chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
@@ -970,9 +975,9 @@ class LMCacheEngine:
                             )
                             location = next(iter(block_mapping.keys()))
                             self.lookup_pins[lookup_id][location].extend(key_all_layers)
-                        res = end
+                        aligned_res = end
                         continue
-                    return res
+                    break
             else:
                 chunk_info_list = []
                 keys = []
@@ -986,24 +991,28 @@ class LMCacheEngine:
                     # chunk_info[2] is the key
                     keys.append(chunk_info[2])
                 # If no tokens to lookup, return immediately
-                if not keys:
-                    return res
-                # hit chunks by prefix matching
-                hit_chunks, block_mapping = self.storage_manager.batched_contains(
-                    keys, search_range, pin
-                )
-                if pin and block_mapping:
-                    assert lookup_id is not None, (
-                        "lookup_id is required when pin is True"
+                if keys:
+                    # hit chunks by prefix matching
+                    hit_chunks, block_mapping = self.storage_manager.batched_contains(
+                        keys, search_range, pin
                     )
-                    self.lookup_pins[lookup_id] = block_mapping
-                for idx, (start, end, key) in enumerate(chunk_info_list):
-                    if idx < hit_chunks:
-                        res = end
-                        continue
-                    return res
-
-            # all tokens where found, return the maximal end
+                    if pin and block_mapping:
+                        assert lookup_id is not None, (
+                            "lookup_id is required when pin is True"
+                        )
+                        self.lookup_pins[lookup_id] = block_mapping
+                    for idx, (start, end, key) in enumerate(chunk_info_list):
+                        if idx < hit_chunks:
+                            aligned_res = end
+                            continue
+                        break
+            res = aligned_res - overlap
+            if res < 0:
+                logger.warning(
+                    f"cache engine found a negative number of hit tokens: {res}"
+                    "returning 0"
+                )
+                res = 0
             return res
         finally:
             # When num_computed_tokens is greater than a chunk, we skip
@@ -1013,7 +1022,9 @@ class LMCacheEngine:
             # In this case, using res as the number of hit tokens will overcount
             # the number of hit tokens.
             # TODO deprecate this metric and use retrieve metrics instead.
-            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
+            self.stats_monitor.on_lookup_finished(
+                lookup_request_id, max(aligned_res - overlap, 0)
+            )
             # vllm lookup sets pin to True
             if pin:
                 self.storage_manager.touch_cache()
