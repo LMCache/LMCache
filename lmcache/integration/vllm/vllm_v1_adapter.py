@@ -1534,7 +1534,6 @@ class LMCacheConnectorV1Impl:
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 
-            # this rounds down
             # example diagram: vllm page size = 16, lmcache chunk size = 256 (brackets)
             # [ vllm page 1 | ... | vllm page 16 ] [ vllm page 17 | vllm page 18 ]
             # lmcache chunk 1                                     lmcache chunk 2
