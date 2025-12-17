@@ -16,6 +16,7 @@ from lmcache.storage_backend.serde.cachegen_basics import (
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.utils import _lmcache_nvtx_annotate
 
+# torch.cuda.is_available() returns true with PT_HPU_GPU_MIGRATION
 try:
     if torch.cuda.is_available():
         # First Party

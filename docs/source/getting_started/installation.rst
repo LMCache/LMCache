@@ -236,3 +236,23 @@ Example on MI300X (gfx942):
     CXX=hipcc \
     BUILD_WITH_HIP=1 \
     python3 -m pip install --no-build-isolation -e .
+
+
+LMCache on Intel Gaudi(HPU)
+------------------
+
+LMCache can be installed in the Intel Gaudi docker along with vllm and vllm-gaudi(plugin to support HPU).
+
+Latest Intel Gaudi docker image info is published at `Gaudi docs <https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#use-intel-gaudi-containers>`__.
+
+Installation steps for vllm and vllm-gaudi is available `vllm-gaudi github <https://github.com/vllm-project/vllm-gaudi>`__.
+
+To install LMCache from source, clone the repository and install in editable mode.
+
+.. code-block:: bash
+
+    NO_CUDA_EXT=1 BUILD_WITH_HPU=1 pip install -e .
+
+Dockerfile to build on intel gaudi environment is also available at `Dockerfile.hpu <https://github.com/LMCache/LMCache/blob/dev/docker/Dockerfile.hpu>`__.
+
+Examples and instructions to run lmcache tests on intel gaudi is available in the `Readme <https://github.com/hsubramony/vllm-gaudi/tree/main/examples/lmcache/README.md>`__ in vllm-gaudi github.

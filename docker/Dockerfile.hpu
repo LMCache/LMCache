@@ -1,0 +1,49 @@
+# Prepare habana docker
+FROM vault.habana.ai/gaudi-docker/1.22.2/ubuntu22.04/habanalabs/pytorch-installer-2.7.1:latest AS base
+
+ARG PYTHON_VERSION=3.12
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NO_CUDA_EXT=1
+ENV BUILD_WITH_HPU=1
+
+WORKDIR /root
+
+# Clone vllm-gaudi repository
+RUN git clone https://github.com/vllm-project/vllm-gaudi.git
+
+# Change to vllm-gaudi directory and get commit hash
+WORKDIR /root/vllm-gaudi
+RUN git fetch --all
+
+# Get commit hash and build vllm
+RUN set -e && \
+    VLLM_COMMIT_HASH=$(git show "origin/vllm/last-good-commit-for-vllm-gaudi:VLLM_STABLE_COMMIT" --format="%H" -s 2>/dev/null || git rev-parse HEAD) && \
+    echo "Using VLLM commit: $VLLM_COMMIT_HASH" && \
+    cd /root && \
+    git clone https://github.com/vllm-project/vllm.git && \
+    cd vllm && \
+    git checkout $VLLM_COMMIT_HASH && \
+    sed '/^torch/d' requirements/build.txt > /tmp/build_requirements.txt && \
+    pip install -r /tmp/build_requirements.txt && \
+    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e . && \
+    cd /root/vllm-gaudi && \
+    pip install -e .
+
+# Install LMCache
+WORKDIR /root
+RUN git clone https://github.com/LMCache/LMCache.git && \
+    cd LMCache && \
+    pip install -e .
+
+# Set environment variables
+ENV no_proxy=localhost,127.0.0.1
+ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+ENV VLLM_SKIP_WARMUP=true
+ENV VLLM_USE_V1=1
+ENV PT_HPU_GPU_MIGRATION=1
+
+# Set working directory for entrypoint
+WORKDIR /root/vllm-gaudi/examples/lmcache
+
+# Set entrypoint to bash in the target directory
+ENTRYPOINT ["/bin/bash"]

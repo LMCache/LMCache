@@ -19,7 +19,7 @@ BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
-BUILD_WITH_HPU = os.environ.get("PT_HPU_GPU_MIGRATION", "0") == "1"
+BUILD_WITH_HPU = os.environ.get("BUILD_WITH_HPU", "0") == "1"
 
 
 def hipify_wrapper() -> None:
