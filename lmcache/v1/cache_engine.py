@@ -925,8 +925,6 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens are cached.
         """
-        # NOTE: the return statement is in the finally clause and
-        # subtracts away the overlap from the chunk aligned res
         assert self.storage_manager is not None
 
         if tokens is not None:
