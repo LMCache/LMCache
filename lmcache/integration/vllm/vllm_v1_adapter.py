@@ -691,6 +691,10 @@ class LMCacheConnectorV1Impl:
             Generator[Optional[torch.Tensor], None, None]
         ] = []
         self.layerwise_storers: list[Generator[Optional[torch.Tensor], None, None]] = []
+        # Track req_ids that started layerwise storing in the current forward.
+        # NOTE: vLLM may call wait_for_save() even when connector metadata has
+        # already been cleared/emptied; we still need to unpin safely.
+        self._layerwise_store_req_ids: list[str] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.lmcache_engine_metadata: LMCacheEngineMetadata
         if role == KVConnectorRole.SCHEDULER:
@@ -1203,6 +1207,7 @@ class LMCacheConnectorV1Impl:
         kvcaches = list(self.kv_caches.values())
         if self.current_layer == 0:
             self.layerwise_storers = []
+            self._layerwise_store_req_ids = []
 
             is_first = True
 
@@ -1259,11 +1264,19 @@ class LMCacheConnectorV1Impl:
                     req_id=request.req_id,
                 )
                 self.layerwise_storers.append(layerwise_storer)
+                self._layerwise_store_req_ids.append(request.req_id)
                 if is_first:
                     is_first = False
 
         for layerwise_storer in self.layerwise_storers:
-            next(layerwise_storer)
+            # Generator completion should never crash the vLLM engine.
+            # If the generator has already finished, treat it as "already saved".
+            try:
+                next(layerwise_storer)
+            except StopIteration:
+                logger.debug(
+                    "Layerwise storer completed early during save_kv_layer; skipping."
+                )
 
         self.current_layer += 1
 
@@ -1279,12 +1292,23 @@ class LMCacheConnectorV1Impl:
             return
 
         if self.use_layerwise:
+            # Drain all remaining steps to guarantee completion.
             for layerwise_storer in self.layerwise_storers:
-                next(layerwise_storer)
+                while True:
+                    try:
+                        next(layerwise_storer)
+                    except StopIteration:
+                        break
+
+            # Prevent double-finalization if wait_for_save() is called twice.
+            self.layerwise_storers = []
 
             # unpin the kv caches according to req_id
-            for request in connector_metadata.requests:
-                self.lmcache_engine.lookup_unpin(request.req_id)
+            req_ids = {r.req_id for r in connector_metadata.requests}
+            req_ids.update(self._layerwise_store_req_ids)
+            self._layerwise_store_req_ids = []
+            for req_id in req_ids:
+                self.lmcache_engine.lookup_unpin(req_id)
             return
 
         assert len(self.kv_caches) > 0

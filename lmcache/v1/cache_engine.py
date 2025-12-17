@@ -514,9 +514,13 @@ class LMCacheEngine:
                 "Freeze mode enabled, skipping store_layer for %d tokens",
                 num_to_store_tokens,
             )
-            # Still need to yield to avoid StopIteration
+            # Still need to yield to match the expected step count in
+            # layerwise integrations (e.g., vLLM calls next() once per layer
+            # plus one extra in wait_for_save()).
             for layer_id in range(self.num_layers):
                 yield
+            # One extra yield for the "finalize" step.
+            yield
             return
 
         starts = []

@@ -30,6 +30,11 @@ class ZMQOffloadServer(OffloadServerInterface):
         vllm_config: "VllmConfig",
         tp_rank: int,
     ):
+        # First Party
+        from lmcache.logging import init_logger
+
+        logger = init_logger(__name__)
+
         self.ctx = get_zmq_context(use_asyncio=False)
         offload_rpc_port = int(os.environ.get("LMCACHE_OFFLOAD_RPC_PORT", 100))
         socket_path = get_zmq_rpc_path_lmcache(
@@ -45,6 +50,8 @@ class ZMQOffloadServer(OffloadServerInterface):
 
         self.lmcache_engine = lmcache_engine
         self.running = True
+
+        logger.info("Started ZMQOffloadServer (tp_rank=%d) at %s", tp_rank, socket_path)
 
         def process_request():
             # First Party
