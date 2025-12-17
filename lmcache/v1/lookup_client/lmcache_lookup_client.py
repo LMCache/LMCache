@@ -53,6 +53,7 @@ class LMCacheLookupClient(LookupClientInterface):
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
+        self.chunk_size = config.chunk_size
         rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache_rpc_port", 0
         )
@@ -183,7 +184,9 @@ class LMCacheLookupClient(LookupClientInterface):
             request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
         num_computed_buf = num_computed_tokens.to_bytes(8, "big", signed=False)
-        aligned_computed_tokens = num_computed_tokens  # pre-aligned in adapter
+        aligned_computed_tokens = (
+            num_computed_tokens // self.chunk_size * self.chunk_size
+        )
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
@@ -201,10 +204,10 @@ class LMCacheLookupClient(LookupClientInterface):
                     continue
                 hashes.append(key)
                 offsets.append(end - start)
-            # Return aligned_computed_tokens immediately if there is no token to
+            # Return num_computed_tokens immediately if there is no token to
             # lookup
             if not hashes:
-                return aligned_computed_tokens
+                return num_computed_tokens
 
             hash_buf = self.encoder.encode(hashes)
             offset_buf = self.encoder.encode(offsets)
