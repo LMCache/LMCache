@@ -1294,11 +1294,8 @@ class LMCacheConnectorV1Impl:
         if self.use_layerwise:
             # Drain all remaining steps to guarantee completion.
             for layerwise_storer in self.layerwise_storers:
-                while True:
-                    try:
-                        next(layerwise_storer)
-                    except StopIteration:
-                        break
+                for _ in layerwise_storer:
+                    pass
 
             # Prevent double-finalization if wait_for_save() is called twice.
             self.layerwise_storers = []
