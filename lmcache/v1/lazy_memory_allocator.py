@@ -262,9 +262,18 @@ class AsyncMemoryExpander:
 
         Runs in daemon thread. Allocates memory in steps (step_ratio at a time)
         until total_size is reached or memory limit is hit. Never shrinks.
+
+        Uses multiprocessing to perform memory allocation in separate process,
+        ensuring zero impact on inference requests in the main worker process.
         """
         try:
+            # Standard
+            import ctypes
+            import multiprocessing as mp
+
             current_size = self.composite_buffer.numel()
+            expansion_count = 0
+
             while current_size < self.total_size and not self.stop_flag.is_set():
                 effective_limit = self._get_effective_limit(current_size)
                 if effective_limit is None:
@@ -277,28 +286,101 @@ class AsyncMemoryExpander:
                 if next_size <= 0:
                     break
 
+                expansion_count += 1
+                size_gb = next_size / (1024**3)
                 logger.info(
-                    f"Expanding: +{next_size}, current={current_size}, "
-                    f"target={self.total_size}"
+                    "Expansion #%d: +%.2f GB, current=%d, target=%d (using subprocess)",
+                    expansion_count,
+                    size_gb,
+                    current_size,
+                    self.total_size,
                 )
 
                 try:
-                    new_buffer = _allocate_cpu_memory(next_size, self.numa_mapping)
+                    result_queue = mp.Queue()
+                    alloc_process = mp.Process(
+                        target=self._allocate_in_subprocess,
+                        args=(next_size, self.numa_mapping, result_queue),
+                        daemon=False,
+                    )
+                    alloc_process.start()
+
+                    ptr, success, error_msg = result_queue.get(timeout=120)
+                    alloc_process.join(timeout=5)
+
+                    if not success:
+                        logger.error("Subprocess allocation failed: %s", error_msg)
+                        break
+
+                    array_type = ctypes.c_uint8 * next_size
+                    buf = array_type.from_address(ptr)
+                    new_buffer = torch.frombuffer(buf, dtype=torch.uint8)
+
+                    logger.info(
+                        "Subprocess allocation succeeded: ptr=0x%x, size=%.2f GB",
+                        ptr,
+                        size_gb,
+                    )
+
                 except Exception as e:
-                    logger.error(f"Allocation failed: {e}")
+                    logger.error("Allocation failed: %s", e)
                     break
 
                 with self.host_mem_lock:
                     self.allocator.expand_with_new_segment(new_buffer)
 
                 current_size += next_size
+                logger.info(
+                    "Segment added to allocator, total size: %.2f GB",
+                    current_size / (1024**3),
+                )
 
-            logger.info(f"Expansion completed: {self.composite_buffer.numel()} bytes")
+            logger.info(
+                "Expansion completed: %d bytes (%d expansions)",
+                self.composite_buffer.numel(),
+                expansion_count,
+            )
         except Exception as e:
             logger.error(f"Expansion error: {e}", exc_info=True)
         finally:
             with self.expansion_lock:
                 self.is_expanding = False
+
+    @staticmethod
+    def _allocate_in_subprocess(size, numa_mapping, result_queue):
+        """Allocate memory in a separate process to avoid blocking worker.
+
+        Args:
+            size: Size in bytes to allocate
+            numa_mapping: NUMA mapping configuration
+            result_queue: Queue to return (ptr, success, error_msg)
+        """
+        try:
+            # Third Party
+            import torch
+
+            if torch.cuda.is_available():
+                # First Party
+                import lmcache.c_ops as lmc_ops
+            else:
+                # First Party
+                import lmcache.non_cuda_equivalents as lmc_ops
+
+            if numa_mapping:
+                if torch.cuda.is_available():
+                    current_device_id = torch.cuda.current_device()
+                else:
+                    current_device_id = 0
+                gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
+                numa_id = gpu_to_numa_mapping.get(current_device_id, 0)
+                ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+            else:
+                ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+
+            result_queue.put((ptr, True, None))
+
+        except Exception as e:
+            result_queue.put((0, False, str(e)))
 
     def stop(self):
         self.stop_flag.set()
