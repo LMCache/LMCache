@@ -7,11 +7,16 @@
 #include <errno.h>
 #include <cstring>            // for strerror
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
+#include <pybind11/pybind11.h>
 #include "mem_alloc.h"
 
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
   void* ptr = nullptr;
-  cudaError_t err = cudaHostAlloc(&ptr, size, flags);
+  cudaError_t err;
+  {
+    pybind11::gil_scoped_release release;
+    err = cudaHostAlloc(&ptr, size, flags);
+  }
   if (err != cudaSuccess) {
     throw std::runtime_error("cudaHostAlloc failed: " + std::to_string(err));
   }
@@ -19,7 +24,11 @@ uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
 }
 
 void free_pinned_ptr(uintptr_t ptr) {
-  cudaError_t err = cudaFreeHost(reinterpret_cast<void*>(ptr));
+  cudaError_t err;
+  {
+    pybind11::gil_scoped_release release;
+    err = cudaFreeHost(reinterpret_cast<void*>(ptr));
+  }
   if (err != cudaSuccess) {
     throw std::runtime_error("cudaFreeHost failed: " + std::to_string(err));
   }
@@ -56,13 +65,18 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
     throw std::runtime_error(std::string("mbind failed: ") + strerror(err));
   }
 
-  first_touch(ptr, size);
+  // Release GIL during time-consuming operations to avoid blocking Python
+  // interpreter
+  {
+    pybind11::gil_scoped_release release;
+    first_touch(ptr, size);
 
-  cudaError_t st = cudaHostRegister(ptr, size, 0);
-  if (st != cudaSuccess) {
-    munmap(ptr, size);
-    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
-                             cudaGetErrorString(st));
+    cudaError_t st = cudaHostRegister(ptr, size, 0);
+    if (st != cudaSuccess) {
+      munmap(ptr, size);
+      throw std::runtime_error(std::string("cudaHostRegister failed: ") +
+                               cudaGetErrorString(st));
+    }
   }
 
   return reinterpret_cast<uintptr_t>(ptr);
@@ -70,6 +84,8 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
 
 void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
   void* p = reinterpret_cast<void*>(ptr);
+  // Release GIL during cleanup operations
+  pybind11::gil_scoped_release release;
   // Unpin first, then unmap.
   cudaError_t st = cudaHostUnregister(p);
   if (st != cudaSuccess) {
