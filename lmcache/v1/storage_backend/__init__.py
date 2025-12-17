@@ -176,7 +176,7 @@ def CreateStorageBackends(
     if config.local_disk and config.max_local_disk_size > 0:
         assert local_cpu_backend is not None
         local_disk_backend = LocalDiskBackend(
-            config, loop, local_cpu_backend, dst_device, lmcache_worker
+            config, loop, local_cpu_backend, dst_device, lmcache_worker, metadata
         )
 
         backend_name = str(local_disk_backend)

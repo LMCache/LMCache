@@ -313,8 +313,8 @@ class AllocatorBackendInterface(StorageBackendInterface):
     @abc.abstractmethod
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -322,8 +322,10 @@ class AllocatorBackendInterface(StorageBackendInterface):
         """
         Allocates memory in the backend to hold a tensor of the given shape.
 
-        :param torch.Size shape: The shape of the tensor to allocate.
-        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param Union[torch.Size, list[torch.Size]] shapes:
+            The shape of the tensor to allocate.
+        :param Union[torch.dtype, list[torch.dtype]] dtypes:
+            The dtype of the tensor to allocate.
         :param MemoryFormat fmt: The format of the memory to allocate.
         :param bool eviction: whether to enable eviction when allocating.
         :param bool busy_loop: whether to enable a busy loop to wait
@@ -340,8 +342,8 @@ class AllocatorBackendInterface(StorageBackendInterface):
     @abc.abstractmethod
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -352,8 +354,10 @@ class AllocatorBackendInterface(StorageBackendInterface):
         in a batched manner. The allocated memory objects will have the same
         shape, dtype, and format.
 
-        :param torch.Size shape: The shape of the tensor to allocate.
-        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param Union[torch.Size, list[torch.Size]] shapes:
+            The shape of the tensor to allocate.
+        :param Union[torch.dtype, list[torch.dtype]] dtypes:
+            The dtype of the tensor to allocate.
         :param int batch_size: The number of memory objects to allocate.
         :param MemoryFormat fmt: The format of the memory to allocate.
         :param bool eviction: whether to enable eviction when allocating.
