@@ -78,27 +78,69 @@ static void log_msg(const char* format, ...) {
 }
 
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
+  auto total_start = std::chrono::steady_clock::now();
+
+  log_msg("[alloc_pinned_ptr] Starting allocation: %.2f GB, flags=%u\n",
+          size / (1024.0 * 1024.0 * 1024.0), flags);
+
   void* ptr = nullptr;
   cudaError_t err;
+
+  log_msg("[alloc_pinned_ptr] Releasing GIL for cudaHostAlloc\n");
   {
     pybind11::gil_scoped_release release;
+    auto step_start = std::chrono::steady_clock::now();
     err = cudaHostAlloc(&ptr, size, flags);
+    auto step_end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        step_end - step_start)
+                        .count();
+    log_msg("[alloc_pinned_ptr] cudaHostAlloc completed in %ld ms\n", duration);
   }
+  log_msg("[alloc_pinned_ptr] GIL reacquired\n");
+
   if (err != cudaSuccess) {
+    log_msg("[alloc_pinned_ptr] ERROR: cudaHostAlloc failed: %s\n",
+            cudaGetErrorString(err));
     throw std::runtime_error("cudaHostAlloc failed: " + std::to_string(err));
   }
+
+  auto total_end = std::chrono::steady_clock::now();
+  auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            total_end - total_start)
+                            .count();
+  log_msg("[alloc_pinned_ptr] Total allocation time: %ld ms (%.2f s)\n",
+          total_duration, total_duration / 1000.0);
+  log_msg("[alloc_pinned_ptr] Allocation successful: ptr=0x%lx\n",
+          reinterpret_cast<uintptr_t>(ptr));
+
   return reinterpret_cast<uintptr_t>(ptr);
 }
 
 void free_pinned_ptr(uintptr_t ptr) {
+  log_msg("[free_pinned_ptr] Freeing ptr=0x%lx\n", ptr);
+
   cudaError_t err;
+  log_msg("[free_pinned_ptr] Releasing GIL for cudaFreeHost\n");
   {
     pybind11::gil_scoped_release release;
+    auto start = std::chrono::steady_clock::now();
     err = cudaFreeHost(reinterpret_cast<void*>(ptr));
+    auto end = std::chrono::steady_clock::now();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+            .count();
+    log_msg("[free_pinned_ptr] cudaFreeHost completed in %ld ms\n", duration);
   }
+  log_msg("[free_pinned_ptr] GIL reacquired\n");
+
   if (err != cudaSuccess) {
+    log_msg("[free_pinned_ptr] ERROR: cudaFreeHost failed: %s\n",
+            cudaGetErrorString(err));
     throw std::runtime_error("cudaFreeHost failed: " + std::to_string(err));
   }
+
+  log_msg("[free_pinned_ptr] Free successful\n");
 }
 
 static void first_touch_range(void* p, size_t start, size_t end) {
