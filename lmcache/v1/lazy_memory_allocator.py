@@ -3,6 +3,10 @@
 
 # Standard
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
+import atexit
+import ctypes
+import multiprocessing as mp
+import queue
 import threading
 
 # Third Party
@@ -36,6 +40,161 @@ else:
     import lmcache.non_cuda_equivalents as lmc_ops
 
 logger = init_logger(__name__)
+
+
+class GlobalMemoryAllocatorService:
+    """Global singleton service for memory allocation in independent process.
+
+    This service runs in a separate process (not daemon) to avoid the
+    'daemonic processes are not allowed to have children' limitation.
+
+    Key Design:
+    - Started at module import time (before any daemon threads)
+    - Uses multiprocessing.Queue for communication
+    - Allocates pinned memory in isolated process
+    - Returns memory pointer via shared memory mechanism
+    """
+
+    _instance: Optional["GlobalMemoryAllocatorService"] = None
+    _lock = mp.Lock()
+
+    def __init__(self):
+        self.request_queue: mp.Queue = mp.Queue()
+        self.response_queue: mp.Queue = mp.Queue()
+        self.process: Optional[mp.Process] = None
+        self.started = False
+
+    @classmethod
+    def get_instance(cls) -> "GlobalMemoryAllocatorService":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+                    cls._instance.start()
+        return cls._instance
+
+    def start(self):
+        if self.started:
+            return
+
+        self.process = mp.Process(
+            target=self._worker_process, daemon=False, name="MemoryAllocatorService"
+        )
+        self.process.start()
+        self.started = True
+        atexit.register(self.stop)
+        logger.info("GlobalMemoryAllocatorService started (PID: %d)", self.process.pid)
+
+    def _worker_process(self):
+        """Worker process that handles memory allocation requests."""
+        logger.info("Memory allocator service process started")
+
+        while True:
+            try:
+                request = self.request_queue.get(timeout=1.0)
+                if request is None:
+                    break
+
+                size, numa_mapping = request
+
+                try:
+                    buffer = _allocate_cpu_memory(size, numa_mapping)
+                    ptr = buffer.data_ptr()
+                    numel = buffer.numel()
+                    dtype_str = str(buffer.dtype)
+
+                    self.response_queue.put(
+                        {
+                            "success": True,
+                            "ptr": ptr,
+                            "numel": numel,
+                            "dtype": dtype_str,
+                        }
+                    )
+                except Exception as e:
+                    logger.error("Allocation failed in service process: %s", e)
+                    self.response_queue.put({"success": False, "error": str(e)})
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error("Service process error: %s", e)
+                break
+
+        logger.info("Memory allocator service process exiting")
+
+    def allocate_async(
+        self, size: int, numa_mapping: Optional[NUMAMapping] = None
+    ) -> Optional[torch.Tensor]:
+        """Request memory allocation from service process.
+
+        Args:
+            size: Size in bytes
+            numa_mapping: NUMA mapping configuration
+
+        Returns:
+            Allocated tensor or None if failed
+        """
+        if not self.started:
+            logger.error("Service not started")
+            return None
+
+        self.request_queue.put((size, numa_mapping))
+
+        try:
+            response = self.response_queue.get(timeout=120.0)
+
+            if not response["success"]:
+                logger.error("Allocation failed: %s", response.get("error"))
+                return None
+
+            ptr = response["ptr"]
+            numel = response["numel"]
+            dtype_str = response["dtype"]
+
+            dtype_map = {
+                "torch.uint8": torch.uint8,
+                "torch.int8": torch.int8,
+                "torch.int16": torch.int16,
+                "torch.int32": torch.int32,
+                "torch.int64": torch.int64,
+                "torch.float16": torch.float16,
+                "torch.float32": torch.float32,
+                "torch.float64": torch.float64,
+            }
+            dtype = dtype_map.get(dtype_str, torch.uint8)
+
+            c_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8))
+            tensor = torch.frombuffer(
+                (ctypes.c_uint8 * numel).from_address(ctypes.addressof(c_ptr.contents)),
+                dtype=dtype,
+            )
+
+            return tensor
+
+        except queue.Empty:
+            logger.error("Allocation timeout (120s)")
+            return None
+        except Exception as e:
+            logger.error("Failed to retrieve allocation: %s", e)
+            return None
+
+    def stop(self):
+        if not self.started:
+            return
+
+        try:
+            self.request_queue.put(None)
+            if self.process:
+                self.process.join(timeout=5.0)
+                if self.process.is_alive():
+                    self.process.terminate()
+                    self.process.join(timeout=2.0)
+            logger.info("GlobalMemoryAllocatorService stopped")
+        except Exception as e:
+            logger.error("Error stopping service: %s", e)
+        finally:
+            self.started = False
 
 
 class CompositeBuffer:
@@ -260,19 +419,18 @@ class AsyncMemoryExpander:
     def _expansion_worker(self):
         """Background worker that progressively expands memory to target size.
 
-        Runs in daemon thread. Allocates memory in steps (step_ratio at a time)
-        until total_size is reached or memory limit is hit. Never shrinks.
+        Uses GlobalMemoryAllocatorService to allocate memory in a completely
+        independent process, ensuring zero impact on inference requests.
 
-        Uses multiprocessing to perform memory allocation in separate process,
-        ensuring zero impact on inference requests in the main worker process.
+        Key advantages:
+        - Memory allocation happens in separate process (no CUDA driver contention)
+        - Inference requests continue unaffected
+        - No daemon process limitation (service started at module import time)
         """
         try:
-            # Standard
-            import ctypes
-            import multiprocessing as mp
-
             current_size = self.composite_buffer.numel()
             expansion_count = 0
+            allocator_service = GlobalMemoryAllocatorService.get_instance()
 
             while current_size < self.total_size and not self.stop_flag.is_set():
                 effective_limit = self._get_effective_limit(current_size)
@@ -289,7 +447,8 @@ class AsyncMemoryExpander:
                 expansion_count += 1
                 size_gb = next_size / (1024**3)
                 logger.info(
-                    "Expansion #%d: +%.2f GB, current=%d, target=%d (using subprocess)",
+                    "Expansion #%d: +%.2f GB, current=%d, target=%d "
+                    "(using service process)",
                     expansion_count,
                     size_gb,
                     current_size,
@@ -297,30 +456,14 @@ class AsyncMemoryExpander:
                 )
 
                 try:
-                    result_queue = mp.Queue()
-                    alloc_process = mp.Process(
-                        target=self._allocate_in_subprocess,
-                        args=(next_size, self.numa_mapping, result_queue),
-                        daemon=False,
+                    new_buffer = allocator_service.allocate_async(
+                        next_size, self.numa_mapping
                     )
-                    alloc_process.start()
-
-                    ptr, success, error_msg = result_queue.get(timeout=120)
-                    alloc_process.join(timeout=5)
-
-                    if not success:
-                        logger.error("Subprocess allocation failed: %s", error_msg)
+                    if new_buffer is None:
+                        logger.error("Allocation failed in service process")
                         break
 
-                    array_type = ctypes.c_uint8 * next_size
-                    buf = array_type.from_address(ptr)
-                    new_buffer = torch.frombuffer(buf, dtype=torch.uint8)
-
-                    logger.info(
-                        "Subprocess allocation succeeded: ptr=0x%x, size=%.2f GB",
-                        ptr,
-                        size_gb,
-                    )
+                    logger.info("Memory allocation succeeded: size=%.2f GB", size_gb)
 
                 except Exception as e:
                     logger.error("Allocation failed: %s", e)
@@ -340,47 +483,11 @@ class AsyncMemoryExpander:
                 self.composite_buffer.numel(),
                 expansion_count,
             )
-        except Exception as e:
-            logger.error(f"Expansion error: {e}", exc_info=True)
+        except Exception:
+            logger.error("Expansion error: %s", exc_info=True)
         finally:
             with self.expansion_lock:
                 self.is_expanding = False
-
-    @staticmethod
-    def _allocate_in_subprocess(size, numa_mapping, result_queue):
-        """Allocate memory in a separate process to avoid blocking worker.
-
-        Args:
-            size: Size in bytes to allocate
-            numa_mapping: NUMA mapping configuration
-            result_queue: Queue to return (ptr, success, error_msg)
-        """
-        try:
-            # Third Party
-            import torch
-
-            if torch.cuda.is_available():
-                # First Party
-                import lmcache.c_ops as lmc_ops
-            else:
-                # First Party
-                import lmcache.non_cuda_equivalents as lmc_ops
-
-            if numa_mapping:
-                if torch.cuda.is_available():
-                    current_device_id = torch.cuda.current_device()
-                else:
-                    current_device_id = 0
-                gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
-                numa_id = gpu_to_numa_mapping.get(current_device_id, 0)
-                ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
-            else:
-                ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-
-            result_queue.put((ptr, True, None))
-
-        except Exception as e:
-            result_queue.put((0, False, str(e)))
 
     def stop(self):
         self.stop_flag.set()
