@@ -86,7 +86,11 @@ def aggregate_results(
                 ),
                 min_latency=min(min_latencies) if min_latencies else 0.0,
                 max_latency=max(max_latencies) if max_latencies else 0.0,
-                p95_latency=max(p95_latencies) if p95_latencies else 0.0,
+                p95_latency=(
+                    sum(s.p95_latency * s.rps for s in op_stats_list) / total_rps
+                    if total_rps > 0 and p95_latencies
+                    else 0.0
+                ),
                 errors=sum(s.errors for s in op_stats_list),
             )
 
