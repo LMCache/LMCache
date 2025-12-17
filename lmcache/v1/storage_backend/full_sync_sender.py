@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 import asyncio
 import random
@@ -24,6 +25,16 @@ if TYPE_CHECKING:
     from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class SyncInitResult:
+    """Result of sync initialization"""
+
+    sync_id: str
+    keys: List[int]
+    total_keys: int
+    batch_count: int
 
 
 class FullSyncSender:
@@ -66,6 +77,9 @@ class FullSyncSender:
         )
         self.retry_delay_s = config.get_extra_config_value(
             "full_sync_retry_delay_s", 1.0
+        )
+        self.max_poll_attempts = config.get_extra_config_value(
+            "full_sync_max_poll_attempts", 60
         )
 
         # Dependencies
@@ -169,9 +183,158 @@ class FullSyncSender:
             logger.error("Error querying sync status: %s", e)
             return None
 
+    async def _initialize_sync(
+        self, reason: Optional[str] = None
+    ) -> Optional[SyncInitResult]:
+        """
+        Initialize the sync process.
+
+        Handles startup delay, entering freeze mode, getting keys,
+        and sending the start message with retry.
+
+        Args:
+            reason: The reason for full sync
+
+        Returns:
+            SyncInitResult if initialization succeeded, None otherwise
+        """
+        # Step 1: Random startup delay to avoid thundering herd
+        delay = random.uniform(0, self.startup_delay_range_s)
+        logger.info("Full sync startup delay: %.2fs", delay)
+        await asyncio.sleep(delay)
+
+        # Step 2: Enter freeze mode
+        logger.info("Entering freeze mode for full sync.")
+        self.lmcache_engine.freeze(True)
+
+        # Step 3: Get all keys from hot cache
+        keys = self._get_all_hot_cache_keys()
+        total_keys = len(keys)
+        batch_count = (total_keys + self.batch_size - 1) // self.batch_size
+        batch_count = max(batch_count, 1)  # At least 1 batch even if empty
+
+        logger.info(
+            "Full sync: total_keys=%d, batch_size=%d, batch_count=%d",
+            total_keys,
+            self.batch_size,
+            batch_count,
+        )
+
+        # Step 4: Generate sync ID and send start message with retry
+        sync_id = self._generate_sync_id()
+        self._current_sync_id = sync_id
+
+        start_accepted = False
+        for attempt in range(self.max_retry_count):
+            ret_msg = await self._send_sync_start(sync_id, total_keys, batch_count)
+            if ret_msg is not None and ret_msg.accepted:
+                start_accepted = True
+                break
+            logger.warning(
+                "FullSyncStart not accepted, attempt %d/%d, error: %s",
+                attempt + 1,
+                self.max_retry_count,
+                ret_msg.error_msg if ret_msg else "No response",
+            )
+            await asyncio.sleep(self.retry_delay_s)
+
+        if not start_accepted:
+            logger.error(
+                "Failed to start full sync after %d attempts", self.max_retry_count
+            )
+            return None
+
+        return SyncInitResult(
+            sync_id=sync_id,
+            keys=keys,
+            total_keys=total_keys,
+            batch_count=batch_count,
+        )
+
+    async def _send_key_batches(
+        self, sync_id: str, keys: List[int], batch_count: int
+    ) -> int:
+        """
+        Send keys in batches to the controller.
+
+        Args:
+            sync_id: The sync session ID
+            keys: List of all keys to send
+            batch_count: Number of batches to send
+
+        Returns:
+            Total number of keys sent
+        """
+        total_keys = len(keys)
+
+        for batch_id in range(batch_count):
+            start_idx = batch_id * self.batch_size
+            end_idx = min(start_idx + self.batch_size, total_keys)
+            batch_keys = keys[start_idx:end_idx]
+
+            self._send_sync_batch(sync_id, batch_id, batch_keys)
+
+            logger.debug(
+                "Sent batch %d/%d with %d keys",
+                batch_id + 1,
+                batch_count,
+                len(batch_keys),
+            )
+
+            # Small delay between batches to avoid overwhelming controller
+            if self.batch_interval_ms > 0 and batch_id < batch_count - 1:
+                await asyncio.sleep(self.batch_interval_ms / 1000.0)
+
+        # Send end message
+        self._send_sync_end(sync_id, total_keys)
+        logger.info("Full sync batches sent, total_keys=%d", total_keys)
+
+        return total_keys
+
+    async def _poll_for_completion(self, sync_id: str) -> bool:
+        """
+        Poll for sync completion status.
+
+        Args:
+            sync_id: The sync session ID
+
+        Returns:
+            True if sync completed and can exit freeze mode, False on timeout
+        """
+        for poll_attempt in range(self.max_poll_attempts):
+            await asyncio.sleep(self.status_poll_interval_s)
+
+            status = await self._query_sync_status(sync_id)
+            if status is None:
+                logger.warning(
+                    "Failed to query sync status, attempt %d", poll_attempt + 1
+                )
+                continue
+
+            logger.info(
+                "Sync status: is_complete=%s, global_progress=%.1f%%, "
+                "can_exit_freeze=%s",
+                status.is_complete,
+                status.global_progress * 100,
+                status.can_exit_freeze,
+            )
+
+            if status.can_exit_freeze:
+                return True
+
+        # TODO(baoloongmao): Use heartbeat to detect controller failure
+        # and exit freeze mode if necessary
+        logger.warning("Full sync status poll timeout, exiting freeze mode anyway")
+        return False
+
     async def start_full_sync(self, reason: Optional[str] = None) -> bool:
         """
         Start the full sync process.
+
+        This method orchestrates the full sync by delegating to helper methods:
+        1. _initialize_sync: Startup delay, freeze mode, get keys, send start msg
+        2. _send_key_batches: Send all keys in batches
+        3. _poll_for_completion: Poll for sync completion status
 
         Args:
             reason: The reason for full sync (e.g., "controller_restart")
@@ -194,103 +357,20 @@ class FullSyncSender:
         )
 
         try:
-            # Step 1: Random startup delay to avoid thundering herd
-            delay = random.uniform(0, self.startup_delay_range_s)
-            logger.info("Full sync startup delay: %.2fs", delay)
-            await asyncio.sleep(delay)
-
-            # Step 2: Enter freeze mode
-            self.lmcache_engine.freeze(True)
-
-            # Step 3: Get all keys from hot cache
-            keys = self._get_all_hot_cache_keys()
-            total_keys = len(keys)
-            batch_count = (total_keys + self.batch_size - 1) // self.batch_size
-            batch_count = max(batch_count, 1)  # At least 1 batch even if empty
-
-            logger.info(
-                "Full sync: total_keys=%d, batch_size=%d, batch_count=%d",
-                total_keys,
-                self.batch_size,
-                batch_count,
-            )
-
-            # Step 4: Generate sync ID and send start message with retry
-            sync_id = self._generate_sync_id()
-            self._current_sync_id = sync_id
-
-            start_accepted = False
-            for attempt in range(self.max_retry_count):
-                ret_msg = await self._send_sync_start(sync_id, total_keys, batch_count)
-                if ret_msg is not None and ret_msg.accepted:
-                    start_accepted = True
-                    break
-                logger.warning(
-                    "FullSyncStart not accepted, attempt %d/%d, error: %s",
-                    attempt + 1,
-                    self.max_retry_count,
-                    ret_msg.error_msg if ret_msg else "No response",
-                )
-                await asyncio.sleep(self.retry_delay_s)
-
-            if not start_accepted:
-                logger.error(
-                    "Failed to start full sync after %d attempts", self.max_retry_count
-                )
+            # Step 1: Initialize sync (delay, freeze, get keys, send start)
+            init_result = await self._initialize_sync(reason)
+            if init_result is None:
                 return False
 
-            # Step 5: Send keys in batches
-            for batch_id in range(batch_count):
-                start_idx = batch_id * self.batch_size
-                end_idx = min(start_idx + self.batch_size, total_keys)
-                batch_keys = keys[start_idx:end_idx]
+            # Step 2: Send keys in batches
+            await self._send_key_batches(
+                init_result.sync_id,
+                init_result.keys,
+                init_result.batch_count,
+            )
 
-                self._send_sync_batch(sync_id, batch_id, batch_keys)
-
-                logger.debug(
-                    "Sent batch %d/%d with %d keys",
-                    batch_id + 1,
-                    batch_count,
-                    len(batch_keys),
-                )
-
-                # Small delay between batches to avoid overwhelming controller
-                if self.batch_interval_ms > 0 and batch_id < batch_count - 1:
-                    await asyncio.sleep(self.batch_interval_ms / 1000.0)
-
-            # Step 6: Send end message
-            self._send_sync_end(sync_id, total_keys)
-            logger.info("Full sync batches sent, total_keys=%d", total_keys)
-
-            # Step 7: Poll for completion status
-            # TODO(baoloongmao): Make this configurable
-            max_poll_attempts = 60  # 5 minutes with 5s interval
-            for poll_attempt in range(max_poll_attempts):
-                await asyncio.sleep(self.status_poll_interval_s)
-
-                status = await self._query_sync_status(sync_id)
-                if status is None:
-                    logger.warning(
-                        "Failed to query sync status, attempt %d", poll_attempt + 1
-                    )
-                    continue
-
-                logger.info(
-                    "Sync status: is_complete=%s, global_progress=%.1f%%, "
-                    "can_exit_freeze=%s",
-                    status.is_complete,
-                    status.global_progress * 100,
-                    status.can_exit_freeze,
-                )
-
-                if status.can_exit_freeze:
-                    break
-            else:
-                # TODO(baoloongmao): Use heartbeat to detect controller failure
-                # and exit freeze mode if necessary
-                logger.warning(
-                    "Full sync status poll timeout, exiting freeze mode anyway"
-                )
+            # Step 3: Poll for completion status
+            await self._poll_for_completion(init_result.sync_id)
 
             logger.info("Full sync completed successfully")
             return True
@@ -301,6 +381,7 @@ class FullSyncSender:
 
         finally:
             # Always clean up state, regardless of success or failure
+            logger.info("Exiting freeze mode after full sync.")
             self.lmcache_engine.freeze(False)
             self._is_syncing = False
             self._current_sync_id = None

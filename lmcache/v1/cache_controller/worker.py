@@ -148,7 +148,6 @@ class LMCacheWorker:
 
         # Full sync sender (initialized lazily when needed)
         self._full_sync_sender: Optional["FullSyncSender"] = None
-        self._full_sync_in_progress = False
 
         self.register()
 

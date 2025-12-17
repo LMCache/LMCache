@@ -38,27 +38,12 @@ class FullSyncCommand(HeartbeatCommand, tag="full_sync"):
             self.args,
         )
 
+        sender = worker._get_full_sync_sender()
+
         # Check if full sync is already in progress
-        if worker._full_sync_in_progress:
+        if sender.is_syncing:
             logger.warning("Full sync already in progress, skipping")
             return
 
         # Trigger full sync in background
-        worker._full_sync_in_progress = True
-        asyncio.create_task(self._do_full_sync(worker, self.reason))
-
-    async def _do_full_sync(
-        self, worker: "LMCacheWorker", reason: str | None = None
-    ) -> None:
-        """Perform full sync in background"""
-        try:
-            sender = worker._get_full_sync_sender()
-            success = await sender.start_full_sync(reason)
-            if success:
-                logger.info("Full sync completed successfully")
-            else:
-                logger.error("Full sync failed")
-        except Exception as e:
-            logger.error("Error during full sync: %s", e)
-        finally:
-            worker._full_sync_in_progress = False
+        asyncio.create_task(sender.start_full_sync(self.reason))
