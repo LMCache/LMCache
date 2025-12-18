@@ -16,8 +16,6 @@ from lmcache.v1.cache_controller.message import (
     ClearMsg,
     CompressMsg,
     DecompressMsg,
-    KVAdmitMsg,
-    KVEvictMsg,
     KVOpEvent,
     LookupMsg,
     MoveMsg,
@@ -47,9 +45,7 @@ class TestKVControllerAdmit:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
 
         await kv_controller.handle_batched_kv_operations(msg)
@@ -67,17 +63,13 @@ class TestKVControllerAdmit:
             instance_id="instance1",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
         msg2 = BatchedKVOperationMsg(
             instance_id="instance2",
             worker_id=1,
             location="LocalDiskBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
 
         await kv_controller.handle_batched_kv_operations(msg1)
@@ -107,7 +99,9 @@ class TestKVControllerAdmit:
         assert report_id in kv_controller.registry.kv_pool
         assert "LocalCPUBackend" in kv_controller.registry.kv_pool[report_id]
         for i in range(5):
-            assert (1000 + i) in kv_controller.registry.kv_pool[report_id]["LocalCPUBackend"]
+            assert (1000 + i) in kv_controller.registry.kv_pool[report_id][
+                "LocalCPUBackend"
+            ]
 
 
 class TestKVControllerEvict:
@@ -121,9 +115,7 @@ class TestKVControllerEvict:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
         await kv_controller.handle_batched_kv_operations(admit_msg)
 
@@ -132,15 +124,18 @@ class TestKVControllerEvict:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=2)
-            ],
+            operations=[KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=2)],
         )
         await kv_controller.handle_batched_kv_operations(evict_msg)
 
         report_id = ("test_instance", 0)
-        assert report_id not in kv_controller.registry.kv_pool or \
-               12345 not in kv_controller.registry.kv_pool.get(report_id, {}).get("LocalCPUBackend", set())
+        assert (
+            report_id not in kv_controller.registry.kv_pool
+            or 12345
+            not in kv_controller.registry.kv_pool.get(report_id, {}).get(
+                "LocalCPUBackend", set()
+            )
+        )
 
     @pytest.mark.asyncio
     async def test_evict_nonexistent_key(self, kv_controller):
@@ -149,9 +144,7 @@ class TestKVControllerEvict:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.EVICT, key=99999, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.EVICT, key=99999, seq_num=1)],
         )
 
         # Should not raise an error
@@ -168,17 +161,13 @@ class TestKVControllerEvict:
             instance_id="instance1",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
         msg2 = BatchedKVOperationMsg(
             instance_id="instance2",
             worker_id=1,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
         await kv_controller.handle_batched_kv_operations(msg1)
         await kv_controller.handle_batched_kv_operations(msg2)
@@ -188,9 +177,7 @@ class TestKVControllerEvict:
             instance_id="instance1",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=2)
-            ],
+            operations=[KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=2)],
         )
         await kv_controller.handle_batched_kv_operations(evict_msg)
 
@@ -200,7 +187,9 @@ class TestKVControllerEvict:
         assert (
             report_id1 not in kv_controller.registry.kv_pool
             or 12345
-            not in kv_controller.registry.kv_pool[report_id1].get("LocalCPUBackend", set())
+            not in kv_controller.registry.kv_pool[report_id1].get(
+                "LocalCPUBackend", set()
+            )
         )
         assert 12345 in kv_controller.registry.kv_pool[report_id2]["LocalCPUBackend"]
 
@@ -212,17 +201,13 @@ class TestKVControllerEvict:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
         msg2 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=0,
             location="LocalDiskBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=2)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=2)],
         )
         await kv_controller.handle_batched_kv_operations(msg1)
         await kv_controller.handle_batched_kv_operations(msg2)
@@ -232,9 +217,7 @@ class TestKVControllerEvict:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=3)
-            ],
+            operations=[KVOpEvent(op_type=OpType.EVICT, key=12345, seq_num=3)],
         )
         await kv_controller.handle_batched_kv_operations(evict_msg)
 
@@ -259,9 +242,7 @@ class TestKVControllerSequenceTracking:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=5)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=5)],
         )
 
         await kv_controller.handle_batched_kv_operations(msg)
@@ -301,9 +282,7 @@ class TestKVControllerSequenceTracking:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12345, seq_num=1)],
         )
         await kv_controller.handle_batched_kv_operations(msg1)
 
@@ -312,9 +291,7 @@ class TestKVControllerSequenceTracking:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=12346, seq_num=5)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=12346, seq_num=5)],
         )
         await kv_controller.handle_batched_kv_operations(msg2)
 
@@ -333,17 +310,13 @@ class TestKVControllerSequenceTracking:
             instance_id="instance1",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=100, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=100, seq_num=1)],
         )
         msg2 = BatchedKVOperationMsg(
             instance_id="instance2",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=200, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=200, seq_num=1)],
         )
 
         await kv_controller.handle_batched_kv_operations(msg1)
@@ -426,9 +399,7 @@ class TestKVControllerLookup:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)],
         )
         await kv_controller.handle_batched_kv_operations(msg)
 
@@ -514,9 +485,7 @@ class TestKVControllerBatchedP2PLookup:
             instance_id="query_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)],
         )
         await kv_controller.handle_batched_kv_operations(msg)
 
@@ -608,17 +577,13 @@ class TestKVControllerDeregister:
             instance_id="test_instance",
             worker_id=0,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)],
         )
         msg2 = BatchedKVOperationMsg(
             instance_id="test_instance",
             worker_id=1,
             location="LocalCPUBackend",
-            operations=[
-                KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)
-            ],
+            operations=[KVOpEvent(op_type=OpType.ADMIT, key=1000, seq_num=1)],
         )
 
         await kv_controller.handle_batched_kv_operations(msg1)

@@ -210,11 +210,12 @@ class TestRegistrationControllerDeregister:
             # Verify cleanup
             worker_node = reg_controller.registry.get_worker("test_instance", 0)
             assert worker_node is None
-            
+
             instance_node = reg_controller.registry.get_instance("test_instance")
             assert instance_node is None
 
-            # Note: KV cleanup is now handled directly by the registry's deregister_worker method
+            # Note: KV cleanup is now handled directly by the registry's
+            # deregister_worker method
 
     @pytest.mark.asyncio
     async def test_deregister_nonexistent_worker(self, reg_controller):
@@ -260,7 +261,7 @@ class TestRegistrationControllerDeregister:
             # Worker 1 should still be registered
             worker_ids = reg_controller.registry.get_worker_ids("test_instance")
             assert worker_ids == [1]
-            
+
             worker_node = reg_controller.registry.get_worker("test_instance", 1)
             assert worker_node is not None
             assert worker_node.socket is not None

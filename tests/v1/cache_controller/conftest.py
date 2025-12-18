@@ -260,7 +260,9 @@ def mock_reg_controller():
             for location, keys in locations.items():
                 if key in keys:
                     # Return a mock KVChunkInfo
+                    # First Party
                     from lmcache.v1.cache_controller.utils import KVChunkInfo
+
                     return KVChunkInfo(instance_id, worker_id, location)
         return None
 
@@ -279,14 +281,18 @@ def mock_reg_controller():
 
     def mock_get_seq_discontinuity_count():
         # Simple implementation for testing
-        return getattr(mock_registry, '_seq_discontinuity_count', 0)
+        return getattr(mock_registry, "_seq_discontinuity_count", 0)
 
     def mock_deregister_worker(instance_id, worker_id):
         report_id = (instance_id, worker_id)
         if report_id in mock_registry.kv_pool:
             del mock_registry.kv_pool[report_id]
         # Also clean up seq_tracker
-        keys_to_remove = [k for k in mock_registry.seq_tracker.keys() if k[0] == instance_id and k[1] == worker_id]
+        keys_to_remove = [
+            k
+            for k in mock_registry.seq_tracker.keys()
+            if k[0] == instance_id and k[1] == worker_id
+        ]
         for key in keys_to_remove:
             del mock_registry.seq_tracker[key]
         return True
@@ -299,7 +305,9 @@ def mock_reg_controller():
                 continue
             for location, keys in locations.items():
                 if key in keys:
+                    # First Party
                     from lmcache.v1.cache_controller.utils import KVChunkInfo
+
                     kv_info = KVChunkInfo(instance_id, worker_id, location)
                     # Get peer_init_url from controller
                     peer_init_url = controller.get_peer_init_url(instance_id, worker_id)
@@ -308,7 +316,9 @@ def mock_reg_controller():
 
     def mock_handle_batched_kv_operations(msg):
         """Handle batched KV operations"""
+        # First Party
         from lmcache.v1.cache_controller.message import OpType
+
         report_id = (msg.instance_id, msg.worker_id)
 
         for op in msg.operations:
@@ -348,10 +358,16 @@ def mock_reg_controller():
     mock_registry.find_kv = Mock(side_effect=mock_find_kv)
     mock_registry.get_worker_kv_keys = Mock(side_effect=mock_get_worker_kv_keys)
     mock_registry.get_total_kv_count = Mock(side_effect=mock_get_total_kv_count)
-    mock_registry.get_seq_discontinuity_count = Mock(side_effect=mock_get_seq_discontinuity_count)
+    mock_registry.get_seq_discontinuity_count = Mock(
+        side_effect=mock_get_seq_discontinuity_count
+    )
     mock_registry.deregister_worker = Mock(side_effect=mock_deregister_worker)
-    mock_registry.find_kv_with_worker_info = Mock(side_effect=mock_find_kv_with_worker_info)
-    mock_registry.handle_batched_kv_operations = Mock(side_effect=mock_handle_batched_kv_operations)
+    mock_registry.find_kv_with_worker_info = Mock(
+        side_effect=mock_find_kv_with_worker_info
+    )
+    mock_registry.handle_batched_kv_operations = Mock(
+        side_effect=mock_handle_batched_kv_operations
+    )
     mock_registry._seq_discontinuity_count = 0
 
     controller.registry = mock_registry
