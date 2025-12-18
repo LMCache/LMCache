@@ -68,6 +68,8 @@ class LMCacheControllerManager:
         controller_urls: dict[str, str],
         health_check_interval: int,
         lmcache_worker_timeout: int,
+        full_sync_completion_threshold: float = 0.8,
+        full_sync_timeout_s: float = 300.0,
     ):
         # Initialize stats logger
         prometheus_labels = {
@@ -118,7 +120,11 @@ class LMCacheControllerManager:
         else:
             self.controller_heartbeat_socket = None
         self.reg_controller = RegistrationController()
-        self.kv_controller = KVController(self.reg_controller.registry)
+        self.kv_controller = KVController(
+            registry=self.reg_controller.registry,
+            full_sync_completion_threshold=full_sync_completion_threshold,
+            full_sync_timeout_s=full_sync_timeout_s,
+        )
 
         # Cluster executor
         self.cluster_executor = LMCacheClusterExecutor(
@@ -448,7 +454,7 @@ class LMCacheControllerManager:
     async def health_check(self):
         while True:
             await asyncio.sleep(self.health_check_interval)
-            worker_infos = self.reg_controller.registry.get_all_worker_infos()
+            worker_infos = self.reg_controller.registry.get_all_worker_infos_cached(1)
             for worker_info in worker_infos:
                 if (
                     time.time() - worker_info.last_heartbeat_time
