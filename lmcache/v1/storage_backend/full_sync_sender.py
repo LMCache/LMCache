@@ -37,6 +37,15 @@ class SyncInitResult:
     batch_count: int
 
 
+@dataclass
+class BatchInfo:
+    """Information about a batch for resending"""
+
+    batch_id: int
+    start_idx: int
+    end_idx: int
+
+
 class FullSyncSender:
     """
     Handles full sync of hot_cache keys to the Controller.
@@ -291,16 +300,62 @@ class FullSyncSender:
 
         return total_keys
 
-    async def _poll_for_completion(self, sync_id: str) -> bool:
+    async def _resend_missing_batches(
+        self, sync_id: str, keys: List[int], missing_batches: List[int]
+    ) -> None:
         """
-        Poll for sync completion status.
+        Resend missing batches to the controller.
 
         Args:
             sync_id: The sync session ID
+            keys: List of all keys
+            missing_batches: List of missing batch IDs to resend
+        """
+        total_keys = len(keys)
+
+        logger.info(
+            "Resending %d missing batches: %s",
+            len(missing_batches),
+            missing_batches,
+        )
+
+        for batch_id in missing_batches:
+            start_idx = batch_id * self.batch_size
+            end_idx = min(start_idx + self.batch_size, total_keys)
+            batch_keys = keys[start_idx:end_idx]
+
+            self._send_sync_batch(sync_id, batch_id, batch_keys)
+
+            logger.debug(
+                "Resent batch %d with %d keys",
+                batch_id,
+                len(batch_keys),
+            )
+
+            # Small delay between batches
+            if self.batch_interval_ms > 0:
+                await asyncio.sleep(self.batch_interval_ms / 1000.0)
+
+        logger.info("Finished resending %d missing batches", len(missing_batches))
+
+    async def _poll_for_completion(
+        self, sync_id: str, keys: List[int], total_keys: int
+    ) -> bool:
+        """
+        Poll for sync completion status and resend missing batches if needed.
+
+        Args:
+            sync_id: The sync session ID
+            keys: List of all keys (needed for resending missing batches)
+            total_keys: Total number of keys
 
         Returns:
             True if sync completed and can exit freeze mode, False on timeout
         """
+        resend_count = 0
+        # TODO(baoloongmao): This can be an individual config
+        max_resend_attempts = self.max_retry_count
+
         for poll_attempt in range(self.max_poll_attempts):
             await asyncio.sleep(self.status_poll_interval_s)
 
@@ -313,14 +368,38 @@ class FullSyncSender:
 
             logger.info(
                 "Sync status: is_complete=%s, global_progress=%.1f%%, "
-                "can_exit_freeze=%s",
+                "can_exit_freeze=%s, missing_batches=%s",
                 status.is_complete,
                 status.global_progress * 100,
                 status.can_exit_freeze,
+                status.missing_batches if status.missing_batches else "none",
             )
 
             if status.can_exit_freeze:
                 return True
+
+            # Handle missing batches - resend them
+            if status.missing_batches and resend_count < max_resend_attempts:
+                resend_count += 1
+                logger.warning(
+                    "Controller reported missing batches, resending "
+                    "(attempt %d/%d): %s",
+                    resend_count,
+                    max_resend_attempts,
+                    status.missing_batches,
+                )
+                await self._resend_missing_batches(
+                    sync_id, keys, status.missing_batches
+                )
+                # Resend end message after resending missing batches
+                self._send_sync_end(sync_id, total_keys)
+            elif status.missing_batches and resend_count >= max_resend_attempts:
+                logger.error(
+                    "Max resend attempts reached (%d), "
+                    "giving up on missing batches: %s",
+                    max_resend_attempts,
+                    status.missing_batches,
+                )
 
         # TODO(baoloongmao): Use heartbeat to detect controller failure
         # and exit freeze mode if necessary
@@ -369,8 +448,12 @@ class FullSyncSender:
                 init_result.batch_count,
             )
 
-            # Step 3: Poll for completion status
-            await self._poll_for_completion(init_result.sync_id)
+            # Step 3: Poll for completion status (with resend support)
+            await self._poll_for_completion(
+                init_result.sync_id,
+                init_result.keys,
+                init_result.total_keys,
+            )
 
             logger.info("Full sync completed successfully")
             return True

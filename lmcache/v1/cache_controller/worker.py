@@ -199,14 +199,14 @@ class LMCacheWorker:
         except zmq.Again as e:
             logger.error("Timeout occurred, recreating socket. Error: %s", e)
             self._recreate_req_socket()
-            return self._create_ret_msg(msg)
+            return self._on_request_failure(msg)
         except zmq.ZMQError as e:
             logger.error("ZMQ error occurred, recreating socket. Error: %s", e)
             self._recreate_req_socket()
-            return self._create_ret_msg(msg)
+            return self._on_request_failure(msg)
         except Exception as e:
             logger.error("Error happens in lmcache worker req_socket. Error: %s", e)
-            return self._create_ret_msg(msg)
+            return self._on_request_failure(msg)
 
     def _create_req_socket(self):
         self.req_socket = get_zmq_socket_with_timeout(
@@ -243,7 +243,11 @@ class LMCacheWorker:
             )
         return self._full_sync_sender
 
-    def _create_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+    def _on_request_failure(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+        """
+        Create a default return message when worker -> controller
+        request encounters an error (e.g., timeout, ZMQ error).
+        """
         if isinstance(msg, BatchedP2PLookupMsg):
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
         elif isinstance(msg, HeartbeatMsg):

@@ -188,7 +188,7 @@ class KVController:
         """
         Handle full sync end message from a worker.
 
-        This marks the sync as completed and verifies the key count.
+        This marks the sync as end-received and records actual total keys.
         """
         # TODO(baoloongmao): Implement full sync end handling
         instance_id = msg.instance_id
@@ -210,7 +210,7 @@ class KVController:
         """
         Handle full sync status query from a worker.
 
-        Returns the sync status and whether freeze mode can be exited.
+        Returns the sync status including any missing batches that need resending.
         """
         # TODO(baoloongmao): Implement full sync status query handling
         instance_id = msg.instance_id
@@ -224,12 +224,14 @@ class KVController:
             sync_id,
         )
 
-        # For now, always return completed and allow exit freeze
+        # TODO(baoloongmao): Implement proper sync status tracking with missing batches
+        # For now, always return complete to allow worker to proceed
         return FullSyncStatusRetMsg(
             sync_id=msg.sync_id,
             is_complete=True,
             global_progress=1.0,
             can_exit_freeze=True,
+            missing_batches=[],
         )
 
     # TODO(Jiayi): The current implementation does not handle

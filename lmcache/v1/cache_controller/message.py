@@ -325,12 +325,16 @@ class FullSyncStatusRetMsg(WorkerReqRetMsg):
     is_complete: bool  # Whether current worker sync is complete
     global_progress: float  # Global progress (0.0 - 1.0)
     can_exit_freeze: bool  # Whether freeze mode can be exited
+    missing_batches: list[int] = []  # List of missing batch IDs that need to be resent
 
     def describe(self) -> str:
+        missing_info = (
+            f" missing={self.missing_batches}" if self.missing_batches else ""
+        )
         return (
             f"FullSyncStatusRet sync_id={self.sync_id} "
             f"complete={self.is_complete} progress={self.global_progress:.2%} "
-            f"can_exit_freeze={self.can_exit_freeze}"
+            f"can_exit_freeze={self.can_exit_freeze}{missing_info}"
         )
 
 
