@@ -17,10 +17,11 @@ steps:
             echo "No log files found for build ${BUILDKITE_BUILD_ID}" > build_${BUILDKITE_BUILD_ID}.log
           fi
         }
-        trap create_artifact EXIT INT TERM
-        BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --configs=.buildkite/cases/comprehensive-cases.txt || exit_code=$?
+        trap 'test_exit_code=$?; create_artifact; exit $test_exit_code' EXIT INT TERM
+        BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --configs=.buildkite/cases/comprehensive-cases.txt
+        test_exit_code=$?
         create_artifact
-        exit ${exit_code:-0}
+        exit $test_exit_code
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
 
