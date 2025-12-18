@@ -34,7 +34,7 @@ def CreateTransferChannel(
     :return: An instance of the specified transfer channel.
     """
 
-    assert channel_type in ["nixl", "mock_memory"], (
+    assert channel_type in ["nixl", "mooncake", "mock_memory"], (
         f"Unsupported channel type: {channel_type}"
     )
 
@@ -56,6 +56,22 @@ def CreateTransferChannel(
             **kwargs,
         )
         return transfer_channel
+
+    if channel_type == "mooncake":
+        # First Party
+        from lmcache.v1.transfer_channel.mooncake_channel import MooncakeChannel
+
+        mooncake_channel: BaseTransferChannel = MooncakeChannel(
+            async_mode=async_mode,
+            role=role,
+            buffer_ptr=buffer_ptr,
+            buffer_size=buffer_size,
+            align_bytes=align_bytes,
+            tp_rank=tp_rank,
+            peer_init_url=peer_init_url,
+            **kwargs,
+        )
+        return mooncake_channel
 
     if channel_type == "mock_memory":
         # First Party
