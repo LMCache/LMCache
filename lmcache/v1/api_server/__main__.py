@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import argparse
 import asyncio
 import json
@@ -26,6 +26,9 @@ import uvicorn
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_controller.config import (
+    load_controller_config_with_overrides,
+)
 from lmcache.v1.cache_controller.controller_manager import LMCacheControllerManager
 from lmcache.v1.cache_controller.message import (  # noqa: E501
     CheckFinishMsg,
@@ -51,9 +54,32 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     QueryWorkerInfoRetMsg,
     WorkerInfo,
 )
+from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.internal_api_server.api_registry import APIRegistry
 
 logger = init_logger(__name__)
+
+
+def parse_extra_params(extra_args: list) -> Dict[str, Any]:
+    """Parse extra parameters in key=value format"""
+    params = {}
+    for arg in extra_args:
+        if "=" in arg:
+            key, value = arg.split("=", 1)
+            key = key.lstrip("-")
+            try:
+                if value.lower() in ("true", "false"):
+                    params[key] = value.lower() == "true"
+                elif value.isdigit():
+                    params[key] = int(value)
+                elif value.replace(".", "", 1).isdigit():
+                    params[key] = float(value)
+                else:
+                    params[key] = value
+            except ValueError:
+                params[key] = value
+            logger.info(f"Extra parameter: {key} = {params[key]}")
+    return params
 
 
 def create_app(
@@ -391,6 +417,9 @@ def create_app(
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config", type=str, help="Path to controller configuration file"
+    )
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument(
@@ -418,33 +447,82 @@ def main():
         help="The lmcache worker timeout in seconds.",
     )
 
-    args = parser.parse_args()
+    # Parse known args first, then handle extra parameters
+    args, extra = parser.parse_known_args()
+    extra_params = parse_command_line_extra_params(extra)
 
     try:
-        if args.monitor_ports is not None:
-            controller_urls = {
-                "pull": f"{args.host}:{args.monitor_ports['pull']}",
-                "reply": f"{args.host}:{args.monitor_ports['reply']}",
-            }
-        else:
-            logger.warning(
-                "Argument --monitor-port will be deprecated soon. "
-                "Please use --monitor-ports instead."
-            )
-            controller_urls = {
-                "pull": f"{args.host}:{args.monitor_port}",
-                "reply": None,
-            }
-        app = create_app(
-            controller_urls, args.health_check_interval, args.lmcache_worker_timeout
+        # Build overrides dictionary from command-line arguments
+        override_dict = {}
+
+        # Map command-line arguments to config keys
+        arg_mappings = {
+            "host": "controller_host",
+            "port": "controller_port",
+            "health_check_interval": "health_check_interval",
+            "lmcache_worker_timeout": "lmcache_worker_timeout",
+        }
+
+        for arg_name, config_key in arg_mappings.items():
+            arg_value = getattr(args, arg_name)
+            if arg_value is not None:
+                override_dict[config_key] = arg_value
+
+        # Add extra parameters
+        if extra_params:
+            override_dict.update(extra_params)
+
+        # Load configuration using the generic utility function
+        # This replaces the previous manual config loading code
+        config = load_controller_config_with_overrides(
+            config_file_path=args.config,
+            overrides=override_dict,
         )
 
-        logger.info(f"Starting LMCache controller at {args.host}:{args.port}")
-        logger.info(f"Monitoring lmcache workers at ports {args.monitor_ports}")
+        # Build controller URLs from config or arguments
+        if config.controller_monitor_ports is not None:
+            controller_urls = {
+                "pull": (
+                    f"{config.controller_host}:"
+                    f"{config.controller_monitor_ports['pull']}"
+                ),
+                "reply": (
+                    f"{config.controller_host}:"
+                    f"{config.controller_monitor_ports['reply']}"
+                ),
+            }
+        else:
+            if args.monitor_port != 9001:  # Only warn if explicitly set
+                logger.warning(
+                    "Argument --monitor-port will be deprecated soon. "
+                    "Please use --monitor-ports instead."
+                )
+            controller_urls = {
+                "pull": f"{config.controller_host}:{args.monitor_port}",
+                "reply": None,
+            }
 
-        uvicorn.run(app, host=args.host, port=args.port)
+        # Use config values for health check and timeout
+        health_check_interval = config.health_check_interval
+        lmcache_worker_timeout = config.lmcache_worker_timeout
+
+        app = create_app(controller_urls, health_check_interval, lmcache_worker_timeout)
+
+        logger.info(
+            f"Starting LMCache controller at "
+            f"{config.controller_host}:{config.controller_port}"
+        )
+        ports_message = f"Monitoring lmcache workers at ports {controller_urls}"
+        logger.info(ports_message)
+        logger.info(f"Health check interval: {health_check_interval}s")
+        logger.info(f"Worker timeout: {lmcache_worker_timeout}s")
+
+        uvicorn.run(app, host=config.controller_host, port=config.controller_port)
     except TimeoutError as e:
         logger.error(e)
+    except Exception as e:
+        logger.error(f"Failed to start controller: {e}", exc_info=True)
+        sys.exit(1)  # Exit with error code
 
 
 if __name__ == "__main__":

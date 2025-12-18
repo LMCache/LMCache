@@ -147,6 +147,49 @@ class BatchedKVOperationMsg(WorkerMsg):
         )
 
 
+# ============= Full Sync Messages (PUSH mode) =============
+
+
+class FullSyncBatchMsg(WorkerMsg):
+    """Full sync batch message (PUSH mode, no confirmation needed)
+
+    Used to send a batch of chunk hashes during full sync.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
+    sync_id: str
+    batch_id: int  # Current batch number (0-indexed)
+    keys: list[int]  # List of chunk_hash in this batch
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncBatch sync_id={self.sync_id} batch_id={self.batch_id} "
+            f"keys_count={len(self.keys)} from {self.instance_id}:{self.worker_id}"
+        )
+
+
+class FullSyncEndMsg(WorkerMsg):
+    """Full sync end message (PUSH mode)
+
+    Sent after all batches are sent to signal completion.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
+    sync_id: str
+    actual_total_keys: int  # Actual total keys sent (for verification)
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncEnd sync_id={self.sync_id} "
+            f"total_keys={self.actual_total_keys} from "
+            f"{self.instance_id}:{self.worker_id}"
+        )
+
+
 """Worker Request (requiring an reply) Message from LMcache to Controller"""
 
 
@@ -180,6 +223,44 @@ class BatchedP2PLookupMsg(WorkerReqMsg):
             f"Batched P2P lookup for {len(self.hashes)} keys from "
             f"instance id {self.instance_id} and "
             f"worker id {self.worker_id}"
+        )
+
+
+class FullSyncStartMsg(WorkerReqMsg):
+    """Full sync start message (REQ-REP mode, needs confirmation)
+
+    Sent before starting full sync to notify controller and get confirmation.
+    """
+
+    instance_id: str
+    worker_id: int
+    location: str
+    sync_id: str  # Sync session ID
+    total_keys: int  # Expected total key count
+    batch_count: int  # Expected batch count
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncStart sync_id={self.sync_id} "
+            f"total_keys={self.total_keys} batches={self.batch_count} "
+            f"from {self.instance_id}:{self.worker_id}"
+        )
+
+
+class FullSyncStatusMsg(WorkerReqMsg):
+    """Full sync status query message (REQ-REP mode)
+
+    Used to query sync progress and check if freeze mode can be exited.
+    """
+
+    instance_id: str
+    worker_id: int
+    sync_id: str
+
+    def describe(self) -> str:
+        return (
+            f"FullSyncStatus query sync_id={self.sync_id} "
+            f"from {self.instance_id}:{self.worker_id}"
         )
 
 
@@ -224,6 +305,37 @@ class BatchedP2PLookupRetMsg(WorkerReqRetMsg):
 
     def describe(self) -> str:
         return f"The layout info is {self.layout_info}"
+
+
+class FullSyncStartRetMsg(WorkerReqRetMsg):
+    """Full sync start response message"""
+
+    sync_id: str
+    accepted: bool  # Whether sync request is accepted
+    error_msg: Optional[str] = None
+
+    def describe(self) -> str:
+        return f"FullSyncStartRet sync_id={self.sync_id} accepted={self.accepted}"
+
+
+class FullSyncStatusRetMsg(WorkerReqRetMsg):
+    """Full sync status response message"""
+
+    sync_id: str
+    is_complete: bool  # Whether current worker sync is complete
+    global_progress: float  # Global progress (0.0 - 1.0)
+    can_exit_freeze: bool  # Whether freeze mode can be exited
+    missing_batches: list[int] = []  # List of missing batch IDs that need to be resent
+
+    def describe(self) -> str:
+        missing_info = (
+            f" missing={self.missing_batches}" if self.missing_batches else ""
+        )
+        return (
+            f"FullSyncStatusRet sync_id={self.sync_id} "
+            f"complete={self.is_complete} progress={self.global_progress:.2%} "
+            f"can_exit_freeze={self.can_exit_freeze}{missing_info}"
+        )
 
 
 """Control Message from Controller to LMCache"""
@@ -637,7 +749,7 @@ class QueryWorkerInfoRetMsg(OrchRetMsg):
         return f"worker infos: {self.worker_infos}"
 
 
-class ErrorMsg(MsgBase):
+class ErrorMsg(WorkerReqRetMsg):
     """Control Error Message"""
 
     error: str
@@ -691,4 +803,10 @@ Msg = Union[
     BatchedP2PLookupRetMsg,
     QueryWorkerInfoMsg,
     QueryWorkerInfoRetMsg,
+    FullSyncStartMsg,
+    FullSyncStartRetMsg,
+    FullSyncBatchMsg,
+    FullSyncEndMsg,
+    FullSyncStatusMsg,
+    FullSyncStatusRetMsg,
 ]

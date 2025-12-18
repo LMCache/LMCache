@@ -1,103 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+LMCache Engine Configuration
+
+Configuration system for LMCache Engine that:
+- Loads configuration from YAML file or environment variables
+- Supports command-line parameter overrides
+- Provides convenient access to configuration values
+"""
+
 # Standard
-from typing import Any, Optional, Union
-import ast
+from typing import Any, Dict, Optional
 import json
 import os
-import re
-import uuid
-
-# Third Party
-import yaml
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.config_base import (
+    _parse_local_disk,
+    _parse_quoted_string,
+    _resolve_config_aliases,
+    _to_bool,
+    _to_float_list,
+    _to_int_list,
+    _to_str_list,
+    create_config_class,
+    load_config_with_overrides,
+)
 import lmcache.config as orig_config
 
 logger = init_logger(__name__)
-
-
-def _parse_local_disk(local_disk) -> Optional[str]:
-    match local_disk:
-        case None:
-            local_disk_path = None
-        case path if re.match(r"file://(.*)/", path):
-            local_disk_path = path[7:]
-        case _:
-            local_disk_path = local_disk
-    return local_disk_path
-
-
-def _to_int_list(
-    value: Optional[Union[str, int, list[Any]]],
-) -> Optional[list[int]]:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [int(x) for x in value]
-    if isinstance(value, int):
-        return [value]
-    parts = [p.strip() for p in str(value).split(",") if p.strip()]
-    return [int(p) for p in parts]
-
-
-def _to_float_list(
-    value: Optional[Union[str, float, list[Any]]],
-) -> Optional[list[float]]:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [float(x) for x in value]
-    if isinstance(value, float):
-        return [value]
-    parts = [p.strip() for p in str(value).split(",") if p.strip()]
-    return [float(p) for p in parts]
-
-
-def _to_str_list(
-    value: Optional[Union[str, list[str]]],
-) -> Optional[list[str]]:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return value
-    parts = [p.strip() for p in value.split(",") if p.strip()]
-    return [p for p in parts]
-
-
-def _to_bool(
-    value: Optional[Union[bool, int, str]],
-) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ["true", "1"]
-
-
-def _parse_quoted_string(value: str) -> str:
-    """Parse a string that may be surrounded by quotes and handle escape characters.
-
-    Args:
-        value: The input string that may be quoted
-
-    Returns:
-        The unquoted string with escape characters properly handled
-    """
-    if not value:
-        return value
-
-    value = value.strip()
-
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        try:
-            evaluated = ast.literal_eval(value)
-            if isinstance(evaluated, str):
-                return evaluated
-        except (ValueError, SyntaxError):
-            # If ast.literal_eval fails, it's not a valid Python literal.
-            # Fall back to simply stripping the outer quotes.
-            return value[1:-1]
-
-    return value
 
 
 # Configuration aliases and deprecated mappings
@@ -121,10 +52,10 @@ _DEPRECATED_CONFIGS = {
     # Maps deprecated names to warning messages
     "nixl_peer_port": "nixl_peer_port is deprecated, use nixl_receiver_port instead",
     "plugin_locations": (
-        "plugin_locations is deprecated, use runtime_plugin_locations instead",
+        "plugin_locations is deprecated, use runtime_plugin_locations instead"
     ),
     "external_backends": (
-        "external_backends is deprecated, use storage_plugins instead",
+        "external_backends is deprecated, use storage_plugins instead"
     ),
 }
 
@@ -514,78 +445,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
 }
 
 
-def _resolve_config_aliases(config_dict: dict, source: str) -> dict:
-    """Resolve configuration aliases and handle deprecated configurations."""
-    resolved = {}
-
-    # Process each key in the input
-    for key, value in config_dict.items():
-        if key in _DEPRECATED_CONFIGS:
-            # Log deprecation warning
-            logger.warning(f"{_DEPRECATED_CONFIGS[key]} (source: {source})")
-
-            # Map to new key if alias exists
-            if key in _CONFIG_ALIASES:
-                new_key = _CONFIG_ALIASES[key]
-                resolved[new_key] = value
-            else:
-                # Keep deprecated key for backward compatibility
-                resolved[key] = value
-        elif key in _CONFIG_DEFINITIONS:
-            # Valid configuration key
-            resolved[key] = value
-        else:
-            # Unknown configuration key
-            logger.warning(f"Unknown configuration key: {key} (source: {source})")
-
-    return resolved
-
-
-# Dynamically create configuration class
-def _create_config_class():
-    """Dynamically create configuration class"""
-    # Extract fields from configuration definitions
-    fields_dict = {}
-    for name, config in _CONFIG_DEFINITIONS.items():
-        fields_dict[name] = (config["type"], config["default"])
-
-    # Create class using make_dataclass
-    # Standard
-    from dataclasses import make_dataclass
-
-    def _post_init(self):
-        # Generate random instance ID if not set
-        if not self.lmcache_instance_id:
-            self.lmcache_instance_id = f"lmcache_instance_{uuid.uuid4().hex}"
-
-    cls = make_dataclass(
-        "LMCacheEngineConfig",
-        [(name, type_, default) for name, (type_, default) in fields_dict.items()],
-        namespace={
-            "__post_init__": _post_init,
-            "validate": _validate_config,
-            "log_config": _log_config,
-            "to_original_config": _to_original_config,
-            "get_extra_config_value": _get_extra_config_value,
-            "get_lmcache_worker_ids": _get_lmcache_worker_ids,
-            "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
-            "from_defaults": classmethod(_from_defaults),
-            "from_legacy": classmethod(_from_legacy),
-            "from_file": classmethod(_from_file),
-            "from_env": classmethod(_from_env),
-            "update_config_from_env": _update_config_from_env,
-            "__str__": lambda self: str(
-                {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
-            ),
-            "from_dict": classmethod(_from_dict),
-            "to_dict": _to_dict,
-            "to_json": _to_json,
-            "from_json": classmethod(_from_json),
-        },
-    )
-    return cls
-
-
+# Specialized methods that are unique to LMCacheEngineConfig
 def _validate_config(self):
     """Validate configuration"""
 
@@ -723,16 +583,6 @@ def _get_lookup_server_worker_ids(self, use_mla, world_size):
     return self.lookup_server_worker_ids
 
 
-def _from_defaults(cls, **kwargs):
-    """Create configuration from defaults"""
-    config_values = {}
-    for name, config in _CONFIG_DEFINITIONS.items():
-        config_values[name] = kwargs.get(name, config["default"])
-
-    instance = cls(**config_values)
-    return instance
-
-
 def _from_legacy(cls, **kwargs):
     """Create configuration from legacy format"""
     backend = kwargs.pop("backend", "cpu")
@@ -798,35 +648,6 @@ def _from_legacy(cls, **kwargs):
     return instance
 
 
-def _from_file(cls, file_path: str):
-    """Load configuration from file"""
-    with open(file_path, "r") as fin:
-        file_config = yaml.safe_load(fin) or {}
-
-    # Resolve aliases and handle deprecated configurations
-    resolved_config = _resolve_config_aliases(file_config, f"file: {file_path}")
-
-    config_values = {}
-    for name, config in _CONFIG_DEFINITIONS.items():
-        value = resolved_config.get(name, config["default"])
-        if value is not None:
-            value = config["env_converter"](value)
-
-        # Handle local_disk parsing
-        if name == "local_disk":
-            value = _parse_local_disk(value)
-
-        # Validate remote_url format
-        if name == "remote_url" and value is not None:
-            if not re.match(r"(.*)://(.*)", value):
-                raise ValueError(f"Invalid remote storage url: {value}")
-
-        config_values[name] = value
-
-    instance = cls(**config_values)
-    return instance
-
-
 def _update_config_from_env(self):
     """Update an existing config object with environment variable configurations."""
 
@@ -869,46 +690,6 @@ def _update_config_from_env(self):
     return self
 
 
-def _from_env(cls):
-    """Load configuration from environment variables"""
-    instance = cls.from_defaults()
-    _update_config_from_env(instance)
-    return instance
-
-
-def _from_dict(cls, config_dict: dict):
-    """Create configuration from a dictionary."""
-    resolved_config = _resolve_config_aliases(config_dict, "dictionary input")
-    config_values = {}
-    for name, config in _CONFIG_DEFINITIONS.items():
-        value = resolved_config.get(name, config["default"])
-        if value is not None:
-            value = config["env_converter"](value)
-        config_values[name] = value
-    instance = cls(**config_values)
-    return instance
-
-
-def _to_dict(self):
-    """Convert the configuration object into a dictionary."""
-    return {name: getattr(self, name) for name in _CONFIG_DEFINITIONS}
-
-
-def _from_json(cls, json_str: str):
-    """Deserialize a JSON string into a configuration object."""
-    try:
-        config_dict = json.loads(json_str)
-        return cls.from_dict(config_dict)
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON input: {e}")
-        raise
-
-
-def _to_json(self):
-    """Serialize the configuration object to a JSON string."""
-    return json.dumps(self.to_dict(), indent=2)
-
-
 def _validate_and_set_config_value(config, config_key, value):
     """Validate and set configuration value"""
     if not hasattr(config, config_key):
@@ -925,5 +706,45 @@ def _validate_and_set_config_value(config, config_key, value):
         return False
 
 
-# Create configuration class
-LMCacheEngineConfig = _create_config_class()
+# Create configuration class using the base utility
+LMCacheEngineConfig = create_config_class(
+    config_name="LMCacheEngineConfig",
+    config_definitions=_CONFIG_DEFINITIONS,
+    config_aliases=_CONFIG_ALIASES,
+    deprecated_configs=_DEPRECATED_CONFIGS,
+    namespace_extras={
+        "validate": _validate_config,
+        "log_config": _log_config,
+        "to_original_config": _to_original_config,
+        "get_extra_config_value": _get_extra_config_value,
+        "get_lmcache_worker_ids": _get_lmcache_worker_ids,
+        "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
+        "from_legacy": classmethod(_from_legacy),
+    },
+)
+
+
+def load_engine_config_with_overrides(
+    config_file_path: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> "LMCacheEngineConfig":  # type: ignore[valid-type]
+    """
+    Load engine configuration with support for file, env vars, and overrides.
+
+    This function uses the generic load_config_with_overrides utility from
+    config_base.py to reduce code duplication.
+
+    Args:
+        config_file_path: Optional direct path to config file
+        overrides: Optional dictionary of configuration overrides
+
+    Returns:
+        Loaded and validated LMCacheEngineConfig instance
+    """
+
+    return load_config_with_overrides(
+        config_class=LMCacheEngineConfig,
+        config_file_env_var="LMCACHE_CONFIG_FILE",
+        config_file_path=config_file_path,
+        overrides=overrides,
+    )

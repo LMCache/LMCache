@@ -3,6 +3,7 @@
 
 # Standard
 from typing import TYPE_CHECKING
+import asyncio
 
 # First Party
 from lmcache.logging import init_logger
@@ -31,9 +32,18 @@ class FullSyncCommand(HeartbeatCommand, tag="full_sync"):
 
     def execute(self, worker: "LMCacheWorker") -> None:
         """Trigger full sync on the worker"""
-        # TODO(baoloongmao): Implement full sync logic and turn to freeze mode
         logger.info(
             "Received full sync command with reason: %s, args: %s",
             self.reason,
             self.args,
         )
+
+        sender = worker._get_full_sync_sender()
+
+        # Check if full sync is already in progress
+        if sender.is_syncing:
+            logger.warning("Full sync already in progress, skipping")
+            return
+
+        # Trigger full sync in background
+        asyncio.create_task(sender.start_full_sync(self.reason))

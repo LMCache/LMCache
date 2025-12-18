@@ -16,6 +16,12 @@ from lmcache.v1.cache_controller.message import (
     CompressRetMsg,
     DecompressMsg,
     DecompressRetMsg,
+    FullSyncBatchMsg,
+    FullSyncEndMsg,
+    FullSyncStartMsg,
+    FullSyncStartRetMsg,
+    FullSyncStatusMsg,
+    FullSyncStatusRetMsg,
     LookupMsg,
     LookupRetMsg,
     MoveMsg,
@@ -123,6 +129,110 @@ class KVController:
                 msg.instance_id,
                 msg.worker_id,
             )
+
+    # ============= Full Sync Message Handlers =============
+
+    async def handle_full_sync_start(
+        self, msg: FullSyncStartMsg
+    ) -> FullSyncStartRetMsg:
+        """
+        Handle full sync start request from a worker.
+
+        This is called when a worker wants to start full sync.
+        The controller should:
+        1. Clear existing keys for this worker
+        2. Mark the worker as syncing (incremental events will be discarded)
+        3. Return acceptance
+        """
+        # TODO(baoloongmao): Implement full sync start handling
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        sync_id = msg.sync_id
+        report_id = (instance_id, worker_id)
+
+        logger.info(
+            "Received FullSyncStart: worker=%s, sync_id=%s, "
+            "total_keys=%d, batch_count=%d",
+            report_id,
+            sync_id,
+            msg.total_keys,
+            msg.batch_count,
+        )
+
+        # For now, always accept the sync request
+        return FullSyncStartRetMsg(sync_id=sync_id, accepted=True)
+
+    async def handle_full_sync_batch(self, msg: FullSyncBatchMsg) -> None:
+        """
+        Handle full sync batch message from a worker.
+
+        This adds the keys from the batch to the registry.
+        """
+        # TODO(baoloongmao): Implement full sync batch handling
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        sync_id = msg.sync_id
+        batch_id = msg.batch_id
+        keys = msg.keys
+        report_id = (instance_id, worker_id)
+
+        logger.debug(
+            "Received FullSyncBatch: worker=%s, sync_id=%s, batch_id=%d, keys_count=%d",
+            report_id,
+            sync_id,
+            batch_id,
+            len(keys),
+        )
+
+    async def handle_full_sync_end(self, msg: FullSyncEndMsg) -> None:
+        """
+        Handle full sync end message from a worker.
+
+        This marks the sync as end-received and records actual total keys.
+        """
+        # TODO(baoloongmao): Implement full sync end handling
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        sync_id = msg.sync_id
+        actual_total_keys = msg.actual_total_keys
+        report_id = (instance_id, worker_id)
+
+        logger.info(
+            "Received FullSyncEnd: worker=%s, sync_id=%s, actual_total_keys=%d",
+            report_id,
+            sync_id,
+            actual_total_keys,
+        )
+
+    async def handle_full_sync_status(
+        self, msg: FullSyncStatusMsg
+    ) -> FullSyncStatusRetMsg:
+        """
+        Handle full sync status query from a worker.
+
+        Returns the sync status including any missing batches that need resending.
+        """
+        # TODO(baoloongmao): Implement full sync status query handling
+        instance_id = msg.instance_id
+        worker_id = msg.worker_id
+        sync_id = msg.sync_id
+        report_id = (instance_id, worker_id)
+
+        logger.debug(
+            "Received FullSyncStatus query: worker=%s, sync_id=%s",
+            report_id,
+            sync_id,
+        )
+
+        # TODO(baoloongmao): Implement proper sync status tracking with missing batches
+        # For now, always return complete to allow worker to proceed
+        return FullSyncStatusRetMsg(
+            sync_id=msg.sync_id,
+            is_complete=True,
+            global_progress=1.0,
+            can_exit_freeze=True,
+            missing_batches=[],
+        )
 
     # TODO(Jiayi): The current implementation does not handle
     # the case where the prefix chunks are evicted while the

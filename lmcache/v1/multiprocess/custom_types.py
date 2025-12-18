@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 import pickle
+import threading
 
 # Third Party
 import msgspec
@@ -15,6 +16,48 @@ communications.
 
 
 class CudaIPCWrapper:
+    _discovered_device_mapping: dict[str, int] = {}
+    _device_mapping_lock = threading.Lock()
+
+    @staticmethod
+    def _get_device_uuid(device_index: int) -> str:
+        """Get the UUID of a GPU device given its index."""
+        return str(torch.cuda.get_device_properties(device_index).uuid)
+
+    @staticmethod
+    def _discover_gpu_devices():
+        """Discover all available GPU devices and map their UUIDs to
+        the physical device ordinals.
+        """
+        if not torch.cuda.is_available():
+            return
+
+        num_devices = torch.cuda.device_count()
+        with CudaIPCWrapper._device_mapping_lock:
+            if CudaIPCWrapper._discovered_device_mapping:
+                return  # Already discovered
+
+            for i in range(num_devices):
+                device_uuid = CudaIPCWrapper._get_device_uuid(i)
+                CudaIPCWrapper._discovered_device_mapping[device_uuid] = i
+
+    @staticmethod
+    def _get_device_index_from_uuid(device_uuid: str) -> int:
+        """Get the physical device ordinal from its UUID."""
+        CudaIPCWrapper._discover_gpu_devices()
+
+        with CudaIPCWrapper._device_mapping_lock:
+            device_index = CudaIPCWrapper._discovered_device_mapping.get(
+                device_uuid, None
+            )
+
+        if device_index is None:
+            raise RuntimeError(
+                f"Device UUID {device_uuid} not found in the discovered devices."
+                "Please make sure the process can see all the GPU devices"
+            )
+        return device_index
+
     def __init__(self, tensor: torch.Tensor):
         assert tensor.storage_offset() == 0
         assert tensor.is_contiguous()
@@ -24,7 +67,8 @@ class CudaIPCWrapper:
         self.handle = handle
         self.dtype = tensor.dtype
         self.shape = tensor.shape
-        self.device = tensor.device.index  # Explicit device ordinal
+        device_index = tensor.device.index
+        self.device_uuid = CudaIPCWrapper._get_device_uuid(device_index)
 
     def to_tensor(self):
         """
@@ -32,8 +76,8 @@ class CudaIPCWrapper:
             This function may break if torch cuda is not initialized.
             We should call `torch.cuda.init()` before using this function.
         """
-        device = self.handle[0]
-        storage = torch.UntypedStorage._new_shared_cuda(*self.handle)
+        device = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
+        storage = torch.UntypedStorage._new_shared_cuda(device, *self.handle[1:])
         t = torch.tensor(0, device=device, dtype=self.dtype)
         t.set_(storage)
         return t.view(self.shape)
@@ -45,7 +89,7 @@ class CudaIPCWrapper:
             self.handle == other.handle
             and self.dtype == other.dtype
             and self.shape == other.shape
-            and self.device == other.device
+            and self.device_uuid == other.device_uuid
         )
 
     @staticmethod

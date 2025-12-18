@@ -262,7 +262,6 @@ class LMCacheEngine:
         """
         if self.storage_manager is not None:
             self.storage_manager.set_freeze(enabled)
-            logger.info("freeze mode %s", "enabled" if enabled else "disabled")
 
     def is_frozen(self) -> bool:
         """
