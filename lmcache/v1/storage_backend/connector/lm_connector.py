@@ -2,7 +2,7 @@
 # Standard
 from typing import List, Optional, no_type_check
 import asyncio
-import socket
+import threading
 
 # Third Party
 import torch
@@ -19,6 +19,9 @@ from lmcache.v1.protocol import (
 )
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.transfer_channel.py_socket_channel import (
+    PySocketChannel as TransferChannel,
+)
 
 logger = init_logger(__name__)
 
@@ -41,20 +44,46 @@ class LMCServerConnector(RemoteConnector):
         # However, we use socket here as we need to use the socket.recv_into()
         # to reduce memory copy.
 
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_socket.connect((host, port))
-        # loop.sock_recv_into(sock, buf)
-
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
+        # Create channel for this connection
+        self.channel = TransferChannel(
+            async_mode=True,
+            role="sender",
+            buffer_ptr=0,
+            buffer_size=0,
+            align_bytes=1,
+            tp_rank=0,
+            peer_init_url=None,
+            event_loop=loop,
+        )
+        # Initialize data socket via base-class API using a tcp URL.
+        init_url = f"tcp://{host}:{port}"
+        if loop.is_running() and getattr(loop, "_thread_id", None) not in (
+            None,
+            threading.get_ident(),
+        ):
+            fut = asyncio.run_coroutine_threadsafe(
+                self.channel.async_lazy_init_peer_connection(
+                    local_id="client",
+                    peer_id="server",
+                    peer_init_url=init_url,
+                ),
+                loop,
+            )
+            fut.result()
+        else:
+            # Fallback for cases where we can't block on the event loop thread.
+            self.channel.lazy_init_peer_connection(
+                local_id="client",
+                peer_id="server",
+                peer_init_url=init_url,
+            )
+
         self.async_socket_lock = asyncio.Lock()
 
-    # TODO(Jiayi): This should be an async function
-    def receive_all(self, meta: ServerMetaMessage) -> Optional[MemoryObj]:
-        received = 0
-        n = meta.length
-
+    async def receive_all(self, meta: ServerMetaMessage) -> Optional[MemoryObj]:
         # TODO(Jiayi): Format will be used once we support
         # compressed memory format
         memory_obj = self.local_cpu_backend.allocate(
@@ -66,14 +95,13 @@ class LMCServerConnector(RemoteConnector):
             logger.warning("Failed to allocate memory during remote receive")
             return None
 
-        buffer = memory_obj.byte_array
-        view = memoryview(buffer)
-
-        while received < n:
-            num_bytes = self.client_socket.recv_into(view[received:], n - received)
-            if num_bytes == 0:
-                return None
-            received += num_bytes
+        # Receive data using channel
+        recv_count = await self.channel.async_batched_recv(
+            [memory_obj],
+            transfer_spec={"size": meta.length},
+        )
+        if recv_count == 0:
+            return None
 
         return memory_obj
 
@@ -81,18 +109,20 @@ class LMCServerConnector(RemoteConnector):
         # logger.debug("Call to exists()!")
 
         async with self.async_socket_lock:
-            self.client_socket.sendall(
-                ClientMetaMessage(
-                    ClientCommand.EXIST,
-                    key,
-                    0,
-                    MemoryFormat(1),
-                    torch.float16,
-                    torch.Size([0, 0, 0, 0]),
-                ).serialize()
+            request = ClientMetaMessage(
+                ClientCommand.EXIST,
+                key,
+                0,
+                MemoryFormat(1),
+                torch.float16,
+                torch.Size([0, 0, 0, 0]),
             )
-
-            response = self.client_socket.recv(ServerMetaMessage.packlength())
+            await self.channel.async_batched_send([request.serialize()])
+            response = await self.channel.async_recv_exactly(
+                ServerMetaMessage.packlength()
+            )
+            if response is None:
+                return False
 
         return ServerMetaMessage.deserialize(response).code == ServerReturnCode.SUCCESS
 
@@ -118,49 +148,45 @@ class LMCServerConnector(RemoteConnector):
         memory_format = memory_obj.get_memory_format()
 
         async with self.async_socket_lock:
-            await self.loop.sock_sendall(
-                self.client_socket,
-                ClientMetaMessage(
-                    ClientCommand.PUT,
-                    key,
-                    len(kv_bytes),
-                    memory_format,
-                    kv_dtype,
-                    kv_shape,
-                ).serialize(),
+            request = ClientMetaMessage(
+                ClientCommand.PUT,
+                key,
+                len(kv_bytes),
+                memory_format,
+                kv_dtype,
+                kv_shape,
             )
-
-            await self.loop.sock_sendall(self.client_socket, kv_bytes)
+            await self.channel.async_batched_send([request.serialize()])
+            await self.channel.async_batched_send([kv_bytes])
 
     # TODO(Jiayi): This should be an async function
     @_lmcache_nvtx_annotate
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        # NOTE(Jiayi): Not using any await in the following as
-        # we don't want to yield control to other tasks which could
-        # sacrifice the performance loading to trade the performance of
-        # saving
+        # IMPORTANT: Keep the socket lock held across the full request/response
+        # (meta + payload). Otherwise concurrent GETs can interleave reads on
+        # the same TCP stream and corrupt framing.
         async with self.async_socket_lock:
-            self.client_socket.sendall(
-                ClientMetaMessage(
-                    ClientCommand.GET,
-                    key,
-                    0,
-                    MemoryFormat(1),
-                    torch.float16,
-                    torch.Size([0, 0, 0, 0]),
-                ).serialize()
+            request = ClientMetaMessage(
+                ClientCommand.GET,
+                key,
+                0,
+                MemoryFormat(1),
+                torch.float16,
+                torch.Size([0, 0, 0, 0]),
             )
+            await self.channel.async_batched_send([request.serialize()])
 
-            data = self.client_socket.recv(ServerMetaMessage.packlength())
+            response = await self.channel.async_recv_exactly(
+                ServerMetaMessage.packlength()
+            )
+            if response is None:
+                return None
 
-        meta = ServerMetaMessage.deserialize(data)
-        if meta.code != ServerReturnCode.SUCCESS:
-            return None
+            meta = ServerMetaMessage.deserialize(response)
+            if meta.code != ServerReturnCode.SUCCESS:
+                return None
 
-        async with self.async_socket_lock:
-            memory_obj = self.receive_all(meta)
-
-        return memory_obj
+            return await self.receive_all(meta)
 
     # TODO
     @no_type_check
@@ -169,5 +195,5 @@ class LMCServerConnector(RemoteConnector):
 
     async def close(self):
         async with self.async_socket_lock:
-            self.client_socket.close()
+            self.channel.close()
         logger.info("Closed the lmserver connection")

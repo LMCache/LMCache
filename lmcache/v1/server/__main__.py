@@ -17,6 +17,9 @@ from lmcache.v1.protocol import (
     ServerReturnCode,
 )
 from lmcache.v1.server.storage_backend import CreateStorageBackend
+from lmcache.v1.transfer_channel.py_socket_channel import (
+    PySocketChannel as TransferChannel,
+)
 
 logger = init_logger(__name__)
 
@@ -31,108 +34,134 @@ class LMCacheServer:
         self.server_socket.bind((host, port))
         self.server_socket.listen()
 
-    def receive_all(self, client_socket, n):
-        data = bytearray()
-        while len(data) < n:
-            packet = client_socket.recv(n - len(data))
-            if not packet:
-                return None
-            data.extend(packet)
-        return data
-
     def handle_client(self, client_socket):
+        # Create a channel for this client connection
+        channel = TransferChannel(
+            async_mode=False,
+            role="receiver",
+            buffer_ptr=0,
+            buffer_size=0,
+            align_bytes=1,
+            tp_rank=0,
+            peer_init_url=None,
+        )
+        # Initialize data socket via base-class API using an fd URL.
+        fd = client_socket.detach()
+        channel.lazy_init_peer_connection(
+            local_id="server",
+            peer_id="client",
+            peer_init_url=f"fd://{fd}",
+        )
+
         try:
             while True:
-                logger.debug("Waiting for command")
-                header = self.receive_all(client_socket, ClientMetaMessage.packlength())
-                if not header:
-                    break
-                meta = ClientMetaMessage.deserialize(header)
-                logger.debug(f"Received command: {meta.command}")
-                match meta.command:
-                    case ClientCommand.PUT:
-                        t0 = time.perf_counter()
-                        s = self.receive_all(client_socket, meta.length)
-                        t1 = time.perf_counter()
-                        self.data_store.put(meta, s)
-                        t2 = time.perf_counter()
-                        logger.debug(
-                            f"Time to receive data: {t1 - t0}, time to store "
-                            f"data: {t2 - t1}"
-                        )
+                try:
+                    logger.debug("Waiting for command")
+                    # Receive header using channel
+                    header_buf = bytearray(ClientMetaMessage.packlength())
+                    recv_count = channel.batched_recv(
+                        [header_buf],
+                        transfer_spec={"size": ClientMetaMessage.packlength()},
+                    )
+                    if recv_count == 0:
+                        break
+                    meta = ClientMetaMessage.deserialize(bytes(header_buf))
+                    logger.debug(f"Received command: {meta.command}")
+                    match meta.command:
+                        case ClientCommand.PUT:
+                            t0 = time.perf_counter()
+                            # Receive data using channel
+                            data_buf = bytearray(meta.length)
+                            recv_count = channel.batched_recv(
+                                [data_buf],
+                                transfer_spec={"size": meta.length},
+                            )
+                            if recv_count == 0:
+                                break
+                            t1 = time.perf_counter()
+                            # Avoid an extra full-payload copy; backend expects
+                            # bytearray.
+                            self.data_store.put(meta, data_buf)
+                            t2 = time.perf_counter()
+                            logger.debug(
+                                f"Time to receive data: {t1 - t0}, time to store "
+                                f"data: {t2 - t1}"
+                            )
 
-                    case ClientCommand.GET:
-                        t0 = time.perf_counter()
-                        lms_memory_obj = self.data_store.get(meta.key)
-                        t1 = time.perf_counter()
-                        if lms_memory_obj is not None:
-                            client_socket.sendall(
-                                ServerMetaMessage(
+                        case ClientCommand.GET:
+                            t0 = time.perf_counter()
+                            lms_memory_obj = self.data_store.get(meta.key)
+                            t1 = time.perf_counter()
+                            if lms_memory_obj is not None:
+                                # Send response using channel
+                                response_meta = ServerMetaMessage(
                                     ServerReturnCode.SUCCESS,
                                     lms_memory_obj.length,
                                     lms_memory_obj.fmt,
                                     lms_memory_obj.dtype,
                                     lms_memory_obj.shape,
-                                ).serialize()
-                            )
-                            t2 = time.perf_counter()
-                            client_socket.sendall(lms_memory_obj.data)
-                            t3 = time.perf_counter()
-                            logger.debug(
-                                f"Time to get data: {t1 - t0}, time to send "
-                                f"meta: {t2 - t1}, time to send data: {t3 - t2}"
-                            )
-                        else:
-                            client_socket.sendall(
-                                ServerMetaMessage(
+                                )
+                                channel.batched_send([response_meta.serialize()])
+                                t2 = time.perf_counter()
+                                channel.batched_send([lms_memory_obj.data])
+                                t3 = time.perf_counter()
+                                logger.debug(
+                                    f"Time to get data: {t1 - t0}, time to send "
+                                    f"meta: {t2 - t1}, time to send data: {t3 - t2}"
+                                )
+                            else:
+                                response_meta = ServerMetaMessage(
                                     ServerReturnCode.FAIL,
                                     0,
                                     MemoryFormat(1),
                                     torch.float16,
                                     torch.Size((0, 0, 0, 0)),
-                                ).serialize()
-                            )
+                                )
+                                channel.batched_send([response_meta.serialize()])
 
-                    case ClientCommand.EXIST:
-                        code = (
-                            ServerReturnCode.SUCCESS
-                            if self.data_store.contains(meta.key)
-                            else ServerReturnCode.FAIL
-                        )
-                        logger.debug(f"Key exists: {code}")
-                        client_socket.sendall(
-                            ServerMetaMessage(
+                        case ClientCommand.EXIST:
+                            code = (
+                                ServerReturnCode.SUCCESS
+                                if self.data_store.contains(meta.key)
+                                else ServerReturnCode.FAIL
+                            )
+                            logger.debug(f"Key exists: {code}")
+                            response_meta = ServerMetaMessage(
                                 code,
                                 0,
                                 MemoryFormat(1),
                                 torch.float16,
                                 torch.Size((0, 0, 0, 0)),
-                            ).serialize()
-                        )
-                    case ClientCommand.HEALTH:
-                        client_socket.sendall(
-                            ServerMetaMessage(
+                            )
+                            channel.batched_send([response_meta.serialize()])
+                        case ClientCommand.HEALTH:
+                            response_meta = ServerMetaMessage(
                                 ServerReturnCode.SUCCESS,
                                 0,
                                 MemoryFormat(1),
                                 torch.float16,
                                 torch.Size((0, 0, 0, 0)),
-                            ).serialize()
-                        )
-                        logger.debug("Health check successful")
+                            )
+                            channel.batched_send([response_meta.serialize()])
+                            logger.debug("Health check successful")
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    logger.info("Client socket error, closing connection: %s", e)
+                    break
 
                     # TODO(Jiayi): Implement List
                     # case ClientCommand.LIST:
                     #     keys = list(self.data_store.list_keys())
                     #     data = "\n".join(keys).encode()
-                    #     client_socket.sendall(
-                    #         ServerMetaMessage(ServerReturnCode.SUCCESS,
-                    #                           len(data)).serialize())
-                    #     client_socket.sendall(data)
+                    #     response_meta = ServerMetaMessage(
+                    #         ServerReturnCode.SUCCESS,
+                    #         len(data),
+                    #     )
+                    #     channel.batched_send([response_meta.serialize()])
+                    #     channel.batched_send([data])
 
         finally:
             logger.info("Client disconnected")
-            client_socket.close()
+            channel.close()
 
     def run(self):
         logger.info(f"Server started at {self.host}:{self.port}")
