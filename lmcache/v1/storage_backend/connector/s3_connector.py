@@ -384,6 +384,7 @@ class S3Connector(RemoteConnector):
                 f"This usually means the data was stored with different chunk_size "
                 f"or model configuration. Please use matching config or clear S3."
             )
+            memory_obj.ref_count_down()
             return None
 
         s3_req = self._s3_download(
@@ -430,6 +431,7 @@ class S3Connector(RemoteConnector):
             else:
                 logger.error(f"Failed to download {key_str} from S3: {e}")
 
+            memory_obj.ref_count_down()
             return None
 
     async def batched_get(
@@ -477,6 +479,7 @@ class S3Connector(RemoteConnector):
                     f"but current config expects {memory_obj.get_size()} bytes. "
                     f"Skipping this key."
                 )
+                memory_obj.ref_count_down()
                 memory_objs.append(None)
                 continue
 

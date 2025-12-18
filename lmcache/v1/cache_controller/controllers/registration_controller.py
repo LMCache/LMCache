@@ -9,11 +9,13 @@ import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_controller.commands import FullSyncCommand, HeartbeatCommand
 from lmcache.v1.cache_controller.message import (
     DeRegisterMsg,
     HealthMsg,
     HealthRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     QueryInstMsg,
     QueryInstRetMsg,
     QueryWorkerInfoMsg,
@@ -164,7 +166,6 @@ class RegistrationController:
         if worker_node.socket is not None:
             close_zmq_socket(worker_node.socket)
 
-        await self.kv_controller.deregister(instance_id, worker_id)
         logger.info("Deregistered instance-worker %s", (instance_id, worker_id))
 
     async def health(self, msg: HealthMsg) -> HealthRetMsg:
@@ -176,21 +177,37 @@ class RegistrationController:
             msg,
         )
 
-    # TODO: add more worker info in heartbeat
-    async def heartbeat(self, msg: HeartbeatMsg) -> None:
+    async def heartbeat(self, msg: HeartbeatMsg) -> HeartbeatRetMsg:
         """
-        Heartbeat from lmcache worker.
+        Heartbeat from lmcache worker (REQ-REP mode).
+
+        Returns HeartbeatRetMsg with optional commands for the worker to execute.
+        Commands are executed sequentially by the worker.
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
         success = self.registry.update_heartbeat(instance_id, worker_id, time.time())
+
+        commands: list[HeartbeatCommand] = []
+
         if not success:
             logger.warning(
                 "%s has not been registered, re-register the worker.",
                 (instance_id, worker_id),
             )
             # re-register the worker
-            await self.register(msg)
+            register_msg = RegisterMsg(
+                instance_id=msg.instance_id,
+                worker_id=msg.worker_id,
+                ip=msg.ip,
+                port=msg.port,
+                peer_init_url=msg.peer_init_url,
+            )
+            await self.register(register_msg)
+            # New worker needs full sync
+            commands.append(FullSyncCommand(reason="worker_re_registered"))
+
+        return HeartbeatRetMsg(commands=commands)
 
     async def query_worker_info(self, msg: QueryWorkerInfoMsg) -> QueryWorkerInfoRetMsg:
         """
@@ -198,6 +215,21 @@ class RegistrationController:
         """
         event_id = msg.event_id
         worker_infos = []
+
+        # Handle special case: instance_id = "all"
+        if msg.instance_id == "all":
+            # Get all worker infos from the registry
+            worker_infos = self.registry.get_all_worker_infos()
+            # If specific worker_ids are requested, filter the results
+            if msg.worker_ids is not None and len(msg.worker_ids) > 0:
+                worker_infos = [
+                    worker_info
+                    for worker_info in worker_infos
+                    if worker_info.worker_id in msg.worker_ids
+                ]
+            return QueryWorkerInfoRetMsg(event_id=event_id, worker_infos=worker_infos)
+
+        # Normal case: query specific instance
         instance_node = self.registry.get_instance(msg.instance_id)
         if instance_node is None:
             logger.warning("instance %s not registered.", msg.instance_id)
