@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import asyncio
 import threading
 
@@ -22,9 +22,14 @@ from lmcache.v1.cache_controller.message import (
     DecompressWorkerRetMsg,
     DeRegisterMsg,
     ErrorMsg,
+    FullSyncStartMsg,
+    FullSyncStartRetMsg,
+    FullSyncStatusMsg,
+    FullSyncStatusRetMsg,
     HealthWorkerMsg,
     HealthWorkerRetMsg,
     HeartbeatMsg,
+    HeartbeatRetMsg,
     MoveWorkerMsg,
     MoveWorkerRetMsg,
     Msg,
@@ -49,6 +54,7 @@ from lmcache.v1.rpc_utils import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
 
 logger = init_logger(__name__)
 
@@ -140,6 +146,9 @@ class LMCacheWorker:
 
         self.msg_queue: asyncio.Queue[WorkerMsg] = asyncio.Queue()
 
+        # Full sync sender (initialized lazily when needed)
+        self._full_sync_sender: Optional["FullSyncSender"] = None
+
         self.register()
 
     def register(self):
@@ -190,14 +199,14 @@ class LMCacheWorker:
         except zmq.Again as e:
             logger.error("Timeout occurred, recreating socket. Error: %s", e)
             self._recreate_req_socket()
-            return self._create_ret_msg(msg)
+            return self._on_request_failure(msg)
         except zmq.ZMQError as e:
             logger.error("ZMQ error occurred, recreating socket. Error: %s", e)
             self._recreate_req_socket()
-            return self._create_ret_msg(msg)
+            return self._on_request_failure(msg)
         except Exception as e:
             logger.error("Error happens in lmcache worker req_socket. Error: %s", e)
-            return self._create_ret_msg(msg)
+            return self._on_request_failure(msg)
 
     def _create_req_socket(self):
         self.req_socket = get_zmq_socket_with_timeout(
@@ -217,9 +226,45 @@ class LMCacheWorker:
             logger.error("Error closing req socket: %s", e)
         self._create_req_socket()
 
-    def _create_ret_msg(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+    def _get_full_sync_sender(self):
+        """Lazy initialization of FullSyncSender"""
+        if self._full_sync_sender is None:
+            # Import here to avoid circular imports
+            # First Party
+            from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
+
+            # Get the local_cpu_backend from lmcache_engine
+            local_cpu_backend = self.lmcache_engine.storage_manager.local_cpu_backend
+            self._full_sync_sender = FullSyncSender(
+                config=self.config,
+                worker=self,
+                lmcache_engine=self.lmcache_engine,
+                local_cpu_backend=local_cpu_backend,
+            )
+        return self._full_sync_sender
+
+    def _on_request_failure(self, msg: WorkerReqMsg) -> WorkerReqRetMsg:
+        """
+        Create a default return message when worker -> controller
+        request encounters an error (e.g., timeout, ZMQ error).
+        """
         if isinstance(msg, BatchedP2PLookupMsg):
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
+        elif isinstance(msg, HeartbeatMsg):
+            return HeartbeatRetMsg()  # No command by default
+        elif isinstance(msg, FullSyncStartMsg):
+            return FullSyncStartRetMsg(
+                sync_id=msg.sync_id,
+                accepted=False,
+                error_msg="Communication error",
+            )
+        elif isinstance(msg, FullSyncStatusMsg):
+            return FullSyncStatusRetMsg(
+                sync_id=msg.sync_id,
+                is_complete=False,
+                global_progress=0.0,
+                can_exit_freeze=False,
+            )
         else:
             raise ValueError(f"Unknown message type: {type(msg)}")
 
@@ -254,6 +299,11 @@ class LMCacheWorker:
         return batch
 
     async def heartbeat(self):
+        """
+        Send periodic heartbeats to the controller (REQ-REP mode).
+
+        Process any commands received in the heartbeat response.
+        """
         enable_heartbeat = (
             self.config.lmcache_worker_heartbeat_time is not None
             and self.config.lmcache_worker_heartbeat_time > 0
@@ -266,16 +316,57 @@ class LMCacheWorker:
             )
             await asyncio.sleep(self.config.lmcache_worker_heartbeat_delay_time)
             while True:
-                self.put_msg(
-                    HeartbeatMsg(
-                        instance_id=self.lmcache_instance_id,
-                        worker_id=self.worker_id,
-                        ip=self.lmcache_worker_ip,
-                        port=self.lmcache_worker_port,
-                        peer_init_url=self.p2p_init_url,
-                    )
+                # Send heartbeat via REQ-REP and get response
+                heartbeat_msg = HeartbeatMsg(
+                    instance_id=self.lmcache_instance_id,
+                    worker_id=self.worker_id,
+                    ip=self.lmcache_worker_ip,
+                    port=self.lmcache_worker_port,
+                    peer_init_url=self.p2p_init_url,
                 )
+
+                try:
+                    ret_msg = await self.async_put_and_wait_msg(heartbeat_msg)
+
+                    if isinstance(ret_msg, HeartbeatRetMsg):
+                        self._handle_heartbeat_commands(ret_msg)
+                    else:
+                        logger.warning(
+                            "Unexpected heartbeat response type: %s", type(ret_msg)
+                        )
+                except Exception as e:
+                    logger.error("Error during heartbeat: %s", e)
+
                 await asyncio.sleep(self.config.lmcache_worker_heartbeat_time)
+
+    def _handle_heartbeat_commands(self, ret_msg: HeartbeatRetMsg):
+        """
+        Handle commands received in heartbeat response.
+
+        Uses polymorphic dispatch - each command class implements its own
+        execute() method. Commands are executed sequentially.
+        """
+        if not ret_msg.has_commands():
+            return
+
+        for command in ret_msg.commands:
+            logger.info(
+                "Executing heartbeat command: %s",
+                command.describe(),
+            )
+            try:
+                command.execute(self)
+            except NotImplementedError:
+                logger.warning(
+                    "Command %s.execute() not implemented yet",
+                    type(command).__name__,
+                )
+            except Exception as e:
+                logger.error(
+                    "Error executing command %s: %s",
+                    type(command).__name__,
+                    e,
+                )
 
     async def push(self):
         while True:

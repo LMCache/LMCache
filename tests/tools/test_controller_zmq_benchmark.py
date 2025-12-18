@@ -158,7 +158,7 @@ class TestOperationHandlers:
 
         assert isinstance(msg, HeartbeatMsg)
         assert handler.get_message_count(controller_zmq_benchmark) == 1
-        assert not handler.use_req_socket()
+        assert handler.use_req_socket()
 
     def test_register_handler(self, controller_zmq_benchmark, test_data):
         """Test RegisterHandler functionality"""
