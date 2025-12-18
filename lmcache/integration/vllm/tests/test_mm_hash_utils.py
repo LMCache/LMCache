@@ -1,8 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
 import dataclasses
 
+# Third Party
 import torch
 
-from lmcache.integration.vllm.utils import apply_mm_hashes_to_token_ids, hex_hash_to_int16
+# First Party
+from lmcache.integration.vllm.utils import (
+    apply_mm_hashes_to_token_ids,
+    hex_hash_to_int16,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,7 +91,9 @@ def test_apply_mm_hashes_to_token_ids_out_of_bounds_is_safe() -> None:
     assert out.tolist() == token_ids.tolist()
 
 
-def test_apply_mm_hashes_to_token_ids_multiple_placeholders_and_length_mismatch() -> None:
+def test_apply_mm_hashes_to_token_ids_multiple_placeholders_and_length_mismatch() -> (
+    None
+):
     token_ids = torch.zeros(12, dtype=torch.long)
     mm_hashes = ["deadbeef", "chatcmpl-a2a48871c4aad192-image-0", "EXTRA_HASH_IGNORED"]
     mm_positions = [
