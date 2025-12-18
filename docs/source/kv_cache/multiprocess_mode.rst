@@ -146,7 +146,7 @@ Kubernetes Deployment
 You can deploy LMCache and vLLM on Kubernetes using a DaemonSet pattern. This approach runs one LMCache server per node that can be shared by multiple vLLM pods on the same node, making it suitable for production deployments.
 
 .. note::
-    The DaemonSet deployment uses ``privileged: true`` to allow LMCache to access GPUs without requesting them as Kubernetes resources. This ensures GPUs remain available for vLLM pods while LMCache can still perform GPU operations.
+    The DaemonSet deployment does not request GPU resources, allowing GPUs to remain exclusively allocated to vLLM pods. The NVIDIA container runtime automatically provides GPU access to the LMCache server for IPC-based memory transfers.
 
 Prerequisites
 ~~~~~~~~~~~~~
@@ -273,40 +273,38 @@ On subsequent identical requests, you should see:
 Kubernetes Configuration Notes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The DaemonSet deployment differs from the sidecar pattern in several important ways:
-
 **DaemonSet Architecture:**
 
-- One LMCache server runs per node (not per pod)
-- Multiple vLLM pods on the same node share the same LMCache instance
+- One LMCache server runs per node as a DaemonSet
+- Multiple vLLM pods on the same node can share the same LMCache instance
 - LMCache uses ``hostNetwork: true`` so vLLM pods can connect via node IP
 - vLLM pods use ``status.hostIP`` to discover the LMCache server on their node
-- Both LMCache and vLLM pods use ``hostIPC: true`` for shared memory IPC communication
+- Both containers mount the host's ``/dev/shm`` to enable CUDA IPC memory sharing
 
-**GPU Access Without Resource Requests:**
+**GPU Access:**
 
-- LMCache DaemonSet uses ``privileged: true`` to access GPUs
 - GPUs are NOT requested in the DaemonSet resources section
 - This allows GPUs to remain exclusively allocated to vLLM pods
-- LMCache can still perform GPU operations for IPC-based memory transfers
+- LMCache can still access GPUs for IPC-based memory transfers via the NVIDIA container runtime
 
-**Why LMCache Server Needs GPU Access:**
+.. note::
+    LMCache pods on nodes without GPUs will crash with CUDA initialization errors. This is expected behavior - LMCache only needs to run successfully on GPU nodes where vLLM pods are scheduled.
 
-The LMCache server requires GPU access because it:
+**Minimal Configuration Requirements:**
 
-- Receives GPU tensor IPC handles from vLLM workers
-- Directly accesses vLLM's GPU memory to perform GPU-to-CPU transfers
-- Uses CUDA operations for efficient memory copying
-- Potentially allocates intermediate GPU buffers
+**vLLM Deployment:**
 
-The term "CPU offloading" refers to where KV cache is **stored** (CPU memory), not where the server runs.
+- ``/dev/shm`` hostPath mount (required for CUDA IPC shared memory)
 
-**Advantages of DaemonSet Pattern:**
+**LMCache DaemonSet:**
 
-- Resource efficiency: One LMCache server per node instead of per pod
-- Better for multi-tenant scenarios with multiple vLLM deployments
-- Easier to manage and monitor centrally
-- Works with SGLang and other inference engines
+- ``hostNetwork: true`` (required for vLLM to connect via node IP using ``status.hostIP``)
+- ``/dev/shm`` hostPath mount (required for CUDA IPC shared memory)
+- ``LMCACHE_LOG_LEVEL=DEBUG`` environment variable (optional, for observability)
+
+**Key Insight:**
+
+Mounting the same ``/dev/shm`` from the host in both containers provides the shared memory space needed for CUDA IPC communication. The NVIDIA container runtime (installed via NVIDIA GPU Operator) automatically provides GPU access to the LMCache server.
 
 **Cleanup:**
 

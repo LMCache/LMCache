@@ -14,25 +14,38 @@ spec:
       labels:
         app: vllm-deployment
     spec:
-      hostIPC: true
+      volumes:
+        - name: dshm
+          hostPath:
+            path: /dev/shm
+            type: Directory
       containers:
         - name: vllm
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
           image: lmcache/vllm-openai:latest-nightly
-          args:
-            - Qwen/Qwen3-14B
-            - --host
-            - "0.0.0.0"
-            - --port
-            - "8000"
-            - --no-enable-prefix-caching
-            - --max-model-len
-            - "32768"
-            - --gpu-memory-utilization
-            - "0.85"
-            - --tensor-parallel-size
-            - "4"
-            - --kv-transfer-config
-            - '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.port": 6555}}'
+          command:
+            - /bin/bash
+            - -c
+            - |
+              vllm serve Qwen/Qwen3-14B \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --no-enable-prefix-caching \
+                --max-model-len 32768 \
+                --gpu-memory-utilization 0.85 \
+                --tensor-parallel-size 4 \
+                --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"tcp://${HOST_IP}\", \"lmcache.mp.port\": 6555}}"
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: "/tmp"
           resources:
             limits:
               nvidia.com/gpu: "4"
@@ -48,10 +61,3 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 1
-          env:
-            - name: PYTHONHASHSEED
-              value: "0"
-            - name: PROMETHEUS_MULTIPROC_DIR
-              value: "/tmp"
-            - name: LMCACHE_LOG_LEVEL
-              value: "DEBUG"
