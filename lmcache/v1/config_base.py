@@ -7,11 +7,13 @@ for all LMCache configuration systems to avoid code duplication.
 """
 
 # Standard
-from typing import Any, Callable, Dict, List, Optional, Protocol, Union
+from dataclasses import make_dataclass
+from typing import Any, Callable, Dict, Optional, Protocol, Union
 import ast
 import json
 import os
 import re
+import threading
 import uuid
 
 # Third Party
@@ -21,6 +23,27 @@ import yaml
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+def _apply_env_converter_safely(config_definitions, name, value):
+    """Apply env_converter to a value safely."""
+    if name not in config_definitions:
+        return value
+
+    config = config_definitions[name]
+    env_converter = config.get("env_converter")
+    if env_converter:
+        try:
+            # Don't apply converter if value is None
+            if value is None:
+                return None
+            return env_converter(value)
+        except (ValueError, json.JSONDecodeError) as e:
+            log_message = f"Failed to convert value for {name}={value!r}: {e}"
+            logger.warning(log_message)
+            # Return None if conversion fails
+            return None
+    return value
 
 
 # Common configuration parsing utilities
@@ -187,9 +210,6 @@ def create_config_class(
     Returns:
         A dynamically created dataclass with configuration functionality
     """
-    # Standard
-    from dataclasses import make_dataclass
-
     # Default values
     config_aliases = config_aliases or {}
     deprecated_configs = deprecated_configs or {}
@@ -206,11 +226,56 @@ def create_config_class(
         if not hasattr(self, "lmcache_instance_id"):
             self.lmcache_instance_id = f"{config_name.lower()}_{uuid.uuid4().hex}"
 
-    def _from_defaults(cls, **kwargs):
-        """Create configuration from defaults"""
+    def _from_env(cls):
+        """Load configuration from environment variables"""
+
+        def get_env_name(attr_name: str) -> str:
+            return f"{env_prefix}{attr_name.upper()}"
+
+        # Collect all defined and deprecated env vars
+        all_keys = list(config_definitions.keys()) + list(config_aliases.keys())
+        env_config = {}
+        for name in all_keys:
+            env_name = get_env_name(name)
+            env_value = os.getenv(env_name)
+            if env_value is not None:
+                env_config[name] = env_value
+
+        # Resolve aliases and handle deprecated configurations
+        resolved_config = _resolve_config_aliases(
+            env_config,
+            "environment variables",
+            config_definitions,
+            config_aliases,
+            deprecated_configs,
+        )
+
         config_values = {}
         for name, config in config_definitions.items():
-            config_values[name] = kwargs.get(name, config["default"])
+            if name in resolved_config:
+                try:
+                    raw_value = resolved_config[name]
+                    value = _parse_quoted_string(raw_value)
+                    # Apply env_converter safely
+                    config_values[name] = _apply_env_converter_safely(
+                        config_definitions, name, value
+                    )
+                except (ValueError, json.JSONDecodeError) as e:
+                    raw_value_for_log = resolved_config.get(name, "unknown value")
+                    log_message = (
+                        f"Failed to parse {get_env_name(name)}"
+                        f"={raw_value_for_log!r}: {e}"
+                    )
+                    logger.warning(log_message)
+                    # Use default value with conversion
+                    config_values[name] = _apply_env_converter_safely(
+                        config_definitions, name, config["default"]
+                    )
+            else:
+                # Use default value with conversion
+                config_values[name] = _apply_env_converter_safely(
+                    config_definitions, name, config["default"]
+                )
 
         instance = cls(**config_values)
         return instance
@@ -232,52 +297,23 @@ def create_config_class(
         config_values = {}
         for name, config in config_definitions.items():
             value = resolved_config.get(name, config["default"])
-            if value is not None:
-                value = config["env_converter"](value)
-            config_values[name] = value
+            # Apply env_converter safely regardless of whether value is None or not
+            config_values[name] = _apply_env_converter_safely(
+                config_definitions, name, value
+            )
 
         instance = cls(**config_values)
         return instance
 
-    def _from_env(cls):
-        """Load configuration from environment variables"""
-
-        def get_env_name(attr_name: str) -> str:
-            return f"{env_prefix}{attr_name.upper()}"
-
-        env_config = {}
-        # Collect all defined and deprecated env vars
-        all_keys = list(config_definitions.keys()) + list(config_aliases.keys())
-        for name in all_keys:
-            env_name = get_env_name(name)
-            env_value = os.getenv(env_name)
-            if env_value is not None:
-                env_config[name] = env_value
-
-        # Resolve aliases
-        resolved_config = _resolve_config_aliases(
-            env_config,
-            "environment variables",
-            config_definitions,
-            config_aliases,
-            deprecated_configs,
-        )
-
+    def _from_defaults(cls, **kwargs):
+        """Create configuration from defaults"""
         config_values = {}
         for name, config in config_definitions.items():
-            if name in resolved_config:
-                try:
-                    raw_value = resolved_config[name]
-                    value = _parse_quoted_string(raw_value)
-                    converted_value = config["env_converter"](value)
-                    config_values[name] = converted_value
-                except (ValueError, json.JSONDecodeError) as e:
-                    logger.warning(
-                        f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
-                    )
-                    config_values[name] = config["default"]
-            else:
-                config_values[name] = config["default"]
+            value = kwargs.get(name, config["default"])
+            # Apply env_converter safely regardless of whether value is None or not
+            config_values[name] = _apply_env_converter_safely(
+                config_definitions, name, value
+            )
 
         instance = cls(**config_values)
         return instance
@@ -315,9 +351,12 @@ def create_config_class(
                     converted_value = config["env_converter"](value)
                     setattr(self, name, converted_value)
                 except (ValueError, json.JSONDecodeError) as e:
-                    logger.warning(
-                        f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
+                    raw_value_for_log = resolved_config.get(name, "unknown value")
+                    log_message = (
+                        f"Failed to parse {get_env_name(name)}"
+                        f"={raw_value_for_log!r}: {e}"
                     )
+                    logger.warning(log_message)
 
         return self
 
@@ -368,6 +407,10 @@ def create_config_class(
         [(name, type_, default) for name, (type_, default) in fields_dict.items()],
         namespace=namespace,
     )
+
+    # Add config_definitions as a class attribute for accessing converters
+    cls._config_definitions = config_definitions  # type: ignore[attr-defined]
+
     return cls
 
 
@@ -392,8 +435,6 @@ def create_singleton_config(
         config_class: The configuration class to create singleton for
         config_env_var: Environment variable name for configuration file path
     """
-    # Standard
-    import threading
 
     _config_instance = None
     _config_lock = threading.Lock()
@@ -441,7 +482,6 @@ def create_singleton_config(
 def load_config_with_overrides(
     config_class,
     config_file_env_var: str = "LMCACHE_CONFIG_FILE",
-    env_prefix: str = "LMCACHE_",
     config_file_path: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
 ):
@@ -454,7 +494,6 @@ def load_config_with_overrides(
     Args:
         config_class: The configuration class to instantiate
         config_file_env_var: Environment variable name for config file path
-        env_prefix: Prefix for environment variables
         config_file_path: Optional direct config file path (overrides env var)
         overrides: Optional dictionary of configuration overrides
 
@@ -478,10 +517,24 @@ def load_config_with_overrides(
         for key, value in overrides.items():
             if hasattr(config, key):
                 old_value = getattr(config, key)
-                setattr(config, key, value)
-                if old_value != value:
+
+                # Check if this configuration class has definitions with converters
+                if (
+                    hasattr(config, "_config_definitions")
+                    and key in config._config_definitions
+                ):
+                    # Use the global helper function to safely apply env_converter
+                    new_value = _apply_env_converter_safely(
+                        config._config_definitions, key, value
+                    )
+                    setattr(config, key, new_value)
+                else:
+                    setattr(config, key, value)
+
+                new_value = getattr(config, key)
+                if old_value != new_value:
                     logger.info(
-                        "Override config: %s = %s (was %s)", key, value, old_value
+                        "Override config: %s = %s (was %s)", key, new_value, old_value
                     )
             else:
                 logger.warning("Unknown config key: %s, ignoring", key)
@@ -497,7 +550,7 @@ def load_config_with_overrides(
     return config
 
 
-def parse_command_line_extra_params(extra_args: List[str]) -> Dict[str, Any]:
+def parse_command_line_extra_params(extra_args: list[str]) -> dict[str, Any]:
     """
     Parse extra command-line parameters in key=value format.
 

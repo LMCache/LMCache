@@ -745,7 +745,6 @@ def load_engine_config_with_overrides(
     return load_config_with_overrides(
         config_class=LMCacheEngineConfig,
         config_file_env_var="LMCACHE_CONFIG_FILE",
-        env_prefix="LMCACHE_",
         config_file_path=config_file_path,
         overrides=overrides,
     )

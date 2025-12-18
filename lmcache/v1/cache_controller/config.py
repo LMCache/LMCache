@@ -10,7 +10,6 @@ Configuration system for LMCache Controller that:
 
 # Standard
 from typing import Any, Dict, Optional
-import ast
 import json
 
 # First Party
@@ -125,15 +124,28 @@ def override_controller_config_from_dict(
     for key, value in overrides.items():
         if hasattr(config, key):
             old_value = getattr(config, key)
-            if key == "extra_config":
-                # convert to dict
-                value = ast.literal_eval(value)
-                setattr(config, key, dict(value))
+
+            # Check if this field has an env_converter in the definitions
+            if key in _CONTROLLER_CONFIG_DEFINITIONS:
+                env_converter = _CONTROLLER_CONFIG_DEFINITIONS[key].get("env_converter")
+                if env_converter:
+                    try:
+                        # Apply the env_converter to the value
+                        converted_value = env_converter(value)
+                        setattr(config, key, converted_value)
+                    except (ValueError, json.JSONDecodeError) as e:
+                        logger.warning(f"Failed to convert {key}={value!r}: {e}")
+                        # Keep the original value if conversion fails
+                        setattr(config, key, value)
+                else:
+                    setattr(config, key, value)
             else:
                 setattr(config, key, value)
-            if old_value != value:
+
+            new_value = getattr(config, key)
+            if old_value != new_value:
                 logger.info(
-                    f"Override controller config: {key} = {value} (was {old_value})"
+                    f"Override controller config: {key} = {new_value} (was {old_value})"
                 )
         else:
             logger.warning(f"Unknown controller config key: {key}, ignoring")
@@ -159,7 +171,6 @@ def load_controller_config_with_overrides(
     return load_config_with_overrides(
         config_class=ControllerConfig,
         config_file_env_var="LMCACHE_CONTROLLER_CONFIG_FILE",
-        env_prefix="LMCACHE_CONTROLLER_",
         config_file_path=config_file_path,
         overrides=overrides,
     )

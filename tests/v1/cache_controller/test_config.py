@@ -18,6 +18,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.config import (
     ControllerConfig,
     controller_get_or_create_config,
+    load_controller_config_with_overrides,
     override_controller_config_from_dict,
 )
 
@@ -170,3 +171,141 @@ def test_to_from_json():
     assert new_config.controller_port == config.controller_port
 
     logger.info("✓ JSON serialization test passed")
+
+
+def test_controller_monitor_ports_json_parsing():
+    """Test that controller_monitor_ports JSON string is correctly parsed as dict"""
+    logger.info("=" * 80)
+    logger.info("Testing: controller_monitor_ports JSON parsing")
+    logger.info("=" * 80)
+
+    # Test 1: From environment variable (string JSON)
+    original_env = os.environ.get("LMCACHE_CONTROLLER_CONTROLLER_MONITOR_PORTS")
+    os.environ["LMCACHE_CONTROLLER_CONTROLLER_MONITOR_PORTS"] = (
+        '{"pull": 8300, "reply": 8400}'
+    )
+
+    try:
+        config = ControllerConfig.from_env()
+        config.validate()
+
+        # Check that controller_monitor_ports is a dict, not a string
+        expected_type_msg = (
+            f"Expected dict but got {type(config.controller_monitor_ports)}: "
+            f"{config.controller_monitor_ports}"
+        )
+        assert isinstance(config.controller_monitor_ports, dict), expected_type_msg
+        assert config.controller_monitor_ports["pull"] == 8300
+        assert config.controller_monitor_ports["reply"] == 8400
+
+        logger.info("✓ Environment variable JSON parsing test passed")
+
+        # Test 2: From file with YAML string
+        config_content = """
+controller_monitor_ports: '{"pull": 8500, "reply": 8600}'
+"""
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(config_content)
+            config_file = f.name
+
+        try:
+            config2 = ControllerConfig.from_file(config_file)
+            config2.validate()
+
+            expected_type_msg2 = (
+                f"Expected dict but got {type(config2.controller_monitor_ports)}: "
+                f"{config2.controller_monitor_ports}"
+            )
+            assert isinstance(config2.controller_monitor_ports, dict), (
+                expected_type_msg2
+            )
+            assert config2.controller_monitor_ports["pull"] == 8500
+            assert config2.controller_monitor_ports["reply"] == 8600
+
+            logger.info("✓ File YAML JSON parsing test passed")
+
+            # Test 3: Dictionary override with JSON string
+            config3 = ControllerConfig.from_env()
+            override_dict = {
+                "controller_monitor_ports": '{"pull": 8700, "reply": 8800}'
+            }
+            override_controller_config_from_dict(config3, override_dict)
+
+            expected_type_msg3 = (
+                f"Expected dict but got {type(config3.controller_monitor_ports)}: "
+                f"{config3.controller_monitor_ports}"
+            )
+            assert isinstance(config3.controller_monitor_ports, dict), (
+                expected_type_msg3
+            )
+            assert config3.controller_monitor_ports["pull"] == 8700
+            assert config3.controller_monitor_ports["reply"] == 8800
+
+            logger.info("✓ Dictionary override JSON parsing test passed")
+
+            # Test 4: Dictionary override with actual dict
+            config4 = ControllerConfig.from_env()
+            override_dict2 = {"controller_monitor_ports": {"pull": 8900, "reply": 9000}}
+            override_controller_config_from_dict(config4, override_dict2)
+
+            expected_type_msg4 = (
+                f"Expected dict but got {type(config4.controller_monitor_ports)}: "
+                f"{config4.controller_monitor_ports}"
+            )
+            assert isinstance(config4.controller_monitor_ports, dict), (
+                expected_type_msg4
+            )
+            assert config4.controller_monitor_ports["pull"] == 8900
+            assert config4.controller_monitor_ports["reply"] == 9000
+
+            logger.info("✓ Dictionary override with dict test passed")
+
+        finally:
+            os.unlink(config_file)
+
+    finally:
+        # Restore original environment variable
+        if original_env is not None:
+            os.environ["LMCACHE_CONTROLLER_CONTROLLER_MONITOR_PORTS"] = original_env
+        else:
+            os.environ.pop("LMCACHE_CONTROLLER_CONTROLLER_MONITOR_PORTS", None)
+
+    logger.info("✓ controller_monitor_ports JSON parsing test passed")
+
+
+def test_load_controller_config_with_overrides():
+    """
+    Test loading controller config with overrides,
+    especially for controller_monitor_ports
+    """
+    logger.info("=" * 80)
+    logger.info("Testing: load_controller_config_with_overrides")
+    logger.info("=" * 80)
+
+    # Test with monitor ports as JSON string in overrides
+    overrides = {
+        "controller_host": "localhost",
+        "controller_port": 8000,
+        "controller_monitor_ports": '{"pull": 8300, "reply": 8400}',
+    }
+
+    # Load config without config file (from env with overrides)
+    config = load_controller_config_with_overrides(overrides=overrides)
+
+    # Verify values
+    assert config.controller_host == "localhost"
+    assert config.controller_port == 8000
+
+    expected_type_msg = (
+        f"Expected dict but got {type(config.controller_monitor_ports)}: "
+        f"{config.controller_monitor_ports}"
+    )
+    assert isinstance(config.controller_monitor_ports, dict), expected_type_msg
+    assert config.controller_monitor_ports["pull"] == 8300
+    assert config.controller_monitor_ports["reply"] == 8400
+
+    # Log config to see the output
+    config.log_config()
+
+    logger.info("✓ load_controller_config_with_overrides test passed")
