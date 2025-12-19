@@ -160,10 +160,24 @@ class KVLayerGroupsManager:
         )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            shape = kv_cache.shape
-            dtype = kv_cache.dtype
-            key = (shape, dtype)
-            groups_dict[key].append((layer_name, idx))
+            # Extract shape and dtype from first valid tensor in kv_cache
+            shape, dtype = None, None
+
+            if isinstance(kv_cache, (tuple, list)):
+                # Handle tuple/list of tensors for HPU
+                for tensor in kv_cache:
+                    if tensor is not None and hasattr(tensor, 'shape'):
+                        shape = tensor.shape
+                        dtype = tensor.dtype
+                        break
+            else:
+                # Handle single tensor
+                shape = kv_cache.shape
+                dtype = kv_cache.dtype
+
+            if shape is not None and dtype is not None:
+                key = (shape, dtype)
+                groups_dict[key].append((layer_name, idx))
 
         # Build KVLayerGroupInfo list
         # Sort groups by the first layer index to maintain order

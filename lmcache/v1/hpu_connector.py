@@ -21,6 +21,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector import GPUConnectorInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -82,6 +83,41 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             self.gpu_buffer = torch.empty(
                 shape, dtype=kwargs["dtype"], device=kwargs["device"]
             )
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: LMCacheEngineMetadata,
+        use_gpu: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> "VLLMPagedMemHPUConnectorV2":
+        """Create a connector from LMCacheEngineMetadata.
+
+        Args:
+            metadata: The LMCache engine metadata containing model configuration.
+            use_gpu: Whether to use GPU intermediate buffer.
+            device: The device to use for the connector.
+
+        Returns:
+            A new instance of VLLMPagedMemHPUConnectorV2.
+        """
+        # Extract parameters from metadata
+        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
+        num_layers = metadata.kv_shape[0]
+        chunk_size = metadata.kv_shape[2]
+        num_kv_head = metadata.kv_shape[3]
+        head_size = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_head * head_size
+
+        return cls(
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=metadata.kv_dtype,
+            device=device,
+            use_mla=metadata.use_mla,
+        )
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]

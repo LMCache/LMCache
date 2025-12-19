@@ -625,7 +625,11 @@ def _init_lmcache_engine(
             )
         tpg = get_tp_group()
     else:
-        if current_platform.is_cuda_alike():
+        if hasattr(torch, "hpu") and torch.hpu.is_available():
+            vllm_gpu_connector = VLLMPagedMemHPUConnectorV2.from_metadata(
+                metadata, use_gpu, device
+            )
+        elif current_platform.is_cuda_alike():
             # TODO(chunxiaozheng): unify use VLLMPagedMemGPUConnectorV3 after stable
             if lmcache_config.use_gpu_connector_v3:
                 vllm_gpu_connector = VLLMPagedMemGPUConnectorV3.from_metadata(
@@ -637,10 +641,6 @@ def _init_lmcache_engine(
                 )
         elif current_platform.is_xpu():
             vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
-                metadata, use_gpu, device
-            )
-        elif hasattr(torch, "hpu") and torch.hpu.is_available():
-            vllm_gpu_connector = VLLMPagedMemHPUConnectorV2.from_metadata(
                 metadata, use_gpu, device
             )
         else:
