@@ -238,10 +238,10 @@ Example on MI300X (gfx942):
     python3 -m pip install --no-build-isolation -e .
 
 
-LMCache on Intel Gaudi(HPU)
+LMCache on Intel® Gaudi® HPU
 ------------------
 
-LMCache can be installed in the Intel Gaudi docker along with vllm and vllm-gaudi(plugin to support HPU).
+LMCache can be installed in the Intel® Gaudi® HPU docker along with vllm and vllm-gaudi.
 
 Latest Intel Gaudi docker image info is published at `Gaudi docs <https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#use-intel-gaudi-containers>`__.
 
@@ -253,6 +253,6 @@ To install LMCache from source, clone the repository and install in editable mod
 
     NO_CUDA_EXT=1 BUILD_WITH_HPU=1 pip install -e .
 
-Dockerfile to build on intel gaudi environment is also available at `Dockerfile.hpu <https://github.com/LMCache/LMCache/blob/dev/docker/Dockerfile.hpu>`__.
+Dockerfile for Intel® Gaudi® HPU is also available at docker/Dockerfile.hpu .
 
-Examples and instructions to run lmcache tests on intel gaudi is available in the `Readme <https://github.com/hsubramony/vllm-gaudi/tree/main/examples/lmcache/README.md>`__ in vllm-gaudi github.
+Example scripts and instructions to run disaggregated prefilling and KV cache sharing tests on Intel® Gaudi® HPU is available in the `Readme <https://github.com/vllm-project/vllm-gaudi/blob/main/examples/lmcache/README.md>`__. Please make sure to enable ``PT_HPU_GPU_MIGRATION=1`` to run on Intel® Gaudi® HPU.  to run on Intel® Gaudi® HPU. Example scripts mentioned shows the various envirnment flags. to run on Intel® Gaudi® HPU. Example scripts mentioned shows the various envirnment flags.Example scripts mentioned shows the various envirnment flags.
