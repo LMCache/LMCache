@@ -87,6 +87,7 @@ class MooncakeChannel(BaseTransferChannel):
       on both local and remote sides and perform RDMA writes via Mooncake.
 
     Currently only batched_write is implemented, which is what PD needs.
+    TODO(Yang): Support TP, async mode.
     """
 
     def __init__(
@@ -95,6 +96,7 @@ class MooncakeChannel(BaseTransferChannel):
         **kwargs: Any,
     ) -> None:
         # Required arguments
+        # TODO(Yang): pass hostname, metadata_server, protocol, device_name from kwargs.
         assert "role" in kwargs
         assert "buffer_ptr" in kwargs
         assert "buffer_size" in kwargs
@@ -121,60 +123,17 @@ class MooncakeChannel(BaseTransferChannel):
         self.side_channels: list[zmq.Socket] = []
         self.running_threads: list[threading.Thread] = []
 
-        # Initialize Mooncake TransferEngine
-        self.engine = TransferEngine()
-
-        # Configuration source: kwargs override environment variables
-        hostname = kwargs.get(
-            "mooncake_hostname",
-            os.getenv("MC_LOCAL_HOSTNAME", "localhost"),
+        # Initialize Mooncake TransferEngine via wrapper
+        self.mooncake_wrapper = MooncakeEngineWrapper(
+            buffer_ptr=self.buffer_ptr,
+            buffer_size=self.buffer_size,
+            hostname=kwargs.get("mooncake_hostname"),
+            metadata_server=kwargs.get("mooncake_metadata_server"),
+            protocol=kwargs.get("mooncake_protocol"),
+            device_name=kwargs.get("mooncake_device_name"),
         )
-        metadata_server = kwargs.get(
-            "mooncake_metadata_server",
-            os.getenv("MC_METADATA_SERVER", "P2PHANDSHAKE"),
-        )
-        protocol = kwargs.get(
-            "mooncake_protocol",
-            os.getenv("MC_PROTOCOL", "tcp"),
-        )
-        device_name = kwargs.get(
-            "mooncake_device_name",
-            os.getenv("MC_DEVICE_NAME", ""),
-        )
-
-        logger.info(
-            "Initializing Mooncake TransferEngine: "
-            f"hostname={hostname}, metadata_server={metadata_server}, "
-            f"protocol={protocol}, device_name={device_name}"
-        )
-
-        ret = self.engine.initialize(
-            hostname,
-            metadata_server,
-            protocol,
-            device_name,
-        )
-        if ret != 0:
-            raise RuntimeError(
-                f"Mooncake TransferEngine.initialize failed with code {ret}"
-            )
-
-        rpc_port = self.engine.get_rpc_port()
-        self.session_id: str = f"{hostname}:{rpc_port}"
-
-        # Register the whole buffer
-        ret = self.engine.register_memory(self.buffer_ptr, self.buffer_size)
-        if ret != 0:
-            raise RuntimeError(
-                "Mooncake register_memory failed with code "
-                f"{ret} (buffer_ptr={self.buffer_ptr}, size={self.buffer_size})"
-            )
-
-        logger.info(
-            "MooncakeChannel initialized: "
-            f"session_id={self.session_id}, "
-            f"buffer_ptr={self.buffer_ptr}, buffer_size={self.buffer_size}"
-        )
+        self.engine = self.mooncake_wrapper.engine
+        self.session_id = self.mooncake_wrapper.session_id
 
         # Remote peers' buffer information
         # key: peer_id (e.g., receiver_id or sender_id)
@@ -606,14 +565,91 @@ class MooncakeChannel(BaseTransferChannel):
             socket.close()
         self.zmq_context.term()
 
+        # Unregister memory via wrapper
+        self.mooncake_wrapper.unregister_memory()
+
+
+@dataclass
+class MooncakeEngineWrapper:
+    engine: TransferEngine
+    session_id: str
+    buffer_ptr: int
+    buffer_size: int
+
+    def __init__(
+        self,
+        buffer_ptr: int,
+        buffer_size: int,
+        hostname: Optional[str] = None,
+        metadata_server: Optional[str] = None,
+        protocol: Optional[str] = None,
+        device_name: Optional[str] = None,
+    ) -> None:
+        """
+        Initialize the Mooncake TransferEngine.
+
+        Args:
+            buffer_ptr (int): The pointer to the pre-allocated buffer.
+            buffer_size (int): The size of the buffer.
+            hostname (str, optional): Local hostname. Defaults to env var or "localhost".
+            metadata_server (str, optional): Metadata server. Defaults to env var or "P2PHANDSHAKE".
+            protocol (str, optional): Protocol to use. Defaults to env var or "tcp".
+            device_name (str, optional): Device name. Defaults to env var or "".
+        """
+        # Configuration: kwargs override environment variables
+        hostname = hostname or os.getenv("MC_LOCAL_HOSTNAME", "localhost")
+        metadata_server = metadata_server or os.getenv("MC_METADATA_SERVER", "P2PHANDSHAKE")
+        protocol = protocol or os.getenv("MC_PROTOCOL", "tcp")
+        device_name = device_name or os.getenv("MC_DEVICE_NAME", "")
+
+        logger.info(
+            "Initializing Mooncake TransferEngine: "
+            f"hostname={hostname}, metadata_server={metadata_server}, "
+            f"protocol={protocol}, device_name={device_name}"
+        )
+
+        # Create and initialize TransferEngine
+        engine = TransferEngine()
+        ret = engine.initialize(hostname, metadata_server, protocol, device_name)
+        if ret != 0:
+            raise RuntimeError(
+                f"Mooncake TransferEngine.initialize failed with code {ret}"
+            )
+
+        # Get RPC port and create session_id
+        rpc_port = engine.get_rpc_port()
+        session_id = f"{hostname}:{rpc_port}"
+
+        # Register the buffer
+        ret = engine.register_memory(buffer_ptr, buffer_size)
+        if ret != 0:
+            raise RuntimeError(
+                "Mooncake register_memory failed with code "
+                f"{ret} (buffer_ptr={buffer_ptr}, size={buffer_size})"
+            )
+
+        logger.info(
+            "MooncakeEngineWrapper initialized: "
+            f"session_id={session_id}, "
+            f"buffer_ptr={buffer_ptr}, buffer_size={buffer_size}"
+        )
+
+        self.engine = engine
+        self.session_id = session_id
+        self.buffer_ptr = buffer_ptr
+        self.buffer_size = buffer_size
+
+    def unregister_memory(self) -> None:
+        """Unregister the registered buffer from Mooncake."""
         try:
             ret = self.engine.unregister_memory(self.buffer_ptr)
             if ret != 0:
                 logger.warning(
-                    "MooncakeChannel.close: unregister_memory failed with code %d",
+                    "MooncakeEngineWrapper.unregister_memory failed with code %d",
                     ret,
                 )
         except Exception as e:
             logger.error(
-                "MooncakeChannel.close: error during unregister_memory: %s", e
+                "MooncakeEngineWrapper.unregister_memory error: %s", e
             )
+
