@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
-from unittest.mock import MagicMock
 import random
 import tempfile
 import time
@@ -13,94 +11,21 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
 )
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
-
-# Local
-from ..utils import (
+from tests.v1.utils import (
+    create_mock_vllm_config,
+    create_test_config,
+    create_test_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
     recover_engine_states,
 )
-
-
-def create_test_metadata(worker_id: int = 0, world_size: int = 1):
-    """Create test metadata for LMCacheEngine."""
-    return LMCacheEngineMetadata(
-        model_name="test_model",
-        world_size=world_size,
-        worker_id=worker_id,
-        fmt="vllm",
-        kv_dtype=torch.bfloat16,
-        kv_shape=(4, 2, 256, 8, 128),
-    )
-
-
-def create_test_config(
-    chunk_size: int = 256,
-    local_cpu: bool = True,
-    max_local_cpu_size: float = 1.0,
-    rpc_port: int = 0,
-    extra_config: Optional[dict] = None,
-    instance_id: Optional[str] = None,
-):
-    """Create test configuration for LMCacheEngine."""
-    if instance_id is None:
-        instance_id = f"test_lookup_instance_{uuid.uuid4().hex[:8]}"
-    config = LMCacheEngineConfig.from_defaults(
-        chunk_size=chunk_size,
-        local_cpu=local_cpu,
-        max_local_cpu_size=max_local_cpu_size,
-        lmcache_instance_id=instance_id,
-    )
-    config.extra_config = extra_config.copy() if extra_config else {}
-    config.extra_config["lmcache_rpc_port"] = rpc_port
-    return config
-
-
-def create_mock_vllm_config(rank: int = 0, world_size: int = 1, rpc_port: int = 0):
-    """Create a mock VllmConfig for testing."""
-    vllm_config = MagicMock()
-
-    # Mock model_config
-    vllm_config.model_config = MagicMock()
-    vllm_config.model_config.model = "test_model"
-    vllm_config.model_config.served_model_name = "test_model"
-    vllm_config.model_config.dtype = torch.bfloat16
-    vllm_config.model_config.get_num_layers = MagicMock(return_value=4)
-    vllm_config.model_config.get_num_kv_heads = MagicMock(return_value=8)
-    vllm_config.model_config.get_head_size = MagicMock(return_value=128)
-    vllm_config.model_config.hf_config = MagicMock()
-    vllm_config.model_config.hf_config.model_type = "llama"
-
-    # Mock parallel_config
-    vllm_config.parallel_config = MagicMock()
-    vllm_config.parallel_config.rank = rank
-    vllm_config.parallel_config.world_size = world_size
-    vllm_config.parallel_config.tensor_parallel_size = world_size
-    vllm_config.parallel_config.pipeline_parallel_size = 1
-
-    # Mock cache_config
-    vllm_config.cache_config = MagicMock()
-    vllm_config.cache_config.cache_dtype = torch.bfloat16
-
-    # Mock kv_transfer_config with engine_id
-    vllm_config.kv_transfer_config = MagicMock()
-    vllm_config.kv_transfer_config.engine_id = "test_engine"
-    vllm_config.kv_transfer_config.get_from_extra_config = MagicMock(
-        side_effect=lambda key, default: (
-            rpc_port if key == "lmcache_rpc_port" else default
-        )
-    )
-
-    return vllm_config
 
 
 class TestLMCacheLookupClientServer:

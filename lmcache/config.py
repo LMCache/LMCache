@@ -42,6 +42,8 @@ class LMCacheEngineMetadata:
     # TODO(baoloongmao): first_rank should be configurable
     first_rank = 0
     served_model_name: Optional[str] = None
+    """chunk size"""
+    chunk_size: int = 256
     """ Manager for groups of layers with identical KV cache structure """
     kv_layer_groups_manager: KVLayerGroupsManager = field(
         default_factory=KVLayerGroupsManager
@@ -50,6 +52,14 @@ class LMCacheEngineMetadata:
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
         return self.worker_id == self.first_rank
+
+    # TODO(chunxiaozheng): some uts do not `build_kv_layer_groups`
+    def get_dtypes(self) -> list[torch.dtype]:
+        if self.kv_layer_groups_manager.kv_layer_groups:
+            return [
+                group.dtype for group in self.kv_layer_groups_manager.kv_layer_groups
+            ]
+        return [self.kv_dtype]
 
 
 @dataclass

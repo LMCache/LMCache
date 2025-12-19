@@ -18,11 +18,15 @@ from .base import OperationHandler
 
 
 class HeartbeatHandler(OperationHandler):
-    """Handler for heartbeat operations"""
+    """Handler for heartbeat operations (REQ-REP mode)"""
 
     @property
     def operation_name(self) -> str:
         return "heartbeat"
+
+    def use_req_socket(self) -> bool:
+        """Heartbeat now uses REQ-REP mode"""
+        return True
 
     def create_message(
         self, benchmark: "ZMQControllerBenchmark", test_data: "TestData"

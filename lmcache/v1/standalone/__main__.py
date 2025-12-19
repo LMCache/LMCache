@@ -30,6 +30,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
@@ -363,10 +364,11 @@ class LMCacheStandaloneStarter:
         logger.info("Starting LMCache engine with instance ID: %s", instance_id)
 
         # Generate fixed pattern kvcaches for testing
-        kvcaches = self._generate_fixed_kvcaches(device=self.device)
+        kv_caches = self._generate_fixed_kvcaches(device=self.device)
+        self.kv_caches = kv_caches
 
         # Initialize the engine with kvcaches
-        self.lmcache_engine.post_init(kvcaches=list(kvcaches.values()))
+        self.lmcache_engine.post_init(kvcaches=list(kv_caches.values()))
         logger.info("LMCache engine post-initialized with fixed kvcaches")
 
         # Start internal API server
@@ -459,28 +461,6 @@ def parse_kv_shape(shape_str: str) -> Tuple[int, int, int, int, int]:
         return parts  # type: ignore[return-value]
     except ValueError as e:
         raise ValueError(f"Invalid kv_shape format: {shape_str}. Error: {e}") from e
-
-
-def parse_extra_params(extra_args: list) -> Dict[str, Any]:
-    """Parse extra parameters in key=value format"""
-    params = {}
-    for arg in extra_args:
-        if "=" in arg:
-            key, value = arg.split("=", 1)
-            key = key.lstrip("-")
-            try:
-                if value.lower() in ("true", "false"):
-                    params[key] = value.lower() == "true"
-                elif value.isdigit():
-                    params[key] = int(value)
-                elif value.replace(".", "", 1).isdigit():
-                    params[key] = float(value)
-                else:
-                    params[key] = value
-            except ValueError:
-                params[key] = value
-            logger.info(f"Extra parameter: {key} = {params[key]}")
-    return params
 
 
 def setup_signal_handlers(starter: LMCacheStandaloneStarter):
@@ -579,7 +559,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     args, extra = parser.parse_known_args()
-    args.extra_params = parse_extra_params(extra)
+    args.extra_params = parse_command_line_extra_params(extra)
 
     return args
 

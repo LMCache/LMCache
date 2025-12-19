@@ -7,7 +7,6 @@ from enum import Enum, auto
 from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
-import math
 import os
 import threading
 
@@ -86,6 +85,7 @@ class FreeBlock:
 
 @dataclass
 class MemoryObjMetadata:
+    # TODO(chunxiaozheng): use shapes and dtypes to replace shape and dtype
     # The 'logical' shape of the tensor
     shape: torch.Size
 
@@ -155,10 +155,9 @@ class MemoryObjMetadata:
         )
 
     def get_size(self) -> int:
-        num_elements = math.prod(self.shape)
-        element_size = self.dtype.itemsize  # type: ignore
-        size_in_bytes = num_elements * element_size
-        return size_in_bytes
+        if self.shapes is not None and self.dtypes is not None:
+            return get_size_bytes(self.shapes, self.dtypes)
+        return self.shape.numel() * self.dtype.itemsize  # type: ignore
 
 
 class MemoryObj(metaclass=abc.ABCMeta):
@@ -328,6 +327,21 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @property
+    @abc.abstractmethod
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        """
+        Get the raw tensor from the MemoryObj.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        """
+        Get the tensor from the MemoryObj at the given index(group).
+        """
+        raise NotImplementedError
+
 
 def _allocate_cpu_memory(
     size: int,
@@ -405,6 +419,17 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+        # Calculate the prefix sum of the group sizes
+        # If there are two groups, the prefix sum will be
+        # [0, size_of_group_1, size_of_group_1 + size_of_group_2]
+        self.group_prefix_sum = [0]
+        if self.meta.shapes is not None and self.meta.dtypes is not None:
+            size_in_bytes = 0
+            for shape, dtype in zip(self.meta.shapes, self.meta.dtypes, strict=True):
+                size_in_bytes += shape.numel() * dtype.itemsize
+                self.group_prefix_sum.append(size_in_bytes)
+        else:
+            self.group_prefix_sum.append(self.meta.get_size())
 
     def invalidate(self):
         self.valid = False
@@ -413,11 +438,10 @@ class TensorMemoryObj(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        num_elements = math.prod(self.meta.shape)
-        element_size = self.meta.dtype.itemsize  # type: ignore
-        size_in_bytes = num_elements * element_size
-        return size_in_bytes
+        return self.group_prefix_sum[-1]
 
+    # TODO(chunxiaozheng): use get_shapes and get_dtypes to replace
+    #  get_shape and get_dtype
     def get_shape(self) -> torch.Size:
         return self.meta.shape
 
@@ -548,6 +572,27 @@ class TensorMemoryObj(MemoryObj):
         """
         return not self.is_pinned and self.get_ref_count() == 1
 
+    @property
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        if not self.valid:
+            logger.warning("Trying to access an invalidated MemoryObj")
+            return None
+        return self.raw_data
+
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        if not self.valid:
+            logger.warning("Trying to access an invalidated MemoryObj")
+            return None
+        assert self.meta.shapes is not None
+        assert self.meta.dtypes is not None
+        begin = self.group_prefix_sum[index]
+        end = self.group_prefix_sum[index + 1]
+        return (
+            self.raw_data[begin:end]
+            .view(self.meta.dtypes[index])
+            .view(self.meta.shapes[index])
+        )
+
 
 class BytesBufferMemoryObj(MemoryObj):
     """
@@ -658,6 +703,16 @@ class BytesBufferMemoryObj(MemoryObj):
         A buffer memory obj can be evicted if it is not pinned.
         """
         return not self.is_pinned
+
+    @property
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        if not self.valid:
+            logger.warning("Trying to access an invalidated MemoryObj")
+            return None
+        return None
+
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        return None
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
@@ -798,15 +853,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
     @staticmethod
     @_lmcache_nvtx_annotate
-    def _Compute_raw_size(shapes: list[torch.Size], dtypes: list[torch.dtype]) -> int:
-        assert len(shapes) == len(dtypes)
-        return sum(
-            shape.numel() * dtype.itemsize
-            for shape, dtype in zip(shapes, dtypes, strict=False)
-        )
-
-    @staticmethod
-    @_lmcache_nvtx_annotate
     def _Compute_aligned_size(raw_size: int, align: int) -> int:
         return (raw_size + align - 1) & ~(align - 1)
 
@@ -868,7 +914,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
-        raw_size = TensorMemoryAllocator._Compute_raw_size(shapes, dtypes)
+        raw_size = get_size_bytes(shapes, dtypes)
         if raw_size % self.align_bytes != 0:
             aligned_size = TensorMemoryAllocator._Compute_aligned_size(
                 raw_size, self.align_bytes
@@ -942,7 +988,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
-        unit_raw_size = TensorMemoryAllocator._Compute_raw_size(shapes, dtypes)
+        unit_raw_size = get_size_bytes(shapes, dtypes)
 
         if unit_raw_size % self.align_bytes != 0:
             unit_aligned_size = TensorMemoryAllocator._Compute_aligned_size(
@@ -1203,11 +1249,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.total_allocated_size = 0
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-
-    @staticmethod
-    @_lmcache_nvtx_annotate
-    def _Compute_raw_size(shape: torch.Size, dtype: torch.dtype) -> int:
-        return shape.numel() * dtype.itemsize
 
     @_lmcache_nvtx_annotate
     def allocate(

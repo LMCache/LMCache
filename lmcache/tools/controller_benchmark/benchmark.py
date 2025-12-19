@@ -145,9 +145,17 @@ class ZMQControllerBenchmark:
         logger.info("ZMQ sockets closed")
 
     def generate_test_data(self) -> TestData:
-        """Generate test data based on configuration"""
+        """Generate test data based on configuration
+
+        Each process gets a unique range of instance IDs to avoid conflicts.
+        Format: instance_p{process_id}_{instance_index}
+        """
+        process_id = self.config.process_id
         return TestData(
-            instances=["instance_%d" % i for i in range(self.config.num_instances)],
+            instances=[
+                "instance_p%d_%d" % (process_id, i)
+                for i in range(self.config.num_instances)
+            ],
             workers=list(range(self.config.num_workers)),
             locations=["location_%d" % i for i in range(self.config.num_locations)],
             keys=list(range(self.config.num_keys)),
@@ -445,7 +453,13 @@ class ZMQControllerBenchmark:
     def print_results(self):
         """Print benchmark results"""
         print("\n" + "=" * 80)
-        print("LMCache Controller ZMQ Benchmark Results")
+        if self.config.num_processes > 1:
+            print(
+                "LMCache Controller ZMQ Benchmark Results (Process %d/%d)"
+                % (self.config.process_id + 1, self.config.num_processes)
+            )
+        else:
+            print("LMCache Controller ZMQ Benchmark Results")
         print("=" * 80)
 
         print("\nConfiguration:")
@@ -497,3 +511,7 @@ class ZMQControllerBenchmark:
             )
 
         print("=" * 80)
+
+    def get_results(self) -> BenchmarkResults:
+        """Return benchmark results for aggregation"""
+        return self.results

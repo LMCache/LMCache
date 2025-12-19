@@ -29,6 +29,7 @@ from lmcache.utils import (
     CacheEngineKey,
     CacheStoreEvent,
     _lmcache_nvtx_annotate,
+    compress_slot_mapping,
     convert_tokens_to_list,
 )
 from lmcache.v1.config import LMCacheEngineConfig
@@ -228,6 +229,9 @@ class LMCacheEngine:
             "force_store_wait", False
         )
 
+        # Flag to control KVCache Check logging (can be toggled via API)
+        self.kvcache_check_log_enabled = False
+
         gc.collect()
         if not config.py_enable_gc:
             gc.disable()
@@ -242,6 +246,33 @@ class LMCacheEngine:
             if self.gpu_connector is not None:
                 self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
+
+    def freeze(self, enabled: bool) -> None:
+        """
+        Set the freeze mode for the cache engine.
+
+        When freeze mode is enabled:
+        - All store operations will be skipped (no new data stored)
+        - Only local_cpu backend will be used for retrieval
+        - No admit/evict messages will be generated
+        This protects the local_cpu hot cache from changes.
+
+        Args:
+            enabled (bool): Whether to enable freeze mode
+        """
+        if self.storage_manager is not None:
+            self.storage_manager.set_freeze(enabled)
+
+    def is_frozen(self) -> bool:
+        """
+        Get the current freeze mode status.
+
+        Returns:
+            bool: True if freeze mode is enabled, False otherwise
+        """
+        if self.storage_manager is not None:
+            return self.storage_manager.is_frozen()
+        return False
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -282,6 +313,9 @@ class LMCacheEngine:
 
         assert self.storage_manager is not None
 
+        # Initialize num_to_store_tokens to avoid reference before assignment
+        num_to_store_tokens = 0
+
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
         elif tokens is not None:
@@ -298,6 +332,22 @@ class LMCacheEngine:
         assert tokens is not None or hashes is not None, (
             "Either 'tokens' or 'hashes' must be provided."
         )
+
+        # KVCache Check logging
+        self._log_kvcache_for_check(
+            operation="Store",
+            kwargs=kwargs,
+            token_count=num_to_store_tokens,
+            require_req_id=False,
+        )
+
+        # Check if freeze mode is enabled
+        if self.is_frozen():
+            logger.debug(
+                "Freeze mode enabled, skipping store operation for %d tokens",
+                num_to_store_tokens,
+            )
+            return
 
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
 
@@ -327,13 +377,13 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
-            kv_shape = self.gpu_connector.get_shape(num_tokens)
-            kv_dtype = self.metadata.kv_dtype
+            kv_shapes = self.gpu_connector.get_shapes(num_tokens)
+            kv_dtypes = self.metadata.get_dtypes()
 
             # TODO (Jiayi): should be batched in the future
             memory_obj = self.storage_manager.allocate(
-                kv_shape,
-                kv_dtype,
+                kv_shapes,
+                kv_dtypes,
                 busy_loop=self.force_store_wait,
                 fmt=self.fmt,
             )
@@ -446,7 +496,27 @@ class LMCacheEngine:
             num_to_store_tokens = torch.sum(mask).item()
         else:
             num_to_store_tokens = len(tokens)
+
+        # KVCache Check logging
+        self._log_kvcache_for_check(
+            operation="Layerwise store",
+            kwargs=kwargs,
+            token_count=num_to_store_tokens,
+            require_req_id=True,
+        )
+
         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
+
+        # Check if freeze mode is enabled
+        if self.is_frozen():
+            logger.debug(
+                "Freeze mode enabled, skipping store_layer for %d tokens",
+                num_to_store_tokens,
+            )
+            # Still need to yield to avoid StopIteration
+            for layer_id in range(self.num_layers):
+                yield
+            return
 
         starts = []
         ends = []
@@ -592,6 +662,15 @@ class LMCacheEngine:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
+
+        # KVCache Check logging
+        self._log_kvcache_for_check(
+            operation="retrieve",
+            kwargs=kwargs,
+            token_count=num_required_tokens,
+            require_req_id=True,
+        )
+
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
@@ -1480,9 +1559,9 @@ class LMCacheEngine:
                 self.broadcast_object_fn(combined_metadata, self.metadata.first_rank)
 
                 # Broadcast tensor data
-                tensor_to_broadcast = memory_obj.tensor.to(
-                    f"cuda:{self.metadata.worker_id}"
-                )
+                raw_tensor = memory_obj.raw_tensor
+                assert raw_tensor is not None
+                tensor_to_broadcast = raw_tensor.to(f"cuda:{self.metadata.worker_id}")
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
         else:
             # Receive total chunk count
@@ -1511,16 +1590,16 @@ class LMCacheEngine:
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
                 local_rank = self.metadata.worker_id % torch.cuda.device_count()
-                tensor = torch.empty(
-                    metadata.shape,
-                    dtype=metadata.dtype,
+                raw_tensor = torch.empty(
+                    torch.Size([metadata.get_size()]),
+                    dtype=torch.uint8,
                     device=f"cuda:{local_rank}",
                 )
-                self.broadcast_fn(tensor, self.metadata.first_rank)
+                self.broadcast_fn(raw_tensor, self.metadata.first_rank)
 
                 # Create temporary memory object (key not needed for other ranks)
                 memory_obj = TensorMemoryObj(
-                    raw_data=tensor, metadata=metadata, parent_allocator=None
+                    raw_data=raw_tensor, metadata=metadata, parent_allocator=None
                 )
                 reordered_chunks.append((None, memory_obj, start, end))
 
@@ -1530,6 +1609,72 @@ class LMCacheEngine:
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
+
+    def _get_slot_mapping_list(
+        self,
+        slot_mapping: Optional[Union[torch.Tensor, List[int]]],
+    ) -> Optional[List[int]]:
+        """
+        Convert slot_mapping to list if it's a tensor, otherwise return as is.
+
+        :param slot_mapping: The slot_mapping to convert,
+            can be a torch.Tensor or List[int], or None
+        :type slot_mapping: Optional[Union[torch.Tensor, List[int]]]
+        :return: The slot_mapping as a List[int], or None if input is None
+        :rtype: Optional[List[int]]
+        """
+        if slot_mapping is None:
+            return None
+        if isinstance(slot_mapping, torch.Tensor):
+            return slot_mapping.tolist()
+        # At this point, slot_mapping must be List[int]
+        return slot_mapping
+
+    def _log_kvcache_for_check(
+        self,
+        operation: str,
+        kwargs: dict,
+        token_count: int,
+        require_req_id: bool = False,
+    ) -> None:
+        """
+        Helper method to log KVCache Check information.
+
+        This method centralizes the KVCache Check logging logic that was
+        duplicated in multiple methods.
+
+        Args:
+            operation: The operation being performed (e.g., "Store", "retrieve")
+            kwargs: The keyword arguments containing slot_mapping and req_id
+            token_count: The number of tokens involved in the operation
+            require_req_id: Whether req_id must be present (default: False)
+        """
+        if not self.kvcache_check_log_enabled:
+            return
+
+        slot_mapping = kwargs.get("slot_mapping")
+        if slot_mapping is None:
+            return
+
+        if require_req_id:
+            req_id = kwargs.get("req_id")
+            if req_id is None:
+                return
+        else:
+            req_id = kwargs.get("req_id", "unspecified")
+
+        # Convert slot_mapping to list if it's a tensor
+        slot_mapping_list = self._get_slot_mapping_list(slot_mapping)
+        # slot_mapping_list should not be None when slot_mapping is not None
+        assert slot_mapping_list is not None
+
+        logger.info(
+            "[KVCache Check] %s request %s, tokens=%d, slot_mapping: %s",
+            operation,
+            req_id,
+            token_count,
+            compress_slot_mapping(slot_mapping_list),
+        )
 
 
 class LMCacheEngineBuilder:

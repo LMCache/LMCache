@@ -267,6 +267,10 @@ class StorageManager:
         else:
             self.internal_copy_stream = None
 
+        # freeze mode: only use local_cpu backend for retrieval
+        self._freeze = False
+        self._freeze_lock = threading.RLock()
+
         self._setup_metrics()
 
     def _setup_metrics(self):
@@ -366,12 +370,6 @@ class StorageManager:
         raise RuntimeError(
             "StorageManager.put is deprecated and should not be called anymore"
         )
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
-            backend.submit_put_task(key, memory_obj)
-
-        memory_obj.ref_count_down()
 
     def batched_put(
         self,
@@ -430,9 +428,7 @@ class StorageManager:
         """
 
         # Search all backends for blocking get
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
+        for backend_name, backend in self.get_active_storage_backends(location):
             # TODO(Jiayi): need to make sure all memory_objs returned
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
@@ -459,9 +455,7 @@ class StorageManager:
         # TODO (Jiayi): incorporate prefetching here
 
         # Search all backends for non-blocking get
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
+        for backend_name, backend in self.get_active_storage_backends(location):
             # NOTE(Jiayi): bypass the allocator for now
             task = backend.get_non_blocking(key)
             if task:
@@ -478,9 +472,7 @@ class StorageManager:
         Blocking function to get the memory objects from the storages.
         """
         # TODO (ApostaC): remove the nested optional here
-        for backend_name, storage_backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
+        for backend_name, storage_backend in self.get_active_storage_backends(location):
             memory_objs = storage_backend.batched_get_blocking(keys)
             if memory_objs:
                 return memory_objs
@@ -662,9 +654,9 @@ class StorageManager:
         tier_expected_chunks = []
         # we also keep track of the keys for each tier and each chunk
         loading_task_keys: list[list[CacheEngineKey]] = []
-        for backend_name, backend in self.storage_backends.items():
-            if search_range and backend_name not in search_range:
-                continue
+        for backend_name, backend in self.get_active_storage_backends(
+            search_range=search_range
+        ):
             num_hit_chunks = await backend.batched_async_contains(lookup_id, keys, pin)
 
             if num_hit_chunks == 0:
@@ -747,6 +739,26 @@ class StorageManager:
             )
         )
 
+    def set_freeze(self, enabled: bool) -> None:
+        """
+        Set freeze mode.
+
+        When enabled, only local_cpu backend will be used for retrieval.
+        """
+        with self._freeze_lock:
+            self._freeze = enabled
+        logger.info("StorageManager freeze mode set to %s", enabled)
+
+    def is_frozen(self) -> bool:
+        """
+        Get freeze mode status.
+
+        Returns:
+            bool: True if freeze mode is enabled, False otherwise
+        """
+        with self._freeze_lock:
+            return self._freeze
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -768,15 +780,11 @@ class StorageManager:
         return: True if the key exists in the specified storage backends.
         """
 
-        for backend_name, backend in self.storage_backends.items():
-            if search_range and backend_name not in search_range:
-                continue
-
+        for backend_name, backend in self.get_active_storage_backends(
+            search_range=search_range
+        ):
             # NOTE(Jiayi): We do not pin for PDBackend
-            if backend_name == "PDBackend":
-                pin_in_backend = False
-            else:
-                pin_in_backend = pin
+            pin_in_backend = pin if backend_name != "PDBackend" else False
 
             if backend.contains(key, pin_in_backend):
                 return backend_name
@@ -806,15 +814,11 @@ class StorageManager:
         total_keys = len(keys)
         total_hit_chunks = 0
         block_mapping = {}
-        for backend_name, backend in self.storage_backends.items():
-            if search_range and backend_name not in search_range:
-                continue
-
+        for backend_name, backend in self.get_active_storage_backends(
+            search_range=search_range
+        ):
             # NOTE(Jiayi): We do not pin for PDBackend
-            if backend_name == "PDBackend":
-                pin_in_backend = False
-            else:
-                pin_in_backend = pin
+            pin_in_backend = pin if backend_name != "PDBackend" else False
 
             hit_chunks = backend.batched_contains(keys, pin_in_backend)
             if hit_chunks == 0:
@@ -844,7 +848,7 @@ class StorageManager:
         total_keys = len(keys)
         block_mapping = {}
         total_hit_chunks = 0
-        for backend_name, backend in self.storage_backends.items():
+        for backend_name, backend in self.get_active_storage_backends():
             hit_chunks = backend.batched_contains(keys)
             if hit_chunks == 0:
                 continue
@@ -980,6 +984,32 @@ class StorageManager:
             if not backend.get_memory_allocator().memcheck():
                 return False
         return True
+
+    def get_active_storage_backends(
+        self,
+        location: Optional[str] = None,
+        search_range: Optional[List[str]] = None,
+    ) -> Generator[Tuple[str, StorageBackendInterface], None, None]:
+        """
+        Get the active storage backends based on freeze mode and filters.
+
+        :param Optional[str] location: If specified, only yield backends
+            matching this exact name.
+        :param Optional[List[str]] search_range: If specified, only yield
+            backends whose names are in this list.
+
+        :return: Generator of (backend_name, backend) tuples.
+        """
+        for backend_name, backend in self.storage_backends.items():
+            # In freeze mode, only use local_cpu backend
+            with self._freeze_lock:
+                if self._freeze and backend_name != "LocalCPUBackend":
+                    continue
+            if location and backend_name != location:
+                continue
+            if search_range and backend_name not in search_range:
+                continue
+            yield backend_name, backend
 
     def get_non_allocator_backends(self) -> List[str]:
         """
