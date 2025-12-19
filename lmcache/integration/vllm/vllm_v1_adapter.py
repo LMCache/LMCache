@@ -931,8 +931,6 @@ class LMCacheConnectorV1Impl:
                 self.lmcache_engine.metadata.kv_layer_groups_manager
             )
             kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
-            if self.lmcache_engine.gpu_connector is not None:
-                self.lmcache_engine.gpu_connector.init_group_info()
 
     ####################
     # Worker side APIs

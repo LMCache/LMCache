@@ -1930,29 +1930,24 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         """
         Returns a dummy MemoryObj for testing purposes.
         """
-        if isinstance(shapes, torch.Size):
-            shape = shapes
-        elif isinstance(shapes, tuple):
-            shape = torch.Size(shapes)
-        else:
-            shape = shapes[0]
-
-        if isinstance(dtypes, list):
-            dtype = dtypes[0]
-        else:
-            dtype = dtypes
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
+        size = get_size_bytes(shapes, dtypes)
 
         # Return a dummy object with no actual memory allocation
         return TensorMemoryObj(
-            raw_data=torch.empty(shape, dtype=dtype, device=self.device),
+            raw_data=torch.empty(
+                torch.Size([size]), dtype=torch.uint8, device=self.device
+            ),
             metadata=MemoryObjMetadata(
-                shape=shape,
-                dtype=dtype,
+                shape=shapes[0],
+                dtype=dtypes[0],
                 address=0,
                 phy_size=0,
                 ref_count=1,
                 pin_count=0,
                 fmt=fmt,
+                shapes=shapes,
+                dtypes=dtypes,
             ),
             parent_allocator=self,
         )
