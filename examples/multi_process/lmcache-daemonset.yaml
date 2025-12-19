@@ -39,7 +39,8 @@ spec:
               mountPath: /dev/shm
           resources:
             requests:
-              memory: "10Gi"
+              # 65Gi = 60GB cpu-buffer-size + ~5GB overhead for Python runtime and server operations
+              memory: "65Gi"
               cpu: "4"
             limits:
               memory: "120Gi"
