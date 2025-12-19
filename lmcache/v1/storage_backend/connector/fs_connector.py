@@ -150,8 +150,8 @@ class FSConnector(RemoteConnector):
 
     def _get_with_odirect(self, file_path: Path) -> Optional[MemoryObj]:
         """Synchronous direct IO read, executed in a thread."""
+        fd = -1
         try:
-            fd = -1
             memory_obj = self.local_cpu_backend.allocate(
                 self.meta_shape, self.meta_dtype, self.meta_fmt
             )
@@ -176,6 +176,9 @@ class FSConnector(RemoteConnector):
             else:
                 fd = os.open(file_path, os.O_RDONLY | os.O_DIRECT)
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
+                    # The fd is now managed by the file object, so we "forget" it
+                    # to prevent closing it in the finally block.
+                    fd = -1
                     num_read = fdo.readinto(buffer)
 
             memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
@@ -183,13 +186,13 @@ class FSConnector(RemoteConnector):
 
         except Exception as e:
             logger.error(f"Failed to read from file {file_path}: {str(e)}")
-            # Make sure fd is closed on error
+            return None
+        finally:
             if fd >= 0:
                 try:
                     os.close(fd)
-                except Exception:
+                except OSError:
                     pass
-            return None
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Get data from file system"""
@@ -273,19 +276,19 @@ class FSConnector(RemoteConnector):
             return None
 
     def _put_with_odirect(self, file_path: Path, buffer: bytes) -> None:
-        fd = os.open(str(file_path), os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
+        fd = -1
         try:
+            fd = os.open(str(file_path), os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
             os.write(fd, buffer)
-            os.close(fd)
         except Exception as e:
             logger.error(f"Failed to write to file {file_path}: {e}")
-            # Make sure fd is closed on error
+            raise
+        finally:
             if fd >= 0:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
-            raise
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
