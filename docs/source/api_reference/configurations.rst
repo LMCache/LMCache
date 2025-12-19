@@ -169,11 +169,11 @@ Settings for enabling and configuring peer-to-peer CPU KV cache sharing and glob
    * - p2p_host
      - LMCACHE_P2P_HOST
      - Ip address. Required if enable_p2p is true
-   * - peer_init_ports
-     - LMCACHE_PEER_INIT_PORTS
+   * - p2p_init_ports
+     - LMCACHE_P2P_INIT_PORTS
      - Ports for p2p peer init. Required if enable_p2p is true
-   * - peer_lookup_ports
-     - LMCACHE_PEER_lookup_PORTS
+   * - p2p_lookup_ports
+     - LMCACHE_P2P_LOOKUP_PORTS
      - Ports for p2p peer lookup. Required if enable_p2p is true
    * - transfer_channel
      - LMCACHE_TRANSFER_CHANNEL
