@@ -1296,7 +1296,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 self.mem_to_storage(keys, memory_objs), self.loop
             )
         else:
-            asyncio.run(self.mem_to_storage(keys, memory_objs))
+            future = asyncio.run_coroutine_threadsafe(
+                self.mem_to_storage(keys, memory_objs), self.loop
+            )
+            future.result()
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
