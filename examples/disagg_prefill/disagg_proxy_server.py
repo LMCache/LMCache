@@ -236,7 +236,7 @@ async def zmq_pull_server():
     proxy_url = f"{global_args.proxy_host}:{global_args.proxy_port}"
     try:
         socket.bind(f"tcp://{proxy_url}")
-    except Exception:
+    except zmq.ZMQError:
         logger.exception("ZMQ proxy server failed to bind on %s", proxy_url)
         return
     logger.info("ZMQ proxy server started on %s", proxy_url)
