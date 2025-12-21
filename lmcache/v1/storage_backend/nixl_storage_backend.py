@@ -273,6 +273,7 @@ class NixlStorageAgent(ABC):
         buffer_size = allocator.buffer_size
         page_size = allocator.align_bytes
 
+        self.backend = backend
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
@@ -459,16 +460,18 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         self.nixl_agent.release_dlist_handle(xfer_handler)
         self.nixl_agent.deregister_memory(reg_descs)
 
-    def nixl_obj_exists(self, object_key: str) -> bool:
-        reg_list = [(0, 0, 0, object_key)]
+    def nixl_desc_exists(self, meta_info: str) -> bool:
+        reg_list = [(0, 0, 0, meta_info)]
         try:
-            resp = self.nixl_agent.query_memory(reg_list, "OBJ", mem_type="OBJ")
+            resp = self.nixl_agent.query_memory(
+                reg_list, self.backend, mem_type=self.mem_type
+            )
             # nixl api query_memory returns a list of nixlRegDesc
             if resp[0] is None:
                 return False
             return True
         except Exception as exc:
-            logger.warning(f"NIXL Object {object_key} query failed: {exc}")
+            logger.warning(f"NIXL Desc {meta_info} query failed: {exc}")
             return False
 
     def close(self):
@@ -1028,8 +1031,13 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         return url_quote(flat_key_str, safe="")
 
     def key_exists(self, key: CacheEngineKey) -> bool:
-        object_key = self._format_object_key(key)
-        return self.agent.nixl_obj_exists(object_key)
+        if self.agent.mem_type == "OBJ":
+            meta_info = self._format_object_key(key)
+        else:
+            # Already validated in validate_nixl_backend
+            raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
+
+        return self.agent.nixl_desc_exists(meta_info)
 
     def storage_to_mem(
         self, keys: list[CacheEngineKey], pin: bool = False
