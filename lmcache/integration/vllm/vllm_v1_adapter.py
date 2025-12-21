@@ -1109,6 +1109,7 @@ class LMCacheConnectorV1Impl:
         ret_mask_cpu = ret_mask.to(device="cpu", dtype=torch.bool)
 
         if ret_mask_cpu.shape[0] != expected_mask_cpu.shape[0]:
+            logger.debug("expected_mask_cpu.shape[0] != ret_mask_cpu.shape[0]")
             return set()
 
         missing_mask = expected_mask_cpu & ~ret_mask_cpu
@@ -1533,15 +1534,16 @@ class LMCacheConnectorV1Impl:
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 
-            # example diagram: vllm page size = 16, lmcache chunk size = 256 (brackets)
-            # [ vllm page 1 | ... | vllm page 16 ] [ vllm page 17 | vllm page 18 ]
-            # lmcache chunk 1                                     lmcache chunk 2
-            # total tokens = 512 (2 lmcache chunks)
-            # vllm num_computed_tokens = 288 (18 vllm pages)
-            # we can completely skip lmcache chunk 1 but we will still retrieve chunk 2
-            # and overwrite vllm page 17 and 18
-            # the need_to_allocate is 512 - 288 = 224
-            # and not 256 even though we will retrieve 256 tokens from lmcache
+            # Example (page_size=16, chunk_size=256):
+            #
+            # chunks:  [0..255]                [256..511]
+            # pages:   [0..15]...[240..255]    [256..271][272..287] ...
+            #
+            # num_computed_tokens = 288 => vLLM already has [0..287] (18 pages)
+            # LMCache hit_prefix_tokens = 512 => cache covers [0..511] (2 chunks)
+            #
+            # Skip chunk 1, retrieve chunk 2, overwrite [256..287] (32-token overlap)
+            # Allocate only the truly new tail: 512 - 288 = 224 tokens
             num_external_hit_tokens = self.lookup_client.lookup(
                 token_ids,
                 lookup_id=req_id,
