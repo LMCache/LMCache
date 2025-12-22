@@ -78,7 +78,7 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
     return _config_instance
 
 
-def hex_hash_to_int16(s: str) -> int:
+def hex_hash_to_int16(s: Any) -> int:
     """
     Convert a hash identifier into a 16-bit integer.
 
