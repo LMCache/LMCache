@@ -671,7 +671,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         test_vllmopenai_server_with_lmcache_integrated "$model"
     elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
-        cfg_json="$(yq r -j "$cfg_file" '*')"
+        cfg_json="$(yq '.' "$cfg_file")"
         has_expected_latency=$(
             jq -e '(.["checking-fields"] // []) | index("warmup_round_time_per_prompt") != null' \
                 <<< "$cfg_json" >/dev/null && echo true || echo false
