@@ -69,16 +69,13 @@ class LMCacheEngineMetadata:
             shapes = []
             kv_size = 1 if self.use_mla else 2
             for group in self.kv_layer_groups_manager.kv_layer_groups:
-                layers = group.num_layers
-                num_heads = 1 if self.use_mla else group.shape[3]
-                hidden_dim_size = num_heads * group.shape[-1]
                 shapes.append(
                     torch.Size(
                         [
                             kv_size,
-                            layers,
+                            group.num_layers,
                             num_tokens,
-                            hidden_dim_size,
+                            group.hidden_dim_size,
                         ]
                     )
                 )
