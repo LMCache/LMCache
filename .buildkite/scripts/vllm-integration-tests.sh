@@ -671,17 +671,18 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         test_vllmopenai_server_with_lmcache_integrated "$model"
     elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
-        has_expected_latency_gain=$(
-            jq -e '(.["checking-fields"] // []) | index("query_round_time_per_prompt") != null' \
-                <<< "$workload_yaml" >/dev/null && echo true || echo false
-        )
+        cfg_json="$(yq -o=json '.' "$cfg_file")"
         has_expected_latency=$(
             jq -e '(.["checking-fields"] // []) | index("warmup_round_time_per_prompt") != null' \
-                <<< "$workload_yaml" >/dev/null && echo true || echo false
+                <<< "$cfg_json" >/dev/null && echo true || echo false
+        )
+        has_expected_latency_gain=$(
+            jq -e '(.["checking-fields"] // []) | index("query_round_time_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
         )
         has_expected_ttft_gain=$(
-            jq -e '(.["checking-fields"] // []) | index("query_ttft_per_prompt") != null' \
-                <<< "$workload_yaml" >/dev/null && echo true || echo false
+            jq -e '(.["checking-fields"] // []) | index("warmup_ttft_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
         )
         if [[ "$feature_type" == "p2p" ]]; then
             run_long_doc_qa "$workload_yaml" "$PORT1"
