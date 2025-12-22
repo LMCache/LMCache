@@ -18,4 +18,4 @@ vllm:
     - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"
 
 checking-fields:
-  - warmup_round_time_per_prompt
+  - query_round_time_per_prompt
