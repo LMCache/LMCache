@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
@@ -47,13 +48,14 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
+    create_lmcache_metadata,
     extract_mm_features,
     lmcache_get_or_create_config,
     mla_enabled,
 )
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
@@ -61,6 +63,7 @@ from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemGPUConnectorV3,
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
@@ -69,7 +72,7 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
     LMCacheAsyncLookupServer,
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.plugin_launcher import PluginLauncher
+from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
 
 if TYPE_CHECKING:
@@ -141,8 +144,6 @@ class RequestTracker:
 
     # The block ids that has been allocated so far
     # NOTE: allocated blocks could be more than the number of tokens
-    # FIXME: need to check whether the block ids will be changed after
-    #        preemption
     allocated_block_ids: list[int]
 
     # The number of tokens that has been saved
@@ -231,9 +232,16 @@ class RequestTracker:
         new_block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
         preempted: bool = False,
         lmcache_cached_tokens: int = 0,
+        vllm_cached_tokens: int = 0,
+        all_token_ids: Optional[list[int]] = None,
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
+
+        vllm_cached_tokens: the number of tokens that are cached in vLLM
+        is only used for preempted requests
+        all_token_ids: the full token list from the vLLM request, used to
+        restore token_ids for preempted requests to ensure chunk keys match
         """
 
         if new_block_ids is None:
@@ -251,11 +259,24 @@ class RequestTracker:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
 
         if preempted:
+            assert all_token_ids is not None, (
+                f"Preempted request {self.req_id} has no all_token_ids"
+            )
             # the block ids will change after preemption
             self.allocated_block_ids = new_block_ids
             # reset the number of saved tokens
             self.num_saved_tokens = lmcache_cached_tokens
-            # we don't need to extend the token ids in the preempted case
+            num_computed_tokens = max(lmcache_cached_tokens, vllm_cached_tokens)
+
+            # FIX: For preempted requests, restore token_ids from the full
+            # token list to ensure chunk keys match what was used during
+            # lookup. The lookup uses request.all_token_ids, so we need the
+            # same tokens for retrieve.
+            num_tokens_needed = max(
+                num_computed_tokens + len(new_token_ids),
+                lmcache_cached_tokens,
+            )
+            self.token_ids = all_token_ids[:num_tokens_needed]
         else:
             self.allocated_block_ids.extend(new_block_ids)
             self.token_ids.extend(new_token_ids)
@@ -379,8 +400,10 @@ class ReqMeta:
 
         if len(token_ids) > num_blocks * block_size:
             logger.error(
-                "The number of tokens is more than the number of blocks."
-                "Something might be wrong in scheduling logic!"
+                "The number of tokens is more than the number of blocks"
+                " for request %s. "
+                "Something might be wrong in scheduling logic!",
+                tracker.req_id,
             )
             logger.error(
                 "Num tokens: %d, num blocks: %d, block size: %d",
@@ -402,8 +425,9 @@ class ReqMeta:
         # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
             logger.debug(
-                "Scheduled to load %d tokens for request %s",
+                "Scheduled to load %d tokens (%d cached in vLLM) for request %s",
                 load_spec.lmcache_cached_tokens,
+                load_spec.vllm_cached_tokens,
                 tracker.req_id,
             )
         else:
@@ -492,15 +516,35 @@ def _init_lmcache_engine(
     ):
         raise ValueError("MLA only works with naive serde mode..")
 
+    # MLA requires save_unfull_chunk=True for correct KV cache storage and retrieval.
+    # Without this, partial chunks would be discarded, causing incomplete cache
+    # and incorrect results in MLA mode.
+    if use_mla and not lmcache_config.save_unfull_chunk:
+        logger.warning(
+            "MLA (Multi-Level Attention) requires save_unfull_chunk=True "
+            "for correct KV cache storage. Automatically setting "
+            "save_unfull_chunk=True."
+        )
+        lmcache_config.save_unfull_chunk = True
+    elif use_mla:
+        logger.info(
+            "MLA mode enabled with save_unfull_chunk=True - all KV cache "
+            "including partial chunks will be stored"
+        )
+
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
     num_layer += num_draft_layers
     chunk_size = lmcache_config.chunk_size
+    # this is per gpu
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
     logger.info(
+        f"num_layer: {num_layer}, chunk_size: {chunk_size}, "
+        f"num_kv_head (per gpu): {num_kv_head}, head_size: {head_size}, "
+        f"hidden_dim (D) for KV (per gpu): {num_kv_head * head_size}, "
         f"use mla: {use_mla}, kv shape: {kv_shape}, num_draft_layers:{num_draft_layers}"
     )
 
@@ -529,6 +573,8 @@ def _init_lmcache_engine(
         kv_shape,
         use_mla,
         role,
+        served_model_name=model_config.served_model_name,
+        chunk_size=lmcache_config.chunk_size,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
@@ -540,8 +586,6 @@ def _init_lmcache_engine(
             "We haven't supported MLA with Cacheblend yet. Please disable blending."
         )
 
-    # When use_mla is True, num_kv_head is 1
-    hidden_dim_size = num_kv_head * head_size
     if role == "scheduler":
         vllm_gpu_connector = None
         # Create a dummy tpg object with broadcast and broadcast_object methods
@@ -551,42 +595,31 @@ def _init_lmcache_engine(
     elif lmcache_config.use_layerwise:
         if lmcache_config.enable_blending:
             # Use layerwise connector for blending
-            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
+            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector.from_metadata(
+                metadata, use_gpu, device
             )
         else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-                use_mla=use_mla,
+            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector.from_metadata(
+                metadata, use_gpu, device
             )
         tpg = get_tp_group()
     else:
         if current_platform.is_cuda_alike():
-            connector_cls = VLLMPagedMemGPUConnectorV2
+            # TODO(chunxiaozheng): unify use VLLMPagedMemGPUConnectorV3 after stable
+            if lmcache_config.use_gpu_connector_v3:
+                vllm_gpu_connector = VLLMPagedMemGPUConnectorV3.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
+                    metadata, use_gpu, device
+                )
         elif current_platform.is_xpu():
-            connector_cls = VLLMPagedMemXPUConnectorV2
+            vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
+                metadata, use_gpu, device
+            )
         else:
             raise RuntimeError("No supported connector found for the current platform.")
-
-        vllm_gpu_connector = connector_cls(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-            use_mla=use_mla,
-        )
         tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
@@ -657,7 +690,9 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
+        self.layerwise_storers: list[Generator[Optional[torch.Tensor], None, None]] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
+        self.lmcache_engine_metadata: LMCacheEngineMetadata
         if role == KVConnectorRole.SCHEDULER:
             self.lmcache_engine: Optional[LMCacheEngine] = None
             # Check if bypass lookup is enabled for scheduler
@@ -668,26 +703,18 @@ class LMCacheConnectorV1Impl:
                     vllm_config,
                     role="scheduler",
                 )
+                self.lmcache_engine_metadata = self.lmcache_engine.metadata
             else:
                 self.lmcache_engine = None
                 # Create a dummy metadata for create prometheus logger
                 # kv_dtype kv_shape and use_mla are dummy data
-                # TODO(baoloongmao): PrometheusLogger should be initialized without
-                #  having to create some dummy data in the future
-                metadata = LMCacheEngineMetadata(
-                    model_name=vllm_config.model_config.model,
-                    world_size=vllm_config.parallel_config.world_size,
-                    worker_id=0,
-                    fmt="vllm",
-                    kv_dtype=torch.bfloat16,
-                    kv_shape=(1, 1, 1, 1, 1),
-                    use_mla=False,
-                    role="scheduler",
+                self.lmcache_engine_metadata, _ = create_lmcache_metadata(
+                    vllm_config, role="scheduler"
                 )
-                PrometheusLogger.GetOrCreate(metadata)
+                PrometheusLogger.GetOrCreate(self.lmcache_engine_metadata)
             # Create lookup client using factory
             self.lookup_client = LookupClientFactory.create_lookup_client(
-                vllm_config, config, self.lmcache_engine
+                vllm_config, config, self.lmcache_engine_metadata, self.lmcache_engine
             )
             self._unfinished_requests: dict[str, Request] = {}
         else:
@@ -774,7 +801,7 @@ class LMCacheConnectorV1Impl:
             self.api_server = InternalAPIServer(self)
             self.api_server.start()
             # Launch plugins
-            self.plugin_launcher = PluginLauncher(
+            self.runtime_plugin_launcher = RuntimePluginLauncher(
                 self.config,
                 role,
                 self.worker_count,
@@ -782,10 +809,10 @@ class LMCacheConnectorV1Impl:
                 if self.lmcache_engine is None  # scheduler side
                 else self.lmcache_engine.metadata.worker_id,
             )
-            self.plugin_launcher.launch_plugins()
+            self.runtime_plugin_launcher.launch_plugins()
         else:
             self.api_server = None  # type: ignore[assignment]
-            self.plugin_launcher = None  # type: ignore[assignment]
+            self.runtime_plugin_launcher = None  # type: ignore[assignment]
 
         # Setup metrics for monitoring data structures
         self._setup_metrics()
@@ -898,6 +925,13 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
+        # Build KV layer groups structure if not already built
+        if self.lmcache_engine is not None:
+            kv_layer_groups_manager = (
+                self.lmcache_engine.metadata.kv_layer_groups_manager
+            )
+            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+
     ####################
     # Worker side APIs
     ####################
@@ -1004,8 +1038,10 @@ class LMCacheConnectorV1Impl:
                 )
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
+                        "Request %s"
                         "The number of retrieved tokens is less than the "
-                        "expected number of tokens! This should not happen!"
+                        "expected number of tokens! This should not happen!",
+                        request.req_id,
                     )
                     logger.error(
                         "Num retrieved tokens: %d, num expected tokens: %d",
@@ -1218,6 +1254,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
                     sync=is_first,
+                    req_id=request.req_id,
                 )
                 self.layerwise_storers.append(layerwise_storer)
                 if is_first:
@@ -1273,7 +1310,8 @@ class LMCacheConnectorV1Impl:
             slot_mapping = slot_mapping.to(self.device)
 
             skip_leading_tokens = save_spec.skip_leading_tokens
-            if self.kv_role == "kv_producer":
+            # shared storage disaggregation will not have a disagg_spec passed in
+            if self.kv_role == "kv_producer" and request.disagg_spec:
                 skip_leading_tokens = min(
                     skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )
@@ -1321,6 +1359,7 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
+                req_id=request.req_id,
             )
 
             # Update skip_leading_tokens only on last rank to ensure
@@ -1377,9 +1416,11 @@ class LMCacheConnectorV1Impl:
             _safe_close("offload_server", self.offload_server.close, timeout=10.0)
 
         # Stop plugins
-        if hasattr(self, "plugin_launcher") and self.plugin_launcher:
+        if hasattr(self, "runtime_plugin_launcher") and self.runtime_plugin_launcher:
             _safe_close(
-                "plugin_launcher", self.plugin_launcher.stop_plugins, timeout=10.0
+                "runtime_plugin_launcher",
+                self.runtime_plugin_launcher.stop_plugins,
+                timeout=10.0,
             )
 
         # Stop API server
@@ -1462,33 +1503,49 @@ class LMCacheConnectorV1Impl:
 
         req_id = request.request_id
 
-        # consult the cache before any processing
-        if cached_num_hit_toks := self.lookup_client.lookup_cache(lookup_id=req_id):
-            return cached_num_hit_toks
+        if (
+            num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
+        ) != -1:
+            # -1 means no result cached
+            # None or int means ongoing (async) or cached result
+            logger.debug(
+                f"Found {num_external_hit_tokens} hit tokens for request"
+                f" {req_id} in the lookup cache."
+            )
+        else:
+            logger.debug(f"Looking up cache for the first time for request {req_id}!")
+            self._requests_priority[req_id] = getattr(request, "priority", 0)
 
-        self._requests_priority[req_id] = getattr(request, "priority", 0)
+            # Align computed tokens once to avoid repeated
+            # chunk-size rounding downstream
+            aligned_num_computed_tokens = (
+                num_computed_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
 
-        # token_ids = request.prompt_token_ids
-        # all token ids covers the preemption case
-        token_ids = request.all_token_ids
+            # token_ids = request.prompt_token_ids
+            # all token ids covers the preemption case
+            token_ids = request.all_token_ids
 
-        # If the request has multimodal hashes, apply them to the token ids
-        mm_hashes, mm_positions = extract_mm_features(request)
-        if mm_hashes and mm_positions:
-            # TODO(Jiayi): Optimize this
-            token_ids = torch.tensor(request.prompt_token_ids)
-            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
-            token_ids = token_ids.tolist()
+            # If the request has multimodal hashes, apply them to the token ids
+            mm_hashes, mm_positions = extract_mm_features(request)
+            if mm_hashes and mm_positions:
+                # TODO(Jiayi): Optimize this
+                token_ids = torch.tensor(request.prompt_token_ids)
+                apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
+                token_ids = token_ids.tolist()
 
-        request_configs = extract_request_configs(request.sampling_params)
-        if self.skip_last_n_tokens > 0:
-            token_ids = token_ids[: -self.skip_last_n_tokens]
+            request_configs = extract_request_configs(request.sampling_params)
+            if self.skip_last_n_tokens > 0:
+                token_ids = token_ids[: -self.skip_last_n_tokens]
 
-        num_external_hit_tokens = self.lookup_client.lookup(
-            token_ids,
-            lookup_id=req_id,
-            request_configs=request_configs,
-        )
+            num_external_hit_tokens = self.lookup_client.lookup(
+                token_ids,
+                lookup_id=req_id,
+                request_configs=request_configs,
+                num_computed_tokens=aligned_num_computed_tokens,
+            )
 
         if num_external_hit_tokens is None:
             logger.debug(
@@ -1678,14 +1735,30 @@ class LMCacheConnectorV1Impl:
             for i, req in enumerate(cached_reqs):
                 load_spec = self.load_specs.pop(req.req_id, None)
                 lmcache_cached_tokens = 0
+                vllm_cached_tokens = 0
                 if load_spec is not None:
                     lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+                    vllm_cached_tokens = load_spec.vllm_cached_tokens
                 request_tracker = self._request_trackers[req.req_id]
+
+                # Pass all_token_ids for preempted requests to restore
+                # token_ids correctly for chunk key computation
+                all_token_ids = None
+                if req.resumed_from_preemption:
+                    vllm_request = self._unfinished_requests.get(req.req_id)
+                    assert vllm_request is not None, (
+                        f"Preempted request {req.req_id} not found "
+                        "in _unfinished_requests"
+                    )
+                    all_token_ids = list(vllm_request.all_token_ids)
+
                 request_tracker.update(
                     req.new_token_ids,
                     req.new_block_ids,
                     req.resumed_from_preemption,
                     lmcache_cached_tokens=lmcache_cached_tokens,
+                    vllm_cached_tokens=vllm_cached_tokens,
+                    all_token_ids=all_token_ids,
                 )
 
                 req_meta = ReqMeta.from_request_tracker(
@@ -1717,8 +1790,10 @@ class LMCacheConnectorV1Impl:
 
             load_spec = self.load_specs.pop(req_id, None)
             lmcache_cached_tokens = 0
+            vllm_cached_tokens = 0
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+                vllm_cached_tokens = load_spec.vllm_cached_tokens
 
             # Handle both old and new versions of CachedRequestData
             if hasattr(cached_reqs, "resumed_req_ids"):
@@ -1734,12 +1809,34 @@ class LMCacheConnectorV1Impl:
                     f"Unable to determine preemption status for request {req_id}. "
                     f"This might be due to an unsupported vLLM version."
                 )
+            if preempted:
+                assert load_spec is not None, (
+                    f"Request {req_id} is preempted but was not given a load spec"
+                )
+                # num_computed_tokens should be reset to 0 during preemption
+                # and then set to the number of already cached tokens (maxxing
+                # prefix caching and lmcache)
+                # this assumption is crucial for the update() call of RequestTracker
+                assert request.num_computed_tokens == max(
+                    lmcache_cached_tokens, load_spec.vllm_cached_tokens
+                ), (
+                    f"Preempted request {req_id} has "
+                    f"num_computed_tokens {request.num_computed_tokens} "
+                    "but max(lmcache_cached_tokens, vllm_cached_tokens) = "
+                    f"{max(lmcache_cached_tokens, vllm_cached_tokens)}"
+                )
+
+            # Pass all_token_ids for preempted requests to restore
+            # token_ids correctly for chunk key computation
+            all_token_ids = list(request.all_token_ids) if preempted else None
 
             request_tracker.update(
                 new_token_ids,
                 new_block_ids,
                 preempted=preempted,
                 lmcache_cached_tokens=lmcache_cached_tokens,
+                vllm_cached_tokens=vllm_cached_tokens,
+                all_token_ids=all_token_ids,
             )
 
             req_meta = ReqMeta.from_request_tracker(
@@ -1784,3 +1881,9 @@ class LMCacheConnectorV1Impl:
             }
 
         return False, return_params
+
+    @_lmcache_nvtx_annotate
+    def get_kv_events(self) -> Iterable[CacheStoreEvent]:
+        if self.lmcache_engine is not None:
+            return self.lmcache_engine.get_kv_events()
+        return []

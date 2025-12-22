@@ -118,12 +118,10 @@ Limitations
     - ``S3Connector``
     - ``FSConnector``
     - ``RedisConnector/RedisClusterConnector``
-- save_unfull_chunk: Automatically disabled in async mode for correctness in prefix chunking.
 
 Future Work
 -----------
 
 - Introduce a default ``batched_async_contains`` implementation, so all backends can support ``async_loading``.
-- Refactor ``AsyncSerializer`` to support being enabled together with ``save_unfull_chunk`` and ``PDBackend``.
 - Add metrics and observability to track the number of asynchronous lookup requests and the number of occupied ``MemoryObj`` instances.
 - Improve the lookup framework by passing vLLM prefix cache hit tokens so that async lookup can skip loading parts already hit in vLLM.

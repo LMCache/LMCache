@@ -393,12 +393,12 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: Optional[torch.dtype],
+        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
-        result = super().allocate(shape, dtype, fmt, allocator_type)
+        result = super().allocate(shapes, dtypes, fmt, allocator_type)
         if result and fmt != MemoryFormat.BINARY_BUFFER:
             self._check_and_trigger_expansion()
         return result
@@ -406,13 +406,15 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shape: Union[torch.Size, Tuple[int, ...]],
-        dtype: Optional[torch.dtype],
+        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
-        result = super().batched_allocate(shape, dtype, batch_size, fmt, allocator_type)
+        result = super().batched_allocate(
+            shapes, dtypes, batch_size, fmt, allocator_type
+        )
         if result and fmt != MemoryFormat.BINARY_BUFFER:
             self._check_and_trigger_expansion()
         return result

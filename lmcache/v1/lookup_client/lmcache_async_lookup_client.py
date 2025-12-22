@@ -10,9 +10,10 @@ import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.async_lookup_message import (
     LookupCleanupMsg,
@@ -52,9 +53,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     def __init__(
         self,
         vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
     ):
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         # lookup_id -> first lookup time
         # this helps us support timeout semantics
         self.first_lookup_time: dict[str, float] = {}
@@ -159,23 +160,19 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             )
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        with self.lock:
-            return self.reqs_status.get(lookup_id, None)
-
-    # TODO(Jiayi): Consider batching here
-    def lookup(
-        self,
-        token_ids: Union[torch.Tensor, list[int]],
-        lookup_id: str,
-        request_configs: Optional[dict] = None,
-    ) -> Optional[int]:
+        """
+        -1 means not found;
+        None means ongoing;
+        int >= 0 means number of hit tokens
+        """
         # Check if any aborted lookups are finished, send cleanup messages
         self._cleanup_finished_aborted_lookups()
 
         with self.lock:
-            # -1 indicates not found; None indicates ongoing.
-            req_status = self.reqs_status.get(lookup_id, -1)
-            if req_status is None:
+            if (req_status := self.reqs_status.get(lookup_id, -1)) == -1:
+                self.reqs_status[lookup_id] = None
+                self.first_lookup_time[lookup_id] = time.time()
+            elif req_status is None:
                 time.sleep(self.lookup_backoff_time)
                 if (
                     time.time() - self.first_lookup_time[lookup_id]
@@ -192,14 +189,21 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.first_lookup_time.pop(lookup_id, None)
                     return 0
 
-                return None
-            elif req_status != -1:
-                return req_status
-            self.reqs_status[lookup_id] = None
-            self.first_lookup_time[lookup_id] = time.time()
+            return req_status
+
+    # TODO(Jiayi): Consider batching here
+    def lookup(
+        self,
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
+    ) -> Optional[int]:
+        # TODO(ziruiliu) num_computed_tokens is passed in
+        # Due to complexity in preemption or eviction in async mode
+        # We will handle skipping logic in future.
 
         hashes: list[int] = []
-
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False

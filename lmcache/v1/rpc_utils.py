@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Literal, Optional
+import os
 import socket
 
 # Third Party
@@ -114,8 +115,18 @@ def get_zmq_rpc_path_lmcache(
     rank: int = 0,
 ) -> str:
     """Get the ZMQ RPC path for LMCache lookup and offload communication."""
-    # Third Party
-    import vllm.envs as envs
+    # Try to import vllm.envs, fallback to default if not available
+    try:
+        # Third Party
+        import vllm.envs as envs
+
+        base_url = envs.VLLM_RPC_BASE_PATH
+    except (ImportError, ModuleNotFoundError):
+        # Fallback for testing environments without vllm
+        base_url = "/tmp/vllm_rpc"
+        logger.debug("vllm not available, using default base_url: %s", base_url)
+        # Ensure the directory exists for IPC socket
+        os.makedirs(base_url, exist_ok=True)
 
     if vllm_config is None or vllm_config.kv_transfer_config is None:
         raise ValueError("A valid kv_transfer_config with engine_id is required.")
@@ -124,8 +135,6 @@ def get_zmq_rpc_path_lmcache(
         raise ValueError(
             f"service_name must be 'lookup' or 'offload', got {service_name!r}"
         )
-
-    base_url = envs.VLLM_RPC_BASE_PATH
 
     engine_id = vllm_config.kv_transfer_config.engine_id
 

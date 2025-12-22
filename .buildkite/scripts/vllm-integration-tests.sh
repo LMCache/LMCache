@@ -516,6 +516,14 @@ run_long_doc_qa() {
     # Load baseline from branch
     baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/$feature_type.json 2>/dev/null || echo "")
 
+    # Check if baseline exists, skip comparisons if not
+    if [[ -z "$baseline_json" ]] || ! echo "$baseline_json" | jq -e . >/dev/null 2>&1; then
+        echo "⚠️  No baseline found for $feature_type.json - skipping performance comparisons"
+        echo "   This is expected for newly added configs. Baseline will be generated on next nightly run."
+        echo "   Current metrics: TTFT=$query_ttft_per_prompt, Latency=$query_round_time_per_prompt, Warmup=$warmup_round_time_per_prompt"
+        return 0
+    fi
+
     # Extract baseline numbers
     expected_query_ttft_per_prompt=$(echo "$baseline_json" | jq -r '.query_ttft_per_prompt')
     expected_query_round_time_per_prompt=$(echo "$baseline_json" | jq -r '.query_round_time_per_prompt')

@@ -9,10 +9,10 @@ remote_serde: "naive"
 blocking_timeout_secs: 100
 
 extra_config:
-  s3_max_io_concurrency: 64
-  s3_max_inflight_reqs: 64
+  save_chunk_meta: False
+  s3_num_io_threads: 64
   s3_prefer_http2: True
   s3_region: "{REGION}"
   s3_enable_s3express: True
-  save_chunk_meta: False
-  s3_file_prefix: "{FILE_PREFIX}"  # Optional prefix for S3 file paths
+  aws_access_key_id: "{AWS_ACCESS_KEY_ID}"
+  aws_secret_access_key: "{AWS_SECRET_ACCESS_KEY}"
