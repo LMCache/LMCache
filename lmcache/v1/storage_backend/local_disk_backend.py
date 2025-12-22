@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
@@ -132,10 +132,13 @@ class LocalDiskBackend(StorageBackendInterface):
         stat = os.statvfs(self.path)
         self.os_disk_bs = stat.f_bsize
         self.use_odirect = False
+        self.clean_on_exit = True
 
         if config.extra_config is not None:
             self.use_odirect = config.extra_config.get("use_odirect", False)
+            self.clean_on_exit = config.extra_config.get("clean_on_exit", True)
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
+        logger.info("Cleaning up local disk cache on exit: %s", self.clean_on_exit)
 
         self.disk_worker = LocalDiskWorker(loop)
 
@@ -592,8 +595,39 @@ class LocalDiskBackend(StorageBackendInterface):
 
     def get_allocator_backend(self):
         return self.local_cpu_backend
+    
+    def _clear_all(self):
+        """
+        Clear all local files held by the backend during shutdown.
+        """
+        logger.info("Cleaning up local disk cache...")
+        with self.disk_lock:
+            if not self.dict:
+                return
+            
+            paths_to_remove = [meta.path for meta in self.dict.values()]
+            self.dict.clear()
+            self.usage = 0
+
+        def _delete_file(path):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                logger.warning(f"Failed to delete {path}: {e}")
+
+        try:
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                list(executor.map(_delete_file, paths_to_remove))
+        except Exception as e:
+            logger.error(f"Error during parallel cleanup: {e}")
+        
+        logger.info("Local disk cache cleanup completed.")
 
     def close(self) -> None:
+        if self.clean_on_exit:
+            self._clear_all()
+
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()

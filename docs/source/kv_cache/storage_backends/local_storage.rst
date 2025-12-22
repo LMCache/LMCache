@@ -30,7 +30,8 @@ Two ways to configure LMCache Disk Offloading:
 
     # Disable page cache
     # This should be turned on for better performance if most local CPU memory is used
-    export LMCACHE_EXTRA_CONFIG='{'use_odirect': True}'
+    # clean_on_exit: (Optional) Whether to clean up local disk cache when the engine closes.
+    export LMCACHE_EXTRA_CONFIG='{"use_odirect": true, "clean_on_exit": true}'
 
 **2. Configuration File**:
 
@@ -47,7 +48,8 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
 
     # Disable page cache
     # This should be turned on for better performance if most local CPU memory is used
-    extra_config: {'use_odirect': True}
+    # clean_on_exit: (Optional) Whether to clean up local disk cache when the engine closes.
+    extra_config: {'use_odirect': True, 'clean_on_exit': True}
 
 Local Storage Explanation:
 --------------------------
