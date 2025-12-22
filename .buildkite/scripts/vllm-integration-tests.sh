@@ -627,8 +627,8 @@ echo "Using port $PORT to send or receive requests."
 # Need to run from docker directory
 cd docker/
 
-# Create the container image
-build_lmcache_vllmopenai_image
+# # Create the container image
+# build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
@@ -671,20 +671,23 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         test_vllmopenai_server_with_lmcache_integrated "$model"
     elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
-        has_expected_latency_gain=$(jq 'has("expected-latency-gain")' <<< "$workload_yaml")
-        has_expected_latency=$(jq 'has("expected-latency")' <<< "$workload_yaml")
-        has_expected_ttft_gain=$(jq 'has("expected-ttft-gain")' <<< "$workload_yaml")
-        tmp_workload_yaml=$(
-            jq 'del(."expected-latency-gain") 
-                | del(."expected-latency") 
-                | del(."expected-ttft-gain")' \
-                <<< "$workload_yaml"
+        has_expected_latency_gain=$(
+            jq -e '(.["checking-fields"] // []) | index("query_round_time_per_prompt") != null' \
+                <<< "$workload_yaml" >/dev/null && echo true || echo false
+        )
+        has_expected_latency=$(
+            jq -e '(.["checking-fields"] // []) | index("warmup_round_time_per_prompt") != null' \
+                <<< "$workload_yaml" >/dev/null && echo true || echo false
+        )
+        has_expected_ttft_gain=$(
+            jq -e '(.["checking-fields"] // []) | index("query_ttft_per_prompt") != null' \
+                <<< "$workload_yaml" >/dev/null && echo true || echo false
         )
         if [[ "$feature_type" == "p2p" ]]; then
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
+            run_long_doc_qa "$workload_yaml" "$PORT1"
+            run_long_doc_qa "$workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         else
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
+            run_long_doc_qa "$workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         fi
     fi
 
