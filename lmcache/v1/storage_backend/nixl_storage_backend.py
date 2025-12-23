@@ -564,14 +564,13 @@ class NixlStorageBackend(AllocatorBackendInterface):
         :return: MemoryObj. None if the key does not exist.
         """
 
-        # Fast metadata collection (with lock)
-        metadata_list = self._collect_metadata_with_lock([key])
+        future = asyncio.run_coroutine_threadsafe(self.storage_to_mem([key]), self.loop)
 
-        future = asyncio.run_coroutine_threadsafe(
-            self._nixl_transfer_async(metadata_list), self.loop
-        )
+        if future is None:
+            return None
+
         obj_list = future.result()
-        return obj_list[0] if obj_list else None
+        return obj_list[0]
 
     def batched_get_blocking(
         self,
@@ -588,12 +587,8 @@ class NixlStorageBackend(AllocatorBackendInterface):
         if not keys:
             return []
 
-        # Fast metadata collection (with lock)
-        metadata_list = self._collect_metadata_with_lock(keys)
+        future = asyncio.run_coroutine_threadsafe(self.storage_to_mem(keys), self.loop)
 
-        future = asyncio.run_coroutine_threadsafe(
-            self._nixl_transfer_async(metadata_list), self.loop
-        )
         obj_list = future.result()
         return obj_list
 
@@ -603,10 +598,7 @@ class NixlStorageBackend(AllocatorBackendInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
-        # Fast metadata collection (with lock)
-        metadata_list = self._collect_metadata_with_lock(keys)
-
-        obj_list = await self._nixl_transfer_async(metadata_list)
+        obj_list = await self.storage_to_mem(keys)
         assert None not in obj_list
         return cast(list[MemoryObj], obj_list)
 
