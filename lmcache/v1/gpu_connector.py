@@ -142,6 +142,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         # works with a single device?
         self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
+        self.block_size = 0
+        self.vllm_two_major = True
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
 
@@ -212,11 +214,28 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         if self.use_mla:
             # kv_caches[0].shape: [num_pages, page_size, head_size]
             assert kv_caches[0].dim() == 3
-            self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
+            self.vllm_two_major = True
+            self.block_size = kv_caches[0].shape[1]
+            self.page_buffer_size = kv_caches[0].shape[0] * self.block_size
         else:
             # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            # or [num_pages, 2, page_size, num_heads, head_size]
             assert kv_caches[0].dim() == 5
-            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+            if kv_caches[0].shape[0] == 2:
+                self.vllm_two_major = True
+                num_blocks = kv_caches[0].shape[1]
+                self.block_size = kv_caches[0].shape[2]
+            elif kv_caches[0].shape[1] == 2:
+                self.vllm_two_major = False
+                num_blocks = kv_caches[0].shape[0]
+                self.block_size = kv_caches[0].shape[2]
+            else:
+                raise ValueError(
+                    "The kv_caches should have shape "
+                    "[2, num_blocks, block_size, num_heads, head_size] or "
+                    "[num_blocks, 2, block_size, num_heads, head_size]."
+                )
+            self.page_buffer_size = num_blocks * self.block_size
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -274,6 +293,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.page_buffer_size,
             False,
             self.use_mla,
+            self.vllm_two_major,
+            self.block_size,
         )
 
     @_lmcache_nvtx_annotate
@@ -319,6 +340,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    self.vllm_two_major,
+                    self.block_size,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -332,6 +355,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    self.vllm_two_major,
+                    self.block_size,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -376,6 +401,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.use_gpu = use_gpu
         self.kvcaches: Optional[List[torch.Tensor]] = None
         self.page_buffer_size = 0
+        self.block_size = 0
+        self.vllm_two_major = True
 
         self.init = False
         self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
@@ -428,15 +455,28 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.use_mla:
             # kvcaches[0].shape: [num_pages, page_size, head_size]
             assert self.kvcaches[0].dim() == 3
-            self.page_buffer_size = (
-                self.kvcaches[0].shape[0] * self.kvcaches[0].shape[1]
-            )
+            self.vllm_two_major = True
+            self.block_size = self.kvcaches[0].shape[1]
+            self.page_buffer_size = self.kvcaches[0].shape[0] * self.block_size
         else:
             # kvcaches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            # or [num_pages, 2, page_size, num_heads, head_size]
             assert self.kvcaches[0].dim() == 5
-            self.page_buffer_size = (
-                self.kvcaches[0].shape[1] * self.kvcaches[0].shape[2]
-            )
+            if self.kvcaches[0].shape[0] == 2:
+                self.vllm_two_major = True
+                num_blocks = self.kvcaches[0].shape[1]
+                self.block_size = self.kvcaches[0].shape[2]
+            elif self.kvcaches[0].shape[1] == 2:
+                self.vllm_two_major = False
+                num_blocks = self.kvcaches[0].shape[0]
+                self.block_size = self.kvcaches[0].shape[2]
+            else:
+                raise ValueError(
+                    "The kv_caches should have shape "
+                    "[2, num_blocks, block_size, num_heads, head_size] or "
+                    "[num_blocks, 2, block_size, num_heads, head_size]."
+                )
+            self.page_buffer_size = num_blocks * self.block_size
         self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
 
@@ -466,6 +506,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 self.page_buffer_size,
                 False,
                 self.use_mla,
+                self.vllm_two_major,
+                self.block_size,
             )
 
     @_lmcache_nvtx_annotate
@@ -494,6 +536,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.page_buffer_size,
                         True,
                         self.use_mla,
+                        self.vllm_two_major,
+                        self.block_size,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -510,6 +554,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         self.page_buffer_size,
                         True,
                         self.use_mla,
+                        self.vllm_two_major,
+                        self.block_size,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None

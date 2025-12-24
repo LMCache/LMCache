@@ -13,7 +13,8 @@ void multi_layer_kv_transfer(torch::Tensor& key_value,
                              const torch::Tensor& slot_mapping,
                              const torch::Device& paged_memory_device,
                              const int page_buffer_size, const bool direction,
-                             const bool use_mla);
+                             const bool use_mla, const bool vllm_two_major,
+                             const int block_size);
 
 void multi_layer_kv_transfer_unilateral(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,

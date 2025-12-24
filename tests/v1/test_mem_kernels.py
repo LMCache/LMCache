@@ -239,6 +239,8 @@ def test_multi_layer_kernel(num_tokens):
             page_buffer_size,
             True,
             False,
+            True,
+            block_size,
         )
         memory_obj_new_list.append(memory_obj_new)
 
@@ -274,6 +276,8 @@ def test_multi_layer_kernel(num_tokens):
             page_buffer_size,
             False,
             False,
+            True,
+            block_size,
         )
 
     check_paged_kv_cache_equal(
@@ -357,6 +361,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             0,
             True,
             True,
+            True,
+            block_size,
         )
         memory_obj_new_list.append(memory_obj_new)
 
@@ -398,6 +404,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             0,
             False,
             True,
+            True,
+            block_size,
         )
 
     for left_kv, right_kv in zip(kv_cache, kv_cache_new, strict=False):

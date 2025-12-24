@@ -69,6 +69,7 @@ class GPUCacheContext:
         # MLA shape: [num_blocks, block_size, hidden_dim]
         # MHA shape: [2, num_blocks, block_size, num_heads, head_size]
         self.is_mla_ = self.kv_caches_[0].ndim == 3
+        self.vllm_two_major_ = True
 
         # Shape related
         self.num_layers_ = len(self.kv_caches_)
@@ -77,8 +78,20 @@ class GPUCacheContext:
             self.block_size_ = self.kv_caches_[0].shape[1]
             self.hidden_dim_size_ = self.kv_caches_[0].shape[2]
         else:
-            self.num_blocks_ = self.kv_caches_[0].shape[1]
-            self.block_size_ = self.kv_caches_[0].shape[2]
+            if self.kv_caches_[0].shape[0] == 2:
+                self.vllm_two_major_ = True
+                self.num_blocks_ = self.kv_caches_[0].shape[1]
+                self.block_size_ = self.kv_caches_[0].shape[2]
+            elif self.kv_caches_[0].shape[1] == 2:
+                self.vllm_two_major_ = False
+                self.num_blocks_ = self.kv_caches_[0].shape[0]
+                self.block_size_ = self.kv_caches_[0].shape[2]
+            else:
+                raise ValueError(
+                    "The kv_caches should have shape "
+                    "[2, num_blocks, block_size, num_heads, head_size] or "
+                    "[num_blocks, 2, block_size, num_heads, head_size]."
+                )
             # hidden_dim = num_heads * head_size
             num_heads = self.kv_caches_[0].shape[3]
             head_size = self.kv_caches_[0].shape[4]
@@ -134,6 +147,13 @@ class GPUCacheContext:
         Returns a GPU tensor of the KV cache pointers
         """
         return self.kv_cache_pointers_
+
+    @property
+    def vllm_two_major(self) -> bool:
+        """
+        Returns whether the KV cache uses the [2, num_blocks, ...] layout
+        """
+        return self.vllm_two_major_
 
     @property
     def stream(self) -> torch.cuda.Stream:
@@ -322,6 +342,8 @@ class MPCacheEngine:
                         gpu_context.block_size * gpu_context.num_blocks,
                         True,
                         gpu_context.is_mla,
+                        gpu_context.vllm_two_major,
+                        gpu_context.block_size,
                     )
 
                     assert memory_obj.tensor is not None
@@ -402,6 +424,8 @@ class MPCacheEngine:
                         gpu_context.block_size * gpu_context.num_blocks,
                         False,
                         gpu_context.is_mla,
+                        gpu_context.vllm_two_major,
+                        gpu_context.block_size,
                     )
 
         with (
