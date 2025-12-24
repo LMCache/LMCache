@@ -362,14 +362,18 @@ class FullSyncTracker:
             and worker_node.sync_info.state == FullSyncState.SYNCING
         )
 
-    def can_exit_freeze(self) -> bool:
+    def can_exit_freeze(self, progress: Optional[float] = None) -> bool:
         """
         Check if the completion threshold is reached and freeze mode can be exited.
+
+        Args:
+            progress: Pre-computed global progress. If None, will be computed.
 
         Returns:
             True if enough workers have completed sync
         """
-        progress = self.get_global_progress()
+        if progress is None:
+            progress = self.get_global_progress()
         can_exit = progress >= self.completion_threshold
 
         if can_exit and self._need_full_sync_all:
@@ -455,7 +459,7 @@ class FullSyncTracker:
             and sync_info.state == FullSyncState.COMPLETED
         )
         global_progress = self.get_global_progress()
-        can_exit = self.can_exit_freeze()
+        can_exit = self.can_exit_freeze(global_progress)
         missing_batches = self.get_missing_batches(instance_id, worker_id, sync_id)
 
         return is_complete, global_progress, can_exit, missing_batches
