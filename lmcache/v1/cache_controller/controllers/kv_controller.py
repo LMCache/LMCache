@@ -206,7 +206,8 @@ class KVController:
             return FullSyncStartRetMsg(
                 sync_id=sync_id,
                 accepted=False,
-                error_msg="Worker already syncing with different sync_id",
+                error_msg="Failed to start sync: worker already syncing with "
+                "different sync_id or worker not found",
             )
 
         # Now clear existing keys for this worker/location using efficient batch method
@@ -252,7 +253,8 @@ class KVController:
             return FullSyncStartRetMsg(
                 sync_id=sync_id,
                 accepted=False,
-                error_msg="Worker already syncing with different sync_id",
+                error_msg="Failed to start sync: worker already syncing with "
+                "different sync_id or worker not found",
             )
 
     async def handle_full_sync_batch(self, msg: FullSyncBatchMsg) -> None:

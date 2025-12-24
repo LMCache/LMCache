@@ -117,18 +117,19 @@ class WorkerNode:
 
             for op in msg.operations:
                 # Skip sequence check during full sync
-                if not is_full_sync:
-                    # Sequence check
-                    last_seq_num = self.seq_tracker.get(location)
-                    if last_seq_num is not None:
-                        expected_seq = last_seq_num + 1
-                        if op.seq_num != expected_seq and seq_warning is None:
-                            seq_warning = (
-                                expected_seq,
-                                op.seq_num,
-                                op.seq_num - expected_seq,
-                            )
-                    self.seq_tracker[location] = op.seq_num
+                if is_full_sync:
+                    continue
+                # Sequence check
+                last_seq_num = self.seq_tracker.get(location)
+                if last_seq_num is not None:
+                    expected_seq = last_seq_num + 1
+                    if op.seq_num != expected_seq and seq_warning is None:
+                        seq_warning = (
+                            expected_seq,
+                            op.seq_num,
+                            op.seq_num - expected_seq,
+                        )
+                self.seq_tracker[location] = op.seq_num
 
                 # Apply operation
                 if op.op_type.value == "admit":

@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Cache utilities for LMCache.
-Provides generic cache classes with TTL (Time-To-Live) support.
-"""
-
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Callable, Generic, Optional, TypeVar
