@@ -459,6 +459,7 @@ def main():
         arg_mappings = {
             "host": "controller_host",
             "port": "controller_port",
+            "monitor_ports": "controller_monitor_ports",
             "health_check_interval": "health_check_interval",
             "lmcache_worker_timeout": "lmcache_worker_timeout",
         }
