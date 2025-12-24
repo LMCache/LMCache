@@ -443,6 +443,8 @@ void multi_layer_kv_transfer(
     k_or_v_size = 1;
   }
 
+  // offset calculation for MLA [num_blocks, block_size, head_size]
+  // is the same as 2-major [2, num_blocks, block_size, ...]
   const bool use_vllm_two_major = use_mla ? true : vllm_two_major;
   dim3 grid(key_value.size(2), num_layers, k_or_v_size);
   dim3 block(std::min(num_xwords, 128));
