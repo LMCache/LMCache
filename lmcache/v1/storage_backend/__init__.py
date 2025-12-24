@@ -14,6 +14,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
+from lmcache.v1.storage_backend.phxfs_backend import PhxfsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
@@ -184,6 +185,10 @@ def CreateStorageBackends(
     if config.gds_path is not None:
         gds_backend = GdsBackend(config, metadata, loop, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
+    elif config.phx_path is not None:
+        phxfs_backend = PhxfsBackend(config, metadata, loop, dst_device)
+        storage_backends[str(phxfs_backend)] = phxfs_backend
+
     if config.remote_url is not None:
         remote_backend = RemoteBackend(
             config,

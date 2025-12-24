@@ -235,6 +235,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": int,
     },
+    "phx_path": {"type": Optional[str], "default": None, "env_converter": str},
+    "phx_buffer_size": {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    },
     # Other configurations
     # (Deprecated) The url of the actual remote lmcache instance for auditing.
     # Please use extra_config['audit_actual_remote_url'] instead.
