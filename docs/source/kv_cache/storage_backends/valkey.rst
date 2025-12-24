@@ -60,6 +60,21 @@ Cluster-mode Valkey Configuration (Endpoint)
      valkey_username: "Your username"
      valkey_password: "Your password"
 
+Cluster-mode Valkey Configuration with numbered databases (Valkey 9.0+ and Valkey-GLIDE 2.1+)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   remote_url: "valkey://<your host>:6379"
+   remote_serde: "naive"
+   extra_config:
+     valkey_mode: "cluster"
+     valkey_username: "Your username"
+     valkey_password: "Your password"
+     valkey_database: 1
+
+
 Cluster-mode Valkey Configuration (Nodes)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
