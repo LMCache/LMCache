@@ -912,6 +912,15 @@ class LMCacheConnectorV1Impl:
         """
         return VLLM_VERSION
 
+    def _build_kv_layer_groups(self):
+        # Build KV layer groups structure if not already built
+        if self.lmcache_engine is not None:
+            assert len(self.kv_caches) > 0
+            kv_layer_groups_manager = (
+                self.lmcache_engine.metadata.kv_layer_groups_manager
+            )
+            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -925,16 +934,22 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
-        # Build KV layer groups structure if not already built
-        if self.lmcache_engine is not None:
-            kv_layer_groups_manager = (
-                self.lmcache_engine.metadata.kv_layer_groups_manager
-            )
-            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+        self._build_kv_layer_groups()
 
     ####################
     # Worker side APIs
     ####################
+    @_lmcache_nvtx_annotate
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        logger.info("Registering KV caches")
+        # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
+        #  not called, we should consider removing it.
+        assert len(self.kv_caches) == 0 and len(kv_caches) > 0
+        self.kv_caches = kv_caches
+        self._build_kv_layer_groups()
+        if self.lmcache_engine is not None:
+            kvcaches = list(self.kv_caches.values())
+            self.lmcache_engine.post_init(kvcaches=kvcaches)
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
