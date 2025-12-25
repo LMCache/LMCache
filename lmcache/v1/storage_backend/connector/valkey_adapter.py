@@ -31,11 +31,13 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
             self.valkey_password = config.extra_config.get("valkey_password", "")
             self.valkey_database = config.extra_config.get("valkey_database", None)
             self.valkey_mode = config.extra_config.get("valkey_mode", "standalone")
+            self.valkey_disable_tls = config.extra_config.get("valkey_disable_tls", True)
         else:
             self.valkey_username = ""
             self.valkey_password = ""
             self.valkey_database = None
             self.valkey_mode = "standalone"
+            self.valkey_disable_tls = True
 
         logger.info(f"Creating Valkey connector for URL: {context.url}")
 
@@ -55,6 +57,7 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
                 local_cpu_backend=context.local_cpu_backend,
                 username=self.valkey_username,
                 password=self.valkey_password,
+                disable_tls=self.valkey_disable_tls,
             )
         else:
             url = context.url[len(self.schema) :]
@@ -65,4 +68,5 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
                 username=self.valkey_username,
                 password=self.valkey_password,
                 database_id=self.valkey_database,
+                disable_tls=self.valkey_disable_tls,
             )

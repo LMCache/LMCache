@@ -32,6 +32,7 @@ Basic Valkey Configuration (Standalone mode)
    extra_config:
      valkey_username: "Your username"
      valkey_password: "Your password"
+     valkey_disable_tls: True
 
 Standalone-mode Valkey Configuration with database
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -45,6 +46,7 @@ Standalone-mode Valkey Configuration with database
      valkey_username: "Your username"
      valkey_password: "Your password"
      valkey_database: 0
+     valkey_disable_tls: True
 
 
 Cluster-mode Valkey Configuration (Endpoint)
@@ -59,6 +61,7 @@ Cluster-mode Valkey Configuration (Endpoint)
      valkey_mode: "cluster"
      valkey_username: "Your username"
      valkey_password: "Your password"
+     valkey_disable_tls: True
 
 Cluster-mode Valkey Configuration (Nodes)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -72,3 +75,4 @@ Cluster-mode Valkey Configuration (Nodes)
      valkey_mode: "cluster"
      valkey_username: "Your username"
      valkey_password: "Your password"
+     valkey_disable_tls: True

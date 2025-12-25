@@ -44,6 +44,7 @@ class ValkeyConnector(RemoteConnector):
         local_cpu_backend: LocalCPUBackend,
         username: str,
         password: str,
+        disable_tls: bool,
         database_id: Optional[int] = None,
     ):
         if ":" in url:
@@ -61,6 +62,7 @@ class ValkeyConnector(RemoteConnector):
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
         self.executor = AsyncPQExecutor(loop)
+        self.disable_tls = disable_tls
 
         # Create connection properly using async create
         self.connection = self._init_connection()
@@ -79,6 +81,7 @@ class ValkeyConnector(RemoteConnector):
                 config_kwargs = {
                     "addresses": [NodeAddress(self.host, self.port)],
                     "credentials": credentials,
+                    "use_tls": not self.disable_tls,
                 }
 
                 if self.database_id is not None:
@@ -230,6 +233,7 @@ class ValkeyClusterConnector(RemoteConnector):
         username: str,
         password: str,
         hosts_and_ports: Optional[List[Tuple[str, int]]],
+        disable_tls: bool,
     ):
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
@@ -237,6 +241,7 @@ class ValkeyClusterConnector(RemoteConnector):
         self.username = username
         self.password = password
         self.hosts_and_ports = hosts_and_ports
+        self.disable_tls = disable_tls
 
         # Create connection
         self.connection = self._init_connection()
@@ -255,7 +260,7 @@ class ValkeyClusterConnector(RemoteConnector):
                     NodeAddress(host, port) for host, port in self.hosts_and_ports
                 ]
                 config = GlideClusterClientConfiguration(
-                    addresses=addresses, credentials=credentials
+                    addresses=addresses, credentials=credentials, use_tls=not self.disable_tls,
                 )
                 return await GlideClusterClient.create(config)
             except Exception as e:
