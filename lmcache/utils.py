@@ -385,7 +385,7 @@ class CacheEngineKey:
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}"
+            f"@{self.worker_id}@{self.chunk_hash}@{self._dtype_str}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags]
