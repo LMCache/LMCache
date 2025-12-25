@@ -11,13 +11,19 @@
 ###
 
 # Standard
+from typing import Optional
 import argparse
 import array
+import atexit
+import os
+import signal
+import sys
 import threading
 import time
 
 # Third Party
 import cupy
+import prometheus_client
 import torch
 import zmq
 
@@ -28,6 +34,10 @@ from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
+from lmcache.v1.multiprocess.observability import (
+    MPMetricsLogger,
+    MPStatsCollector,
+)
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
@@ -219,6 +229,20 @@ class MPCacheEngine:
         # storage manager
         self.storage_manager = MPStorageManager(cpu_buffer_size)
 
+        # stats collector for observability
+        self.stats_collector = MPStatsCollector.get_instance()
+
+    def update_memory_stats(self) -> None:
+        """
+        Update memory statistics in the stats collector.
+        This should be called periodically to keep metrics up-to-date.
+        """
+        try:
+            stats = self.storage_manager.get_memory_stats()
+            self.stats_collector.update_memory_stats(stats)
+        except Exception as e:
+            logger.warning("Failed to update memory stats: %s", str(e))
+
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -333,6 +357,12 @@ class MPCacheEngine:
             self.storage_manager.commit, reserve_handle
         )
         ed = time.perf_counter()
+
+        # Track store metrics with timing
+        stored_tokens = len(reserved_dict) * self.chunk_size
+        elapsed_ms = (ed - st) * 1000
+        self.stats_collector.on_store(stored_tokens, elapsed_ms)
+
         if length := len(reserved_dict):
             logger.info(
                 "Stored %d tokens in %.3f seconds",
@@ -374,6 +404,7 @@ class MPCacheEngine:
         # retrieves objects is pre-locked by the lookup function (so they
         # must be all found)
         st = time.perf_counter()
+
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
         )
@@ -428,6 +459,11 @@ class MPCacheEngine:
 
         tokens_retrieved = len(keys) * self.chunk_size
         ed = time.perf_counter()
+
+        # Track retrieve metrics with timing
+        elapsed_ms = (ed - st) * 1000
+        self.stats_collector.on_retrieve(tokens_retrieved, elapsed_ms)
+
         logger.info(
             "Retrieved %d tokens in %.3f seconds",
             tokens_retrieved,
@@ -477,6 +513,12 @@ class MPCacheEngine:
             )
 
         found_count = self.storage_manager.lookup(keys)
+
+        # Track lookup metrics
+        total_tokens = len(keys) * self.chunk_size
+        hit_tokens = found_count * self.chunk_size
+        self.stats_collector.on_lookup(total_tokens, hit_tokens)
+
         return [True] * found_count + [False] * (len(keys) - found_count)
 
     def debug(self) -> str:
@@ -505,13 +547,49 @@ def add_handler_helper(
     )
 
 
+class MemoryStatsUpdater:
+    """
+    Background thread that periodically updates memory statistics.
+    """
+
+    def __init__(self, engine: MPCacheEngine, update_interval: int = 5):
+        self.engine = engine
+        self.update_interval = update_interval
+        self.is_running = True
+        self.shutdown_event = threading.Event()
+
+        self.thread = threading.Thread(target=self._update_worker, daemon=True)
+        self.thread.start()
+        logger.info(
+            "MemoryStatsUpdater started with interval %d seconds", update_interval
+        )
+
+    def _update_worker(self) -> None:
+        """Background worker that periodically updates memory stats."""
+        while self.is_running:
+            self.engine.update_memory_stats()
+            self.shutdown_event.wait(self.update_interval)
+
+    def shutdown(self) -> None:
+        """Shutdown the memory stats updater gracefully."""
+        self.is_running = False
+        self.shutdown_event.set()
+        self.thread.join(timeout=2.0)
+        logger.info("MemoryStatsUpdater shutdown complete")
+
+
 def run_cache_server(
     host: str = "localhost",
     port: int = 5555,
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
+    metrics_port: int = 9100,
+    metrics_interval: int = 5,
 ):
+    # Track resources for cleanup
+    shutdown_in_progress = threading.Event()
+
     # Initialize the engine
     engine = MPCacheEngine(chunk_size, cpu_buffer_size)
 
@@ -533,18 +611,86 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
+    # Start Prometheus metrics HTTP server and metrics logger
+    metrics_logger: Optional[MPMetricsLogger] = None
+    memory_stats_updater: Optional[MemoryStatsUpdater] = None
+    if metrics_port > 0:
+        prometheus_client.start_http_server(metrics_port)
+        logger.info("Prometheus metrics server started on port %d", metrics_port)
+
+        # Initialize the metrics logger
+        metrics_logger = MPMetricsLogger(
+            host=host,
+            port=port,
+            chunk_size=chunk_size,
+            log_interval=metrics_interval,
+        )
+
+        # Start memory stats updater
+        memory_stats_updater = MemoryStatsUpdater(
+            engine=engine,
+            update_interval=metrics_interval,
+        )
+
+    def cleanup():
+        """Gracefully shutdown all resources."""
+        if shutdown_in_progress.is_set():
+            return  # Already shutting down
+        shutdown_in_progress.set()
+
+        logger.info("Shutting down LMCache server...")
+
+        # Shutdown in reverse order of initialization
+        if memory_stats_updater:
+            try:
+                memory_stats_updater.shutdown()
+            except Exception as e:
+                logger.warning("Error shutting down memory stats updater: %s", e)
+
+        if metrics_logger:
+            try:
+                metrics_logger.shutdown()
+            except Exception as e:
+                logger.warning("Error shutting down metrics logger: %s", e)
+
+        try:
+            server.close()
+        except Exception as e:
+            logger.warning("Error closing server: %s", e)
+
+        # Terminate ZMQ context
+        try:
+            context.term()
+        except Exception as e:
+            logger.warning("Error terminating ZMQ context: %s", e)
+
+        logger.info("LMCache server shutdown complete")
+
+    def signal_handler(signum, frame):
+        """Handle termination signals."""
+        sig_name = signal.Signals(signum).name
+        logger.info("Received signal %s, initiating shutdown...", sig_name)
+        cleanup()
+        sys.exit(0)
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Register atexit handler as fallback
+    atexit.register(cleanup)
+
     # Start the server
     torch.cuda.init()
     server.start()
-    logger.info("LMCache cache server is running...")
+    logger.info("LMCache cache server is running (PID: %d)...", os.getpid())
 
-    # Dummy loop to keep the server running
+    # Main loop to keep the server running
     try:
-        while True:
+        while not shutdown_in_progress.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        server.close()
+        cleanup()
 
 
 def parse_args():
@@ -564,6 +710,18 @@ def parse_args():
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
+    parser.add_argument(
+        "--metrics-port",
+        type=int,
+        default=9100,
+        help="Port for Prometheus metrics HTTP server (set to 0 to disable)",
+    )
+    parser.add_argument(
+        "--metrics-interval",
+        type=int,
+        default=5,
+        help="Interval in seconds for Prometheus metrics collection (default: 5)",
+    )
     return parser.parse_args()
 
 
@@ -575,4 +733,6 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
+        metrics_port=args.metrics_port,
+        metrics_interval=args.metrics_interval,
     )

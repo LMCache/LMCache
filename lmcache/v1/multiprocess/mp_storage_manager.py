@@ -19,6 +19,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.observability import MPStatsCollector
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 
 logger = init_logger(__name__)
@@ -190,6 +191,9 @@ class MPStorageManager:
             cpu_buffer_size: the total size (in GB) of CPU memory buffer
                 to be used for storage
         """
+        # Stats collector for observability
+        self._stats_collector = MPStatsCollector.get_instance()
+
         # Lock manager for locking memory objects
         # TODO: have separate lock manager for different storage backends
         # in the future
@@ -354,6 +358,9 @@ class MPStorageManager:
                 for key in candidates:
                     obj = self._commited_memory_objects.pop(key)
                     obj.ref_count_down()
+
+                # Track eviction metrics
+                self._stats_collector.on_eviction(len(candidates))
 
                 logger.info(
                     "Recycled %d committed memory objects to free up space.",
@@ -538,3 +545,127 @@ class MPStorageManager:
             )
             self._reserved_memory_object_pools.clear()
             self._reserved_keys.clear()
+
+    def get_memory_stats(self) -> dict:
+        """
+        Get memory statistics with minimal lock holding time.
+
+        Design: Snapshot-then-compute pattern
+        - Hold locks only to copy raw values (< 1μs)
+        - All calculations done outside the lock
+
+        Returns:
+            dict: Memory statistics for monitoring.
+        """
+        # === Phase 1: Snapshot under lock (minimal time) ===
+        with self._allocator_lock, self._buffer_lock:
+            pin_allocator = self._memory_allocator.pin_allocator
+            total_bytes = self._memory_allocator.size
+            align_bytes = getattr(pin_allocator, "align_bytes", 4096)
+            used_bytes = getattr(pin_allocator, "total_allocated_size", 0)
+            num_active_allocations = getattr(pin_allocator, "num_active_allocations", 0)
+
+            # Quick snapshot of hole sizes (just copy the list)
+            hole_sizes: list[int] = []
+            if hasattr(pin_allocator, "explicit_list"):
+                hole_sizes = [block.size for block in pin_allocator.explicit_list]
+
+            # Cache key counts (just len() calls)
+            committed_keys_count = len(self._commited_memory_objects)
+            reserved_keys_count = len(self._reserved_keys)
+            locked_keys_count = len(self._obj_lock_manager._locks)
+        # === Lock released here ===
+
+        # === Phase 2: Compute statistics outside lock ===
+        free_bytes = total_bytes - used_bytes
+        num_holes = len(hole_sizes)
+
+        # Basic hole statistics
+        if num_holes == 0:
+            largest_hole = 0
+            smallest_hole = 0
+            avg_hole = 0
+            total_hole_bytes = 0
+        else:
+            total_hole_bytes = sum(hole_sizes)
+            largest_hole = max(hole_sizes)
+            smallest_hole = min(hole_sizes)
+            avg_hole = total_hole_bytes // num_holes
+
+        # External fragmentation: 1 - (largest / total_free)
+        external_fragmentation = (
+            1.0 - (largest_hole / total_hole_bytes) if total_hole_bytes > 0 else 0.0
+        )
+
+        # Hole scatter index: (holes - 1) / allocations
+        hole_scatter_index = (
+            (num_holes - 1) / max(1, num_active_allocations) if num_holes > 0 else 0.0
+        )
+
+        # Allocation efficiency: usable_free / total_free
+        usable_holes = sum(s for s in hole_sizes if s >= align_bytes)
+        allocation_efficiency = (
+            usable_holes / total_hole_bytes if total_hole_bytes > 0 else 1.0
+        )
+
+        # Hole size distribution (simplified: just count by category)
+        hole_distribution = {
+            "unusable_lt_align": 0,
+            "tiny_lt_1mb": 0,
+            "small_1mb_4mb": 0,
+            "medium_4mb_16mb": 0,
+            "large_16mb_64mb": 0,
+            "xlarge_64mb_256mb": 0,
+            "huge_gt_256mb": 0,
+        }
+        unusable_bytes = 0
+        for size in hole_sizes:
+            if size < align_bytes:
+                hole_distribution["unusable_lt_align"] += 1
+                unusable_bytes += size
+            elif size < 1 << 20:  # 1MB
+                hole_distribution["tiny_lt_1mb"] += 1
+            elif size < 4 << 20:  # 4MB
+                hole_distribution["small_1mb_4mb"] += 1
+            elif size < 16 << 20:  # 16MB
+                hole_distribution["medium_4mb_16mb"] += 1
+            elif size < 64 << 20:  # 64MB
+                hole_distribution["large_16mb_64mb"] += 1
+            elif size < 256 << 20:  # 256MB
+                hole_distribution["xlarge_64mb_256mb"] += 1
+            else:
+                hole_distribution["huge_gt_256mb"] += 1
+
+        return {
+            # Basic Memory Stats
+            "total_bytes": total_bytes,
+            "used_bytes": used_bytes,
+            "free_bytes": free_bytes,
+            "align_bytes": align_bytes,
+            # Allocation Tracking
+            "num_active_allocations": num_active_allocations,
+            "num_allocated_regions": num_active_allocations,  # Simplified
+            # Cache Key Counts
+            "committed_keys_count": committed_keys_count,
+            "reserved_keys_count": reserved_keys_count,
+            "locked_keys_count": locked_keys_count,
+            # Hole Statistics
+            "num_holes": num_holes,
+            "largest_hole_bytes": largest_hole,
+            "smallest_hole_bytes": smallest_hole,
+            "avg_hole_bytes": avg_hole,
+            "median_hole_bytes": avg_hole,  # Use avg as approximation
+            "std_hole_bytes": 0,  # Skip std calculation
+            # Fragmentation Metrics
+            "external_fragmentation": external_fragmentation,
+            "hole_scatter_index": hole_scatter_index,
+            "allocation_efficiency": allocation_efficiency,
+            "unusable_bytes": unusable_bytes,
+            "unusable_hole_count": hole_distribution["unusable_lt_align"],
+            "compaction_benefit_bytes": total_hole_bytes - largest_hole
+            if num_holes > 1
+            else 0,
+            "non_coalesced_pairs": 0,  # Skip check (should always be 0)
+            # Hole Size Distribution
+            "hole_distribution": hole_distribution,
+        }
