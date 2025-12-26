@@ -116,9 +116,19 @@ class WorkerNode:
                 self.kv_store[location] = set()
 
             for op in msg.operations:
+                # Apply operation first, then check sequence
+                # (sequence check is skipped during full sync)
+                if op.op_type.value == "admit":
+                    self.kv_store[location].add(op.key)
+                elif op.op_type.value == "evict":
+                    self.kv_store[location].discard(op.key)
+                else:
+                    logger.error(f"Unknown op_type: {op.op_type}")
+
                 # Skip sequence check during full sync
                 if is_full_sync:
                     continue
+
                 # Sequence check
                 last_seq_num = self.seq_tracker.get(location)
                 if last_seq_num is not None:
@@ -130,14 +140,6 @@ class WorkerNode:
                             op.seq_num - expected_seq,
                         )
                 self.seq_tracker[location] = op.seq_num
-
-                # Apply operation
-                if op.op_type.value == "admit":
-                    self.kv_store[location].add(op.key)
-                elif op.op_type.value == "evict":
-                    self.kv_store[location].discard(op.key)
-                else:
-                    logger.error(f"Unknown op_type: {op.op_type}")
 
             # Clean up empty set
             if not self.kv_store[location]:
