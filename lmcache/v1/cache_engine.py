@@ -729,6 +729,18 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        # The retrieved may be larger than the need_to_load
+        # Example (page_size=16, chunk_size=256):
+        #
+        # chunks:  [0..255]                [256..511]
+        # pages:   [0..15]...[240..255]    [256..271][272..287] ...
+        #
+        # num_computed_tokens = 288 => vLLM already has [0..287] (18 pages)
+        # LMCache hit_prefix_tokens = 512 => cache covers [0..511] (2 chunks)
+        #
+        # Skip chunk 1, retrieve chunk 2, overwrite [256..287] (32-token overlap)
+        # need_to_load: 512 - 288 = 224 tokens
+        # retrieved: 256 tokens
         logger.info(
             "Retrieved %d out of %d required tokens (from %d total tokens)."
             " size: %.4f gb,"
@@ -928,6 +940,7 @@ class LMCacheEngine:
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
+        res = 0
         try:
             chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
@@ -972,9 +985,6 @@ class LMCacheEngine:
                     # chunk_info contains (start, end, key)
                     # chunk_info[2] is the key
                     keys.append(chunk_info[2])
-                # If no tokens to lookup, return immediately
-                if not keys:
-                    return res
                 # hit chunks by prefix matching
                 hit_chunks, block_mapping = self.storage_manager.batched_contains(
                     keys, search_range, pin
