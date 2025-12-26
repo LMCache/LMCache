@@ -104,7 +104,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
             streaming PUT requests (default: 64KB)
             **kwargs: Unused legacy parameters (ignored for backward compatibility)
         """
-        super().__init__()
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         # Core configuration
         self.base_url = sagemaker_hyperpod_url.rstrip("/")

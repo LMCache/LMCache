@@ -41,6 +41,8 @@ class InfinistoreConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         memory_allocator: LocalCPUBackend,
     ):
+        super().__init__(memory_allocator.config, memory_allocator.metadata)
+
         config = infinistore.ClientConfig(
             host_addr=host,
             service_port=port,

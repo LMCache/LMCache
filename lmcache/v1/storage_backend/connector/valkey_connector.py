@@ -46,6 +46,8 @@ class ValkeyConnector(RemoteConnector):
         password: str,
         database_id: Optional[int] = None,
     ):
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         if ":" in url:
             host, port_str = url.split(":", 1)
             port = int(port_str)
@@ -231,6 +233,8 @@ class ValkeyClusterConnector(RemoteConnector):
         password: str,
         hosts_and_ports: Optional[List[Tuple[str, int]]],
     ):
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
         self.executor = AsyncPQExecutor(loop)

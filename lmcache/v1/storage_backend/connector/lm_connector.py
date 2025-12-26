@@ -40,6 +40,7 @@ class LMCServerConnector(RemoteConnector):
         # than implementations that work with sockets.
         # However, we use socket here as we need to use the socket.recv_into()
         # to reduce memory copy.
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client_socket.connect((host, port))

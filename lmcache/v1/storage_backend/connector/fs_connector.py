@@ -45,6 +45,8 @@ class FSConnector(RemoteConnector):
             local_cpu_backend: Memory allocator interface
             config: Lmcache engine config
         """
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # Parse comma separated paths
         self.base_paths = (
             [Path(p.strip()) for p in base_paths_str.split(",")]
@@ -76,20 +78,6 @@ class FSConnector(RemoteConnector):
             if config is None
             else config.get_extra_config_value("fs_connector_use_odirect", False)
         )
-
-        logger.info(
-            f"Initialized FSConnector with base paths {self.base_paths}, "
-            f"relative tmp dir: {self.relative_tmp_dir}, "
-            f"read ahead size: {self.read_ahead_size}, "
-            f"use O_DIRECT: {self.use_odirect}"
-        )
-        # Create directories for all paths
-        for path in self.base_paths:
-            path.mkdir(parents=True, exist_ok=True)
-            if self.relative_tmp_dir is not None:
-                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
-
-    def post_init(self):
         self.os_disk_bs = 0
         if self.use_odirect:
             # save_chunk_meta is useful if save_unfull_chunk is True, since partial
@@ -105,6 +93,18 @@ class FSConnector(RemoteConnector):
             else:
                 stat = os.statvfs(self.base_paths[0])
                 self.os_disk_bs = stat.f_bsize
+
+        logger.info(
+            f"Initialized FSConnector with base paths {self.base_paths}, "
+            f"relative tmp dir: {self.relative_tmp_dir}, "
+            f"read ahead size: {self.read_ahead_size}, "
+            f"use O_DIRECT: {self.use_odirect}"
+        )
+        # Create directories for all paths
+        for path in self.base_paths:
+            path.mkdir(parents=True, exist_ok=True)
+            if self.relative_tmp_dir is not None:
+                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
 
     def _get_base_path(self, key: CacheEngineKey) -> Path:
         """Get file base path for the given key"""
@@ -153,7 +153,7 @@ class FSConnector(RemoteConnector):
         fd = -1
         try:
             memory_obj = self.local_cpu_backend.allocate(
-                self.meta_shape, self.meta_dtype, self.meta_fmt
+                self.meta_shapes, self.meta_dtypes, self.meta_fmt
             )
             if memory_obj is None:
                 logger.debug("Memory allocation failed.")
@@ -223,7 +223,7 @@ class FSConnector(RemoteConnector):
                     )
                 else:
                     memory_obj = self.local_cpu_backend.allocate(
-                        self.meta_shape, self.meta_dtype, self.meta_fmt
+                        self.meta_shapes, self.meta_dtypes, self.meta_fmt
                     )
                 if memory_obj is None:
                     logger.debug("Memory allocation failed during async disk load.")
