@@ -893,7 +893,6 @@ class LMCacheEngine:
         lookup_id: Optional[str] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
-        num_computed_tokens: int = 0,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -918,9 +917,6 @@ class LMCacheEngine:
 
         :param Optional[dict] request_configs: the configs of the request.
 
-        :param int num_computed_tokens: Number of leading tokens those are already
-            available in the caller.
-
         :return: An int indicating how many prefix tokens are cached.
         """
         assert self.storage_manager is not None
@@ -932,10 +928,6 @@ class LMCacheEngine:
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
-        # Skip the number of tokens that are already computed (aligned upstream to
-        # chunk size)
-        aligned_computed_tokens = num_computed_tokens
-        res = aligned_computed_tokens
         try:
             chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
@@ -947,8 +939,6 @@ class LMCacheEngine:
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
-                    if end <= aligned_computed_tokens:
-                        continue
                     assert isinstance(key, CacheEngineKey)
 
                     # TODO(Jiayi): Optimize by checking only the existence of the key
@@ -978,8 +968,6 @@ class LMCacheEngine:
                 for chunk_info in chunk_info_iterator:
                     assert isinstance(chunk_info[2], CacheEngineKey)
                     start, end, _ = chunk_info
-                    if end <= aligned_computed_tokens:
-                        continue
                     chunk_info_list.append(chunk_info)
                     # chunk_info contains (start, end, key)
                     # chunk_info[2] is the key
@@ -1005,16 +993,10 @@ class LMCacheEngine:
             # all tokens where found, return the maximal end
             return res
         finally:
-            # When num_computed_tokens is greater than a chunk, we skip
-            # some tokens to reduce the number of lookup requests.
-            # It is possible that res equals aligned_computed_tokens and no lookup is
-            # performed.
-            # In this case, using res as the number of hit tokens will overcount
-            # the number of hit tokens.
-            # TODO deprecate this metric and use retrieve metrics instead.
             self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
+                # touch_cache is tightly coupled with batched_contains
                 self.storage_manager.touch_cache()
 
     @_lmcache_nvtx_annotate

@@ -1516,14 +1516,6 @@ class LMCacheConnectorV1Impl:
             logger.debug(f"Looking up cache for the first time for request {req_id}!")
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
-            # Align computed tokens once to avoid repeated
-            # chunk-size rounding downstream
-            aligned_num_computed_tokens = (
-                num_computed_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
-
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
             token_ids = request.all_token_ids
@@ -1544,7 +1536,6 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
-                num_computed_tokens=aligned_num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:
