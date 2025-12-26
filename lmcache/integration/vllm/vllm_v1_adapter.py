@@ -752,8 +752,26 @@ class LMCacheConnectorV1Impl:
 
             # In case of MLA, the lookup server is only created on worker 0
             if self.async_loading and self.lookup_server is not None:
-                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
-                self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
+                # if the connector implements `register_kv_caches`, we do not need to
+                # post init the lmcache engine here, do it in `register_kv_caches`.
+                def implements_register_kv_caches():
+                    child_class = self._parent.__class__
+                    parent_class = KVConnectorBase_V1
+                    child_method = getattr(child_class, "register_kv_caches", None)
+                    parent_method = getattr(parent_class, "register_kv_caches", None)
+                    if child_method is None or parent_method is None:
+                        return False
+                    return child_method is not parent_method
+
+                if not implements_register_kv_caches():
+                    logger.warning(
+                        "Please use the latest lmcache connector, otherwise some "
+                        "features may not work, such as DSA with async loading."
+                    )
+                    assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
+                    self.lmcache_engine.post_init(
+                        async_lookup_server=self.lookup_server
+                    )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -921,6 +939,9 @@ class LMCacheConnectorV1Impl:
             )
             kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
 
+    # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
+    #  to init self.kv_caches, we keep it in order to be compatible with old versions
+    #  and will be removed in the future.
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -949,7 +970,13 @@ class LMCacheConnectorV1Impl:
         self._build_kv_layer_groups()
         if self.lmcache_engine is not None:
             kvcaches = list(self.kv_caches.values())
-            self.lmcache_engine.post_init(kvcaches=kvcaches)
+            async_lookup_server = None
+            if self.async_loading and self.lookup_server is not None:
+                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
+                async_lookup_server = self.lookup_server
+            self.lmcache_engine.post_init(
+                kvcaches=kvcaches, async_lookup_server=async_lookup_server
+            )
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -967,6 +994,10 @@ class LMCacheConnectorV1Impl:
         self.current_layer = 0
 
         if len(self.kv_caches) == 0:
+            logger.warning(
+                "Please update LMCacheConnector, "
+                "use register_kv_caches to init kv_caches"
+            )
             self._init_kv_caches_from_forward_context(forward_context)
 
         metadata = self._parent._get_connector_metadata()

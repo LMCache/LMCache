@@ -212,6 +212,7 @@ class StorageManager:
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
     ):
         self.config = config
         self.metadata = metadata
@@ -258,7 +259,9 @@ class StorageManager:
 
         self.event_manager = event_manager
 
-        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
+            async_lookup_server
+        )
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
@@ -270,6 +273,10 @@ class StorageManager:
         # freeze mode: only use local_cpu backend for retrieval
         self._freeze = False
         self._freeze_lock = threading.RLock()
+
+        if not self.enable_pd and self.config.enable_async_loading:
+            assert self.allocator_backend is not None
+            self.async_serializer = AsyncSingleSerializer(self.loop)
 
         self._setup_metrics()
 
@@ -295,14 +302,6 @@ class StorageManager:
                     EventType.LOADING, s
                 )
             )
-
-    def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-        # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and self.config.enable_async_loading:
-            assert self.allocator_backend is not None
-            self.async_serializer = AsyncSingleSerializer(self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig

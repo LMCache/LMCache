@@ -159,30 +159,7 @@ class LMCacheEngine:
         # the storage_manager
         # if save_only_first_rank is True, only the first rank and
         # lookup server workers will initialize the storage_manager
-        self.storage_manager = None
-        lookup_server_worker_ids = self.config.get_lookup_server_worker_ids(
-            metadata.use_mla, metadata.world_size
-        )
-        if (
-            self.lmcache_worker is not None
-            or self.use_layerwise
-            or not self.save_only_first_rank
-            or self.metadata.is_first_rank()
-            or len(lookup_server_worker_ids) == 0
-            or self.metadata.worker_id in lookup_server_worker_ids
-        ):
-            logger.info(
-                f"Initialize storage manager on rank {self.metadata.worker_id}, "
-                f"use layerwise: {self.use_layerwise},"
-                f"save only first rank: {self.save_only_first_rank}"
-            )
-            self.storage_manager = StorageManager(
-                config,
-                metadata,
-                # self.memory_allocator,
-                event_manager=self.event_manager,
-                lmcache_worker=self.lmcache_worker,
-            )
+        self.storage_manager: Optional[StorageManager] = None
 
         # KV events
         self.kv_events_enabled = False
@@ -239,8 +216,30 @@ class LMCacheEngine:
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
             logger.info("Post initializing LMCacheEngine")
-            if self.storage_manager is not None:
-                self.storage_manager.post_init(**kwargs)
+            lookup_server_worker_ids = self.config.get_lookup_server_worker_ids(
+                self.metadata.use_mla, self.metadata.world_size
+            )
+            if (
+                self.lmcache_worker is not None
+                or self.use_layerwise
+                or not self.save_only_first_rank
+                or self.metadata.is_first_rank()
+                or len(lookup_server_worker_ids) == 0
+                or self.metadata.worker_id in lookup_server_worker_ids
+            ):
+                logger.info(
+                    f"Initialize storage manager on rank {self.metadata.worker_id}, "
+                    f"use layerwise: {self.use_layerwise},"
+                    f"save only first rank: {self.save_only_first_rank}"
+                )
+                async_lookup_server = kwargs.get("async_lookup_server", None)
+                self.storage_manager = StorageManager(
+                    self.config,
+                    self.metadata,
+                    event_manager=self.event_manager,
+                    lmcache_worker=self.lmcache_worker,
+                    async_lookup_server=async_lookup_server,
+                )
             if self.gpu_connector is not None:
                 self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
