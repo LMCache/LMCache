@@ -371,11 +371,11 @@ def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
     kv_bytes = memory_obj.byte_array
     meta = RemoteMetadata(
         len(kv_bytes),
-        memory_obj.get_shape(),
-        memory_obj.get_dtype(),
+        memory_obj.get_shapes(),
+        memory_obj.get_dtypes(),
         memory_obj.get_memory_format(),
     )
-    metadata_bytes = meta.serialize()
+    metadata_bytes = meta.serialize("iiiiiii")
 
     # clean up memory object after getting metadata
     memory_obj.ref_count_down()

@@ -84,11 +84,13 @@ class RedisConnector(RemoteConnector):
 
             assert not inspect.isawaitable(metadata_bytes)
 
-            metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+            metadata = RemoteMetadata.deserialize(
+                memoryview(metadata_bytes), self.remote_metadata_fmt
+            )
 
             memory_obj = self.local_cpu_backend.allocate(
-                metadata.shape,
-                metadata.dtype,
+                metadata.shapes,
+                metadata.dtypes,
                 metadata.fmt,
             )
             if memory_obj is None:
@@ -163,13 +165,13 @@ class RedisConnector(RemoteConnector):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
 
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
-        ).serialize()
+            len(kv_bytes), kv_shapes, kv_dtypes, memory_format
+        ).serialize(self.remote_metadata_fmt)
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
@@ -322,11 +324,11 @@ class RedisSentinelConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RemoteMetadata.deserialize(metadata_bytes)
+        metadata = RemoteMetadata.deserialize(metadata_bytes, self.remote_metadata_fmt)
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
         if memory_obj is None:
@@ -372,13 +374,13 @@ class RedisSentinelConnector(RemoteConnector):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
 
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
-        ).serialize()
+            len(kv_bytes), kv_shapes, kv_dtypes, memory_format
+        ).serialize(self.remote_metadata_fmt)
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
@@ -462,11 +464,13 @@ class RedisClusterConnector(RemoteConnector):
 
             assert not inspect.isawaitable(metadata_bytes)
 
-            metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+            metadata = RemoteMetadata.deserialize(
+                memoryview(metadata_bytes), self.remote_metadata_fmt
+            )
 
             memory_obj = self.local_cpu_backend.allocate(
-                metadata.shape,
-                metadata.dtype,
+                metadata.shapes,
+                metadata.dtypes,
                 metadata.fmt,
             )
             if memory_obj is None:
@@ -542,13 +546,13 @@ class RedisClusterConnector(RemoteConnector):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
 
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
-        ).serialize()
+            len(kv_bytes), kv_shapes, kv_dtypes, memory_format
+        ).serialize(self.remote_metadata_fmt)
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition

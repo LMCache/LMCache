@@ -134,11 +134,13 @@ class ValkeyConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+        metadata = RemoteMetadata.deserialize(
+            memoryview(metadata_bytes), self.remote_metadata_fmt
+        )
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
         if memory_obj is None:
@@ -185,13 +187,13 @@ class ValkeyConnector(RemoteConnector):
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         try:
             kv_bytes = bytes(memory_obj.byte_array)
-            kv_shape = memory_obj.get_shape()
-            kv_dtype = memory_obj.get_dtype()
+            kv_shapes = memory_obj.get_shapes()
+            kv_dtypes = memory_obj.get_dtypes()
             memory_format = memory_obj.get_memory_format()
 
             metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shape, kv_dtype, memory_format
-            ).serialize()
+                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
+            ).serialize(self.remote_metadata_fmt)
 
             metadata_key, kv_key = self._get_keys(key)
 
@@ -310,11 +312,13 @@ class ValkeyClusterConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
+        metadata = RemoteMetadata.deserialize(
+            memoryview(metadata_bytes), self.remote_metadata_fmt
+        )
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
         if memory_obj is None:
@@ -360,13 +364,13 @@ class ValkeyClusterConnector(RemoteConnector):
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         try:
             kv_bytes = bytes(memory_obj.byte_array)
-            kv_shape = memory_obj.get_shape()
-            kv_dtype = memory_obj.get_dtype()
+            kv_shapes = memory_obj.get_shapes()
+            kv_dtypes = memory_obj.get_dtypes()
             memory_format = memory_obj.get_memory_format()
 
             metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shape, kv_dtype, memory_format
-            ).serialize()
+                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
+            ).serialize(self.remote_metadata_fmt)
 
             metadata_key, kv_key = self._get_keys_with_hash_tag(key)
 
