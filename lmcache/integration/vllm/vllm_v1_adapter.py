@@ -1767,6 +1767,7 @@ class LMCacheConnectorV1Impl:
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
+                    save_decode_cache=self._save_decode_cache,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
