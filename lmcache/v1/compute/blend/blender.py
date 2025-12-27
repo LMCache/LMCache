@@ -67,7 +67,6 @@ class LMCBlender:
         attn_metadata: LMCAttnMetadata,
     ):
         logger.debug(f"Blender is processing KV for layer {layer_id}")
-        old_k, old_v = self.gpu_connector.get_kv(layer_id)
 
         if attn_output is None:
             attn_output = torch.empty(
@@ -80,10 +79,19 @@ class LMCBlender:
         if self.metadata.positions is None:
             self.metadata.positions = torch.arange(
                 q.shape[0], device=q.device, dtype=torch.int64
-            )
+        )
         layer = self.layerwise_model.vllm_model.model.layers[layer_id]
         attn_layer = layer.self_attn
         q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
+
+        try:
+            old_k, old_v = self.gpu_connector.get_kv(layer_id)
+        except ValueError:
+            logger.debug(
+                "Skipping blend for layer %d: KV not loaded into GPU buffer.",
+                layer_id,
+            )
+            return q, k, v, residual, attn_output, attn_metadata
 
         if (
             self.common_metadata.check_layers
