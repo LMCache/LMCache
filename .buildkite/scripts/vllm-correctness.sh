@@ -3,27 +3,36 @@ set -euo pipefail
 
 : "${BUILD_ID:?BUILD_ID must be set}"
 
-PORT=${PORT:-}   # Optional: allow pre-setting PORT
+PORT=${PORT:-}
 MODEL="meta-llama/Llama-3.2-1B-Instruct"
 LOGFILE="/tmp/build_${BUILD_ID}_correctness.log"
 
-# Capture all stdout/stderr to console + logfile
+# ---- Artifact function must be defined before trap ----
+create_artifact() {
+    if ls /tmp/build_${BUILD_ID}_*.log >/dev/null 2>&1; then
+        cat /tmp/build_${BUILD_ID}_*.log > build_${BUILD_ID}.log || true
+    else
+        echo "No log files found" > build_${BUILD_ID}.log
+    fi
+}
+
+trap 'rc=$?; create_artifact; cleanup $rc' EXIT INT TERM
+
+# ---- Capture all stdout/stderr to console + logfile ----
 exec > >(tee -a "$LOGFILE") 2>&1
 
 echo "[INFO] Build ID: $BUILD_ID"
 echo "[INFO] Logfile: $LOGFILE"
 
-# ---- Utilities ----
-
+# ---- Cleanup ----
 cleanup() {
     local rc=${1:-0}
     echo "[INFO] Cleaning up background processes..."
     [[ -n "${VLLM_PID:-}" ]] && kill $VLLM_PID 2>/dev/null || true
     exit $rc
 }
-trap 'cleanup $?' EXIT INT TERM
 
-# Find an available port starting from 8000
+# ---- Utilities ----
 find_available_port() {
     local start_port=${1:-8000}
     for port in $(seq $start_port 9000); do
@@ -48,7 +57,7 @@ vllm serve "$MODEL" \
   >/dev/null 2>&1 &
 VLLM_PID=$!
 
-# Wait for server readiness
+# ---- Wait for server readiness ----
 echo "[INFO] Waiting for vLLM server to be ready..."
 timeout=60
 until curl -s "http://localhost:$PORT/v1/models" >/dev/null 2>&1 || (( timeout-- <= 0 )); do
@@ -106,12 +115,4 @@ fi
 
 echo "[PASS] Results are strictly identical"
 
-# ---- Artifact export ----
-create_artifact() {
-    if ls /tmp/build_${BUILD_ID}_*.log >/dev/null 2>&1; then
-        cat /tmp/build_${BUILD_ID}_*.log > build_${BUILD_ID}.log || true
-    else
-        echo "No log files found" > build_${BUILD_ID}.log
-    fi
-}
 create_artifact
