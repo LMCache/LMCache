@@ -18,9 +18,10 @@ import requests
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
+from lmcache.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
     # First Party
