@@ -996,24 +996,46 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            if lmcache_cached_tokens <= 0:
+                continue
+
+            tokens_to_load = tokens[:lmcache_cached_tokens]
+            mask_to_load = token_mask[:lmcache_cached_tokens]
+            if mask_to_load.numel() == 0 or not mask_to_load.any():
+                logger.debug(
+                    "Skipping LMCache load for request %s: mask excludes all tokens",
+                    request.req_id,
+                )
+                continue
+
             if self.use_layerwise:
                 if idx == last_idx:
                     sync = True
                 else:
                     sync = False
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
-                if self.enable_blending:
+                should_blend = self.enable_blending and (
+                    int(mask_to_load.sum().item()) >= self.config.blend_min_tokens
+                )
+                if self.enable_blending and not should_blend:
+                    logger.debug(
+                        "Skipping blending for request %s: %d < blend_min_tokens %d",
+                        request.req_id,
+                        int(mask_to_load.sum().item()),
+                        self.config.blend_min_tokens,
+                    )
+                if should_blend:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
                     self.blender.blend(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
+                        tokens_to_load,
+                        mask_to_load,
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
+                        tokens_to_load,
+                        mask_to_load,
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         sync=sync,

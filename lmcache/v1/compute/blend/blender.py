@@ -85,7 +85,10 @@ class LMCBlender:
         attn_layer = layer.self_attn
         q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
-        if layer_id in self.common_metadata.check_layers:
+        if (
+            self.common_metadata.check_layers
+            and layer_id in self.common_metadata.check_layers
+        ):
             diff_k = torch.sum(
                 (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
             )
@@ -158,6 +161,10 @@ class LMCBlender:
         """
         Perform blending for the given tokens.
         """
+
+        if mask is not None and mask.numel() > 0 and not mask.any():
+            logger.debug("Blend skipped: mask excludes all tokens.")
+            return
 
         if isinstance(tokens, list):
             tokens = torch.tensor(tokens).cuda()
