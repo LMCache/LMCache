@@ -21,7 +21,7 @@ steps:
         trap 'rc=$?; create_artifact; exit $rc' EXIT INT TERM
 
         BUILD_ID=${BUILDKITE_BUILD_ID} \
-          .buildkite/scripts/vllm-correctness-test.sh
+          .buildkite/scripts/vllm-correctness.sh
 
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
