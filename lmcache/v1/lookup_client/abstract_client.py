@@ -40,6 +40,9 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         Should be called for first lookup and pinning. Subsequent lookups for the same
         request should call lookup_cache instead.
 
+        Caller should handle overlaps between tokens that exist in LMCache
+        and tokens that are already computed by the caller.
+
         Args:
             token_ids: The token IDs to lookup
 
@@ -49,7 +52,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             includes tags and the other configs
 
         Returns:
-            The number of tokens that can be loaded from cache.
+            The number of tokens that exist inside LMCache.
             None indicates the lookup/prefetch is in progress.
         """
         raise NotImplementedError

@@ -929,7 +929,7 @@ class LMCacheEngine:
 
         :param Optional[dict] request_configs: the configs of the request.
 
-        :return: An int indicating how many prefix tokens are cached.
+        :return: An int indicating how many prefix tokens exist inside LMCache.
         """
         assert self.storage_manager is not None
 
