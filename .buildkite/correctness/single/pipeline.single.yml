@@ -1,28 +1,14 @@
-env:
-  DOCKER_BUILDKIT: 1
-
 steps:
   - label: ":rocket: vLLM Single Request Correctness Test"
     key: "test"
     timeout_in_minutes: 60
+    env:
+      DOCKER_BUILDKIT: 1
     commands:
       - chmod +x .buildkite/scripts/vllm-correctness.sh
       - |
-        create_artifact() {
-          if ls /tmp/build_${BUILDKITE_BUILD_ID}_*.log >/dev/null 2>&1; then
-            cat /tmp/build_${BUILDKITE_BUILD_ID}_*.log \
-              > build_${BUILDKITE_BUILD_ID}.log || true
-          else
-            echo "No log files found" \
-              > build_${BUILDKITE_BUILD_ID}.log
-          fi
-        }
-
         trap 'rc=$?; create_artifact; exit $rc' EXIT INT TERM
-
-        BUILD_ID=${BUILDKITE_BUILD_ID} \
-          .buildkite/scripts/vllm-correctness.sh
-
+        BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/vllm-correctness.sh
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
 
@@ -30,7 +16,6 @@ steps:
     depends_on: ["test"]
     allow_dependency_failure: true
     command: |
-      TARGET="$PWD"
-      echo "Deleting workspace $TARGET"
+      echo "Deleting current workspace $PWD"
       cd /
-      sudo rm -rf "$TARGET"
+      sudo rm -rf "$PWD"
