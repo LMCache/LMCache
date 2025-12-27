@@ -174,7 +174,9 @@ class FSConnector(RemoteConnector):
                 with open(file_path, "rb") as f:
                     num_read = f.readinto(buffer)
             else:
-                fd = os.open(file_path, os.O_RDONLY | os.O_DIRECT)
+                fd = os.open(
+                    file_path, os.O_RDONLY | getattr(os, "O_DIRECT", 0)
+                )
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     # The fd is now managed by the file object, so we "forget" it
                     # to prevent closing it in the finally block.
@@ -278,7 +280,11 @@ class FSConnector(RemoteConnector):
     def _put_with_odirect(self, file_path: Path, buffer: bytes) -> None:
         fd = -1
         try:
-            fd = os.open(str(file_path), os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
+            fd = os.open(
+                str(file_path),
+                os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
+                0o644,
+            )
             os.write(fd, buffer)
         except Exception as e:
             logger.error(f"Failed to write to file {file_path}: {e}")
