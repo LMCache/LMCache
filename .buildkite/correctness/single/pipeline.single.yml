@@ -6,7 +6,7 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     commands:
-      - chmod +x .buildkite/scripts/vllm-correctness-test.sh
+      - chmod +x .buildkite/scripts/vllm-correctness.sh
       - |
         create_artifact() {
           if ls /tmp/build_${BUILDKITE_BUILD_ID}_*.log >/dev/null 2>&1; then
