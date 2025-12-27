@@ -174,9 +174,7 @@ class FSConnector(RemoteConnector):
                 with open(file_path, "rb") as f:
                     num_read = f.readinto(buffer)
             else:
-                fd = os.open(
-                    file_path, os.O_RDONLY | getattr(os, "O_DIRECT", 0)
-                )
+                fd = os.open(file_path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     # The fd is now managed by the file object, so we "forget" it
                     # to prevent closing it in the finally block.
