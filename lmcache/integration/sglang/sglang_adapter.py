@@ -300,6 +300,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping[:retrieve_token_num],
             sync=False,
+            use_shared_buffer_mapping=False,
         )
 
         next(layerwise_retriever)
