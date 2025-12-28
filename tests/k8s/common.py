@@ -13,8 +13,18 @@ import logging
 import os
 import subprocess
 
-
 # Setup logging
+_logger: Optional[logging.Logger] = None
+
+
+def get_logger() -> logging.Logger:
+    """Get or create the logger instance"""
+    global _logger
+    if _logger is None:
+        _logger = setup_logging()
+    return _logger
+
+
 def setup_logging(log_dir: str = "/logs") -> logging.Logger:
     """Setup logging to both console and file"""
     log_path = Path(log_dir)
@@ -47,9 +57,6 @@ def setup_logging(log_dir: str = "/logs") -> logging.Logger:
     return logger
 
 
-logger = setup_logging()
-
-
 class K8sTestConfig:
     """Configuration for K8s integration tests"""
 
@@ -77,7 +84,7 @@ class K8sTestConfig:
         self.hf_token = os.getenv("HF_TOKEN", "")
         self.skip_cleanup = os.getenv("K8S_SKIP_CLEANUP", "0") == "1"
 
-        logger.info(
+        get_logger().info(
             f"Test configuration: namespace={namespace}, "
             f"image={self.lmcache_image}, timeout={timeout}s"
         )
@@ -94,7 +101,7 @@ class K8sTestHelper:
     ) -> subprocess.CompletedProcess:
         """Run kubectl command"""
         cmd = ["kubectl"] + args
-        logger.debug(f"Running: {' '.join(cmd)}")
+        get_logger().debug(f"Running: {' '.join(cmd)}")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -102,9 +109,9 @@ class K8sTestHelper:
             check=False,
         )
         if result.returncode != 0:
-            logger.debug(f"Command failed with exit code {result.returncode}")
-            logger.debug(f"stdout: {result.stdout}")
-            logger.debug(f"stderr: {result.stderr}")
+            get_logger().debug(f"Command failed with exit code {result.returncode}")
+            get_logger().debug(f"stdout: {result.stdout}")
+            get_logger().debug(f"stderr: {result.stderr}")
         if check and result.returncode != 0:
             raise RuntimeError(
                 f"kubectl command failed: {' '.join(cmd)}\n"
@@ -115,8 +122,8 @@ class K8sTestHelper:
 
     def apply_manifest(self, manifest_content: str) -> None:
         """Apply K8s manifest"""
-        logger.info("Applying K8s manifest")
-        logger.debug(f"Manifest content:\n{manifest_content}")
+        get_logger().info("Applying K8s manifest")
+        get_logger().debug(f"Manifest content:\n{manifest_content}")
         result = subprocess.run(
             ["kubectl", "apply", "-f", "-"],
             input=manifest_content,
@@ -125,17 +132,17 @@ class K8sTestHelper:
             check=False,
         )
         if result.returncode != 0:
-            logger.error(f"Failed to apply manifest: {result.stderr}")
+            get_logger().error(f"Failed to apply manifest: {result.stderr}")
             raise RuntimeError(
                 f"Failed to apply manifest:\n"
                 f"stdout: {result.stdout}\n"
                 f"stderr: {result.stderr}"
             )
-        logger.info("Manifest applied successfully")
+        get_logger().info("Manifest applied successfully")
 
     def wait_for_pod_ready(self, label_selector: str, timeout: int) -> None:
         """Wait for pod to be ready"""
-        logger.info(
+        get_logger().info(
             f"Waiting for pod with label {label_selector} to be ready "
             f"(timeout: {timeout}s)"
         )
@@ -151,7 +158,7 @@ class K8sTestHelper:
             check=False,
         )
         if result.returncode != 0:
-            logger.error(f"Pod failed to become ready within {timeout}s")
+            get_logger().error(f"Pod failed to become ready within {timeout}s")
             # Get pod status for debugging
             pod_status = self.run_kubectl(
                 [
@@ -188,9 +195,9 @@ class K8sTestHelper:
             )
 
             # Log detailed debugging info
-            logger.debug(f"Pod status:\n{pod_status.stdout}")
-            logger.debug(f"Pod describe:\n{pod_describe.stdout}")
-            logger.debug(f"Pod logs:\n{pod_logs.stdout}")
+            get_logger().debug(f"Pod status:\n{pod_status.stdout}")
+            get_logger().debug(f"Pod describe:\n{pod_describe.stdout}")
+            get_logger().debug(f"Pod logs:\n{pod_logs.stdout}")
 
             raise RuntimeError(
                 f"Pod failed to become ready within {timeout}s\n"
@@ -200,7 +207,7 @@ class K8sTestHelper:
                 f"Pod logs (last 100 lines):\n{pod_logs.stdout}\n"
                 f"Pod logs stderr:\n{pod_logs.stderr}"
             )
-        logger.info("Pod is ready")
+        get_logger().info("Pod is ready")
 
     def exec_in_pod(
         self, pod_name: str, command: list[str]
@@ -213,10 +220,10 @@ class K8sTestHelper:
     def cleanup_resources(self, manifest_content: str) -> None:
         """Cleanup all test resources using the manifest"""
         if self.config.skip_cleanup:
-            logger.info("Skipping cleanup (K8S_SKIP_CLEANUP=1)")
+            get_logger().info("Skipping cleanup (K8S_SKIP_CLEANUP=1)")
             return
 
-        logger.info("Cleaning up test resources")
+        get_logger().info("Cleaning up test resources")
         result = subprocess.run(
             ["kubectl", "delete", "-f", "-"],
             input=manifest_content,
@@ -225,10 +232,10 @@ class K8sTestHelper:
             check=False,
         )
         if result.returncode != 0:
-            logger.warning(
+            get_logger().warning(
                 f"Cleanup had errors (this is often normal): {result.stderr}"
             )
-        logger.info("Cleanup complete")
+        get_logger().info("Cleanup complete")
 
 
 def prepare_manifest(
@@ -291,7 +298,7 @@ def run_inference_test(
     Raises:
         AssertionError: If inference test fails
     """
-    logger.info(f"Testing inference at {service_url}")
+    get_logger().info(f"Testing inference at {service_url}")
     # Prepare inference request
     request_data = {
         "model": model,
@@ -299,7 +306,7 @@ def run_inference_test(
         "max_tokens": max_tokens,
         "temperature": 0.7,
     }
-    logger.debug(f"Request data: {json.dumps(request_data, indent=2)}")
+    get_logger().debug(f"Request data: {json.dumps(request_data, indent=2)}")
 
     # Send request from debug pod
     curl_cmd = [
@@ -319,14 +326,14 @@ def run_inference_test(
 
     result = helper.exec_in_pod(helper.config.debug_pod_name, curl_cmd)
     http_status = result.stdout.strip()
-    logger.debug(f"HTTP status: {http_status}")
+    get_logger().debug(f"HTTP status: {http_status}")
 
     # Verify HTTP status
     if http_status != "200":
         # Get curl stderr for more details
         curl_stderr = result.stderr if result.stderr else "No stderr output"
-        logger.error(f"Inference request failed with HTTP {http_status}")
-        logger.debug(f"curl stderr: {curl_stderr}")
+        get_logger().error(f"Inference request failed with HTTP {http_status}")
+        get_logger().debug(f"curl stderr: {curl_stderr}")
         raise AssertionError(
             f"Expected HTTP 200, got {http_status}\n"
             f"curl stderr: {curl_stderr}\n"
@@ -338,13 +345,13 @@ def run_inference_test(
         helper.config.debug_pod_name, ["cat", "/tmp/response.json"]
     )
     response_text = response_result.stdout
-    logger.debug(f"Response: {response_text}")
+    get_logger().debug(f"Response: {response_text}")
 
     # Parse and validate response
     try:
         response_data = json.loads(response_text)
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse response JSON: {e}")
+        get_logger().error(f"Failed to parse response JSON: {e}")
         raise AssertionError(
             f"Failed to parse response JSON: {e}\nResponse: {response_text}"
         ) from e
@@ -356,5 +363,5 @@ def run_inference_test(
         "Response missing 'choices[0].text' field"
     )
 
-    logger.info("Inference test passed")
+    get_logger().info("Inference test passed")
     return response_data
