@@ -40,6 +40,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV RUN_K8S_TESTS=1
 
 # Default command runs pytest with verbose output
 CMD ["pytest", "test_integration.py", "-v", "-s"]

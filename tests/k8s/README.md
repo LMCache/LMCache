@@ -2,7 +2,7 @@
 
 Python-based integration tests for LMCache in Kubernetes environments.
 
-> **Note**: These tests are currently for local validation only. K8s cluster integration in CI/CD is not yet available. Once a K8s cluster is configured in CI/CD, these tests can be added to the automated pipeline.
+> **Note**: These tests are skipped in CI by default (require K8s cluster with GPU nodes). Set `RUN_K8S_TESTS=1` to enable them when a K8s cluster is available in CI/CD.
 
 ## Directory Structure
 
