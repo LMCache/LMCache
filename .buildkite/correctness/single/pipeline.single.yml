@@ -1,6 +1,10 @@
 steps:
   - label: ":rocket: vLLM correctness (source install)"
     key: "correctness"
+    env:
+      # Buildkite will ensure every sub-process gets them.
+      XDG_CACHE_HOME: "/tmp/vllm-cache"
+      FLASHINFER_WORKSPACE_DIR: "/tmp/vllm-cache/flashinfer"
     timeout_in_minutes: 60
     commands:
       - |
