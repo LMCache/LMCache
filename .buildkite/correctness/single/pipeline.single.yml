@@ -6,6 +6,8 @@ steps:
       - |
         set -euo pipefail
 
+        echo "DEBUG: PWD is $(pwd)"
+
         # 1. Install uv
         curl -LsSf https://astral.sh/uv/install.sh | sh
         export PATH="$HOME/.local/bin:$PATH"
@@ -15,8 +17,13 @@ steps:
         MY_CACHE_PATH="$(pwd)/.uv-cache"
         mkdir -p "$MY_CACHE_PATH"
         
+        echo "DEBUG: MY_CACHE_PATH is ${MY_CACHE_PATH:-EMPTY_STRING}"
+
         export UV_CACHE_DIR="$MY_CACHE_PATH"
         export XDG_CACHE_HOME="$MY_CACHE_PATH"
+
+        echo "UV_CACHE_DIR is: $UV_CACHE_DIR"
+        echo "XDG_CACHE_HOME is: $XDG_CACHE_HOME"
 
         # 3. Cleanup logic
         cleanup() {
