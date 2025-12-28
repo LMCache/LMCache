@@ -13,8 +13,16 @@ MODEL="meta-llama/Llama-3.2-1B-Instruct"
 WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
-# Bumping timeout to 180 as JIT compilation on L4 takes significant time
 SERVER_WAIT_TIMEOUT=180
+
+# 1. Setup a local, writable directory in the current workspace
+CI_CACHE_DIR="$PWD/.vllm_cache_${BUILD_ID}"
+mkdir -p "$CI_CACHE_DIR"
+
+# Export these so EVERY process (cli, vllm, workers) uses this path
+export HF_HOME="$CI_CACHE_DIR/huggingface"
+export XDG_CACHE_HOME="$CI_CACHE_DIR/xdg"
+export FLASHINFER_WORKSPACE_DIR="$CI_CACHE_DIR/flashinfer"
 
 # Auto-activate venv
 if [[ -f ".venv/bin/activate" ]]; then
@@ -23,7 +31,7 @@ if [[ -f ".venv/bin/activate" ]]; then
 fi
 
 #######################################
-# Diagnostics & Cleanup
+# Artifact collection & Cleanup
 #######################################
 collect_artifact() {
     echo "[INFO] Collecting logs into ${ARTIFACT}"
@@ -36,8 +44,7 @@ cleanup() {
         kill "${VLLM_PID}" >/dev/null 2>&1 || true
         wait "${VLLM_PID}" 2>/dev/null || true
     fi
-    # Cleanup the fake home sandbox
-    rm -rf "/tmp/vllm_home_${BUILD_ID}"
+    # Optional: rm -rf "$CI_CACHE_DIR" 
 }
 
 trap 'rc=$?; cleanup; collect_artifact; exit $rc' EXIT INT TERM
@@ -49,6 +56,15 @@ exec > >(tee -a "${WORK_LOG}") 2>&1
 
 echo "=== DIAGNOSTICS: GPU STATE ==="
 nvidia-smi
+
+#######################################
+# Independent Download Phase
+#######################################
+# We do this here to ensure the directory structure is created with 
+# the correct user permissions before vLLM workers touch it.
+echo "[INFO] Pre-downloading model weights to $HF_HOME"
+uv pip install huggingface_hub
+huggingface-cli download "${MODEL}" --cache-dir "$HF_HOME"
 
 #######################################
 # Start vLLM
@@ -64,27 +80,8 @@ find_free_port() {
 }
 
 PORT="$(find_free_port)"
-REAL_HOME="$HOME"
-FAKE_HOME="/tmp/vllm_home_${BUILD_ID}"
-
-# 1. Setup the fake home structure to bypass permission issues in /var/lib/buildkite-agent
-mkdir -p "${FAKE_HOME}/.cache/huggingface"
-
-# 2. Symlink ONLY the 'hub' (weights) to save 15GB+ download time
-# This leaves 'modules' and 'transformers' writable in our FAKE_HOME sandbox
-REAL_HUB="${REAL_HOME}/.cache/huggingface/hub"
-mkdir -p "${REAL_HUB}"
-ln -sfn "${REAL_HUB}" "${FAKE_HOME}/.cache/huggingface/hub"
 
 echo "[INFO] Starting vLLM on port ${PORT}"
-echo "[INFO] Redirecting HOME to ${FAKE_HOME}"
-
-# 3. Export everything globally for the worker processes (vLLM V1)
-export HOME="${FAKE_HOME}"
-export XDG_CACHE_HOME="${FAKE_HOME}/.cache"
-export HF_HOME="${FAKE_HOME}/.cache/huggingface"
-export FLASHINFER_WORKSPACE_DIR="${FAKE_HOME}/.cache/flashinfer"
-
 echo "[INFO] FLASHINFER_WORKSPACE_DIR is ${FLASHINFER_WORKSPACE_DIR}"
 
 VLLM_SERVER_DEV_MODE=1 \
@@ -122,7 +119,7 @@ if [ "$READY" = false ]; then
 fi
 
 #######################################
-# Build test contexts (YOUR ORIGINAL LOGIC)
+# Build test contexts
 #######################################
 echo "[INFO] Generating test contexts from man bash..."
 CONTEXT="$(
