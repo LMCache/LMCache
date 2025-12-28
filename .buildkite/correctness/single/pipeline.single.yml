@@ -6,15 +6,17 @@ steps:
       - |
         set -euo pipefail
 
-        # Install uv (brings its own Python)
+        # Install uv
         curl -LsSf https://astral.sh/uv/install.sh | sh
         export PATH="$HOME/.local/bin:$PATH"
 
-        uv --version
-
-        export UV_CACHE_DIR="$PWD/.uv-cache"
-        mkdir -p "$UV_CACHE_DIR"
+        # Define and export variables clearly
+        UV_CACHE_DIR="$PWD/.uv-cache"
+        export UV_CACHE_DIR
         export XDG_CACHE_HOME="$UV_CACHE_DIR"
+
+        # Now mkdir will receive the full path
+        mkdir -p "$UV_CACHE_DIR"
 
         # Always clean up the venv
         cleanup() {
