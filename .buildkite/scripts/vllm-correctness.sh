@@ -64,15 +64,15 @@ PORT="$(find_free_port)"
 LOCAL_CACHE="/tmp/vllm_cache_${BUILD_ID}"
 mkdir -p "${LOCAL_CACHE}/flashinfer"
 
-echo "[INFO] Starting vLLM on port ${PORT}"
-
-# 1. Export them globally so they are in the environment table
 export XDG_CACHE_HOME="${LOCAL_CACHE}"
 export FLASHINFER_WORKSPACE_DIR="${LOCAL_CACHE}/flashinfer"
 
-# 2. Start the server
+echo "[INFO] Starting vLLM on port ${PORT}"
+echo "[DEBUG] FLASHINFER_WORKSPACE_DIR is ${FLASHINFER_WORKSPACE_DIR}"
+
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
+FLASHINFER_WORKSPACE_DIR="${FLASHINFER_WORKSPACE_DIR}" \
 VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
