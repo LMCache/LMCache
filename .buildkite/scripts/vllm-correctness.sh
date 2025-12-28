@@ -61,24 +61,33 @@ find_free_port() {
 }
 
 PORT="$(find_free_port)"
-LOCAL_CACHE="/tmp/vllm_cache_${BUILD_ID}"
-mkdir -p "${LOCAL_CACHE}/flashinfer"
 
-export XDG_CACHE_HOME="${LOCAL_CACHE}"
-export FLASHINFER_WORKSPACE_DIR="${LOCAL_CACHE}/flashinfer"
+# 1. Use a local directory in the workspace instead of /tmp
+# This ensures total ownership and prevents permission inheritance issues
+CI_HOME="$PWD/.vllm_home_${BUILD_ID}"
+mkdir -p "${CI_HOME}/.cache/flashinfer"
+
+# 2. Save real home and link HF cache (prevents redownloading 15GB of weights)
+REAL_HOME="$HOME"
+mkdir -p "${REAL_HOME}/.cache/huggingface"
+ln -sfn "${REAL_HOME}/.cache/huggingface" "${CI_HOME}/.cache/huggingface"
+
+# 3. Export these so worker processes (EngineCore_DP0) inherit them
+export HOME="${CI_HOME}"
+export XDG_CACHE_HOME="${CI_HOME}/.cache"
+export FLASHINFER_WORKSPACE_DIR="${CI_HOME}/.cache/flashinfer"
 
 echo "[INFO] Starting vLLM on port ${PORT}"
 echo "[DEBUG] FLASHINFER_WORKSPACE_DIR is ${FLASHINFER_WORKSPACE_DIR}"
 
+# 4. Start vLLM with the updated --attention-backend flag for V1
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
-FLASHINFER_WORKSPACE_DIR="${FLASHINFER_WORKSPACE_DIR}" \
-VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --gpu-memory-utilization 0.8 \
-    --attention-config '{"backend":"flash_attn"}' \
+    --attention-backend flash_attn \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >"${VLLM_LOG}" 2>&1 &
 
