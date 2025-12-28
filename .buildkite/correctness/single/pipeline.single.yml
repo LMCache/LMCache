@@ -1,19 +1,40 @@
 steps:
-  - label: ":rocket: vLLM Single Request Correctness Test"
-    key: "test"
+  - label: ":rocket: vLLM correctness (source install)"
+    key: "correctness"
     timeout_in_minutes: 60
-    env:
-      DOCKER_BUILDKIT: 1
     commands:
-      - chmod +x .buildkite/scripts/vllm-correctness.sh
-      - BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/vllm-correctness.sh
+      - |
+        set -euo pipefail
+
+        # Install uv (brings its own Python)
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+
+        uv --version
+
+        # Always clean up the venv
+        cleanup() {
+          echo "[INFO] Cleaning up .venv"
+          rm -rf .venv
+        }
+        trap cleanup EXIT INT TERM
+
+        # Create isolated env
+        uv venv .venv
+        source .venv/bin/activate
+
+        python --version
+
+        # Install dependencies
+        uv pip install --upgrade pip
+        uv pip install vllm
+        uv pip install -e .
+
+        which vllm
+
+        # Run test
+        chmod +x .buildkite/scripts/vllm-correctness.sh
+        BUILD_ID="${BUILDKITE_BUILD_ID}" \
+          .buildkite/scripts/vllm-correctness.sh
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
-
-  - label: ":broom: Clean up"
-    depends_on: ["test"]
-    allow_dependency_failure: true
-    command: |
-      echo "Deleting current workspace $PWD"
-      cd /
-      sudo rm -rf "$PWD"
