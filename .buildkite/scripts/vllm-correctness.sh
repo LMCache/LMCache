@@ -91,6 +91,7 @@ vllm serve "${MODEL}" \
     --trust-remote-code \
     --gpu-memory-utilization 0.8 \
     --attention-backend FLASH_ATTN \
+    -cc.level=0 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >"${VLLM_LOG}" 2>&1 &
 
