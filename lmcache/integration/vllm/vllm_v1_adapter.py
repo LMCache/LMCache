@@ -836,6 +836,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         sync=sync,
+                        use_shared_buffer_mapping=False,
                     )
                     # NOTE: retrieve for two layers at the first layer
                     next(layerwise_retriever)
