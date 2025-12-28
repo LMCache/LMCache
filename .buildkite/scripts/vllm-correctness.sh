@@ -13,10 +13,12 @@ MODEL="meta-llama/Llama-3.2-1B-Instruct"
 WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
-SERVER_WAIT_TIMEOUT=60
+# Bumping timeout to 180 as JIT compilation on L4 takes significant time
+SERVER_WAIT_TIMEOUT=180
 
 # Auto-activate venv
 if [[ -f ".venv/bin/activate" ]]; then
+    echo "[INFO] Activating found venv in .venv"
     source .venv/bin/activate
 fi
 
@@ -34,7 +36,8 @@ cleanup() {
         kill "${VLLM_PID}" >/dev/null 2>&1 || true
         wait "${VLLM_PID}" 2>/dev/null || true
     fi
-    rm -rf "/tmp/vllm_cache_${BUILD_ID}"
+    # Cleanup the fake home sandbox
+    rm -rf "/tmp/vllm_home_${BUILD_ID}"
 }
 
 trap 'rc=$?; cleanup; collect_artifact; exit $rc' EXIT INT TERM
@@ -61,33 +64,36 @@ find_free_port() {
 }
 
 PORT="$(find_free_port)"
-
-# 1. Use a local directory in the workspace instead of /tmp
-# This ensures total ownership and prevents permission inheritance issues
-CI_HOME="$PWD/.vllm_home_${BUILD_ID}"
-mkdir -p "${CI_HOME}/.cache/flashinfer"
-
-# 2. Save real home and link HF cache (prevents redownloading 15GB of weights)
 REAL_HOME="$HOME"
-mkdir -p "${REAL_HOME}/.cache/huggingface"
-ln -sfn "${REAL_HOME}/.cache/huggingface" "${CI_HOME}/.cache/huggingface"
+FAKE_HOME="/tmp/vllm_home_${BUILD_ID}"
 
-# 3. Export these so worker processes (EngineCore_DP0) inherit them
-export HOME="${CI_HOME}"
-export XDG_CACHE_HOME="${CI_HOME}/.cache"
-export FLASHINFER_WORKSPACE_DIR="${CI_HOME}/.cache/flashinfer"
+# 1. Setup the fake home structure to bypass permission issues in /var/lib/buildkite-agent
+mkdir -p "${FAKE_HOME}/.cache/huggingface"
+
+# 2. Symlink ONLY the 'hub' (weights) to save 15GB+ download time
+# This leaves 'modules' and 'transformers' writable in our FAKE_HOME sandbox
+REAL_HUB="${REAL_HOME}/.cache/huggingface/hub"
+mkdir -p "${REAL_HUB}"
+ln -sfn "${REAL_HUB}" "${FAKE_HOME}/.cache/huggingface/hub"
 
 echo "[INFO] Starting vLLM on port ${PORT}"
-echo "[DEBUG] FLASHINFER_WORKSPACE_DIR is ${FLASHINFER_WORKSPACE_DIR}"
+echo "[INFO] Redirecting HOME to ${FAKE_HOME}"
 
-# 4. Start vLLM with the updated --attention-backend flag for V1
+# 3. Export everything globally for the worker processes (vLLM V1)
+export HOME="${FAKE_HOME}"
+export XDG_CACHE_HOME="${FAKE_HOME}/.cache"
+export HF_HOME="${FAKE_HOME}/.cache/huggingface"
+export FLASHINFER_WORKSPACE_DIR="${FAKE_HOME}/.cache/flashinfer"
+
+echo "[INFO] FLASHINFER_WORKSPACE_DIR is ${FLASHINFER_WORKSPACE_DIR}"
+
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --gpu-memory-utilization 0.8 \
-    --attention-backend flash_attn \
+    --attention-backend FLASH_ATTN \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >"${VLLM_LOG}" 2>&1 &
 
