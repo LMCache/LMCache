@@ -14,6 +14,7 @@ steps:
 
         export UV_CACHE_DIR="$PWD/.uv-cache"
         mkdir -p "$UV_CACHE_DIR"
+        export XDG_CACHE_HOME="$UV_CACHE_DIR"
 
         # Always clean up the venv
         cleanup() {
