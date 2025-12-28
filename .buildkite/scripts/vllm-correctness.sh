@@ -14,20 +14,20 @@ WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
 
-#######################################
-# Artifact collection
-#######################################
-collect_artifact() {
-    cat /tmp/build_"${BUILD_ID}"_*.log > "${ARTIFACT}" 2>/dev/null || {
-        echo "No logs found" > "${ARTIFACT}"
-    }
-}
+# Auto-activate venv if it exists in the current directory
+if [[ -f ".venv/bin/activate" ]]; then
+    source .venv/bin/activate
+fi
 
 #######################################
-# Cleanup
+# Artifact collection & Cleanup
 #######################################
+collect_artifact() {
+    cat /tmp/build_"${BUILD_ID}"_*.log > "${ARTIFACT}" 2>/dev/null || true
+}
+
 cleanup() {
-    echo "[INFO] Cleaning up"
+    echo "[INFO] Cleaning up vLLM process"
     if [[ -n "${VLLM_PID:-}" ]]; then
         kill "${VLLM_PID}" >/dev/null 2>&1 || true
         wait "${VLLM_PID}" 2>/dev/null || true
@@ -42,8 +42,7 @@ trap 'rc=$?; collect_artifact; cleanup; exit $rc' EXIT INT TERM
 exec > >(tee -a "${WORK_LOG}") 2>&1
 
 echo "[INFO] Build ID: ${BUILD_ID}"
-echo "[INFO] Work log: ${WORK_LOG}"
-echo "[INFO] vLLM log: ${VLLM_LOG}"
+echo "[INFO] Using vllm from: $(which vllm)"
 
 #######################################
 # Utilities
@@ -55,7 +54,6 @@ find_free_port() {
             return
         fi
     done
-    echo "[ERROR] No free port found"
     exit 1
 }
 
@@ -65,9 +63,15 @@ find_free_port() {
 PORT="$(find_free_port)"
 echo "[INFO] Using port ${PORT}"
 
+# Solve Permission Denied by redirecting JIT cache to a local writable folder
+LOCAL_CACHE="/tmp/vllm_cache_${BUILD_ID}"
+mkdir -p "${LOCAL_CACHE}/flashinfer"
+
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
 VLLM_ATTENTION_BACKEND=FLASH_ATTN \
+XDG_CACHE_HOME="${LOCAL_CACHE}" \
+FLASHINFER_WORKSPACE_DIR="${LOCAL_CACHE}/flashinfer" \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
@@ -79,7 +83,6 @@ VLLM_PID=$!
 # Wait for readiness
 #######################################
 echo "[INFO] Waiting for vLLM to become ready"
-
 for _ in $(seq 1 60); do
     if curl -s "http://localhost:${PORT}/v1/models" >/dev/null; then
         echo "[INFO] vLLM is ready"
@@ -90,8 +93,7 @@ done
 
 if ! curl -s "http://localhost:${PORT}/v1/models" >/dev/null; then
     echo "[ERROR] vLLM failed to start"
-    echo "----- vLLM log (tail) -----"
-    tail -n 200 "${VLLM_LOG}" || true
+    tail -n 100 "${VLLM_LOG}"
     exit 1
 fi
 
