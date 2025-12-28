@@ -13,7 +13,7 @@ MODEL="meta-llama/Llama-3.2-1B-Instruct"
 WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
-SERVER_WAIT_TIMEOUT=180
+SERVER_WAIT_TIMEOUT=60
 
 # Auto-activate venv
 if [[ -f ".venv/bin/activate" ]]; then
@@ -66,15 +66,19 @@ mkdir -p "${LOCAL_CACHE}/flashinfer"
 
 echo "[INFO] Starting vLLM on port ${PORT}"
 
+# 1. Export them globally so they are in the environment table
+export XDG_CACHE_HOME="${LOCAL_CACHE}"
+export FLASHINFER_WORKSPACE_DIR="${LOCAL_CACHE}/flashinfer"
+
+# 2. Start the server
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
 VLLM_ATTENTION_BACKEND=FLASH_ATTN \
-XDG_CACHE_HOME="${LOCAL_CACHE}" \
-FLASHINFER_WORKSPACE_DIR="${LOCAL_CACHE}/flashinfer" \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --gpu-memory-utilization 0.8 \
+    --attention-config '{"backend":"flash_attn"}' \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >"${VLLM_LOG}" 2>&1 &
 
