@@ -12,10 +12,14 @@ steps:
 
         uv --version
 
+        export UV_CACHE_DIR="$PWD/.uv-cache"
+        rm -rf "$UV_CACHE_DIR"
+
+
         # Always clean up the venv
         cleanup() {
           echo "[INFO] Cleaning up .venv"
-          rm -rf .venv
+          rm -rf .venv .uv-cache
         }
         trap cleanup EXIT INT TERM
 
