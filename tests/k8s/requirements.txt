@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# Python dependencies for LMCache K8s integration tests
+
+pytest>=7.0.0

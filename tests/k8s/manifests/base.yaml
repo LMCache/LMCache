@@ -1,0 +1,121 @@
+---
+# Base K8s test deployment for LMCache + vLLM
+# This is a minimal configuration for testing basic functionality
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lmcache-base-test
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-config
+  namespace: lmcache-base-test
+data:
+  lmcache.yaml: |
+    local_cpu: true
+    chunk_size: 256
+    max_local_cpu_size: 5
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache-base
+  namespace: lmcache-base-test
+  labels:
+    app: lmcache-base
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmcache-base
+  template:
+    metadata:
+      labels:
+        app: lmcache-base
+    spec:
+      containers:
+        - name: vllm
+          # Configurable via LMCACHE_IMAGE environment variable
+          # Default: lmcache/vllm-openai:latest
+          image: ${LMCACHE_IMAGE}
+          command:
+            - vllm
+            - serve
+            - Qwen/Qwen3-14B
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --max-model-len
+            - "1024"
+            - --enforce-eager
+            - --tensor-parallel-size
+            - "4"
+            - --kv-transfer-config
+            - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LMCACHE_CONFIG_FILE
+              value: /etc/lmcache/lmcache.yaml
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"
+            - name: PYTHONHASHSEED
+              value: "0"
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              nvidia.com/gpu: "4"
+          volumeMounts:
+            - name: lmcache-config
+              mountPath: /etc/lmcache
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 3
+      volumes:
+        - name: lmcache-config
+          configMap:
+            name: lmcache-config
+
+---
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lmcache-base-test-client
+  namespace: lmcache-base-test
+  labels:
+    app: lmcache-base-test-client
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:latest
+      command:
+        - sleep
+        - "3600"
+  restartPolicy: Never

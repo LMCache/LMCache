@@ -1,0 +1,115 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lmcache-sagemaker-hyperpod-test
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-config
+  namespace: lmcache-sagemaker-hyperpod-test
+data:
+  lmcache.yaml: |
+    chunk_size: 256
+    local_cpu: false
+    remote_url: "sagemaker-hyperpod://$NODE_IP:9200"
+    extra_config:
+      sagemaker_hyperpod_bucket: "lmcache"
+      sagemaker_hyperpod_shared_memory_name: "ai_toolkit_cache"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache-sagemaker-hyperpod
+  namespace: lmcache-sagemaker-hyperpod-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmcache-sagemaker-hyperpod
+  template:
+    metadata:
+      namespace: lmcache-sagemaker-hyperpod-test
+      labels:
+        app: lmcache-sagemaker-hyperpod
+    spec:
+      containers:
+        - name: vllm
+          image: ${LMCACHE_IMAGE}
+          command:
+            - /opt/venv/bin/vllm
+            - serve
+            - Qwen/Qwen3-14B
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --no-enable-prefix-caching
+            - --max-model-len
+            - "4096"
+            - --tensor-parallel-size
+            - "4"
+            - --kv-transfer-config
+            - '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              nvidia.com/gpu: "4"
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /health
+              port: 8000
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: LMCACHE_CONFIG_FILE
+              value: /etc/lmcache/lmcache.yaml
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: "/tmp"
+          volumeMounts:
+            - name: lmcache-config
+              mountPath: /etc/lmcache
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: lmcache-config
+          configMap:
+            name: lmcache-config
+        - name: dshm
+          hostPath:
+            path: /dev/shm
+
+---
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lmcache-sagemaker-hyperpod-test-client
+  namespace: lmcache-sagemaker-hyperpod-test
+  labels:
+    app: lmcache-sagemaker-hyperpod-test-client
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:latest
+      command:
+        - sleep
+        - "3600"
+  restartPolicy: Never
