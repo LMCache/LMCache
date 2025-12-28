@@ -6,41 +6,39 @@ steps:
       - |
         set -euo pipefail
 
-        # Install uv
+        # 1. Install uv
         curl -LsSf https://astral.sh/uv/install.sh | sh
         export PATH="$HOME/.local/bin:$PATH"
+        uv --version
 
-        # Define and export variables clearly
-        UV_CACHE_DIR="$PWD/.uv-cache"
-        export UV_CACHE_DIR
-        export XDG_CACHE_HOME="$UV_CACHE_DIR"
+        # 2. Setup Cache - Use a direct variable and verify it
+        MY_CACHE_PATH="$(pwd)/.uv-cache"
+        mkdir -p "$MY_CACHE_PATH"
+        
+        export UV_CACHE_DIR="$MY_CACHE_PATH"
+        export XDG_CACHE_HOME="$MY_CACHE_PATH"
 
-        # Now mkdir will receive the full path
-        mkdir -p "$UV_CACHE_DIR"
-
-        # Always clean up the venv
+        # 3. Cleanup logic
         cleanup() {
-          echo "[INFO] Cleaning up .venv"
-          rm -rf .venv .uv-cache
+          echo "[INFO] Cleaning up .venv and cache"
+          rm -rf .venv "$MY_CACHE_PATH"
         }
         trap cleanup EXIT INT TERM
 
-        # Create isolated env
+        # 4. Create isolated env (Force python version to ensure stability)
         uv venv .venv
         source .venv/bin/activate
 
-        python --version
-
-        # Install dependencies
+        # 5. Install dependencies
+        # Note: installing 'vllm' then '-e .' might cause version conflicts
+        # depending on your setup; usually -e . handles the deps.
         uv pip install --upgrade pip
         uv pip install vllm
         uv pip install -e .
 
-        which vllm
-
-        # Run test
+        # 6. Run test
         chmod +x .buildkite/scripts/vllm-correctness.sh
-        BUILD_ID="${BUILDKITE_BUILD_ID}" \
-          .buildkite/scripts/vllm-correctness.sh
+        BUILD_ID="${BUILDKITE_BUILD_ID}" .buildkite/scripts/vllm-correctness.sh
+
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
