@@ -13,17 +13,19 @@ MODEL="meta-llama/Llama-3.2-1B-Instruct"
 WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
+SERVER_WAIT_TIMEOUT=180
 
-# Auto-activate venv if it exists in the current directory
+# Auto-activate venv
 if [[ -f ".venv/bin/activate" ]]; then
     source .venv/bin/activate
 fi
 
 #######################################
-# Artifact collection & Cleanup
+# Diagnostics & Cleanup
 #######################################
 collect_artifact() {
-    cat /tmp/build_"${BUILD_ID}"_*.log > "${ARTIFACT}" 2>/dev/null || true
+    echo "[INFO] Collecting logs into ${ARTIFACT}"
+    cat "${WORK_LOG}" "${VLLM_LOG}" > "${ARTIFACT}" 2>/dev/null || true
 }
 
 cleanup() {
@@ -32,20 +34,21 @@ cleanup() {
         kill "${VLLM_PID}" >/dev/null 2>&1 || true
         wait "${VLLM_PID}" 2>/dev/null || true
     fi
+    rm -rf "/tmp/vllm_cache_${BUILD_ID}"
 }
 
-trap 'rc=$?; collect_artifact; cleanup; exit $rc' EXIT INT TERM
+trap 'rc=$?; cleanup; collect_artifact; exit $rc' EXIT INT TERM
 
 #######################################
-# Logging
+# Logging Setup
 #######################################
 exec > >(tee -a "${WORK_LOG}") 2>&1
 
-echo "[INFO] Build ID: ${BUILD_ID}"
-echo "[INFO] Using vllm from: $(which vllm)"
+echo "=== DIAGNOSTICS: GPU STATE ==="
+nvidia-smi
 
 #######################################
-# Utilities
+# Start vLLM
 #######################################
 find_free_port() {
     for p in $(seq 8000 9000); do
@@ -57,15 +60,11 @@ find_free_port() {
     exit 1
 }
 
-#######################################
-# Start vLLM
-#######################################
 PORT="$(find_free_port)"
-echo "[INFO] Using port ${PORT}"
-
-# Solve Permission Denied by redirecting JIT cache to a local writable folder
 LOCAL_CACHE="/tmp/vllm_cache_${BUILD_ID}"
 mkdir -p "${LOCAL_CACHE}/flashinfer"
+
+echo "[INFO] Starting vLLM on port ${PORT}"
 
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
@@ -74,6 +73,8 @@ XDG_CACHE_HOME="${LOCAL_CACHE}" \
 FLASHINFER_WORKSPACE_DIR="${LOCAL_CACHE}/flashinfer" \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.8 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >"${VLLM_LOG}" 2>&1 &
 
@@ -82,24 +83,29 @@ VLLM_PID=$!
 #######################################
 # Wait for readiness
 #######################################
-echo "[INFO] Waiting for vLLM to become ready"
-for _ in $(seq 1 60); do
-    if curl -s "http://localhost:${PORT}/v1/models" >/dev/null; then
+echo "[INFO] Waiting for vLLM (Timeout: ${SERVER_WAIT_TIMEOUT}s)"
+READY=false
+START_TIME=$(date +%s)
+while [ $(($(date +%s) - START_TIME)) -lt $SERVER_WAIT_TIMEOUT ]; do
+    if curl -s "http://localhost:${PORT}/v1/models" | grep -q "${MODEL//\//\\/}"; then
         echo "[INFO] vLLM is ready"
+        READY=true
         break
     fi
-    sleep 1
+    sleep 5
 done
 
-if ! curl -s "http://localhost:${PORT}/v1/models" >/dev/null; then
+if [ "$READY" = false ]; then
     echo "[ERROR] vLLM failed to start"
-    tail -n 100 "${VLLM_LOG}"
+    echo "=== VLLM LOG (FULL STARTUP) ==="
+    cat "${VLLM_LOG}"
     exit 1
 fi
 
 #######################################
-# Build test contexts
+# Build test contexts (YOUR ORIGINAL LOGIC)
 #######################################
+echo "[INFO] Generating test contexts from man bash..."
 CONTEXT="$(
     man bash | col -b | tr -s '[:space:]' ' ' |
     awk '{for(i=1;i<=NF;i++){printf "%s ",$i; if(++c==5000) exit}}'
@@ -116,9 +122,7 @@ HALF_CONTEXT="$(
 send_completion() {
     curl -s "http://localhost:${PORT}/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d "$(jq -n \
-            --arg model "${MODEL}" \
-            --arg content "$1" \
+        -d "$(jq -n --arg model "${MODEL}" --arg content "$1" \
             '{
                 model: $model,
                 temperature: 0,
@@ -146,10 +150,8 @@ OUT2="$(send_completion "${CONTEXT}")"
 echo "[STEP 5] Equality check"
 if [[ "${OUT1}" != "${OUT2}" ]]; then
     echo "[FAIL] Output mismatch"
-    echo "----- FIRST -----"
-    printf '%s\n' "${OUT1}"
-    echo "----- SECOND -----"
-    printf '%s\n' "${OUT2}"
+    printf 'FIRST: %s\n' "${OUT1}"
+    printf 'SECOND: %s\n' "${OUT2}"
     exit 1
 fi
 
