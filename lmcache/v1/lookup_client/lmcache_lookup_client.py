@@ -177,6 +177,13 @@ class LMCacheLookupClient(LookupClientInterface):
         request_configs: Optional[dict] = None,
         num_computed_tokens: int = 0,
     ) -> Optional[int]:
+        if not isinstance(token_ids, list):
+            if isinstance(token_ids, torch.Tensor):
+                token_ids = token_ids.tolist()
+            elif hasattr(token_ids, "tolist"):
+                token_ids = token_ids.tolist()
+            else:
+                token_ids = list(token_ids)
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:

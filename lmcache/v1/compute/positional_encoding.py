@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Callable, Dict, Optional
+import inspect
 
 # Third Party
 from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
@@ -109,6 +110,25 @@ def validate_rope_params(
     return True
 
 
+def _match_rope_cache_device(rope, reference: torch.Tensor) -> None:
+    match = getattr(rope, "_match_cos_sin_cache_dtype", None)
+    if callable(match):
+        match(reference)
+        return
+
+    cos_sin_cache = getattr(rope, "cos_sin_cache", None)
+    if cos_sin_cache is None:
+        return
+
+    if (
+        cos_sin_cache.device != reference.device
+        or cos_sin_cache.dtype != reference.dtype
+    ):
+        rope.cos_sin_cache = cos_sin_cache.to(
+            reference.device, dtype=reference.dtype
+        )
+
+
 def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> bool:
     hidden_dim = head_size * 8
     num_tokens = 10
@@ -116,6 +136,8 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     dumb_q = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
     dumb_k = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
     positions = torch.arange(num_tokens, device="cuda")
+
+    _match_rope_cache_device(rope, dumb_q)
 
     q1 = dumb_q.clone()
     k1 = dumb_k.clone()
@@ -171,16 +193,30 @@ def get_fused_rope(
         )
         return None
 
-    rope = vllm_get_rope(
-        head_size,
-        rotary_dim,
-        max_position,
-        base,
-        is_neox_style,
-        rope_scaling,
-        dtype,
-        partial_rotary_factor,
-    )
+    rope_params = {
+        "rope_theta": base,
+        "partial_rotary_factor": partial_rotary_factor,
+    }
+    rope_sig = inspect.signature(vllm_get_rope)
+    if "rope_parameters" in rope_sig.parameters:
+        rope = vllm_get_rope(
+            head_size=head_size,
+            max_position=max_position,
+            is_neox_style=is_neox_style,
+            rope_parameters=rope_params,
+            dtype=dtype,
+        )
+    else:
+        rope = vllm_get_rope(
+            head_size,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox_style,
+            rope_scaling,
+            dtype,
+            partial_rotary_factor,
+        )
 
     reverse_rope = BasicReverseRope(rope, rotary_dim, is_neox_style)
     fused_rope = FusedRope(rope, is_neox_style)

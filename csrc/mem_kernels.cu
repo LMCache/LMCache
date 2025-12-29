@@ -401,6 +401,9 @@ void multi_layer_kv_transfer(
 
   int num_layers = key_value.size(1);
   int num_tokens = slot_mapping.size(0);
+  if (num_tokens == 0) {
+    return;
+  }
   int num_origin_elements = key_value.size(3);
   int elements_per_qword = 8 / key_value.element_size();
   int num_qwords = num_origin_elements / elements_per_qword;
@@ -480,6 +483,9 @@ void multi_layer_kv_transfer_unilateral(
 
   int num_layers = key_value.size(1);
   int num_tokens = slot_mapping.size(0);
+  if (num_tokens == 0) {
+    return;
+  }
   int num_origin_elements = key_value.size(3);
   int elements_per_qword = 8 / key_value.element_size();
   int num_qwords = num_origin_elements / elements_per_qword;
@@ -561,6 +567,9 @@ void single_layer_kv_transfer(
   int elements_per_entry = 8 / vllm_key_value_cache.element_size();
 
   int num_tokens = slot_mapping.size(0);
+  if (num_tokens == 0) {
+    return;
+  }
   int num_heads;
   int head_size_in_64bit;
   int block_size;
@@ -657,6 +666,9 @@ void load_and_reshape_flash(
   int elements_per_entry = 8 / key_cache.element_size();
 
   int num_tokens = slot_mapping.size(0);
+  if (num_tokens == 0) {
+    return;
+  }
   int num_heads = key_cache.size(2);
   int head_size_in_64bit = key_cache.size(3) / elements_per_entry;
 
@@ -706,6 +718,9 @@ void reshape_and_cache_back_flash(
   int elements_per_entry = 8 / key_cache.element_size();
 
   int num_tokens = slot_mapping.size(0);
+  if (num_tokens == 0) {
+    return;
+  }
   int num_heads = key_cache.size(2);
   int head_size_in_64bit = key_cache.size(3) / elements_per_entry;
 
@@ -771,6 +786,9 @@ void single_layer_kv_transfer_sgl(
   int elements_per_entry = 8 / sgl_key_cache.element_size();
 
   int num_tokens = slot_mapping.size(0);
+  if (num_tokens == 0) {
+    return;
+  }
   int num_heads = sgl_key_cache.size(2);
   int head_size_in_64bit = sgl_key_cache.size(3) / elements_per_entry;
 

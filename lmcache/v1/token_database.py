@@ -477,10 +477,9 @@ class SegmentTokenDatabase(TokenDatabase):
                 num_falses = mask.numel() - mask.long().sum().item()
             else:
                 num_falses = 0
-            assert num_falses < len(tokens), (
-                "The number of Falses in the mask shouldn't "
-                "be less than the length of tokens."
-            )
+            if num_falses >= len(tokens):
+                # All tokens are masked out, so nothing to process.
+                return
 
             token_chunks = self._fast_split_by_subtensor(tokens)
             start_idx = 0
