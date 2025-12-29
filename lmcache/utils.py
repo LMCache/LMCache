@@ -383,14 +383,13 @@ class CacheEngineKey:
         return False
 
     def to_string(self):
-        s = (
+        # Convert bytes to hex string if sha256 is used, otherwise format as hex
+        hash_str = self.chunk_hash.hex() if isinstance(self.chunk_hash, bytes) else f"{self.chunk_hash:x}"
+
+        return (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}"
+            f"@{self.worker_id}@{hash_str}@{self._dtype_str}"
         )
-        if self.tags is not None and len(self.tags) != 0:
-            tags = [f"{k}%{v}" for k, v in self.tags]
-            s += "@" + "@".join(tags)
-        return s
 
     def split_layers(self, num_layers: int) -> List["LayerCacheEngineKey"]:
         """Split the key into multiple keys for each layer"""
