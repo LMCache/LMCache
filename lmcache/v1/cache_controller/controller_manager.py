@@ -20,6 +20,7 @@ from lmcache.v1.cache_controller.observability import (
     SocketType,
 )
 from lmcache.v1.rpc_utils import (
+    get_ip,
     get_zmq_context,
     get_zmq_socket,
 )
@@ -170,7 +171,16 @@ class LMCacheControllerManager:
             # Build extra_config with heartbeat_url if available
             extra_config: dict[str, str] = {}
             if self.controller_urls.get("heartbeat") is not None:
-                extra_config["heartbeat_url"] = self.controller_urls["heartbeat"]
+                # Convert bind address (e.g., "0.0.0.0:8082" or "*:8082")
+                # to a connectable address using actual controller IP
+                heartbeat_bind_url = self.controller_urls["heartbeat"]
+                heartbeat_url = self._convert_bind_to_connect_url(heartbeat_bind_url)
+                extra_config["heartbeat_url"] = heartbeat_url
+                logger.debug(
+                    "Returning heartbeat_url to worker: %s (bind: %s)",
+                    heartbeat_url,
+                    heartbeat_bind_url,
+                )
             ret_msg = await self.reg_controller.register(msg, extra_config)
         elif isinstance(msg, BatchedP2PLookupMsg):
             ret_msg = await self.kv_controller.batched_p2p_lookup(msg)
@@ -247,6 +257,29 @@ class LMCacheControllerManager:
             prometheus_logger.reply_socket_active_requests.set_function(
                 lambda: self.reply_socket_active_requests
             )
+
+    def _convert_bind_to_connect_url(self, bind_url: str) -> str:
+        """Convert a bind address to a connectable address.
+
+        Bind addresses like "0.0.0.0:port" or "*:port" cannot be used
+        by workers to connect. We need to replace them with the actual
+        controller IP address.
+
+        Args:
+            bind_url: The bind URL (e.g., "0.0.0.0:8082" or "*:8082")
+
+        Returns:
+            A connectable URL (e.g., "192.168.1.100:8082")
+        """
+        if ":" not in bind_url:
+            return bind_url
+
+        host, port = bind_url.rsplit(":", 1)
+        # Replace bind-all addresses with actual IP
+        if host in ("0.0.0.0", "*", ""):
+            actual_ip = get_ip()
+            return f"{actual_ip}:{port}"
+        return bind_url
 
     def _check_socket_has_pending(self, socket) -> int:
         """Check if socket has pending messages.
