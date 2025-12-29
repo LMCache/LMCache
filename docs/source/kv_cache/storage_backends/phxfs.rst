@@ -7,8 +7,7 @@ Overview
 --------
 
 This backend will work with Phoenix-based filesystem. The `Phoenix <https://github.com/nicexlab/phoenix>`_ is a refactored
-I/O Stack for GPU Direct Storage without Phony Buffers, which has been accepted for `SC'23 <https://dl.acm.org/doi/10.1145/3712285.3759862>`_.
-
+I/O Stack for GPU Direct Storage without Phony Buffers, which has been accepted for `SC <https://dl.acm.org/doi/10.1145/3712285.3759862>`_.
 
 Ways to configure LMCache Phoenix Backend
 -----------------------------------------

@@ -45,9 +45,6 @@ _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
 
 class PhxfsMemoryAllocator(GPUMemoryAllocator):
     def __init__(self, size: int, device=None):
-        # HACK(Jiayi): cufile import is buggy on some hardware
-        # (e.g., without GPUDirect), so it's temporarily put here.
-        # Third Party
         from phxfs.phxfs_bind import phxfs_regmem, phxfs_deregmem
 
         self.phxfsBufDeReg = phxfs_deregmem
@@ -204,18 +201,14 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
 
 class PhxfsBackend(AllocatorBackendInterface):
     """
-    Originally based on the open sourced WekaPhxfsBackend, this is a backend that
-    leverages NVIDIA's cuFile API to issue GDS requests directly to the
-    GDS-supported remote filesystem.  In order to use it, users need to specify
-    `phx_path` and `cufile_buffer_size` in their LMCache config.
-
+    The PhxfsBackend references GDSBackend. In order to use it, users need to specify
+    `phx_path` and `phx_buffer_size` in their LMCache config.
     Cache Directory Structure created by this Backend:
     /{phx_path}/{first_level}/{second_level}/{data & metadata} This structure
     is semi-arbitrary. We create two levels in the directory hierarchy to
     parallelize loading the data during initialization in the Python code.
 
-    NOTE: If GPUDirect is not supported on that other filesystem, then CuFile will
-    fall back to POSIX I/O.
+    NOTE: The phoenix should support on that filesystem.
     """
 
     def __init__(
@@ -246,8 +239,7 @@ class PhxfsBackend(AllocatorBackendInterface):
         assert self.fstype not in ["tmpfs", "overlayfs"], "Unsupported fstype"
 
         logger.info("Using phxfs")
-        # HACK(Jiayi): cufile import is buggy on some hardware
-        # (e.g., without GPUDirect), so it's temporarily put here.
+
         # Third Party
         import phxfs
 
@@ -281,7 +273,7 @@ class PhxfsBackend(AllocatorBackendInterface):
             logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
             self.phxfs_base_pointer = self.memory_allocator.base_pointer
         else:
-            logger.info("No base pointer found, cufile will use bounce buffers")
+            logger.info("No base pointer found, phoenix will use bounce buffers")
             self.phxfs_base_pointer = None
         asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
         self.save_metadata_tasks: set[asyncio.Task] = set()
@@ -459,7 +451,7 @@ class PhxfsBackend(AllocatorBackendInterface):
         assert kv_chunk is not None
         path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
         # TODO: maybe remove `metadata_dirs` and insert mkdir calls
-        # only for the case where creating the CuFile fails on ENOENT. It
+        # only for the case where creating the phoenix fails on ENOENT. It
         # also makes the code more resilient to out-of-band deletions
         if subdir_key not in self.metadata_dirs:
             os.makedirs(os.path.join(self.phx_path, l1_dir, l2_dir), exist_ok=True)
@@ -467,7 +459,7 @@ class PhxfsBackend(AllocatorBackendInterface):
         tmp = ".tmp" + rand_suffix(self.rand, 8)
         fmt = memory_obj.metadata.fmt
         metadata = await asyncio.to_thread(
-            self._save_gds,
+            self._save_phxfs,
             path,
             tmp,
             kv_chunk,
@@ -505,25 +497,6 @@ class PhxfsBackend(AllocatorBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> bool:
-        # with self.hot_lock:
-        #     entry = self.hot_cache.get(key)
-        # if entry is None:
-        #     return None
-
-        # path = entry.path
-        # dtype = entry.dtype
-        # shape = entry.shape
-        # fmt = entry.fmt
-        # assert dtype is not None
-        # assert shape is not None
-        # assert fmt is not None
-        # return asyncio.run_coroutine_threadsafe(
-        #     self._async_load_bytes_from_disk(key, path, dtype, shape，fmt), self.loop
-        # )
-
-        # TODO(Jiayi): Need to modify this when prefetch interface is determined.
-
-        # TODO(Jiayi): add `test_gds_backend_sanity` back after implementing this
         return False
 
     async def _async_load_bytes_from_disk(
@@ -551,7 +524,7 @@ class PhxfsBackend(AllocatorBackendInterface):
         dtype = entry.dtype
         shape = entry.shape
         fmt = entry.fmt
-        logger.warning(entry)
+        logger.debug(entry)
         assert dtype is not None
         assert shape is not None
         assert fmt is not None
@@ -619,7 +592,7 @@ class PhxfsBackend(AllocatorBackendInterface):
         else:
             addr = ctypes.c_void_p(self.phxfs_base_pointer)
             dev_offset = memory_obj.metadata.address
-        ret = self._load_gds(path, offset, addr, memory_obj.get_size(), dev_offset)
+        ret = self._load_phxfs(path, offset, addr, memory_obj.get_size(), dev_offset)
         if ret != memory_obj.get_size():
             if ret < 0:
                 logger.error(
@@ -675,7 +648,7 @@ class PhxfsBackend(AllocatorBackendInterface):
                 shapes.append(entry.shape)
 
         memory_objs: list[MemoryObj | None] = []
-        gds_reads, gds_read_bytes = 0, 0
+        phxfs_reads, phxfs_read_bytes = 0, 0
         for dtype, shape, path in zip(dtypes, shapes, paths, strict=True):
             if path is None:
                 memory_objs.append(None)
@@ -684,27 +657,21 @@ class PhxfsBackend(AllocatorBackendInterface):
             if memory_obj is None:
                 logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:
-                gds_reads += 1
-                gds_read_bytes += memory_obj.get_size()
+                phxfs_reads += 1
+                phxfs_read_bytes += memory_obj.get_size()
             memory_objs.append(memory_obj)
 
         start_time = time.perf_counter()
-        assert self._thread_pool is not None
-        results = list(
-            self._thread_pool.map(
-                self._load_bytes_from_disk_with_memory, keys, paths, memory_objs
-            )
-        )
         total_time = time.perf_counter() - start_time
         logger.info(
             f"Time taken for batched_get_blocking: {total_time:.3f}s |"
-            f" {gds_read_bytes / 1024 / 1024}MiB | {gds_reads} ops."
+            f" {phxfs_read_bytes / 1024 / 1024}MiB | {phxfs_reads} ops."
         )
         return results
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
-    def _save_gds(
+    def _save_phxfs(
         self,
         path: str,
         tmp: str,
@@ -768,7 +735,7 @@ class PhxfsBackend(AllocatorBackendInterface):
         os.rename(tmp_path, path)
         return metadata
 
-    def _load_gds(
+    def _load_phxfs(
         self,
         phx_path: str,
         file_offset: int,
@@ -816,21 +783,21 @@ class PhxfsBackend(AllocatorBackendInterface):
             return size_in_bytes
         else:
             raise RuntimeError(
-                "Both cufile and cudart are None, this should not happen"
+                "Both phoenix and cudart are None, this should not happen"
             )
 
     def pin(self, key: CacheEngineKey) -> bool:
-        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # NOTE (ApostaC): Since phoenix doesn't have eviction now, we don't need
         # to implement pin and unpin
         return False
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
+        # NOTE (ApostaC): Since phoenix doesn't have eviction now, we don't need
         # to implement pin and unpin
         return False
 
     def remove(self, key: CacheEngineKey, force: bool = True):
-        raise NotImplementedError("Remote backend does not support remove now.")
+        raise NotImplementedError("PhxfsBackend does not support remove now.")
 
     def initialize_allocator(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
      ) -> PhxfsMemoryAllocator:
