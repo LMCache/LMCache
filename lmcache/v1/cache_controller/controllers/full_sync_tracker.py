@@ -325,18 +325,26 @@ class FullSyncTracker:
             Progress as a float between 0.0 and 1.0
 
         Note: Uses cached worker list for Prometheus metrics efficiency.
+
+        Progress calculation:
+        - Denominator: total number of all workers
+        - Numerator: workers that are ready to serve (COMPLETED or no sync info needed)
+        - Workers in SYNCING or FAILED state are NOT considered ready
         """
         all_workers = self._get_all_workers_cached()
         if not all_workers:
             return 0.0
 
-        completed = sum(
+        total = len(all_workers)
+        ready_count = sum(
             1
             for _, worker_node in all_workers
-            if worker_node.sync_info is not None
-            and worker_node.sync_info.state == FullSyncState.COMPLETED
+            if worker_node.sync_info is None
+            or worker_node.sync_info.state == FullSyncState.COMPLETED
         )
-        return completed / len(all_workers)
+
+        # Progress = ready / total
+        return ready_count / total
 
     def get_completed_count(self) -> int:
         """Get count of workers that have completed sync.

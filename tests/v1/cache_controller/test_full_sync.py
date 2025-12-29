@@ -154,8 +154,8 @@ class TestFullSyncTracker:
 
         for i in range(total):
             H.reg_worker(reg, "i1", i)
-        for i in range(completed):
             tracker.start_sync("i1", i, f"s{i}", 100, 5)
+        for i in range(completed):
             tracker.complete_sync("i1", i, f"s{i}", 100)
 
         assert abs(tracker.get_global_progress() - expected) < 0.001
@@ -171,8 +171,8 @@ class TestFullSyncTracker:
 
         for i in range(total):
             H.reg_worker(reg, "i1", i)
-        for i in range(completed):
             tracker.start_sync("i1", i, f"s{i}", 100, 5)
+        for i in range(completed):
             tracker.complete_sync("i1", i, f"s{i}", 100)
 
         assert tracker.can_exit_freeze() == can_exit
@@ -299,8 +299,8 @@ class TestKVController:
         ctrl.full_sync_tracker.completion_threshold = 0.5
         for i in range(4):
             H.reg_worker(ctrl.registry, "i1", i)
-        for i in range(2):
             ctrl.full_sync_tracker.start_sync("i1", i, f"s{i}", 100, 5)
+        for i in range(2):
             ctrl.full_sync_tracker.complete_sync("i1", i, f"s{i}", 100)
 
         ret = await ctrl.handle_full_sync_status(FullSyncStatusMsg("i1", 0, "s0"))
@@ -429,13 +429,15 @@ class TestIntegration:
         kv, rc = setup
         workers = [(f"i{i}", i, f"192.168.1.{i + 1}") for i in range(4)]
 
-        for inst, wid, ip in workers:
+        for i in range(len(workers)):
+            inst, wid, ip = workers[i]
+            sid = f"s{i}"
             await H.reg_worker_async(rc, inst, wid, ip)
+            await kv.handle_full_sync_start(H.start_msg(inst, wid, sid, 5, 1))
 
         for i in range(2):
             inst, wid, _ = workers[i]
             sid = f"s{i}"
-            await kv.handle_full_sync_start(H.start_msg(inst, wid, sid, 5, 1))
             await kv.handle_full_sync_batch(
                 H.batch_msg(inst, wid, sid, 0, list(range(5)))
             )

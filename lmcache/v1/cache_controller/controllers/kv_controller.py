@@ -236,26 +236,15 @@ class KVController:
                     msg.location,
                 )
 
-        if success:
-            logger.info(
-                "Accepted full sync start: worker=%s, sync_id=%s, "
-                "total_keys=%d, batch_count=%d",
-                report_id,
-                sync_id,
-                msg.total_keys,
-                msg.batch_count,
-            )
-            return FullSyncStartRetMsg(sync_id=sync_id, accepted=True)
-        else:
-            logger.warning(
-                "Rejected full sync start: worker=%s, sync_id=%s", report_id, sync_id
-            )
-            return FullSyncStartRetMsg(
-                sync_id=sync_id,
-                accepted=False,
-                error_msg="Failed to start sync: worker already syncing with "
-                "different sync_id or worker not found",
-            )
+        logger.info(
+            "Accepted full sync start: worker=%s, sync_id=%s, "
+            "total_keys=%d, batch_count=%d",
+            report_id,
+            sync_id,
+            msg.total_keys,
+            msg.batch_count,
+        )
+        return FullSyncStartRetMsg(sync_id=sync_id, accepted=True)
 
     async def handle_full_sync_batch(self, msg: FullSyncBatchMsg) -> None:
         """
