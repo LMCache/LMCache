@@ -344,7 +344,12 @@ class LMCacheControllerManager:
                             error=f"Expected HeartbeatMsg, got {type(msg)}"
                         )
                         await socket.send(msgspec.msgpack.encode(err_msg))
-                except Exception as e:
+                except (
+                    json.JSONDecodeError,
+                    msgspec.DecodeError,
+                    msgspec.ValidationError,
+                    zmq.ZMQError,
+                ) as e:
                     logger.error(
                         "Error handling heartbeat request: %s", e, exc_info=True
                     )

@@ -18,7 +18,10 @@ from lmcache.tools.controller_benchmark.benchmark import ZMQControllerBenchmark
 from lmcache.tools.controller_benchmark.config import ZMQBenchmarkConfig
 from lmcache.tools.controller_benchmark.handlers import OPERATION_HANDLERS
 from lmcache.tools.controller_benchmark.handlers.admit import AdmitHandler
-from lmcache.tools.controller_benchmark.handlers.base import OperationHandler
+from lmcache.tools.controller_benchmark.handlers.base import (
+    OperationHandler,
+    SocketType,
+)
 from lmcache.tools.controller_benchmark.handlers.deregister import DeregisterHandler
 from lmcache.tools.controller_benchmark.handlers.evict import EvictHandler
 from lmcache.tools.controller_benchmark.handlers.heartbeat import HeartbeatHandler
@@ -135,7 +138,7 @@ class TestOperationHandlers:
             handler.get_message_count(controller_zmq_benchmark)
             == controller_zmq_benchmark.config.batch_size
         )
-        assert not handler.use_req_socket()
+        assert handler.socket_type == SocketType.PUSH
 
     def test_evict_handler(self, controller_zmq_benchmark, test_data):
         """Test EvictHandler functionality"""
@@ -149,7 +152,7 @@ class TestOperationHandlers:
             handler.get_message_count(controller_zmq_benchmark)
             == controller_zmq_benchmark.config.batch_size
         )
-        assert not handler.use_req_socket()
+        assert handler.socket_type == SocketType.PUSH
 
     def test_heartbeat_handler(self, controller_zmq_benchmark, test_data):
         """Test HeartbeatHandler functionality"""
@@ -158,7 +161,7 @@ class TestOperationHandlers:
 
         assert isinstance(msg, HeartbeatMsg)
         assert handler.get_message_count(controller_zmq_benchmark) == 1
-        assert handler.use_req_socket()
+        assert handler.socket_type == SocketType.HEARTBEAT
 
     def test_register_handler(self, controller_zmq_benchmark, test_data):
         """Test RegisterHandler functionality"""
@@ -167,7 +170,7 @@ class TestOperationHandlers:
 
         assert isinstance(msg, RegisterMsg)
         assert handler.get_message_count(controller_zmq_benchmark) == 1
-        assert not handler.use_req_socket()
+        assert handler.socket_type == SocketType.REQ
 
     def test_deregister_handler(self, controller_zmq_benchmark, test_data):
         """Test DeregisterHandler functionality"""
@@ -176,7 +179,7 @@ class TestOperationHandlers:
 
         assert isinstance(msg, DeRegisterMsg)
         assert handler.get_message_count(controller_zmq_benchmark) == 1
-        assert not handler.use_req_socket()
+        assert handler.socket_type == SocketType.PUSH
 
     def test_p2p_lookup_handler(self, controller_zmq_benchmark, test_data):
         """Test P2PLookupHandler functionality"""
@@ -189,7 +192,7 @@ class TestOperationHandlers:
             handler.get_message_count(controller_zmq_benchmark)
             == controller_zmq_benchmark.config.num_hashes
         )
-        assert handler.use_req_socket()
+        assert handler.socket_type == SocketType.REQ
 
     def test_operation_handler_registry(self):
         """Test operation handler registry"""

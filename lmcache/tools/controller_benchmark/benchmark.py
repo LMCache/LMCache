@@ -290,7 +290,7 @@ class ZMQControllerBenchmark:
                     # (only if not already configured)
                     if self.heartbeat_url is None and response:
                         self._process_register_response(response)
-                except Exception as e:
+                except (RuntimeError, zmq.ZMQError) as e:
                     logger.error(
                         "Failed to register worker %s-%d: %s", instance, worker, e
                     )
@@ -308,7 +308,7 @@ class ZMQControllerBenchmark:
             if ret_msg.extra_config and "heartbeat_url" in ret_msg.extra_config:
                 self.heartbeat_url = ret_msg.extra_config["heartbeat_url"]
                 logger.info("Got heartbeat_url from register: %s", self.heartbeat_url)
-        except Exception as e:
+        except msgspec.DecodeError as e:
             logger.warning("Failed to decode RegisterRetMsg: %s", e)
 
     def _setup_heartbeat_socket(self):

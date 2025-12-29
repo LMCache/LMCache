@@ -156,9 +156,7 @@ class LMCacheWorker:
         # Full sync sender (initialized lazily when needed)
         self._full_sync_sender: Optional["FullSyncSender"] = None
 
-        self.register()
-
-    def register(self):
+    async def register(self):
         """
         Register the lmcache worker with the controller via REQ-REP.
 
@@ -181,11 +179,10 @@ class LMCacheWorker:
 
         # Send via REQ socket and wait for response
         try:
-            self.req_socket.send(
+            await self.req_socket.send(
                 msgspec.msgpack.encode(register_msg), flags=zmq.NOBLOCK
             )
-            # Use sync recv since we're not in async context
-            serialized_ret_msg = self.req_socket.recv()
+            serialized_ret_msg = await self.req_socket.recv()
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
 
             if isinstance(ret_msg, RegisterRetMsg):
@@ -364,7 +361,7 @@ class LMCacheWorker:
             logger.warning("Heartbeat socket is not initialized")
             return HeartbeatRetMsg()
         try:
-            self.heartbeat_socket.send(msgspec.msgpack.encode(msg))
+            await self.heartbeat_socket.send(msgspec.msgpack.encode(msg))
             serialized_ret_msg = await self.heartbeat_socket.recv()
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
             return ret_msg
@@ -379,7 +376,9 @@ class LMCacheWorker:
             self._recreate_heartbeat_socket()
             return HeartbeatRetMsg()
         except Exception as e:
-            logger.error("Error happens in heartbeat socket. Error: %s", e)
+            logger.error(
+                "Error happens in heartbeat socket. Error: %s", e, exc_info=True
+            )
             return HeartbeatRetMsg()
 
     async def heartbeat(self):
@@ -574,6 +573,9 @@ class LMCacheWorker:
 
     async def start_all(self):
         try:
+            # Register first to get heartbeat_url before starting heartbeat task
+            await self.register()
+
             logger.info(
                 f"Starting lmcache worker {self.worker_id}"
                 f"for instance {self.lmcache_instance_id}"
