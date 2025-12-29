@@ -9,6 +9,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -78,8 +79,16 @@ def local_cpu_backend():
         remote_url="mock://test",
         extra_config={},
     )
+    metadata = LMCacheEngineMetadata(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        fmt="vllm",
+        kv_dtype=torch.bfloat16,
+        kv_shape=(64, 2, 1, 8, 128),
+    )
     allocator = AdHocMemoryAllocator(device="cpu")
-    return LocalCPUBackend(config=config, memory_allocator=allocator)
+    return LocalCPUBackend(config=config, metadata=metadata, memory_allocator=allocator)
 
 
 @pytest.fixture
@@ -468,16 +477,11 @@ class TestAuditConnector:
         log_capture.clear()
 
         audit.post_init()
-        audit.init_chunk_meta(None, None)
 
         print("\nAfter @NotAudit methods:")
         print(log_capture.get_logs())
 
-        operation_logs = [
-            r
-            for r in log_capture.get_records()
-            if "POST_INIT" in r.msg or "INIT_CHUNK_META" in r.msg
-        ]
+        operation_logs = [r for r in log_capture.get_records() if "POST_INIT" in r.msg]
         operation_logs = [r for r in operation_logs if "SUCCESS" in r.msg]
         assert len(operation_logs) == 0, (
             f"@NotAudit methods should not generate operation audit logs. "

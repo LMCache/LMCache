@@ -97,7 +97,8 @@ def async_loop():
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    return LocalCPUBackend(config, memory_allocator=memory_allocator)
+    metadata = create_test_metadata()
+    return LocalCPUBackend(config, metadata, memory_allocator=memory_allocator)
 
 
 @pytest.fixture
@@ -286,6 +287,7 @@ class TestFSConnector:
         # Create new backend instance and verify data persists
         new_local_cpu_backend = LocalCPUBackend(
             LMCacheEngineConfig.from_legacy(chunk_size=256),
+            local_cpu_backend.metadata,
             memory_allocator=local_cpu_backend.memory_allocator,
         )
         new_backend = RemoteBackend(

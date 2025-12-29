@@ -45,6 +45,9 @@ class RedisConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # set a large max
         self.max_connections = 150
         # redis will crash if we have more than max_connections connections
@@ -270,6 +273,9 @@ class RedisSentinelConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # Get service name
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
@@ -409,6 +415,9 @@ class RedisClusterConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # Convert hosts_and_ports to startup_nodes format expected by RedisCluster
         startup_nodes = [ClusterNode(h, p) for (h, p) in hosts_and_ports]
 

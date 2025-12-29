@@ -104,7 +104,8 @@ class SageMakerHyperPodConnector(RemoteConnector):
             streaming PUT requests (default: 64KB)
             **kwargs: Unused legacy parameters (ignored for backward compatibility)
         """
-        super().__init__()
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         # Core configuration
         self.base_url = sagemaker_hyperpod_url.rstrip("/")
@@ -133,9 +134,11 @@ class SageMakerHyperPodConnector(RemoteConnector):
         self.put_inflight = asyncio.Semaphore(self.max_concurrent_requests)
         self.pq_executor = AsyncPQExecutor(loop)
 
-        # Shared memory (lazy initialized)
+        # Shared memory
         self.shared_memory_obj: Optional[shared_memory.SharedMemory] = None
         self.shared_memory_map: Optional[memoryview] = None
+        if self.shared_memory_name:
+            self._init_shared_memory()
 
         # Observability
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -156,11 +159,6 @@ class SageMakerHyperPodConnector(RemoteConnector):
             f"bucket={self.bucket_name}, shared_memory={self.shared_memory_name}, "
             f"connections={self.max_connections}, lease_ttl={lease_ttl_s}s"
         )
-
-    def post_init(self):
-        """Initialize shared memory connection after construction."""
-        if self.shared_memory_name:
-            self._init_shared_memory()
 
     def _init_shared_memory(self):
         """Initialize shared memory connection to ai-toolkit daemon."""
