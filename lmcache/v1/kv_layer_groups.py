@@ -164,9 +164,9 @@ class KVLayerGroupsManager:
             shape, dtype = None, None
 
             if isinstance(kv_cache, (tuple, list)):
-                # Handle tuple/list of tensors for HPU
+                # HPU has a tuple list (K,V) with same shape and dtype
                 for tensor in kv_cache:
-                    if tensor is not None and hasattr(tensor, 'shape'):
+                    if tensor is not None:
                         shape = tensor.shape
                         dtype = tensor.dtype
                         break
