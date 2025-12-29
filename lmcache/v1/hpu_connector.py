@@ -20,8 +20,8 @@ from typing import List, Optional
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector import GPUConnectorInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj

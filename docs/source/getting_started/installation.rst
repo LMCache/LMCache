@@ -255,4 +255,4 @@ To install LMCache from source, clone the repository and install in editable mod
 
 Dockerfile for Intel® Gaudi® HPU is also available at docker/Dockerfile.hpu .
 
-Example scripts and instructions to run disaggregated prefilling and KV cache sharing tests on Intel® Gaudi® HPU is available in the `Readme <https://github.com/vllm-project/vllm-gaudi/blob/main/examples/lmcache/README.md>`__. Please make sure to enable ``PT_HPU_GPU_MIGRATION=1`` to run on Intel® Gaudi® HPU.  to run on Intel® Gaudi® HPU. Example scripts mentioned shows the various envirnment flags. to run on Intel® Gaudi® HPU. Example scripts mentioned shows the various envirnment flags.Example scripts mentioned shows the various envirnment flags.
+Example scripts and instructions to run disaggregated prefilling and KV cache sharing tests on Intel® Gaudi® HPU is available in the `Readme <https://github.com/vllm-project/vllm-gaudi/blob/main/examples/lmcache/README.md>`__. Please make sure to enable ``PT_HPU_GPU_MIGRATION=1`` to run on Intel® Gaudi® H.
