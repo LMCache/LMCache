@@ -46,6 +46,7 @@ class ValkeyConnector(RemoteConnector):
         password: str,
         database_id: Optional[int] = None,
     ):
+        # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         if ":" in url:
@@ -233,6 +234,7 @@ class ValkeyClusterConnector(RemoteConnector):
         password: str,
         hosts_and_ports: Optional[List[Tuple[str, int]]],
     ):
+        # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         self.loop = loop

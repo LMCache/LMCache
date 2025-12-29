@@ -118,6 +118,7 @@ class EICConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         memory_allocator: LocalCPUBackend,
     ):
+        # initialize base class, which includes some common attributes
         super().__init__(memory_allocator.config, memory_allocator.metadata)
 
         logger.info("init EICConnector")

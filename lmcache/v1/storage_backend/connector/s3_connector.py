@@ -83,6 +83,7 @@ class S3Connector(RemoteConnector):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
     ):
+        # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         if not s3_endpoint.startswith("s3://"):

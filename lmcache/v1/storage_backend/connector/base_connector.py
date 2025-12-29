@@ -35,6 +35,19 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     def __init__(
         self, config: LMCacheEngineConfig, metadata: Optional[LMCacheEngineMetadata]
     ):
+        """
+        Initialize some common attributes, which will be used in the subclasses.
+        - `save_chunk_meta` is a flag to indicate whether to save the chunk meta info.
+        - `meta_shapes` is a list of shapes of lmcache full chunk.
+        - `meta_dtypes` is a list of dtypes of lmcache chunk.
+        - `meta_fmt` is the memory format of the lmcache chunk.
+        - `full_chunk_size` is the size of the lmcache full chunk.
+        - `single_token_size` is the size of a single token.`
+
+        Input:
+            config: the lmcache engine config
+            metadata: the lmcache engine metadata
+        """
         # TODO(chunxiaozheng): support layerwise here
         assert metadata is not None
         self.save_chunk_meta: bool = (

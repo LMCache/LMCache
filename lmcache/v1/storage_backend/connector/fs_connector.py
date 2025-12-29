@@ -45,6 +45,7 @@ class FSConnector(RemoteConnector):
             local_cpu_backend: Memory allocator interface
             config: Lmcache engine config
         """
+        # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
         # Parse comma separated paths
