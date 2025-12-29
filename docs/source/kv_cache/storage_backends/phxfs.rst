@@ -7,7 +7,7 @@ Overview
 --------
 
 This backend will work with Phoenix-based filesystem. The `Phoenix <https://github.com/nicexlab/phoenix>`_ is a refactored
-I/O Stack for GPU Direct Storage without Phony Buffers, which has been accepted for `SC'25 <https://dl.acm.org/doi/10.1145/3712285.3759862>`_.
+I/O Stack for GPU Direct Storage without Phony Buffers, which has been accepted for `SC'23 <https://dl.acm.org/doi/10.1145/3712285.3759862>`_.
 
 
 Ways to configure LMCache Phoenix Backend
@@ -21,7 +21,7 @@ Ways to configure LMCache Phoenix Backend
     export LMCACHE_CHUNK_SIZE=256
     # Path to store files
     export LMCACHE_PHX_PATH="/mnt/phx/cache"
-    # CuFile Buffer Size in MiB
+    # Phoenix Buffer Size in MiB
     export LMCACHE_PHX_BUFFER_SIZE="8192"
     # Disabling CPU RAM offload is sometimes recommended as the
     # CPU can get in the way of GPUDirect operations
@@ -41,7 +41,7 @@ Example ``config.yaml``:
     local_cpu: false
     # Path to file system of Phoenix-enabled mount
     phx_path: "/mnt/phx/cache"
-    # CuFile Buffer Size in MiB
+    # Phoenix Buffer Size in MiB
     phx_buffer_size: 8192
 
 
@@ -64,7 +64,7 @@ Setup Example
 
 - A Machine with at least one GPU. You can adjust the max model length of your vllm instance depending on your GPU memory.
 
-- A mounted file system. A file system supportings Phoenix will work best.
+- A mounted file system. A file system supporting Phoenix will work best.
 
 - Deploy the Python API module of phoenix following the `instructions <https://github.com/nicexlab/phoenix/blob/main/python/README.md>`_.
 
@@ -84,7 +84,7 @@ To check if the phoenix is ready, use `example` from phoenix project:
 
     sudo /path/to/phoenix/build/bin/example
 
-Create a directory under the file systew mount (the name here is arbitrary):
+Create a directory under the file system mount (the name here is arbitrary):
 
 .. code-block:: bash
 
@@ -92,7 +92,7 @@ Create a directory under the file systew mount (the name here is arbitrary):
 
 **Step 2. Start a vLLM server with file backend enabled:**
 
-Create a an lmcache configuration file called: ``phx-backend.yaml``
+Create an lmcache configuration file called: ``phx-backend.yaml``
 
 .. code-block:: yaml
 
