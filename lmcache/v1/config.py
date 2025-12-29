@@ -229,7 +229,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
     },
     # Storage paths
-    "weka_path": {"type": Optional[str], "default": None, "env_converter": str},
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
     "cufile_buffer_size": {
         "type": Optional[int],

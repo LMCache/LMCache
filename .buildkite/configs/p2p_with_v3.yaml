@@ -22,6 +22,7 @@ docker1:
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
     - "LMCACHE_SAVE_UNFULL_CHUNK=False"
     - "PYTHONHASHSEED=123"
+    - "LMCACHE_USE_GPU_CONNECTOR_V3=True"
   pull-port: 8300
   reply-port: 8400
 
@@ -40,6 +41,7 @@ docker2:
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
     - "LMCACHE_SAVE_UNFULL_CHUNK=False"
     - "PYTHONHASHSEED=123"
+    - "LMCACHE_USE_GPU_CONNECTOR_V3=True"
   pull-port: 8300
   reply-port: 8400
 

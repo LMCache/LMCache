@@ -12,7 +12,6 @@ import os
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -106,6 +105,9 @@ class MooncakestoreConnector(RemoteConnector):
         local_cpu_backend: LocalCPUBackend,
         lmcache_config: Optional[LMCacheEngineConfig],
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         try:
             # Third Party
             from mooncake.store import (
@@ -223,23 +225,6 @@ class MooncakestoreConnector(RemoteConnector):
 
         logger.info("MooncakeConnector initialized successfully.")
 
-    def init_chunk_meta(
-        self,
-        config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
-    ) -> None:
-        """Initialize chunk metadata and log the configuration."""
-        super().init_chunk_meta(config, metadata)
-
-        if self.meta_shape and self.meta_dtype and self.meta_fmt:
-            logger.info("MooncakeConnector using optimized mode")
-        else:
-            logger.info("MooncakeConnector using legacy mode")
-            logger.info(
-                "Try setting 'save_chunk_meta' to False in the configuration "
-                "for better performance"
-            )
-
     def _register_cpu_buffer(self):
         """Register CPU buffer for zero-copy operations."""
         try:
@@ -329,11 +314,11 @@ class MooncakestoreConnector(RemoteConnector):
         Zero-copy batch get using batch_get_into when metadata is available locally.
         This is used when save_chunk_meta=False (metadata not stored remotely).
         """
-        if not self.meta_shape or not self.meta_dtype or not self.meta_fmt:
+        if not self.meta_shapes or not self.meta_dtypes or not self.meta_fmt:
             logger.error(
                 f"Metadata required for batch_get_into but not available: "
-                f"meta_shape={self.meta_shape}, "
-                f"meta_dtype={self.meta_dtype}, "
+                f"meta_shapes={self.meta_shapes}, "
+                f"meta_dtypes={self.meta_dtypes}, "
                 f"meta_fmt={self.meta_fmt}"
             )
             return [None] * len(keys)
@@ -350,7 +335,7 @@ class MooncakestoreConnector(RemoteConnector):
 
         for i, _ in enumerate(keys):
             buf = self.local_cpu_backend.allocate(
-                self.meta_shape, self.meta_dtype, self.meta_fmt
+                self.meta_shapes, self.meta_dtypes, self.meta_fmt
             )
             memory_objs.append(buf)
             buf_tensor = buf.tensor

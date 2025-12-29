@@ -221,10 +221,6 @@ class ConnectorManager:
             if adapter.can_parse(self.context.url):
                 logger.info(f"Creating connector for URL: {self.context.url}")
                 connector = adapter.create_connector(self.context)
-                logger.info(f"initializing chunk meta for connector: {connector}")
-                connector.init_chunk_meta(self.context.config, self.context.metadata)
-                logger.info(f"post-initializing connector: {connector}")
-                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")

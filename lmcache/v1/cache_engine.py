@@ -237,12 +237,10 @@ class LMCacheEngine:
             gc.disable()
 
     def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:
+            logger.info("Post initializing LMCacheEngine")
             if self.storage_manager is not None:
                 self.storage_manager.post_init(**kwargs)
-            logger.info("Post-initializing LMCacheEngine")
             if self.gpu_connector is not None:
                 self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
@@ -377,7 +375,7 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
-            kv_shapes = self.gpu_connector.get_shapes(num_tokens)
+            kv_shapes = self.metadata.get_shapes(num_tokens)
             kv_dtypes = self.metadata.get_dtypes()
 
             # TODO (Jiayi): should be batched in the future
@@ -1731,7 +1729,7 @@ class LMCacheEngineBuilder:
                 MemoryFormat.KV_2LTD,
             )
 
-        if config.weka_path is not None or config.gds_path is not None:
+        if config.gds_path is not None:
             assert config.cufile_buffer_size is not None
             return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
 
