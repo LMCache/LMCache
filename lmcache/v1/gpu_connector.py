@@ -605,6 +605,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
     ):
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
+        self.use_mla = bool(kwargs.get("use_mla", False))
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
 
@@ -662,6 +663,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             use_gpu=use_gpu,
             dtype=metadata.kv_dtype,
             device=device,
+            use_mla=metadata.use_mla,
         )
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -815,6 +817,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     False,
                     False,  # shape is [2, num_tokens, hidden_dim]
                     self.vllm_two_major,
+                    self.use_mla,
                 )
                 del buffer_mapping[layer_id - 2]
 
@@ -981,6 +984,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     True,
                     False,  # shape is [2, num_tokens, hidden_dim]
                     self.vllm_two_major,
+                    self.use_mla,
                 )
                 for (buf_start, buf_end), memory_obj, old_positions in zip(
                     buf_starts_ends,

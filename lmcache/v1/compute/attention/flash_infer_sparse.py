@@ -12,7 +12,10 @@ from flashinfer.utils import (
     check_shape_dtype_device,
     device_support_pdl,
 )
-from vllm.attention import Attention
+try:
+    from vllm.attention import Attention
+except ImportError:
+    from vllm.attention.layer import Attention
 from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 import flashinfer
 import torch

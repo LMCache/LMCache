@@ -40,6 +40,22 @@ class LMCBaseModel(nn.Module, ABC):
         # if we want to make this LMCModel more general.
         self.blender = blender
 
+        embed_fn = getattr(vllm_model, "embed_input_ids", None)
+        if embed_fn is None:
+            get_input_embeddings = getattr(vllm_model, "get_input_embeddings", None)
+            if callable(get_input_embeddings):
+                embed_fn = get_input_embeddings()
+            elif hasattr(vllm_model, "model"):
+                if hasattr(vllm_model.model, "embed_input_ids"):
+                    embed_fn = vllm_model.model.embed_input_ids
+                elif hasattr(vllm_model.model, "embed_tokens"):
+                    embed_fn = vllm_model.model.embed_tokens
+        if embed_fn is None:
+            raise AttributeError(
+                f"Cannot find input embedding function for {type(vllm_model).__name__}."
+            )
+        self._embed_fn = embed_fn
+
         # remove hard code
         rotary_emb = vllm_model.model.layers[0].self_attn.rotary_emb
         head_dim = rotary_emb.head_size
@@ -69,7 +85,7 @@ class LMCBaseModel(nn.Module, ABC):
         input_ids: torch.Tensor,
     ):
         input_ids = input_ids.cuda()
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids)
+        hidden_states = self._embed_fn(input_ids)
         residual = None
 
         attn_output = None

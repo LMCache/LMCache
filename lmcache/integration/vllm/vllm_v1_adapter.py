@@ -1019,6 +1019,12 @@ class LMCacheConnectorV1Impl:
 
         assert len(self.kv_caches) > 0
 
+        if self.current_layer >= self.num_layers:
+            # Handle multiple forward segments (e.g. chunked prefill) in one pass.
+            self._finalize_layerwise_storers("layerwise cycle reset")
+            self.layerwise_storers = []
+            self.current_layer = 0
+
         kvcaches = list(self.kv_caches.values())
         if self.current_layer == 0:
             self.layerwise_storers = []
@@ -1086,6 +1092,18 @@ class LMCacheConnectorV1Impl:
 
         self.current_layer += 1
 
+    def _finalize_layerwise_storers(self, reason: str) -> None:
+        if not self.layerwise_storers:
+            return
+        for layerwise_storer in self.layerwise_storers:
+            try:
+                next(layerwise_storer)
+            except StopIteration:
+                logger.debug(
+                    "Layerwise storer exhausted during %s; skipping final step",
+                    reason,
+                )
+
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
@@ -1098,8 +1116,9 @@ class LMCacheConnectorV1Impl:
             return
 
         if self.use_layerwise:
-            for layerwise_storer in self.layerwise_storers:
-                next(layerwise_storer)
+            self._finalize_layerwise_storers("wait_for_save")
+            self.layerwise_storers = []
+            self.current_layer = 0
 
             # unpin the kv caches according to req_id
             for request in connector_metadata.requests:

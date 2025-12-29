@@ -11,7 +11,25 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def _unwrap_vllm_model(vllm_model):
+    for _ in range(4):
+        unwrap = getattr(vllm_model, "unwrap", None)
+        if callable(unwrap):
+            unwrapped = unwrap()
+            if unwrapped is vllm_model:
+                break
+            vllm_model = unwrapped
+            continue
+        runnable = getattr(vllm_model, "runnable", None)
+        if runnable is not None:
+            vllm_model = runnable
+            continue
+        break
+    return vllm_model
+
+
 def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
+    vllm_model = _unwrap_vllm_model(vllm_model)
     model_name = type(vllm_model).__name__
     if model_name == "LlamaForCausalLM":
         # First Party
