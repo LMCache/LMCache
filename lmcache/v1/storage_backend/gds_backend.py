@@ -2,7 +2,8 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from concurrent.futures import TimeoutError as ConcurrentTimeoutError
+from typing import Any, List, Optional, Sequence, Tuple, Union, Callable
 import asyncio
 import ctypes
 import json
@@ -30,6 +31,85 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+
+class OperationTimeoutError(Exception):
+    """Exception raised when operations timeout."""
+
+    pass
+
+
+class OperationHangThresholdReached(Exception):
+    """Exception raised when operations hang threshold is reached."""
+
+    pass
+
+
+class OperationManager:
+    def __init__(
+        self,
+        num_threads: int = 4,
+        hang_threshold: int = 10,
+        reset_file: str = "/tmp/lmcache_operation_manager_reset",
+    ):
+        self.timeout_pool = ThreadPoolExecutor(
+            max_workers=num_threads, thread_name_prefix="fs-timeout"
+        )
+        self._failure_count = 0
+        self._failure_lock = threading.Lock()
+        self._hang_threshold = hang_threshold
+        self._reset_file = reset_file
+
+    def run_with_timeout(
+        self,
+        func: Callable[[], Any],
+        timeout_seconds: float,
+        label: str = "default_label",
+        metadata: Any = None,
+    ) -> Any:
+        if self._failure_count >= self._hang_threshold:
+            if os.path.exists(self._reset_file):
+                os.remove(self._reset_file)
+                self.reset_failure_count()
+                logger.info(
+                    f"Resetting operation manager failure count due to reset file "
+                    f"{self._reset_file}"
+                )
+            else:
+                raise OperationHangThresholdReached(
+                    f"Operation hang threshold reached. Will not run operation "
+                    f"'{label}'",
+                    metadata,
+                )
+        future = self.timeout_pool.submit(func)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except ConcurrentTimeoutError as err:
+            count = self.increment_failure_count()
+            raise OperationTimeoutError(
+                f"Operation '{label}' timed out after {timeout_seconds} seconds",
+                metadata,
+                count,
+            ) from err
+
+    def shutdown(self):
+        self.timeout_pool.shutdown(wait=True)
+
+    def increment_failure_count(self) -> int:
+        with self._failure_lock:
+            self._failure_count += 1
+            return self._failure_count
+
+    def get_failure_count(self) -> int:
+        """Get the current count of timed-out operations."""
+        with self._failure_lock:
+            return self._failure_count
+
+    def reset_failure_count(self) -> int:
+        """Reset the timeout counter and return the previous count."""
+        with self._failure_lock:
+            old_count = self._failure_count
+            self._failure_count = 0
+            return old_count
 
 logger = init_logger(__name__)
 
@@ -242,6 +322,16 @@ class GdsBackend(AllocatorBackendInterface):
                 max_workers=thread_count, thread_name_prefix="weka-gds-io"
             )
 
+        self.op_manager = OperationManager(
+            config.extra_config.get("operation_manager_threads", 4),
+            config.extra_config.get("operation_hang_threshold", 10),
+        )
+        self.timeout_contains = config.extra_config.get("timeout_contains", 1.0)
+        self.timeout_get_blocking = config.extra_config.get("timeout_get_blocking", 5.0)
+        self.timeout_batched_get_blocking = config.extra_config.get(
+            "timeout_batched_get_blocking", 5.0
+        )
+
         if self.use_cufile:
             logger.info("Using cufile")
             # HACK(Jiayi): cufile import is buggy on some hardware
@@ -264,8 +354,7 @@ class GdsBackend(AllocatorBackendInterface):
             if use_direct_io is not None:
                 self.use_direct_io = use_direct_io
 
-        if not os.path.exists(self.gds_path):
-            os.makedirs(self.gds_path, exist_ok=True)
+        os.makedirs(self.gds_path, exist_ok=True)
 
         self.stats = None  # TODO: plug into LMCache Statistics
 
@@ -385,8 +474,26 @@ class GdsBackend(AllocatorBackendInterface):
             res = key in self.hot_cache
         if res:
             return True
-        if self._try_to_read_metadata(key):
-            return True
+        try:
+            read_from_disk = self.op_manager.run_with_timeout(
+                lambda: self._try_to_read_metadata(key),
+                self.timeout_contains,
+                "contains",
+                key,
+            )
+            if read_from_disk:
+                return True
+        except OperationHangThresholdReached:
+            logger.error(
+                "Contains hang threshold reached. Will not run operation",
+                exc_info=True,
+            )
+            return False
+        except OperationTimeoutError:
+            logger.error(
+                f"Contains timed out after {self.timeout_contains} seconds",
+                exc_info=True,
+            )
         return False
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
@@ -397,6 +504,18 @@ class GdsBackend(AllocatorBackendInterface):
                 return self._read_metadata(key, path, subdir_key)
             except UnsupportedMetadataVersion:
                 logger.error(f"Unsupported metadata version for {path}, ignoring")
+            except (OSError, IOError) as e:
+                logger.error(
+                    f"Failed to read metadata file {path}: {type(e).__name__}: {e}. "
+                    f"File may be corrupted or inaccessible. "
+                    f"Ignoring cache entry for key {key}."
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error reading metadata file {path}: "
+                    f"{type(e).__name__}: {e}. Ignoring cache entry for key {key}."
+                )
+
         return None
 
     def _key_to_path(
@@ -467,28 +586,45 @@ class GdsBackend(AllocatorBackendInterface):
             self.metadata_dirs.add(subdir_key)
         tmp = ".tmp" + rand_suffix(self.rand, 8)
         fmt = memory_obj.metadata.fmt
-        metadata = await asyncio.to_thread(
-            self._save_gds,
-            path,
-            tmp,
-            kv_chunk,
-            fmt,
-            self.cufile_base_pointer,
-            memory_obj.metadata.address,
-        )
+        try:
+            metadata = await asyncio.to_thread(
+                self._save_gds,
+                path,
+                tmp,
+                kv_chunk,
+                fmt,
+                self.cufile_base_pointer,
+                memory_obj.metadata.address,
+            )
+        except Exception as e:
+            logger.error(
+                f"GDS/cuFile write operation failed for key {key} at path {path}: "
+                f"tensor_shape={kv_chunk.shape}, tensor_dtype={kv_chunk.dtype}, "
+                f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
+                exc_info=True,
+            )
+            with self.put_lock:
+                self.put_tasks.discard(key)
+            return
 
-        logger.debug(
-            f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
-            f"to {path} with metadata {metadata}"
-        )
         self.insert_key(key, memory_obj)
         memory_obj.ref_count_down()
 
-        task = asyncio.create_task(
-            save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
-        )
-        self.save_metadata_tasks.add(task)
-        task.add_done_callback(self.save_metadata_tasks.discard)
+        try:
+            task = asyncio.create_task(
+                save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
+            )
+            self.save_metadata_tasks.add(task)
+            task.add_done_callback(self.save_metadata_tasks.discard)
+        except Exception as e:
+            logger.error(
+                f"POSIX metadata write operation failed for key {key} at path "
+                f"{path + _METADATA_FILE_SUFFIX}: metadata_size_bytes={len(metadata)}, "
+                f"tmp_suffix={tmp}, error={e}",
+                exc_info=True,
+            )
+            with self.hot_lock:
+                self.hot_cache.pop(key, None)
         with self.put_lock:
             self.put_tasks.discard(key)
 
@@ -556,9 +692,28 @@ class GdsBackend(AllocatorBackendInterface):
         assert dtype is not None
         assert shape is not None
         assert fmt is not None
-        return self._load_bytes_from_disk_with_allocation(
-            key, path, dtype=dtype, shape=shape, fmt=fmt
-        )
+
+        try:
+            return self.op_manager.run_with_timeout(
+                lambda: self._load_bytes_from_disk_with_allocation(
+                        key, path, dtype=dtype, shape=shape, fmt=fmt
+                ),
+                self.timeout_get_blocking,
+                "get_blocking",
+                key,
+            )
+        except OperationHangThresholdReached:
+            logger.error(
+                "Get blocking hang threshold reached. Will not run operation",
+                exc_info=True,
+            )
+            return None
+        except OperationTimeoutError:
+            logger.error(
+                f"Get blocking timed out after {self.timeout_get_blocking} seconds",
+                exc_info=True,
+            )
+            return None
 
     def _load_bytes_from_disk_with_allocation(
         self,
@@ -583,7 +738,7 @@ class GdsBackend(AllocatorBackendInterface):
         """
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
         if memory_obj is None:
-            logger.debug("Memory allocation failed during sync disk load.")
+            logger.error("Memory allocation failed during sync disk load.")
             return None
         assert memory_obj.tensor is not None
         assert memory_obj.tensor.is_cuda
@@ -655,7 +810,26 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> List[Optional[MemoryObj]]:
         if self.use_thread_pool:
             logger.info("Using batched_get_blocking with thread pool implementation")
-            return self._batched_get_blocking_by_thread_pool_impl(keys)
+            try:
+                return self.op_manager.run_with_timeout(
+                    lambda: self._batched_get_blocking_by_thread_pool_impl(keys),
+                    self.timeout_batched_get_blocking,
+                    "batched_get_blocking",
+                    len(keys),
+                )
+            except OperationHangThresholdReached:
+                logger.error(
+                    "Batched get blocking hang threshold reached. Will not run operation",
+                    exc_info=True,
+                )
+                return [None] * len(keys)
+            except OperationTimeoutError:
+                logger.error(
+                    f"Batched get blocking timed out after "
+                    f"{self.timeout_batched_get_blocking} seconds",
+                    exc_info=True,
+                )
+                return [None] * len(keys)
         else:
             return super().batched_get_blocking(keys)
 
@@ -782,47 +956,51 @@ class GdsBackend(AllocatorBackendInterface):
         dev_offset: int,
     ) -> int:
         # Read data from disk into a GPU buffer
-        if self.cufile:
-            with self.cufile.CuFile(
-                gds_path, "r", use_direct_io=self.use_direct_io
-            ) as f:
-                return f.read(
-                    gpu_pointer,
-                    size_in_bytes,
-                    file_offset=file_offset,
-                    dev_offset=dev_offset,
+        try:
+            if self.cufile:
+                with self.cufile.CuFile(
+                    gds_path, "r", use_direct_io=self.use_direct_io
+                ) as f:
+                    return f.read(
+                        gpu_pointer,
+                        size_in_bytes,
+                        file_offset=file_offset,
+                        dev_offset=dev_offset,
+                    )
+            elif self.cudart:
+                fd = os.open(gds_path, os.O_RDONLY)
+                file_size = os.fstat(fd).st_size
+                mm = mmap.mmap(
+                    fd,
+                    file_size,
+                    prot=mmap.PROT_READ,
+                    flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
                 )
-        elif self.cudart:
-            fd = os.open(gds_path, os.O_RDONLY)
-            file_size = os.fstat(fd).st_size
-            mm = mmap.mmap(
-                fd,
-                file_size,
-                prot=mmap.PROT_READ,
-                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
-            )
-            os.close(fd)
+                os.close(fd)
 
-            arr = np.frombuffer(mm, dtype=np.uint8)
-            addr = arr.__array_interface__["data"][0]
+                arr = np.frombuffer(mm, dtype=np.uint8)
+                addr = arr.__array_interface__["data"][0]
 
-            assert gpu_pointer.value is not None
-            res = self.cudart.cudaMemcpy(
-                ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
-                ctypes.c_void_p(addr + file_offset),
-                ctypes.c_size_t(size_in_bytes),
-                ctypes.c_int(1),
-            )
+                assert gpu_pointer.value is not None
+                res = self.cudart.cudaMemcpy(
+                    ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
+                    ctypes.c_void_p(addr + file_offset),
+                    ctypes.c_size_t(size_in_bytes),
+                    ctypes.c_int(1),
+                )
 
-            if res != 0:
-                raise RuntimeError(f"cudaMemcpy failed with code {res}")
-            del arr
-            mm.close()
-            return size_in_bytes
-        else:
-            raise RuntimeError(
-                "Both cufile and cudart are None, this should not happen"
-            )
+                if res != 0:
+                    raise RuntimeError(f"cudaMemcpy failed with code {res}")
+                del arr
+                mm.close()
+                return size_in_bytes
+            else:
+                raise RuntimeError(
+                    "Both cufile and cudart are None, this should not happen"
+                )
+        except Exception as e:
+            logger.error(f"CuFile read failed for {file_path}: {e}", exc_info=True)
+            return -1
 
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
@@ -882,6 +1060,7 @@ class GdsBackend(AllocatorBackendInterface):
 
     def close(self) -> None:
         self.memory_allocator.close()
+        self.op_manager.shutdown()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)
         logger.info("GDS backend closed.")
