@@ -75,6 +75,19 @@ Works on Linux NVIDIA GPU platform.
 
 More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs, particularly if you are not using the latest stable version of vllm or using another serving engine with different dependencies. Any "undefined symbol" or torch mismatch versions can be resolved in the documentation. 
 
+## Optional vLLM GPU worker patch
+
+Some setups require a small vLLM GPU worker patch for LMCache model tracking.
+After installing vLLM, run this script with the same Python interpreter/venv
+used to launch vLLM:
+
+```bash
+python scripts/patch_vllm_gpu_worker.py
+```
+
+The script creates a `.bak` backup next to the original file and is safe to run
+multiple times. Restart vLLM workers after patching.
+
 ## Getting started
 
 The best way to get started is to checkout the [Quickstart Examples](https://docs.lmcache.ai/getting_started/quickstart/) in the docs.
