@@ -7,6 +7,7 @@ import threading
 # Third Party
 import msgspec
 import zmq
+import zmq.asyncio
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -36,6 +37,7 @@ from lmcache.v1.cache_controller.message import (
     PinWorkerMsg,
     PinWorkerRetMsg,
     RegisterMsg,
+    RegisterRetMsg,
     WorkerMsg,
     WorkerReqMsg,
     WorkerReqRetMsg,
@@ -106,6 +108,11 @@ class LMCacheWorker:
             self.controller_rep_url = config.controller_reply_url
             self._create_req_socket()
 
+        # Heartbeat socket will be created dynamically after register
+        # based on heartbeat_url returned from controller
+        self.heartbeat_socket: Optional[zmq.asyncio.Socket] = None
+        self.controller_heartbeat_url: Optional[str] = None
+
         lmcache_worker_ids = config.get_lmcache_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -153,22 +160,54 @@ class LMCacheWorker:
 
     def register(self):
         """
-        Register the lmcache worker with the controller.
+        Register the lmcache worker with the controller via REQ-REP.
+
+        This method sends a RegisterMsg and waits for RegisterRetMsg
+        which contains extra_config (e.g., heartbeat_url).
         """
         assert self.lmcache_instance_id is not None
         logger.info(
-            "Registering lmcache instance-worker: "
-            f"{(self.lmcache_instance_id, self.worker_id)}"
+            "Registering lmcache instance-worker: %s",
+            (self.lmcache_instance_id, self.worker_id),
         )
-        self.put_msg(
-            RegisterMsg(
-                instance_id=self.lmcache_instance_id,
-                worker_id=self.worker_id,
-                ip=self.lmcache_worker_ip,
-                port=self.lmcache_worker_port,
-                peer_init_url=self.p2p_init_url,
+
+        register_msg = RegisterMsg(
+            instance_id=self.lmcache_instance_id,
+            worker_id=self.worker_id,
+            ip=self.lmcache_worker_ip,
+            port=self.lmcache_worker_port,
+            peer_init_url=self.p2p_init_url,
+        )
+
+        # Send via REQ socket and wait for response
+        try:
+            self.req_socket.send(
+                msgspec.msgpack.encode(register_msg), flags=zmq.NOBLOCK
             )
-        )
+            # Use sync recv since we're not in async context
+            serialized_ret_msg = self.req_socket.recv()
+            ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
+
+            if isinstance(ret_msg, RegisterRetMsg):
+                self._process_register_response(ret_msg)
+            else:
+                logger.warning("Unexpected register response type: %s", type(ret_msg))
+        except zmq.ZMQError as e:
+            logger.error("Failed to register with controller: %s", e)
+            raise
+
+    def _process_register_response(self, ret_msg: RegisterRetMsg):
+        """Process RegisterRetMsg and initialize components based on extra_config."""
+        extra_config = ret_msg.extra_config
+
+        # Initialize heartbeat socket if heartbeat_url is provided
+        heartbeat_url = extra_config.get("heartbeat_url")
+        if heartbeat_url:
+            logger.info("Received heartbeat_url from controller: %s", heartbeat_url)
+            self.controller_heartbeat_url = heartbeat_url
+            self._create_heartbeat_socket()
+        else:
+            logger.info("No dedicated heartbeat_url provided by controller")
 
     def deregister(self):
         """
@@ -218,6 +257,24 @@ class LMCacheWorker:
             self.socket_recv_timeout_ms,
             self.socket_send_timeout_ms,
         )
+
+    def _create_heartbeat_socket(self):
+        self.heartbeat_socket = get_zmq_socket_with_timeout(
+            self.context,
+            self.controller_heartbeat_url,
+            "tcp",
+            zmq.REQ,  # type: ignore[attr-defined]
+            "connect",
+            self.socket_recv_timeout_ms,
+            self.socket_send_timeout_ms,
+        )
+
+    def _recreate_heartbeat_socket(self):
+        try:
+            self.heartbeat_socket.close(linger=0)
+        except Exception as e:
+            logger.error("Error closing heartbeat socket: %s", e)
+        self._create_heartbeat_socket()
 
     def _recreate_req_socket(self):
         try:
@@ -298,25 +355,56 @@ class LMCacheWorker:
                 break
         return batch
 
+    async def _send_heartbeat_msg(self, msg: HeartbeatMsg) -> HeartbeatRetMsg:
+        """
+        Send heartbeat message via dedicated heartbeat socket.
+        This is separate from async_put_and_wait_msg to avoid socket contention.
+        """
+        if self.heartbeat_socket is None:
+            logger.warning("Heartbeat socket is not initialized")
+            return HeartbeatRetMsg()
+        try:
+            self.heartbeat_socket.send(msgspec.msgpack.encode(msg))
+            serialized_ret_msg = await self.heartbeat_socket.recv()
+            ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
+            return ret_msg
+        except zmq.Again as e:
+            logger.error("Heartbeat timeout occurred, recreating socket. Error: %s", e)
+            self._recreate_heartbeat_socket()
+            return HeartbeatRetMsg()
+        except zmq.ZMQError as e:
+            logger.error(
+                "Heartbeat ZMQ error occurred, recreating socket. Error: %s", e
+            )
+            self._recreate_heartbeat_socket()
+            return HeartbeatRetMsg()
+        except Exception as e:
+            logger.error("Error happens in heartbeat socket. Error: %s", e)
+            return HeartbeatRetMsg()
+
     async def heartbeat(self):
         """
         Send periodic heartbeats to the controller (REQ-REP mode).
 
         Process any commands received in the heartbeat response.
+        Uses dedicated heartbeat socket to avoid blocking from other requests.
         """
         enable_heartbeat = (
             self.config.lmcache_worker_heartbeat_time is not None
             and self.config.lmcache_worker_heartbeat_time > 0
+            and self.heartbeat_socket is not None
         )
         if enable_heartbeat:
             logger.info(
-                f"Start heartbeat in {self.lmcache_instance_id} : {self.worker_id}, "
-                f"delay time: {self.config.lmcache_worker_heartbeat_delay_time}s, "
-                f"heartbeat time: {self.config.lmcache_worker_heartbeat_time}s"
+                "Start heartbeat in %s : %s, delay time: %ss, heartbeat time: %ss",
+                self.lmcache_instance_id,
+                self.worker_id,
+                self.config.lmcache_worker_heartbeat_delay_time,
+                self.config.lmcache_worker_heartbeat_time,
             )
             await asyncio.sleep(self.config.lmcache_worker_heartbeat_delay_time)
             while True:
-                # Send heartbeat via REQ-REP and get response
+                # Send heartbeat via dedicated heartbeat socket
                 heartbeat_msg = HeartbeatMsg(
                     instance_id=self.lmcache_instance_id,
                     worker_id=self.worker_id,
@@ -326,7 +414,7 @@ class LMCacheWorker:
                 )
 
                 try:
-                    ret_msg = await self.async_put_and_wait_msg(heartbeat_msg)
+                    ret_msg = await self._send_heartbeat_msg(heartbeat_msg)
 
                     if isinstance(ret_msg, HeartbeatRetMsg):
                         self._handle_heartbeat_commands(ret_msg)

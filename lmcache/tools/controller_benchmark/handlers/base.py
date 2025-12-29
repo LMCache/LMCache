@@ -4,11 +4,20 @@
 
 # Standard
 from abc import ABC, abstractmethod
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Local
     from ..benchmark import TestData, ZMQControllerBenchmark
+
+
+class SocketType(Enum):
+    """Socket type for benchmark operations"""
+
+    PUSH = auto()  # PUSH socket for fire-and-forget messages
+    REQ = auto()  # REQ socket for request-reply messages
+    HEARTBEAT = auto()  # Dedicated heartbeat socket
 
 
 class OperationHandler(ABC):
@@ -32,6 +41,7 @@ class OperationHandler(ABC):
         """Get the number of messages in a single operation"""
         pass
 
-    def use_req_socket(self) -> bool:
-        """Whether this operation uses REQ-REP socket"""
-        return False
+    @property
+    def socket_type(self) -> SocketType:
+        """Return the socket type for this operation (default: PUSH)"""
+        return SocketType.PUSH

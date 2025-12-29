@@ -104,6 +104,18 @@ class LMCacheControllerManager:
                 role=zmq.REP,  # type: ignore[attr-defined]
                 bind_or_connect="bind",
             )
+
+        # Dedicated heartbeat socket to avoid blocking from other REQ-REP requests
+        if self.controller_urls.get("heartbeat") is not None:
+            self.controller_heartbeat_socket = get_zmq_socket(
+                self.zmq_context,
+                self.controller_urls["heartbeat"],
+                protocol="tcp",
+                role=zmq.REP,  # type: ignore[attr-defined]
+                bind_or_connect="bind",
+            )
+        else:
+            self.controller_heartbeat_socket = None
         self.reg_controller = RegistrationController()
         self.kv_controller = KVController(self.reg_controller.registry)
 
@@ -154,7 +166,13 @@ class LMCacheControllerManager:
         self, msg: WorkerReqMsg
     ) -> Union[WorkerReqRetMsg, ErrorMsg]:
         ret_msg: Union[WorkerReqRetMsg, ErrorMsg]
-        if isinstance(msg, BatchedP2PLookupMsg):
+        if isinstance(msg, RegisterMsg):
+            # Build extra_config with heartbeat_url if available
+            extra_config: dict[str, str] = {}
+            if self.controller_urls.get("heartbeat") is not None:
+                extra_config["heartbeat_url"] = self.controller_urls["heartbeat"]
+            ret_msg = await self.reg_controller.register(msg, extra_config)
+        elif isinstance(msg, BatchedP2PLookupMsg):
             ret_msg = await self.kv_controller.batched_p2p_lookup(msg)
         elif isinstance(msg, HeartbeatMsg):
             ret_msg = await self.reg_controller.heartbeat(msg)
@@ -298,9 +316,44 @@ class LMCacheControllerManager:
                     err_msg = ErrorMsg(error=str(e))
                     await socket.send(msgspec.msgpack.encode(err_msg))
 
+    async def handle_heartbeat_request(self, socket) -> None:
+        """Handle heartbeat requests on dedicated socket.
+
+        This runs on a separate socket to ensure heartbeats are processed
+        without being blocked by other REQ-REP requests.
+        """
+        while True:
+            part = await socket.recv()
+            with SocketMetricsContext(self, SocketType.REPLY):
+                try:
+                    if part.startswith(b"{"):
+                        msg_dict = json.loads(part)
+                        msg = msgspec.convert(msg_dict, type=Msg)
+                    else:
+                        msg = msgspec.msgpack.decode(part, type=Msg)
+
+                    if isinstance(msg, HeartbeatMsg):
+                        ret_msg = await self.reg_controller.heartbeat(msg)
+                        await socket.send(msgspec.msgpack.encode(ret_msg))
+                    else:
+                        logger.error(
+                            "Unexpected message type on heartbeat socket: %s",
+                            type(msg),
+                        )
+                        err_msg = ErrorMsg(
+                            error=f"Expected HeartbeatMsg, got {type(msg)}"
+                        )
+                        await socket.send(msgspec.msgpack.encode(err_msg))
+                except Exception as e:
+                    logger.error(
+                        "Error handling heartbeat request: %s", e, exc_info=True
+                    )
+                    err_msg = ErrorMsg(error=str(e))
+                    await socket.send(msgspec.msgpack.encode(err_msg))
+
     async def health_check(self):
         while True:
-            time.sleep(self.health_check_interval)
+            await asyncio.sleep(self.health_check_interval)
             worker_infos = self.reg_controller.registry.get_all_worker_infos()
             for worker_info in worker_infos:
                 if (
@@ -329,6 +382,10 @@ class LMCacheControllerManager:
         tasks = []
         if self.controller_urls["reply"] is not None:
             tasks.append(self.handle_batched_req_request(self.controller_reply_socket))
+        if self.controller_heartbeat_socket is not None:
+            tasks.append(
+                self.handle_heartbeat_request(self.controller_heartbeat_socket)
+            )
         tasks.append(self.handle_batched_push_request(self.controller_pull_socket))
         await asyncio.gather(
             *tasks,

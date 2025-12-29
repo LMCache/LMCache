@@ -18,7 +18,11 @@ import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.message import DeRegisterMsg, RegisterMsg
+from lmcache.v1.cache_controller.message import (
+    DeRegisterMsg,
+    RegisterMsg,
+    RegisterRetMsg,
+)
 from lmcache.v1.cache_controller.utils import KVChunkInfo
 from lmcache.v1.rpc_utils import (
     close_zmq_socket,
@@ -37,6 +41,7 @@ from .constants import (
     DEFAULT_SEND_TIMEOUT_MS,
 )
 from .handlers import OPERATION_HANDLERS
+from .handlers.base import SocketType
 
 logger = init_logger(__name__)
 
@@ -85,6 +90,8 @@ class ZMQControllerBenchmark:
         self.context: Optional[zmq.asyncio.Context] = None
         self.push_socket: Optional[Any] = None
         self.req_socket: Optional[Any] = None
+        self.heartbeat_socket: Optional[Any] = None
+        self.heartbeat_url: Optional[str] = None
         self.results = BenchmarkResults()
         self.running = False
         # Track sequence numbers per KVChunkInfo (instance_id, worker_id, location)
@@ -136,12 +143,23 @@ class ZMQControllerBenchmark:
             # Give ZMQ time to establish the connection
             time.sleep(0.1)
 
+        # Setup heartbeat socket if configured
+        if self.config.controller_heartbeat_url:
+            self.heartbeat_url = self.config.controller_heartbeat_url
+            self._setup_heartbeat_socket()
+            logger.info(
+                "Connected to heartbeat socket at tcp://%s",
+                self.config.controller_heartbeat_url,
+            )
+
     def cleanup(self):
         """Cleanup ZMQ sockets"""
         if self.push_socket:
             close_zmq_socket(self.push_socket)
         if self.req_socket:
             close_zmq_socket(self.req_socket)
+        if self.heartbeat_socket:
+            close_zmq_socket(self.heartbeat_socket)
         logger.info("ZMQ sockets closed")
 
     def generate_test_data(self) -> TestData:
@@ -243,12 +261,15 @@ class ZMQControllerBenchmark:
             raise
 
     async def register_workers(self, test_data: TestData):
-        """Pre-register all workers before benchmark"""
+        """Pre-register all workers before benchmark using REQ-REP mode"""
         if not self.config.register_first:
             return
 
-        logger.info("Pre-registering workers...")
-        messages = []
+        if self.req_socket is None:
+            logger.warning("REQ socket not initialized, skipping worker registration")
+            return
+
+        logger.info("Pre-registering workers via REQ-REP...")
         for instance in test_data.instances:
             for worker in test_data.workers:
                 ip = "192.168.1.%d" % (worker + 1)
@@ -262,16 +283,71 @@ class ZMQControllerBenchmark:
                     port=port,
                     peer_init_url=peer_init_url,
                 )
-                messages.append(msg)
-                self.registered_workers.append((instance, worker, ip, port))
+                try:
+                    _, response = await self.send_request(msg)
+                    self.registered_workers.append((instance, worker, ip, port))
+                    # Extract heartbeat_url from first successful registration
+                    # (only if not already configured)
+                    if self.heartbeat_url is None and response:
+                        self._process_register_response(response)
+                except Exception as e:
+                    logger.error(
+                        "Failed to register worker %s-%d: %s", instance, worker, e
+                    )
 
-        # Send in batches
-        for i in range(0, len(messages), DEFAULT_BATCH_SEND_SIZE):
-            batch = messages[i : i + DEFAULT_BATCH_SEND_SIZE]
-            await self.send_messages(batch)
-
-        logger.info("Registered %d workers", len(messages))
+        logger.info("Registered %d workers", len(self.registered_workers))
+        # Setup heartbeat socket after getting heartbeat_url (if not already setup)
+        if self.heartbeat_url and self.heartbeat_socket is None:
+            self._setup_heartbeat_socket()
         await asyncio.sleep(0.5)
+
+    def _process_register_response(self, response: bytes):
+        """Process RegisterRetMsg to extract heartbeat_url"""
+        try:
+            ret_msg = msgspec.msgpack.decode(response, type=RegisterRetMsg)
+            if ret_msg.extra_config and "heartbeat_url" in ret_msg.extra_config:
+                self.heartbeat_url = ret_msg.extra_config["heartbeat_url"]
+                logger.info("Got heartbeat_url from register: %s", self.heartbeat_url)
+        except Exception as e:
+            logger.warning("Failed to decode RegisterRetMsg: %s", e)
+
+    def _setup_heartbeat_socket(self):
+        """Setup heartbeat socket after getting heartbeat_url from register"""
+        if not self.heartbeat_url or not self.context:
+            return
+        if self.heartbeat_socket is not None:
+            return  # Already setup
+        self.heartbeat_socket = get_zmq_socket_with_timeout(
+            self.context,
+            self.heartbeat_url,
+            protocol="tcp",
+            role=zmq.REQ,
+            bind_or_connect="connect",
+            recv_timeout_ms=DEFAULT_RECV_TIMEOUT_MS,
+            send_timeout_ms=DEFAULT_SEND_TIMEOUT_MS,
+        )
+
+    async def send_heartbeat(self, message: Any) -> Tuple[float, Any]:
+        """Send heartbeat via dedicated heartbeat socket
+
+        Args:
+            message: HeartbeatMsg to send
+
+        Returns:
+            Tuple of (time taken, response)
+        """
+        if self.heartbeat_socket is None:
+            raise RuntimeError(
+                "Heartbeat socket not initialized. Register first to get heartbeat_url."
+            )
+        start_time = time.time()
+        encoded_msg = msgspec.msgpack.encode(message)
+        try:
+            await self.heartbeat_socket.send(encoded_msg)
+            response = await self.heartbeat_socket.recv()
+            return time.time() - start_time, response
+        except zmq.Again as e:
+            raise RuntimeError("Heartbeat timeout") from e
 
     async def deregister_workers(self):
         """Deregister all workers after benchmark"""
@@ -321,10 +397,13 @@ class ZMQControllerBenchmark:
 
         try:
             msg = handler.create_message(self, test_data)
-            # Check if handler requires REQ-REP pattern
-            if handler.use_req_socket():
+            socket_type = handler.socket_type
+
+            if socket_type == SocketType.HEARTBEAT:
+                latency, _ = await self.send_heartbeat(msg)
+            elif socket_type == SocketType.REQ:
                 latency, _ = await self.send_request(msg)
-            else:
+            else:  # SocketType.PUSH
                 msg_start = time.time()
                 await self.send_messages([msg])
                 latency = time.time() - msg_start

@@ -21,6 +21,7 @@ from lmcache.v1.cache_controller.message import (
     QueryWorkerInfoMsg,
     QueryWorkerInfoRetMsg,
     RegisterMsg,
+    RegisterRetMsg,
 )
 from lmcache.v1.cache_controller.observability import PrometheusLogger
 from lmcache.v1.cache_controller.utils import RegistryTree
@@ -98,9 +99,19 @@ class RegistrationController:
             return QueryInstRetMsg(instance_id=None, event_id=event_id)
         return QueryInstRetMsg(instance_id=instance_node.instance_id, event_id=event_id)
 
-    async def register(self, msg: RegisterMsg) -> None:
+    async def register(
+        self, msg: RegisterMsg, extra_config: Optional[dict[str, str]] = None
+    ) -> RegisterRetMsg:
         """
         Register a new instance-worker connection mapping.
+
+        Args:
+            msg: RegisterMsg from worker
+            extra_config: Optional extra configuration to return to worker,
+                          e.g., {"heartbeat_url": "tcp://...:8082"}
+
+        Returns:
+            RegisterRetMsg with extra_config for worker initialization
         """
         instance_id = msg.instance_id
         worker_id = msg.worker_id
@@ -115,7 +126,7 @@ class RegistrationController:
                 "Instance-worker %s already registered, skip registration",
                 (instance_id, worker_id),
             )
-            return
+            return RegisterRetMsg(extra_config=extra_config or {})
 
         peer_init_url = msg.peer_init_url
         if peer_init_url is None:
@@ -147,6 +158,7 @@ class RegistrationController:
         logger.info(
             "Registered instance-worker %s with URL %s", (instance_id, worker_id), url
         )
+        return RegisterRetMsg(extra_config=extra_config or {})
 
     async def deregister(self, msg: DeRegisterMsg) -> None:
         """
