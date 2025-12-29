@@ -32,54 +32,45 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     Interface for remote connector
     """
 
-    save_chunk_meta: bool = True
-    meta_shape: Optional[torch.Size] = None
-    meta_dtype: Optional[torch.dtype] = None
-    meta_fmt: Optional[MemoryFormat] = None
-    full_chunk_size: Optional[int] = None
-    single_token_size: Optional[int] = None
+    def __init__(
+        self, config: LMCacheEngineConfig, metadata: Optional[LMCacheEngineMetadata]
+    ):
+        """
+        Initialize some common attributes, which will be used in the subclasses.
+        - `save_chunk_meta` is a flag to indicate whether to save the chunk meta info.
+        - `meta_shapes` is a list of shapes of lmcache full chunk.
+        - `meta_dtypes` is a list of dtypes of lmcache chunk.
+        - `meta_fmt` is the memory format of the lmcache chunk.
+        - `full_chunk_size` is the size of the lmcache full chunk.
+        - `single_token_size` is the size of a single token.`
 
-    @NotAudit
-    def init_chunk_meta(
-        self,
-        config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
-    ) -> None:
-        logger.info("initializing chunk meta for remote connector")
-        # TODO: support layerwise later
-        if (
-            config is None
-            or metadata is None
-            or config.extra_config is None
+        Input:
+            config: the lmcache engine config
+            metadata: the lmcache engine metadata
+        """
+        # TODO(chunxiaozheng): support layerwise here
+        assert metadata is not None
+        self.save_chunk_meta: bool = (
+            config.extra_config is None
             or config.extra_config.get("save_chunk_meta", True)
             or config.use_layerwise
-        ):
-            return
-
-        self.save_chunk_meta = False
-        self.meta_shape = torch.Size(
-            [
-                metadata.kv_shape[1],
-                metadata.kv_shape[0],
-                metadata.kv_shape[2],
-                metadata.kv_shape[3] * metadata.kv_shape[4],
-            ]
         )
-        self.meta_dtype = metadata.kv_dtype
-        self.meta_fmt = (
+        self.meta_shapes: list[torch.Size] = metadata.get_shapes()
+        self.meta_dtypes: list[torch.dtype] = metadata.get_dtypes()
+        self.meta_fmt: MemoryFormat = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
-        self.full_chunk_size = get_size_bytes([self.meta_shape], [self.meta_dtype])
-        assert self.full_chunk_size is not None
-        assert self.full_chunk_size % metadata.kv_shape[2] == 0
-        self.single_token_size = self.full_chunk_size // metadata.kv_shape[2]
+        self.full_chunk_size: int = get_size_bytes(self.meta_shapes, self.meta_dtypes)
+        assert self.full_chunk_size % metadata.chunk_size == 0
+        self.single_token_size = self.full_chunk_size // metadata.chunk_size
         logger.info(
-            f"init remote connector metadata info, "
-            f"shape: {self.meta_shape}, "
-            f"dtype: {self.meta_dtype}, "
-            f"fmt: {self.meta_fmt}, "
-            f"full chunk size: {self.full_chunk_size}, "
-            f"single token size: {self.single_token_size}"
+            "init remote connector metadata info, shapes: %s, dtypes: %s, "
+            "fmt: %s, full chunk size: %s, single token size: %s",
+            self.meta_shapes,
+            self.meta_dtypes,
+            self.meta_fmt,
+            self.full_chunk_size,
+            self.single_token_size,
         )
 
     @NotAudit

@@ -459,35 +459,53 @@ class NixlStorageBackend(AllocatorBackendInterface):
             with self.progress_lock:
                 self.progress_set.discard(key)
 
-    async def storage_to_mem(
+    def _collect_metadata_with_lock(
         self, keys: list[CacheEngineKey]
-    ) -> list[Optional[MemoryObj]]:
-        obj_list: list[Optional[MemoryObj]] = []
-        mem_indices = []
-        storage_indices = []
+    ) -> list[Optional[NixlKeyMetadata]]:
+        """
+        Fast metadata collection with lock.
+        Returns metadata for each key, None if key doesn't exist.
+        """
+        metadata_list: list[Optional[NixlKeyMetadata]] = []
         with self.key_lock:
             for key in keys:
                 metadata = self.key_dict.get(key)
-                if metadata is None:
-                    obj_list.append(None)
-                    continue
+                if metadata is not None:
+                    self.cache_policy.update_on_hit(key, self.key_dict)
+                metadata_list.append(metadata)
+        return metadata_list
 
-                self.cache_policy.update_on_hit(key, self.key_dict)
+    async def _nixl_transfer_async(
+        self, metadata_list: list[Optional[NixlKeyMetadata]]
+    ) -> list[Optional[MemoryObj]]:
+        """
+        Memory allocation and NIXL transfer without locks.
+        Can run async and in parallel with other transfers.
+        """
+        obj_list: list[Optional[MemoryObj]] = []
+        mem_indices = []
+        storage_indices = []
 
-                dtype = metadata.dtype
-                shape = metadata.shape
-                fmt = metadata.fmt
-                assert dtype is not None
-                assert shape is not None
-                assert fmt is not None
+        # Memory allocation outside lock
+        for metadata in metadata_list:
+            if metadata is None:
+                obj_list.append(None)
+                continue
 
-                obj = self.memory_allocator.allocate(shape, dtype, fmt)
-                assert obj is not None
+            dtype = metadata.dtype
+            shape = metadata.shape
+            fmt = metadata.fmt
+            assert dtype is not None
+            assert shape is not None
+            assert fmt is not None
 
-                obj_list.append(obj)
+            obj = self.memory_allocator.allocate(shape, dtype, fmt)
+            assert obj is not None
 
-                mem_indices.append(obj.metadata.address)
-                storage_indices.append(metadata.index)
+            obj_list.append(obj)
+
+            mem_indices.append(obj.metadata.address)
+            storage_indices.append(metadata.index)
 
         if not mem_indices:
             return obj_list
@@ -497,6 +515,15 @@ class NixlStorageBackend(AllocatorBackendInterface):
         self.agent.release_handle(handle)
 
         return obj_list
+
+    async def storage_to_mem(
+        self, keys: list[CacheEngineKey]
+    ) -> list[Optional[MemoryObj]]:
+        """
+        Combined method: collect metadata with lock, then do NIXL transfer.
+        """
+        metadata_list = self._collect_metadata_with_lock(keys)
+        return await self._nixl_transfer_async(metadata_list)
 
     def batched_submit_put_task(
         self,
@@ -544,6 +571,26 @@ class NixlStorageBackend(AllocatorBackendInterface):
 
         obj_list = future.result()
         return obj_list[0]
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        """
+        A blocking function to get the kv cache from the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+
+        :return: a list of memory objects.
+        """
+
+        if not keys:
+            return []
+
+        future = asyncio.run_coroutine_threadsafe(self.storage_to_mem(keys), self.loop)
+
+        obj_list = future.result()
+        return obj_list
 
     async def batched_get_non_blocking(
         self,

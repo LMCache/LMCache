@@ -83,11 +83,13 @@ class S3Connector(RemoteConnector):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         if not s3_endpoint.startswith("s3://"):
             raise ValueError("S3 url must start with 's3://'")
 
-        # post initialized
-        self.s3_part_size = None
+        self.s3_part_size = self.full_chunk_size
 
         self.s3_endpoint = s3_endpoint.removeprefix("s3://")
         self.loop = loop
@@ -163,18 +165,6 @@ class S3Connector(RemoteConnector):
         self.connection_disabled = False
 
         self.pq_executor = AsyncPQExecutor(loop)
-
-    def post_init(self):
-        logger.info("Post-initializing S3 connector")
-
-        if self.s3_part_size is None:
-            # Default to chunk size
-            self.s3_part_size = self.full_chunk_size
-        assert self.s3_part_size == self.full_chunk_size, (
-            "S3 part size must be equal to chunk size in S3Connector"
-        )
-        logger.info(f"s3 connector meta_shape: {self.meta_shape}")
-        logger.info(f"s3 connector meta_dtype: {self.meta_dtype}")
 
     def _format_safe_path(self, key_str: str) -> str:
         """
@@ -368,8 +358,8 @@ class S3Connector(RemoteConnector):
             self.object_size_cache[key_str] = obj_size
 
         memory_obj = self.local_cpu_backend.allocate(
-            self.meta_shape,
-            self.meta_dtype,
+            self.meta_shapes,
+            self.meta_dtypes,
             self.meta_fmt,
         )
 
@@ -463,8 +453,8 @@ class S3Connector(RemoteConnector):
                 self.object_size_cache[key_str] = obj_size
 
             memory_obj = self.local_cpu_backend.allocate(
-                self.meta_shape,
-                self.meta_dtype,
+                self.meta_shapes,
+                self.meta_dtypes,
                 self.meta_fmt,
             )
 
