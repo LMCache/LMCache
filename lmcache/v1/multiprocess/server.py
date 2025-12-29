@@ -108,6 +108,10 @@ class GPUCacheContext:
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
+        # This allows different vLLM instances to perform GPU transfers concurrently
+        # instead of being serialized by a global lock
+        self.transfer_lock = threading.Lock()
+
         # Extra initialization
         self.cupy_stream_.launch_host_func(
             lambda logger: logger.info(
@@ -312,7 +316,7 @@ class MPCacheEngine:
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
-                with self.lock:
+                with gpu_context.transfer_lock:
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_buffer,
                         # memory_obj.tensor,
@@ -390,7 +394,7 @@ class MPCacheEngine:
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                with self.lock:
+                with gpu_context.transfer_lock:
                     tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
 
                     lmc_ops.multi_layer_kv_transfer(
