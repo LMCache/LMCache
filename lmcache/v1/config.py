@@ -461,6 +461,26 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "interval to detect and handle timeouts. Default is 30 seconds."
         ),
     },
+    # Remote configuration service
+    "remote_config_url": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+        "description": (
+            "URL of the remote configuration service. When set, LMCache will "
+            "fetch additional configuration from this URL at startup."
+        ),
+    },
+    "lmcache_appId": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+        "description": (
+            "Application ID to send to the remote configuration service. "
+            "If not set, the remote service may infer it from current config "
+            "and environment variables."
+        ),
+    },
 }
 
 

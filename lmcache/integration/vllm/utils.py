@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple
+import json
 import os
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -29,6 +33,153 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
+def _fetch_remote_config(
+    remote_config_url: str,
+    lmcache_app_id: Optional[str],
+    config: LMCacheEngineConfig,
+    timeout: int = 10,
+) -> Optional[dict]:
+    """Fetch configuration from remote config service.
+
+    Args:
+        remote_config_url: URL of the remote config service.
+        lmcache_app_id: Optional app ID to send to the config service.
+        config: Current LMCacheEngineConfig to send to the config service.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        Parsed JSON response from the config service, or None if failed.
+    """
+    try:
+        # Build request payload with current config and env variables
+        payload: dict[str, Any] = {
+            "current_config": config.to_dict(),
+            "env_variables": {},
+        }
+
+        # Add lmcache_appId if provided
+        if lmcache_app_id:
+            payload["lmcache_appId"] = lmcache_app_id
+
+        # Collect all environment variables
+        for key, value in os.environ.items():
+            payload["env_variables"][key] = value
+
+        # Prepare and send request
+        request_data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            remote_config_url,
+            data=request_data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            response_data = response.read().decode("utf-8")
+            return json.loads(response_data)
+
+    except urllib.error.URLError as e:
+        logger.warning(f"Failed to fetch remote config from {remote_config_url}: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse remote config response: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"Unexpected error fetching remote config: {e}")
+        return None
+
+
+def _apply_remote_configs(
+    config: LMCacheEngineConfig, remote_response: dict
+) -> LMCacheEngineConfig:
+    """Apply remote configuration to LMCacheEngineConfig.
+
+    This function extracts the 'configs' field from the remote response
+    and applies each config item to the LMCacheEngineConfig instance.
+
+    The expected format of remote_response['configs'] is:
+    [
+        {"override": true, "key": "config_key", "value": "config_value"},
+        ...
+    ]
+
+    Args:
+        config: LMCacheEngineConfig instance to update.
+        remote_response: Response from the remote config service.
+
+    Returns:
+        Updated LMCacheEngineConfig instance.
+    """
+    configs = remote_response.get("configs", [])
+    if not configs:
+        logger.debug("No configs found in remote response")
+        return config
+
+    applied_count = 0
+    for config_item in configs:
+        if not isinstance(config_item, dict):
+            logger.warning(f"Invalid config item format: {config_item}")
+            continue
+
+        key = config_item.get("key")
+        value = config_item.get("value")
+        override = config_item.get("override", True)
+
+        if not key:
+            logger.warning(f"Config item missing 'key': {config_item}")
+            continue
+
+        # Check if the config attribute exists
+        if not hasattr(config, key):
+            # If the key doesn't exist as a direct attribute, try to store it
+            # in extra_config
+            if config.extra_config is None:
+                config.extra_config = {}
+            if override or key not in config.extra_config:
+                config.extra_config[key] = value
+                logger.debug(f"Applied remote config to extra_config: {key}={value}")
+                applied_count += 1
+            continue
+
+        # Get current value
+        current_value = getattr(config, key)
+
+        # Skip if override is False and current value is not None/default
+        if not override and current_value is not None:
+            logger.debug(
+                f"Skipping remote config {key} (override=False, "
+                f"current value={current_value})"
+            )
+            continue
+
+        # Try to convert value to appropriate type
+        try:
+            if current_value is not None and value is not None:
+                # Convert to the same type as current value
+                if isinstance(current_value, bool):
+                    # Handle boolean conversion from string
+                    if isinstance(value, str):
+                        value = value.lower() in ("true", "1", "yes", "y", "on")
+                    else:
+                        value = bool(value)
+                elif isinstance(current_value, int):
+                    value = int(value)
+                elif isinstance(current_value, float):
+                    value = float(value)
+                elif isinstance(current_value, str):
+                    value = str(value)
+                # For list and dict, assume the value is already in correct format
+
+            setattr(config, key, value)
+            logger.info(f"Applied remote config: {key}={value}")
+            applied_count += 1
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to apply remote config {key}={value}: {e}")
+
+    logger.info(f"Applied {applied_count} remote configuration items")
+    return config
+
+
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
@@ -36,6 +187,11 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
 
     This function is thread-safe and implements singleton pattern,
     ensuring the configuration is loaded only once.
+
+    After loading the configuration, if 'remote_config_url' is configured,
+    this function will attempt to fetch additional configuration from the
+    remote config service. The current config and LMCACHE environment
+    variables will be sent to the service, along with 'lmcache_appId' if set.
     """
     global _config_instance
 
@@ -59,6 +215,27 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                     _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
+
+                # Fetch and apply remote configuration if configured
+                remote_config_url = _config_instance.remote_config_url
+                if remote_config_url:
+                    logger.info(
+                        f"Fetching remote configuration from {remote_config_url}"
+                    )
+                    lmcache_app_id = _config_instance.lmcache_appId
+                    remote_response = _fetch_remote_config(
+                        remote_config_url, lmcache_app_id, _config_instance
+                    )
+                    if remote_response:
+                        _config_instance = _apply_remote_configs(
+                            _config_instance, remote_response
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to fetch remote configuration from %s. "
+                            "Using local configuration only.",
+                            remote_config_url,
+                        )
     return _config_instance
 
 
