@@ -156,7 +156,7 @@ class LMCacheWorker:
         # Full sync sender (initialized lazily when needed)
         self._full_sync_sender: Optional["FullSyncSender"] = None
 
-    def register(self):
+    async def register(self):
         """
         Register the lmcache worker with the controller via DEALER-ROUTER.
 
@@ -179,12 +179,11 @@ class LMCacheWorker:
 
         # Send via DEALER socket (empty frame + payload) and wait for response
         try:
-            self.req_socket.send_multipart(
+            await self.req_socket.send_multipart(
                 [b"", msgspec.msgpack.encode(register_msg)], flags=zmq.NOBLOCK
             )
-            # Use sync recv since we're not in async context
             # DEALER receives: [empty_frame, payload]
-            frames = self.req_socket.recv_multipart()
+            frames = await self.req_socket.recv_multipart()
             serialized_ret_msg = frames[-1]
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
 
@@ -603,7 +602,7 @@ class LMCacheWorker:
     async def start_all(self):
         try:
             # Register first to get heartbeat_url before starting heartbeat task
-            self.register()
+            await self.register()
 
             logger.info(
                 f"Starting lmcache worker {self.worker_id}"
