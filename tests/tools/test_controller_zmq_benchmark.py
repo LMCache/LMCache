@@ -170,7 +170,7 @@ class TestOperationHandlers:
 
         assert isinstance(msg, RegisterMsg)
         assert handler.get_message_count(controller_zmq_benchmark) == 1
-        assert handler.socket_type == SocketType.REQ
+        assert handler.socket_type == SocketType.DEALER
 
     def test_deregister_handler(self, controller_zmq_benchmark, test_data):
         """Test DeregisterHandler functionality"""
@@ -192,7 +192,7 @@ class TestOperationHandlers:
             handler.get_message_count(controller_zmq_benchmark)
             == controller_zmq_benchmark.config.num_hashes
         )
-        assert handler.socket_type == SocketType.REQ
+        assert handler.socket_type == SocketType.DEALER
 
     def test_operation_handler_registry(self):
         """Test operation handler registry"""
@@ -308,11 +308,12 @@ class TestZMQControllerBenchmark:
 
     @pytest.mark.asyncio
     async def test_send_request_success(self, zmq_benchmark):
-        """Test successful request sending"""
+        """Test successful request sending via DEALER socket"""
         # Mock the socket
         mock_socket = AsyncMock()
-        mock_socket.send = AsyncMock()
-        mock_socket.recv = AsyncMock(return_value=b"response")
+        mock_socket.send_multipart = AsyncMock()
+        # DEALER receives: [empty_frame, payload]
+        mock_socket.recv_multipart = AsyncMock(return_value=[b"", b"response"])
         zmq_benchmark.req_socket = mock_socket
 
         test_data = zmq_benchmark.generate_test_data()
@@ -324,16 +325,16 @@ class TestZMQControllerBenchmark:
         assert isinstance(latency, float)
         assert latency >= 0
         assert response == b"response"
-        mock_socket.send.assert_called_once()
-        mock_socket.recv.assert_called_once()
+        mock_socket.send_multipart.assert_called_once()
+        mock_socket.recv_multipart.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_send_request_timeout(self, zmq_benchmark):
-        """Test request sending timeout"""
+        """Test request sending timeout via DEALER socket"""
         # Mock the socket to raise timeout
         mock_socket = AsyncMock()
-        mock_socket.send = AsyncMock()
-        mock_socket.recv = AsyncMock(side_effect=Exception("Request timeout"))
+        mock_socket.send_multipart = AsyncMock()
+        mock_socket.recv_multipart = AsyncMock(side_effect=Exception("Request timeout"))
         zmq_benchmark.req_socket = mock_socket
 
         test_data = zmq_benchmark.generate_test_data()
@@ -502,3 +503,60 @@ class TestIntegration:
         assert isinstance(results.memory_usage, list)
         assert results.total_messages == 0
         assert results.total_requests == 0
+
+    def test_normalize_heartbeat_url_localhost_connection(self):
+        """Test heartbeat URL normalization when connecting to localhost"""
+        config = ZMQBenchmarkConfig(
+            controller_pull_url="127.0.0.1:8100",
+            controller_reply_url="127.0.0.1:8101",
+            duration=1,
+            batch_size=10,
+            num_instances=2,
+            num_workers=2,
+            num_locations=2,
+            num_keys=10,
+            register_first=False,
+        )
+
+        zmq_benchmark = ZMQControllerBenchmark(config)
+
+        # When connecting locally, remote IPs should be replaced with 127.0.0.1
+        assert (
+            zmq_benchmark._normalize_heartbeat_url("10.0.0.5:7557") == "127.0.0.1:7557"
+        )
+        assert (
+            zmq_benchmark._normalize_heartbeat_url("192.168.1.100:7557")
+            == "127.0.0.1:7557"
+        )
+        # localhost should remain unchanged
+        assert (
+            zmq_benchmark._normalize_heartbeat_url("127.0.0.1:7557") == "127.0.0.1:7557"
+        )
+        assert (
+            zmq_benchmark._normalize_heartbeat_url("localhost:7557") == "localhost:7557"
+        )
+
+    def test_normalize_heartbeat_url_remote_connection(self):
+        """Test heartbeat URL normalization when connecting to remote host"""
+        config = ZMQBenchmarkConfig(
+            controller_pull_url="10.0.0.5:8100",
+            controller_reply_url="10.0.0.5:8101",
+            duration=1,
+            batch_size=10,
+            num_instances=2,
+            num_workers=2,
+            num_locations=2,
+            num_keys=10,
+            register_first=False,
+        )
+
+        zmq_benchmark = ZMQControllerBenchmark(config)
+
+        # When connecting to remote, should keep the original IP
+        assert (
+            zmq_benchmark._normalize_heartbeat_url("10.0.0.5:7557") == "10.0.0.5:7557"
+        )
+        assert (
+            zmq_benchmark._normalize_heartbeat_url("192.168.1.100:7557")
+            == "192.168.1.100:7557"
+        )

@@ -156,9 +156,9 @@ class LMCacheWorker:
         # Full sync sender (initialized lazily when needed)
         self._full_sync_sender: Optional["FullSyncSender"] = None
 
-    async def register(self):
+    def register(self):
         """
-        Register the lmcache worker with the controller via REQ-REP.
+        Register the lmcache worker with the controller via DEALER-ROUTER.
 
         This method sends a RegisterMsg and waits for RegisterRetMsg
         which contains extra_config (e.g., heartbeat_url).
@@ -177,12 +177,15 @@ class LMCacheWorker:
             peer_init_url=self.p2p_init_url,
         )
 
-        # Send via REQ socket and wait for response
+        # Send via DEALER socket (empty frame + payload) and wait for response
         try:
-            await self.req_socket.send(
-                msgspec.msgpack.encode(register_msg), flags=zmq.NOBLOCK
+            self.req_socket.send_multipart(
+                [b"", msgspec.msgpack.encode(register_msg)], flags=zmq.NOBLOCK
             )
-            serialized_ret_msg = await self.req_socket.recv()
+            # Use sync recv since we're not in async context
+            # DEALER receives: [empty_frame, payload]
+            frames = self.req_socket.recv_multipart()
+            serialized_ret_msg = frames[-1]
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
 
             if isinstance(ret_msg, RegisterRetMsg):
@@ -226,10 +229,26 @@ class LMCacheWorker:
     ) -> WorkerReqRetMsg:
         """
         Send a message to the controller and wait for the response.
+
+        This method handles different types of WorkerReqMsg using appropriate sockets:
+        - HeartbeatMsg: Uses dedicated heartbeat socket
+        - Other messages (RegisterMsg, BatchedP2PLookupMsg, FullSyncStartMsg,
+          FullSyncStatusMsg): Uses DEALER socket (req_socket)
+
+        Note: With DEALER-ROUTER mode, we no longer need to separate FullSync
+        messages to heartbeat socket since DEALER supports async concurrent requests.
         """
+        # Send heartbeat via dedicated heartbeat socket
+        if isinstance(msg, HeartbeatMsg):
+            return await self._send_heartbeat_msg(msg)
+
+        # Send other messages via DEALER socket
         try:
-            self.req_socket.send(msgspec.msgpack.encode(msg))
-            serialized_ret_msg = await self.req_socket.recv()
+            # DEALER socket: send [empty_frame, payload]
+            await self.req_socket.send_multipart([b"", msgspec.msgpack.encode(msg)])
+            frames = await self.req_socket.recv_multipart()
+            # DEALER receives: [empty_frame, payload]
+            serialized_ret_msg = frames[-1]
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
             return ret_msg
         except zmq.Again as e:
@@ -249,7 +268,7 @@ class LMCacheWorker:
             self.context,
             self.controller_rep_url,
             "tcp",
-            zmq.REQ,  # type: ignore[attr-defined]
+            zmq.DEALER,  # type: ignore[attr-defined]
             "connect",
             self.socket_recv_timeout_ms,
             self.socket_send_timeout_ms,
@@ -267,7 +286,7 @@ class LMCacheWorker:
             self.context,
             self.controller_heartbeat_url,
             "tcp",
-            zmq.REQ,  # type: ignore[attr-defined]
+            zmq.DEALER,  # type: ignore[attr-defined]
             "connect",
             self.socket_recv_timeout_ms,
             self.socket_send_timeout_ms,
@@ -361,25 +380,24 @@ class LMCacheWorker:
 
     async def _send_heartbeat_msg(self, msg: HeartbeatMsg) -> HeartbeatRetMsg:
         """
-        Send heartbeat message via dedicated heartbeat socket.
-        This is separate from async_put_and_wait_msg to avoid socket contention.
+        Send heartbeat message via dedicated heartbeat DEALER socket.
+        This is separate from async_put_and_wait_msg to keep heartbeat independent.
         """
         if self.heartbeat_socket is None:
             logger.warning("Heartbeat socket is not initialized")
             return HeartbeatRetMsg()
         try:
-            await self.heartbeat_socket.send(msgspec.msgpack.encode(msg))
-            serialized_ret_msg = await self.heartbeat_socket.recv()
+            # DEALER socket: send [empty_frame, payload]
+            await self.heartbeat_socket.send_multipart(
+                [b"", msgspec.msgpack.encode(msg)]
+            )
+            frames = await self.heartbeat_socket.recv_multipart()
+            # DEALER receives: [empty_frame, payload]
+            serialized_ret_msg = frames[-1]
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
             return ret_msg
         except zmq.Again as e:
-            logger.error(
-                "Heartbeat timeout occurred, recreating socket. "
-                "Error: %s, heartbeat_url: %s, recv_timeout: %dms",
-                e,
-                self.controller_heartbeat_url,
-                self.socket_recv_timeout_ms,
-            )
+            logger.error("Heartbeat timeout occurred, recreating socket. Error: %s", e)
             self._recreate_heartbeat_socket()
             return HeartbeatRetMsg()
         except zmq.ZMQError as e:
@@ -389,14 +407,12 @@ class LMCacheWorker:
             self._recreate_heartbeat_socket()
             return HeartbeatRetMsg()
         except Exception as e:
-            logger.error(
-                "Error happens in heartbeat socket. Error: %s", e, exc_info=True
-            )
+            logger.error("Error happens in heartbeat socket. Error: %s", e)
             return HeartbeatRetMsg()
 
     async def heartbeat(self):
         """
-        Send periodic heartbeats to the controller (REQ-REP mode).
+        Send periodic heartbeats to the controller (DEALER-ROUTER mode).
 
         Process any commands received in the heartbeat response.
         Uses dedicated heartbeat socket to avoid blocking from other requests.
@@ -587,7 +603,7 @@ class LMCacheWorker:
     async def start_all(self):
         try:
             # Register first to get heartbeat_url before starting heartbeat task
-            await self.register()
+            self.register()
 
             logger.info(
                 f"Starting lmcache worker {self.worker_id}"

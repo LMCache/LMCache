@@ -79,12 +79,12 @@ class TestWorkerInfoAPI:
 
     @pytest.fixture
     def req_socket(self, zmq_context, controller_urls):
-        """REQ socket for register operations (REQ-REP mode)"""
+        """DEALER socket for register operations (DEALER-ROUTER mode)"""
         socket = get_zmq_socket(
             zmq_context,
             controller_urls["reply"],
             protocol="tcp",
-            role=zmq.REQ,
+            role=zmq.DEALER,
             bind_or_connect="connect",
         )
         yield socket
@@ -92,12 +92,12 @@ class TestWorkerInfoAPI:
 
     @pytest.fixture
     def heartbeat_socket(self, zmq_context, controller_urls):
-        """REQ socket for heartbeat operations"""
+        """DEALER socket for heartbeat operations"""
         socket = get_zmq_socket(
             zmq_context,
             controller_urls["heartbeat"],
             protocol="tcp",
-            role=zmq.REQ,
+            role=zmq.DEALER,
             bind_or_connect="connect",
         )
         yield socket
@@ -116,8 +116,8 @@ class TestWorkerInfoAPI:
     def _send_message(self, socket, msg_type, instance_id, worker_id, ip, port):
         """Send message to controller via ZMQ
 
-        For register: uses REQ socket (REQ-REP mode), returns response
-        For heartbeat: uses REQ socket (dedicated heartbeat socket)
+        For register: uses DEALER socket (DEALER-ROUTER mode), returns response
+        For heartbeat: uses DEALER socket (dedicated heartbeat socket)
         For others: uses PUSH socket (fire-and-forget)
         """
         msg_classes = {
@@ -139,10 +139,13 @@ class TestWorkerInfoAPI:
 
         message_data = msgspec.msgpack.encode(msg)
 
-        # REQ-REP mode for register and heartbeat
+        # DEALER-ROUTER mode for register and heartbeat
         if msg_type in ("register", "heartbeat"):
-            socket.send(message_data)
-            response = socket.recv()
+            # DEALER socket: send [empty_frame, payload]
+            socket.send_multipart([b"", message_data])
+            # DEALER receives: [empty_frame, payload]
+            frames = socket.recv_multipart()
+            response = frames[-1]
             return msgspec.msgpack.decode(response, type=Msg)
         else:
             socket.send(message_data)
@@ -204,7 +207,7 @@ class TestWorkerInfoAPI:
     def test_real_worker_registration_and_query(
         self, client_with_real_controller, req_socket, heartbeat_socket
     ):
-        # Register workers via REQ-REP communication
+        # Register workers via DEALER-ROUTER communication
         self._send_message(req_socket, "register", "instance1", 0, "127.0.0.1", 8000)
         self._send_message(req_socket, "register", "instance1", 1, "127.0.0.1", 8001)
         self._send_message(req_socket, "register", "instance2", 0, "127.0.0.2", 8002)

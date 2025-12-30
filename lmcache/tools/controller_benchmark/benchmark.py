@@ -120,35 +120,35 @@ class ZMQControllerBenchmark:
             self.config.controller_pull_url,
         )
 
-        # Setup REQ socket for request-reply operations (e.g., P2P lookup)
+        # Setup DEALER socket for request-reply operations (e.g., P2P lookup)
         if self.config.controller_reply_url:
             self.req_socket = get_zmq_socket_with_timeout(
                 self.context,
                 self.config.controller_reply_url,
                 protocol="tcp",
-                role=zmq.REQ,
+                role=zmq.DEALER,
                 bind_or_connect="connect",
                 recv_timeout_ms=DEFAULT_RECV_TIMEOUT_MS,
                 send_timeout_ms=DEFAULT_SEND_TIMEOUT_MS,
             )
             logger.info(
-                "Connected to controller REP socket at tcp://%s",
+                "Connected to controller ROUTER socket at tcp://%s",
                 self.config.controller_reply_url,
             )
             logger.info(
-                "REQ socket type: %d, last_endpoint: %s",
+                "DEALER socket type: %d, last_endpoint: %s",
                 self.req_socket.get(zmq.TYPE),
                 self.req_socket.get_string(zmq.LAST_ENDPOINT, encoding="utf-8"),
             )
             # Give ZMQ time to establish the connection
             time.sleep(0.1)
 
-        # Setup heartbeat socket if configured
+        # Setup heartbeat DEALER socket if configured
         if self.config.controller_heartbeat_url:
             self.heartbeat_url = self.config.controller_heartbeat_url
             self._setup_heartbeat_socket()
             logger.info(
-                "Connected to heartbeat socket at tcp://%s",
+                "Connected to heartbeat ROUTER socket at tcp://%s",
                 self.config.controller_heartbeat_url,
             )
 
@@ -219,7 +219,7 @@ class ZMQControllerBenchmark:
         return time.time() - start_time
 
     async def send_request(self, message: Any) -> Tuple[float, Any]:
-        """Send a message via ZMQ REQ socket and wait for reply
+        """Send a message via ZMQ DEALER socket and wait for reply
 
         Args:
             message: Message to send
@@ -229,11 +229,12 @@ class ZMQControllerBenchmark:
 
         Raises:
             RuntimeError: If socket not initialized or timeout
-            zmq.ZMQError: If REQ socket state machine error occurs
+            zmq.ZMQError: If DEALER socket error occurs
         """
         if self.req_socket is None:
             raise RuntimeError(
-                "REQ socket not initialized. Ensure controller_reply_url is configured."
+                "DEALER socket not initialized. "
+                "Ensure controller_reply_url is configured."
             )
         start_time = time.time()
         encoded_msg = msgspec.msgpack.encode(message)
@@ -245,8 +246,11 @@ class ZMQControllerBenchmark:
         )
 
         try:
-            await self.req_socket.send(encoded_msg)
-            response = await self.req_socket.recv()
+            # DEALER socket: send [empty_frame, payload]
+            await self.req_socket.send_multipart([b"", encoded_msg])
+            frames = await self.req_socket.recv_multipart()
+            # DEALER receives: [empty_frame, payload]
+            response = frames[-1]
             logger.debug("Response received, size: %d bytes", len(response))
             return time.time() - start_time, response
         except zmq.Again as e:
@@ -261,12 +265,14 @@ class ZMQControllerBenchmark:
             raise
 
     async def register_workers(self, test_data: TestData):
-        """Pre-register all workers before benchmark using REQ-REP mode"""
+        """Pre-register all workers before benchmark using DEALER-ROUTER mode"""
         if not self.config.register_first:
             return
 
         if self.req_socket is None:
-            logger.warning("REQ socket not initialized, skipping worker registration")
+            logger.warning(
+                "DEALER socket not initialized, skipping worker registration"
+            )
             return
 
         logger.info("Pre-registering workers via REQ-REP...")
@@ -306,29 +312,81 @@ class ZMQControllerBenchmark:
         try:
             ret_msg = msgspec.msgpack.decode(response, type=RegisterRetMsg)
             if ret_msg.extra_config and "heartbeat_url" in ret_msg.extra_config:
-                self.heartbeat_url = ret_msg.extra_config["heartbeat_url"]
+                raw_url = ret_msg.extra_config["heartbeat_url"]
+                # Strip tcp:// prefix if present (get_zmq_socket adds it)
+                if raw_url.startswith("tcp://"):
+                    raw_url = raw_url[6:]
+                # If benchmark connects to localhost but controller returns
+                # a different IP, use localhost for heartbeat as well
+                raw_url = self._normalize_heartbeat_url(raw_url)
+                self.heartbeat_url = raw_url
                 logger.info("Got heartbeat_url from register: %s", self.heartbeat_url)
         except msgspec.DecodeError as e:
             logger.warning("Failed to decode RegisterRetMsg: %s", e)
 
+    def _normalize_heartbeat_url(self, heartbeat_url: str) -> str:
+        """Normalize heartbeat URL based on controller connection.
+
+        If benchmark connects to controller via localhost (127.0.0.1),
+        but heartbeat_url contains a different IP (e.g., from get_ip()),
+        replace it with 127.0.0.1 to ensure connectivity.
+
+        Args:
+            heartbeat_url: The heartbeat URL from controller (e.g., "10.0.0.1:7557")
+
+        Returns:
+            Normalized URL (e.g., "127.0.0.1:7557" if connecting locally)
+        """
+        if ":" not in heartbeat_url:
+            return heartbeat_url
+
+        hb_host, hb_port = heartbeat_url.rsplit(":", 1)
+
+        # Check if we're connecting to controller via localhost
+        controller_host = self.config.controller_pull_url.split(":")[0]
+        if controller_host in ("127.0.0.1", "localhost"):
+            # If controller returns a non-localhost IP, use localhost instead
+            if hb_host not in ("127.0.0.1", "localhost"):
+                logger.info(
+                    "Controller returned heartbeat IP %s, "
+                    "but we're connecting locally. Using 127.0.0.1 instead.",
+                    hb_host,
+                )
+                return "127.0.0.1:%s" % hb_port
+
+        return heartbeat_url
+
     def _setup_heartbeat_socket(self):
-        """Setup heartbeat socket after getting heartbeat_url from register"""
+        """Setup heartbeat DEALER socket after getting heartbeat_url from register"""
         if not self.heartbeat_url or not self.context:
+            logger.warning(
+                "Cannot setup heartbeat socket: heartbeat_url=%s, context=%s",
+                self.heartbeat_url,
+                self.context is not None,
+            )
             return
         if self.heartbeat_socket is not None:
             return  # Already setup
+        logger.info(
+            "Setting up heartbeat DEALER socket to %s, "
+            "recv_timeout=%dms, send_timeout=%dms",
+            self.heartbeat_url,
+            DEFAULT_RECV_TIMEOUT_MS,
+            DEFAULT_SEND_TIMEOUT_MS,
+        )
         self.heartbeat_socket = get_zmq_socket_with_timeout(
             self.context,
             self.heartbeat_url,
             protocol="tcp",
-            role=zmq.REQ,
+            role=zmq.DEALER,
             bind_or_connect="connect",
             recv_timeout_ms=DEFAULT_RECV_TIMEOUT_MS,
             send_timeout_ms=DEFAULT_SEND_TIMEOUT_MS,
         )
+        logger.info("Heartbeat socket created successfully")
 
     async def send_heartbeat(self, message: Any) -> Tuple[float, Any]:
-        """Send heartbeat via dedicated heartbeat socket
+        """Send heartbeat via dedicated heartbeat DEALER socket
 
         Args:
             message: HeartbeatMsg to send
@@ -338,16 +396,22 @@ class ZMQControllerBenchmark:
         """
         if self.heartbeat_socket is None:
             raise RuntimeError(
-                "Heartbeat socket not initialized. Register first to get heartbeat_url."
+                "Heartbeat socket not initialized. "
+                "heartbeat_url=%s. Register first to get heartbeat_url."
+                % self.heartbeat_url
             )
         start_time = time.time()
         encoded_msg = msgspec.msgpack.encode(message)
         try:
-            await self.heartbeat_socket.send(encoded_msg)
-            response = await self.heartbeat_socket.recv()
+            # DEALER socket: send [empty_frame, payload]
+            await self.heartbeat_socket.send_multipart([b"", encoded_msg])
+            frames = await self.heartbeat_socket.recv_multipart()
+            response = frames[-1]
             return time.time() - start_time, response
         except zmq.Again as e:
-            raise RuntimeError("Heartbeat timeout") from e
+            raise RuntimeError(
+                "Heartbeat timeout waiting for response from %s" % self.heartbeat_url
+            ) from e
 
     async def deregister_workers(self):
         """Deregister all workers after benchmark"""
@@ -401,7 +465,7 @@ class ZMQControllerBenchmark:
 
             if socket_type == SocketType.HEARTBEAT:
                 latency, _ = await self.send_heartbeat(msg)
-            elif socket_type == SocketType.REQ:
+            elif socket_type == SocketType.DEALER:
                 latency, _ = await self.send_request(msg)
             else:  # SocketType.PUSH
                 msg_start = time.time()

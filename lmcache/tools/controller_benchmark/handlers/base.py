@@ -16,8 +16,8 @@ class SocketType(Enum):
     """Socket type for benchmark operations"""
 
     PUSH = auto()  # PUSH socket for fire-and-forget messages
-    REQ = auto()  # REQ socket for request-reply messages
-    HEARTBEAT = auto()  # Dedicated heartbeat socket
+    DEALER = auto()  # DEALER socket for async request-reply messages
+    HEARTBEAT = auto()  # Dedicated heartbeat DEALER socket
 
 
 class OperationHandler(ABC):

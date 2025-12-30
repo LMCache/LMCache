@@ -18,7 +18,7 @@ from .base import OperationHandler, SocketType
 
 
 class RegisterHandler(OperationHandler):
-    """Handler for register operations (REQ-REP mode)"""
+    """Handler for register operations (DEALER-ROUTER mode)"""
 
     @property
     def operation_name(self) -> str:
@@ -26,7 +26,7 @@ class RegisterHandler(OperationHandler):
 
     @property
     def socket_type(self) -> SocketType:
-        return SocketType.REQ
+        return SocketType.DEALER
 
     def create_message(
         self, benchmark: "ZMQControllerBenchmark", test_data: "TestData"

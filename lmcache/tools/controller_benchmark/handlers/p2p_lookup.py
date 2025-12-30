@@ -18,7 +18,7 @@ from .base import OperationHandler, SocketType
 
 
 class P2PLookupHandler(OperationHandler):
-    """Handler for P2P lookup operations (uses REQ-REP socket)"""
+    """Handler for P2P lookup operations (uses DEALER-ROUTER socket)"""
 
     @property
     def operation_name(self) -> str:
@@ -26,7 +26,7 @@ class P2PLookupHandler(OperationHandler):
 
     @property
     def socket_type(self) -> SocketType:
-        return SocketType.REQ
+        return SocketType.DEALER
 
     def create_message(
         self, benchmark: "ZMQControllerBenchmark", test_data: "TestData"
