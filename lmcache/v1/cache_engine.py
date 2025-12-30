@@ -375,7 +375,11 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
-            kv_shapes = self.metadata.get_shapes(num_tokens)
+            # required for VLLMPagedMemHPUConnectorV2
+            if hasattr(torch, "hpu") and torch.hpu.is_available():
+                kv_shapes = self.gpu_connector.get_shape(num_tokens)
+            else:
+                kv_shapes = self.metadata.get_shapes(num_tokens)
             kv_dtypes = self.metadata.get_dtypes()
 
             # TODO (Jiayi): should be batched in the future
