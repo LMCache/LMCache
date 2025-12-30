@@ -180,7 +180,7 @@ class LMCacheWorker:
         # Send via DEALER socket (empty frame + payload) and wait for response
         try:
             await self.req_socket.send_multipart(
-                [b"", msgspec.msgpack.encode(register_msg)], flags=zmq.NOBLOCK
+                [b"", msgspec.msgpack.encode(register_msg)]
             )
             # DEALER receives: [empty_frame, payload]
             frames = await self.req_socket.recv_multipart()

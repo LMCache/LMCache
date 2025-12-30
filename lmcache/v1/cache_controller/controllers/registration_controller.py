@@ -126,7 +126,11 @@ class RegistrationController:
                 "Instance-worker %s already registered, skip registration",
                 (instance_id, worker_id),
             )
-            return RegisterRetMsg(extra_config=extra_config or {})
+            return (
+                RegisterRetMsg()
+                if extra_config is None
+                else RegisterRetMsg(extra_config=extra_config)
+            )
 
         peer_init_url = msg.peer_init_url
         if peer_init_url is None:
@@ -158,7 +162,11 @@ class RegistrationController:
         logger.info(
             "Registered instance-worker %s with URL %s", (instance_id, worker_id), url
         )
-        return RegisterRetMsg(extra_config=extra_config or {})
+        return (
+            RegisterRetMsg()
+            if extra_config is None
+            else RegisterRetMsg(extra_config=extra_config)
+        )
 
     async def deregister(self, msg: DeRegisterMsg) -> None:
         """

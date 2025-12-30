@@ -281,7 +281,7 @@ class RegisterRetMsg(WorkerReqRetMsg):
 
     # Extra configuration from controller to worker
     # e.g., {"heartbeat_url": "tcp://...:8082"}
-    extra_config: dict[str, str] = {}
+    extra_config: dict[str, str] = msgspec.field(default_factory=dict)
 
     def describe(self) -> str:
         return f"RegisterRet extra_config={self.extra_config}"
