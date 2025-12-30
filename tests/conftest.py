@@ -434,9 +434,9 @@ def autorelease(request):
 def autorelease_v1(request):
     objects = []
 
-    def _factory(obj):
+    def _factory(obj, **kwargs):
         if isinstance(obj, LMCacheEngine):
-            obj.post_init()
+            obj.post_init(**kwargs)
         objects.append(obj)
         return obj
 
