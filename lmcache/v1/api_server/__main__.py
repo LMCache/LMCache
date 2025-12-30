@@ -491,6 +491,12 @@ def main():
                     f"{config.controller_host}:"
                     f"{config.controller_monitor_ports['reply']}"
                 ),
+                "heartbeat": (
+                    f"{config.controller_host}:"
+                    f"{config.controller_monitor_ports['heartbeat']}"
+                    if config.controller_monitor_ports.get("heartbeat")
+                    else None
+                ),
             }
         else:
             if args.monitor_port != 9001:  # Only warn if explicitly set
@@ -501,6 +507,7 @@ def main():
             controller_urls = {
                 "pull": f"{config.controller_host}:{args.monitor_port}",
                 "reply": None,
+                "heartbeat": None,
             }
 
         # Use config values for health check and timeout

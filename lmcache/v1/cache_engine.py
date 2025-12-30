@@ -219,7 +219,7 @@ class LMCacheEngine:
             lambda: defaultdict(list)
         )
 
-        InitializeUsageContext(config.to_original_config(), metadata)
+        InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         self.post_inited = False

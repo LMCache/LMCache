@@ -387,38 +387,17 @@ class S3Connector(RemoteConnector):
             await asyncio.wrap_future(s3_req.finished_future)
 
             # Reset failure counter on success
-            if self.connection_failures > 0:
-                logger.info("S3 connection recovered")
-                self.connection_failures = 0
+            self._reset_connection_failures()
 
             return memory_obj
         except Exception as e:
             error_msg = str(e)
 
-            # Check if it's a connection error
-            is_connection_error = (
-                "CONNECTION_REFUSED" in error_msg
-                or "SOCKET" in error_msg
-                or "DNS" in error_msg
-                or "TIMEOUT" in error_msg
-            )
+            # Update connection failures and check if it's a connection error
+            is_connection_error = self._update_connection_failures(error_msg)
 
-            if is_connection_error:
-                self.connection_failures += 1
-                logger.error(
-                    f"S3 connection error ({self.connection_failures}/"
-                    f"{self.max_connection_failures}): {error_msg}"
-                )
-
-                if self.connection_failures >= self.max_connection_failures:
-                    self.connection_disabled = True
-                    logger.error(
-                        f"S3 connection disabled after "
-                        f"{self.max_connection_failures} "
-                        f"consecutive failures. "
-                        f"All future S3 operations will be skipped."
-                    )
-            else:
+            if not is_connection_error:
+                # Log non-connection errors
                 logger.error(f"Failed to download {key_str} from S3: {e}")
 
             memory_obj.ref_count_down()
@@ -437,9 +416,9 @@ class S3Connector(RemoteConnector):
 
         memory_objs: List[Optional[MemoryObj]] = []
         futures = []
+        future_to_memobj_idx = []
 
-        # TODO(Jiayi): Need some error handling in this loop.
-        for key in keys:
+        for idx, key in enumerate(keys):
             key_str = key.to_string()
 
             obj_size = self.object_size_cache.get(key_str, None)
@@ -481,9 +460,37 @@ class S3Connector(RemoteConnector):
             )
             fut = asyncio.wrap_future(s3_req.finished_future)
             futures.append(fut)
+            future_to_memobj_idx.append(len(memory_objs) - 1)
 
         # Use return_exceptions to prevent one failure from stopping all downloads
-        await asyncio.gather(*futures, return_exceptions=True)
+        results = await asyncio.gather(*futures, return_exceptions=True)
+
+        had_success = False
+
+        for future_idx, result in enumerate(results):
+            memobj_idx = future_to_memobj_idx[future_idx]
+
+            if isinstance(result, Exception):
+                error_msg = str(result)
+
+                is_connection_error = self._update_connection_failures(error_msg)
+
+                if not is_connection_error:
+                    # Log non-connection errors
+                    logger.error(
+                        f"Failed to download key at index {memobj_idx}: {error_msg}"
+                    )
+                # Release the memory object for failed download
+                memobj = memory_objs[memobj_idx]
+                if memobj is not None:
+                    memobj.ref_count_down()
+                    memory_objs[memobj_idx] = None
+            else:
+                had_success = True
+
+        if had_success:
+            self._reset_connection_failures()
+
         return memory_objs
 
     def _s3_upload(
@@ -559,39 +566,15 @@ class S3Connector(RemoteConnector):
             logger.debug(f"Uploaded {key_str} to S3 successfully")
 
             # Reset failure counter on success
-            if self.connection_failures > 0:
-                logger.info("S3 connection recovered")
-                self.connection_failures = 0
+            self._reset_connection_failures()
         except Exception as e:
             error_msg = str(e)
 
-            # Check if it's a connection error
-            is_connection_error = (
-                "CONNECTION_REFUSED" in error_msg
-                or "SOCKET" in error_msg
-                or "DNS" in error_msg
-                or "TIMEOUT" in error_msg
-            )
+            # Update connection failures and check if it's a connection error
+            is_connection_error = self._update_connection_failures(error_msg)
 
-            if is_connection_error:
-                self.connection_failures += 1
-                logger.error(
-                    f"S3 connection error ({self.connection_failures}/"
-                    f"{self.max_connection_failures}): {error_msg}"
-                )
-
-                if self.connection_failures >= self.max_connection_failures:
-                    self.connection_disabled = True
-                    logger.error(
-                        f"S3 connection disabled after "
-                        f"{self.max_connection_failures} "
-                        f"consecutive failures. "
-                        f"All future S3 operations will be skipped. "
-                        f"Please check network connectivity and "
-                        f"restart the service."
-                    )
-            else:
-                # Not a connection error, just log it
+            if not is_connection_error:
+                # Log non-connection errors
                 logger.error(f"Failed to upload {key_str} to S3: {e}")
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -678,6 +661,39 @@ class S3Connector(RemoteConnector):
 
     def support_batched_get(self) -> bool:
         return True
+
+    def _update_connection_failures(self, error_msg: str) -> bool:
+        # Check if it's a connection error
+        is_connection_error = (
+            "CONNECTION_REFUSED" in error_msg
+            or "SOCKET" in error_msg
+            or "DNS" in error_msg
+            or "TIMEOUT" in error_msg
+        )
+
+        if is_connection_error:
+            self.connection_failures += 1
+            logger.error(
+                f"S3 connection error ({self.connection_failures}/"
+                f"{self.max_connection_failures}): {error_msg}"
+            )
+
+            if self.connection_failures >= self.max_connection_failures:
+                self.connection_disabled = True
+                logger.error(
+                    f"S3 connection disabled after "
+                    f"{self.max_connection_failures} "
+                    f"consecutive failures. "
+                    f"All future S3 operations will be skipped."
+                )
+
+        return is_connection_error
+
+    def _reset_connection_failures(self):
+        """Reset connection failure counter on successful operation."""
+        if self.connection_failures > 0:
+            logger.info("S3 connection recovered")
+            self.connection_failures = 0
 
     async def close(self):
         await self.pq_executor.shutdown(wait=True)
