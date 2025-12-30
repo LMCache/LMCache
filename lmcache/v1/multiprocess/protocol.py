@@ -15,6 +15,7 @@ functions are supported:
     instance_id: int
     kv_caches: KVCache
     backend_type: Optional[str]  # "sglang" or "vllm" (default: None for auto-detect)
+    block_size: Optional[int]  # Required for SGLang, KV cache block size
 
 - UNREGISTER_KV_CACHE:
     instance_id: int
@@ -106,9 +107,10 @@ _PROTOCOL_DEFINTIONS = {
     # - instance_id: int
     # - kv_cache: KVCacheType
     # - backend_type: Optional[str] ("sglang" or "vllm", None for auto-detect)
+    # - block_size: Optional[int] (required for SGLang backend)
     # Returns: None
     RequestType.REGISTER_KV_CACHE: ProtocolDefinition(
-        payload_classes=[int, KVCache, Optional[str]],
+        payload_classes=[int, KVCache, Optional[str], Optional[int]],
         response_class=None,
         handler_type=HandlerType.SYNC,
     ),
