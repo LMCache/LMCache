@@ -361,7 +361,7 @@ def test_pin_timeout(alloc_cls, custom_timeout, elapsed_time):
         allocator = alloc_cls(total_size)
 
         # Create a memory object
-        data = allocator.allocate([4096], torch.float)
+        data = allocator.allocate(torch.Size([4096]), torch.float)
         assert data is not None
 
         # Pin the object
