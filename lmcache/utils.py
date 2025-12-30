@@ -584,6 +584,7 @@ class CacheStoreEvent:
     block_size: int
     lora_id: int | None
     medium: str | None
+    lora_name: str | None
 
 
 ##### NVTX annotation #####

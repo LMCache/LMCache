@@ -67,6 +67,6 @@ Example of the LMCache configuration is as follows:
 .. code-block:: bash
 
     Received event batch at 1765529395.2132685:
-  - BlockStored(block_hashes=[b'\x96\x95[h6\x1dE$v\x03\xe8\xf0\xc20\xcd\xe8\xa7#\x9cS\xe0\x16\xba\xab7\xf7z\x10P]\xfaT'], parent_block_hash=None, token_ids=[27, 91, 7265, 3575, 4326, 91, 1784, 91, 8948, 91, 397, 2610, 525, 264, 10950, 15235, 17847, 624, 27, 91, 872, 91, 397, 3838, 374, 279, 16158, 1685, 1370, 276, 5267, 27, 91, 77091, 91, 29], block_size=36, lora_id=None, medium='cpu')
+  - BlockStored(block_hashes=[b'\x96\x95[h6\x1dE$v\x03\xe8\xf0\xc20\xcd\xe8\xa7#\x9cS\xe0\x16\xba\xab7\xf7z\x10P]\xfaT'], parent_block_hash=None, token_ids=[27, 91, 7265, 3575, 4326, 91, 1784, 91, 8948, 91, 397, 2610, 525, 264, 10950, 15235, 17847, 624, 27, 91, 872, 91, 397, 3838, 374, 279, 16158, 1685, 1370, 276, 5267, 27, 91, 77091, 91, 29], block_size=36, lora_id=None, medium='cpu', lora_name=None)
 
 This is the event generated after the cache store operation.

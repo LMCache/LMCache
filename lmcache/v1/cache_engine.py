@@ -410,6 +410,7 @@ class LMCacheEngine:
                     block_size=num_tokens,
                     lora_id=None,
                     medium="cpu",
+                    lora_name=None,
                 )
                 if tokens is not None:
                     stored_event.token_ids = convert_tokens_to_list(
@@ -571,6 +572,7 @@ class LMCacheEngine:
                     block_size=num_tokens,
                     lora_id=None,
                     medium="cpu",
+                    lora_name=None,
                 )
                 if tokens is not None:
                     stored_event.token_ids = convert_tokens_to_list(
