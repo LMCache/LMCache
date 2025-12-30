@@ -452,7 +452,7 @@ class LMCacheWorker:
                     num_pinned_tokens = self.lmcache_engine.lookup(
                         tokens=request.tokens,
                         search_range=[request.location],
-                        request_id=request.worker_event_id,
+                        lookup_id=request.worker_event_id,
                         pin=True,
                     )
                     serialized_ret_msg = msgspec.msgpack.encode(
