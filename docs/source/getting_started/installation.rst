@@ -243,9 +243,9 @@ LMCache on Intel® Gaudi® HPU
 
 LMCache can be installed in the Intel® Gaudi® HPU docker along with vllm and vllm-gaudi.
 
-Latest Intel Gaudi docker image info is published at `Gaudi docs <https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#use-intel-gaudi-containers>`__.
+Latest docker image info is published at `Intel® Gaudi® Documentation <https://docs.habana.ai/en/latest/Installation_Guide/Additional_Installation/Docker_Installation.html#use-intel-gaudi-containers>`__.
 
-Installation steps for vllm and vllm-gaudi is available `vllm-gaudi github <https://github.com/vllm-project/vllm-gaudi>`__.
+Installation steps for vllm and vllm-gaudi is available `vllm-gaudi <https://github.com/vllm-project/vllm-gaudi>`__.
 
 To install LMCache from source, clone the repository and install in editable mode.
 
@@ -255,4 +255,4 @@ To install LMCache from source, clone the repository and install in editable mod
 
 Dockerfile for Intel® Gaudi® HPU is also available at docker/Dockerfile.hpu .
 
-Example scripts and instructions to run disaggregated prefilling and KV cache sharing tests on Intel® Gaudi® HPU is available in the `Readme <https://github.com/vllm-project/vllm-gaudi/blob/main/examples/lmcache/README.md>`__. Please make sure to enable ``PT_HPU_GPU_MIGRATION=1`` to run on Intel® Gaudi® H.
+Example scripts and instructions to run disaggregated prefilling and KV cache sharing tests on Intel® Gaudi® HPU is available in the `Readme <https://github.com/vllm-project/vllm-gaudi/blob/main/examples/lmcache/README.md>`__. Please make sure to enable ``PT_HPU_GPU_MIGRATION=1`` to run on Intel® Gaudi® HPU.
