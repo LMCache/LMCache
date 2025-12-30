@@ -15,6 +15,7 @@ import argparse
 import array
 import threading
 import time
+from typing import Optional
 
 # Third Party
 import cupy
@@ -54,10 +55,20 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
 
 class GPUCacheContext:
     """
-    Manages the shape and pointers to vLLM GPU KV cache tensors.
+    Manages the shape and pointers to vLLM/SGLang GPU KV cache tensors.
+    
+    Supports three formats:
+    - vLLM MHA: [2, num_blocks, block_size, num_heads, head_size] per layer (5 dims)
+    - vLLM MLA: [num_blocks, block_size, hidden_dim] per layer (3 dims)
+    - SGLang MHA: [buffer_size, num_heads, head_size] separate K/V (3 dims, 2*num_layers tensors)
     """
 
-    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+    def __init__(
+        self, 
+        kv_caches: KVCache, 
+        lmcache_chunk_size: int = 256,
+        backend_type: Optional[str] = None
+    ):
         self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = self.kv_caches_[0].device
 
@@ -65,18 +76,58 @@ class GPUCacheContext:
         pointers_list = [t.data_ptr() for t in self.kv_caches_]
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
-        # MLA flag
-        # MLA shape: [num_blocks, block_size, hidden_dim]
-        # MHA shape: [2, num_blocks, block_size, num_heads, head_size]
-        self.is_mla_ = self.kv_caches_[0].ndim == 3
+        ndim = self.kv_caches_[0].ndim
+        num_tensors = len(self.kv_caches_)
+        
+        # Determine backend type
+        # If explicitly provided, use it directly (no heuristics needed)
+        if backend_type == "sglang":
+            self.is_sglang_ = True
+            logger.info("Backend type explicitly set to SGLang")
+        elif backend_type == "vllm" or backend_type is None:
+            # For vLLM or auto-detect mode, SGLang is never assumed
+            self.is_sglang_ = False
+            if backend_type is None:
+                logger.info("Backend type not specified, defaulting to vLLM format")
+        else:
+            logger.warning(
+                "Unknown backend_type '%s', defaulting to vLLM format", 
+                backend_type
+            )
+            self.is_sglang_ = False
+        
+        # MLA flag (vLLM MLA format): 3 dims and not SGLang
+        self.is_mla_ = ndim == 3 and not self.is_sglang_
 
         # Shape related
-        self.num_layers_ = len(self.kv_caches_)
-        if self.is_mla_:
+        if self.is_sglang_:
+            # SGLang format: [buffer_size, num_heads, head_size]
+            # We have 2 * num_layers tensors (K0, V0, K1, V1, ...)
+            self.num_layers_ = num_tensors // 2
+            # buffer_size = num_blocks * block_size (flattened)
+            buffer_size = self.kv_caches_[0].shape[0]
+            num_heads = self.kv_caches_[0].shape[1]
+            head_size = self.kv_caches_[0].shape[2]
+            self.hidden_dim_size_ = num_heads * head_size
+            # For SGLang, we need to figure out block_size
+            # The block_size is passed when registering, but we don't have it here
+            # Use a reasonable default (8 is common)
+            self.block_size_ = 8  # Will be updated if needed
+            self.num_blocks_ = buffer_size // self.block_size_
+            logger.info(
+                "Detected SGLang format: %d layers, buffer_size=%d, "
+                "num_heads=%d, head_size=%d, hidden_dim=%d",
+                self.num_layers_, buffer_size, num_heads, head_size, 
+                self.hidden_dim_size_
+            )
+        elif self.is_mla_:
+            self.num_layers_ = num_tensors
             self.num_blocks_ = self.kv_caches_[0].shape[0]
             self.block_size_ = self.kv_caches_[0].shape[1]
             self.hidden_dim_size_ = self.kv_caches_[0].shape[2]
         else:
+            # vLLM MHA: [2, num_blocks, block_size, num_heads, head_size]
+            self.num_layers_ = num_tensors
             self.num_blocks_ = self.kv_caches_[0].shape[1]
             self.block_size_ = self.kv_caches_[0].shape[2]
             # hidden_dim = num_heads * head_size
@@ -181,6 +232,13 @@ class GPUCacheContext:
         """
         return self.is_mla_
 
+    @property
+    def is_sglang(self) -> bool:
+        """
+        Returns whether using SGLang format (separate K/V tensors)
+        """
+        return self.is_sglang_
+
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
         Returns the temporary GPU buffer for transfers
@@ -219,20 +277,32 @@ class MPCacheEngine:
         # storage manager
         self.storage_manager = MPStorageManager(cpu_buffer_size)
 
-    def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
+    def register_kv_cache(
+        self, 
+        instance_id: int, 
+        kv_caches: KVCache, 
+        backend_type: Optional[str] = None
+    ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
 
         Args:
             instance_id (int): The GPU instance ID (such as PID).
-            kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
+            kv_caches (KVCache): The KV cache tensor wrappers from vLLM/SGLang.
+            backend_type (Optional[str]): The backend type ("sglang" or "vllm").
+                If None, defaults to vLLM format for backward compatibility.
         """
-        gpu_context = GPUCacheContext(kv_caches)
+        gpu_context = GPUCacheContext(
+            kv_caches, 
+            lmcache_chunk_size=self.chunk_size,
+            backend_type=backend_type
+        )
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
-            "Registered KV cache for GPU ID %d with %d layers",
+            "Registered KV cache for GPU ID %d with %d layers (backend=%s)",
             instance_id,
             gpu_context.num_layers,
+            backend_type or "vllm",
         )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
@@ -313,16 +383,28 @@ class MPCacheEngine:
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
                 with self.lock:
-                    lmc_ops.multi_layer_kv_transfer(
-                        tmp_buffer,
-                        # memory_obj.tensor,
-                        gpu_context.kv_pointers,
-                        slot_mapping,
-                        gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
-                        True,
-                        gpu_context.is_mla,
-                    )
+                    if gpu_context.is_sglang:
+                        # SGLang uses separate K/V tensors, use unilateral kernel
+                        page_buffer_size = gpu_context.kv_tensors[0].shape[0]
+                        lmc_ops.multi_layer_kv_transfer_unilateral(
+                            tmp_buffer,
+                            gpu_context.kv_pointers,
+                            slot_mapping,
+                            gpu_context.device,
+                            page_buffer_size,
+                            True,  # direction: GPU to LMCache
+                            gpu_context.is_mla,
+                        )
+                    else:
+                        lmc_ops.multi_layer_kv_transfer(
+                            tmp_buffer,
+                            gpu_context.kv_pointers,
+                            slot_mapping,
+                            gpu_context.device,
+                            gpu_context.block_size * gpu_context.num_blocks,
+                            True,
+                            gpu_context.is_mla,
+                        )
 
                     assert memory_obj.tensor is not None
                     memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
@@ -393,16 +475,28 @@ class MPCacheEngine:
                 with self.lock:
                     tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
 
-                    lmc_ops.multi_layer_kv_transfer(
-                        # memory_obj.tensor,
-                        tmp_gpu_buffer_,
-                        gpu_context.kv_pointers,
-                        slot_mapping,
-                        gpu_context.device,
-                        gpu_context.block_size * gpu_context.num_blocks,
-                        False,
-                        gpu_context.is_mla,
-                    )
+                    if gpu_context.is_sglang:
+                        # SGLang uses separate K/V tensors, use unilateral kernel
+                        page_buffer_size = gpu_context.kv_tensors[0].shape[0]
+                        lmc_ops.multi_layer_kv_transfer_unilateral(
+                            tmp_gpu_buffer_,
+                            gpu_context.kv_pointers,
+                            slot_mapping,
+                            gpu_context.device,
+                            page_buffer_size,
+                            False,  # direction: LMCache to GPU
+                            gpu_context.is_mla,
+                        )
+                    else:
+                        lmc_ops.multi_layer_kv_transfer(
+                            tmp_gpu_buffer_,
+                            gpu_context.kv_pointers,
+                            slot_mapping,
+                            gpu_context.device,
+                            gpu_context.block_size * gpu_context.num_blocks,
+                            False,
+                            gpu_context.is_mla,
+                        )
 
         with (
             torch.cuda.device(gpu_context.device),
