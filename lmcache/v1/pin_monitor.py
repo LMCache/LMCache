@@ -61,7 +61,11 @@ class PinMonitor:
 
     def register_pinned_object(self, memory_obj: "TensorMemoryObj"):
         """Register a pinned memory object for timeout monitoring.
-        Updates the register time each time this is called.
+
+        Note: The same memory_obj can be pinned multiple times, so this
+        function may be called multiple times with the same object.
+        Each call updates the register time, effectively resetting the
+        timeout countdown.
         """
         with self._objects_lock:
             obj_id = id(memory_obj)
