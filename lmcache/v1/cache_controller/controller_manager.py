@@ -333,6 +333,7 @@ class LMCacheControllerManager:
         while True:
             frames = await socket.recv_multipart()
             with SocketMetricsContext(self, SocketType.REPLY):
+                identity = None
                 try:
                     # ROUTER socket: [identity, empty_frame, payload]
                     if len(frames) < 3:
@@ -367,11 +368,16 @@ class LMCacheControllerManager:
                         await socket.send_multipart(
                             [identity, b"", msgspec.msgpack.encode(err_msg)]
                         )
-                except Exception as e:
+                except (
+                    json.JSONDecodeError,
+                    msgspec.DecodeError,
+                    msgspec.ValidationError,
+                    zmq.ZMQError,
+                ) as e:
                     logger.error("Error handling request message: %s", e, exc_info=True)
                     err_msg = ErrorMsg(error=str(e))
                     # Try to reply with error if we have identity
-                    if "identity" in dir():
+                    if identity is not None:
                         await socket.send_multipart(
                             [identity, b"", msgspec.msgpack.encode(err_msg)]
                         )
@@ -388,6 +394,7 @@ class LMCacheControllerManager:
         while True:
             frames = await socket.recv_multipart()
             with SocketMetricsContext(self, SocketType.REPLY):
+                identity = None
                 try:
                     # ROUTER socket: [identity, empty_frame, payload]
                     if len(frames) < 3:
@@ -433,7 +440,7 @@ class LMCacheControllerManager:
                     )
                     err_msg = ErrorMsg(error=str(e))
                     # Try to reply with error if we have identity
-                    if "identity" in dir():
+                    if identity is not None:
                         await socket.send_multipart(
                             [identity, b"", msgspec.msgpack.encode(err_msg)]
                         )
