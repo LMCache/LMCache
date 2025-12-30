@@ -11,11 +11,11 @@
 ###
 
 # Standard
+from typing import Optional
 import argparse
 import array
 import threading
 import time
-from typing import Optional
 
 # Third Party
 import cupy
@@ -56,18 +56,19 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
 class GPUCacheContext:
     """
     Manages the shape and pointers to vLLM/SGLang GPU KV cache tensors.
-    
+
     Supports three formats:
     - vLLM MHA: [2, num_blocks, block_size, num_heads, head_size] per layer (5 dims)
     - vLLM MLA: [num_blocks, block_size, hidden_dim] per layer (3 dims)
-    - SGLang MHA: [buffer_size, num_heads, head_size] separate K/V (3 dims, 2*num_layers tensors)
+    - SGLang MHA: [buffer_size, num_heads, head_size] separate K/V
+                  (3 dims, 2*num_layers tensors)
     """
 
     def __init__(
-        self, 
-        kv_caches: KVCache, 
+        self,
+        kv_caches: KVCache,
         lmcache_chunk_size: int = 256,
-        backend_type: Optional[str] = None
+        backend_type: Optional[str] = None,
     ):
         self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = self.kv_caches_[0].device
@@ -78,7 +79,7 @@ class GPUCacheContext:
 
         ndim = self.kv_caches_[0].ndim
         num_tensors = len(self.kv_caches_)
-        
+
         # Determine backend type
         # If explicitly provided, use it directly (no heuristics needed)
         if backend_type == "sglang":
@@ -91,11 +92,10 @@ class GPUCacheContext:
                 logger.info("Backend type not specified, defaulting to vLLM format")
         else:
             logger.warning(
-                "Unknown backend_type '%s', defaulting to vLLM format", 
-                backend_type
+                "Unknown backend_type '%s', defaulting to vLLM format", backend_type
             )
             self.is_sglang_ = False
-        
+
         # MLA flag (vLLM MLA format): 3 dims and not SGLang
         self.is_mla_ = ndim == 3 and not self.is_sglang_
 
@@ -117,8 +117,11 @@ class GPUCacheContext:
             logger.info(
                 "Detected SGLang format: %d layers, buffer_size=%d, "
                 "num_heads=%d, head_size=%d, hidden_dim=%d",
-                self.num_layers_, buffer_size, num_heads, head_size, 
-                self.hidden_dim_size_
+                self.num_layers_,
+                buffer_size,
+                num_heads,
+                head_size,
+                self.hidden_dim_size_,
             )
         elif self.is_mla_:
             self.num_layers_ = num_tensors
@@ -278,10 +281,7 @@ class MPCacheEngine:
         self.storage_manager = MPStorageManager(cpu_buffer_size)
 
     def register_kv_cache(
-        self, 
-        instance_id: int, 
-        kv_caches: KVCache, 
-        backend_type: Optional[str] = None
+        self, instance_id: int, kv_caches: KVCache, backend_type: Optional[str] = None
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
@@ -293,9 +293,7 @@ class MPCacheEngine:
                 If None, defaults to vLLM format for backward compatibility.
         """
         gpu_context = GPUCacheContext(
-            kv_caches, 
-            lmcache_chunk_size=self.chunk_size,
-            backend_type=backend_type
+            kv_caches, lmcache_chunk_size=self.chunk_size, backend_type=backend_type
         )
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
