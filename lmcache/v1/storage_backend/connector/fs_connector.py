@@ -216,9 +216,7 @@ class FSConnector(RemoteConnector):
                         )
 
                     # Deserialize metadata and allocate memory
-                    metadata = RemoteMetadata.deserialize(
-                        md_buffer, self.remote_metadata_fmt
-                    )
+                    metadata = RemoteMetadata.deserialize(md_buffer)
                     memory_obj = self.local_cpu_backend.allocate(
                         metadata.shapes, metadata.dtypes, metadata.fmt
                     )
@@ -334,7 +332,7 @@ class FSConnector(RemoteConnector):
                 # Write to file (metadata + data)
                 async with aiofiles.open(temp_path, "wb") as f:
                     if metadata is not None:
-                        await f.write(metadata.serialize(self.remote_metadata_fmt))
+                        await f.write(metadata.serialize())
                     await f.write(buffer)
 
             # Atomically rename temp file to final destination

@@ -339,9 +339,7 @@ class EICConnector(RemoteConnector):
         perf_timer.stop("eic_mget")
 
         perf_timer.start("serialize")
-        meta = RemoteMetadata.deserialize(
-            meta_bytes[:meta_size], self.remote_metadata_fmt
-        )
+        meta = RemoteMetadata.deserialize(meta_bytes[:meta_size])
         perf_timer.stop("serialize")
 
         perf_timer.stop("total_cost")
@@ -462,7 +460,7 @@ class EICConnector(RemoteConnector):
 
         logger.debug(f"eic meta {key_str} remote_meta{remote_meta}")
 
-        meta_bytes = remote_meta.serialize(self.remote_metadata_fmt)
+        meta_bytes = remote_meta.serialize()
 
         perf_timer.stop("serialize")
 
@@ -549,7 +547,7 @@ class EICConnector(RemoteConnector):
             remote_meta = RemoteMetadata(
                 self.remote_metadata_bytes, kv_shapes, kv_dtypes, memory_format
             )
-            meta_bytes = remote_meta.serialize(self.remote_metadata_fmt)
+            meta_bytes = remote_meta.serialize()
             meta_list.append(meta_bytes)
             meta_ptr = self.bytes_get_ptr(meta_bytes)
             meta_size = len(meta_bytes)

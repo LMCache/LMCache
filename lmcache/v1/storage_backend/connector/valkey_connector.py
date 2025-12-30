@@ -134,9 +134,7 @@ class ValkeyConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RemoteMetadata.deserialize(
-            memoryview(metadata_bytes), self.remote_metadata_fmt
-        )
+        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
         memory_obj = self.local_cpu_backend.allocate(
             metadata.shapes,
@@ -193,7 +191,7 @@ class ValkeyConnector(RemoteConnector):
 
             metadata_bytes = RemoteMetadata(
                 len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-            ).serialize(self.remote_metadata_fmt)
+            ).serialize()
 
             metadata_key, kv_key = self._get_keys(key)
 
@@ -312,9 +310,7 @@ class ValkeyClusterConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RemoteMetadata.deserialize(
-            memoryview(metadata_bytes), self.remote_metadata_fmt
-        )
+        metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
         memory_obj = self.local_cpu_backend.allocate(
             metadata.shapes,
@@ -370,7 +366,7 @@ class ValkeyClusterConnector(RemoteConnector):
 
             metadata_bytes = RemoteMetadata(
                 len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-            ).serialize(self.remote_metadata_fmt)
+            ).serialize()
 
             metadata_key, kv_key = self._get_keys_with_hash_tag(key)
 

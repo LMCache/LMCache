@@ -101,7 +101,7 @@ class InfinistoreConnector(RemoteConnector):
             self.recv_queue.put_nowait(buf_idx)
             return None
 
-        metadata = RemoteMetadata.deserialize(buffer, self.remote_metadata_fmt)
+        metadata = RemoteMetadata.deserialize(buffer)
 
         num_elements = reduce(operator.mul, metadata.shapes[0])
         assert len(metadata.dtypes) == 1
@@ -143,7 +143,7 @@ class InfinistoreConnector(RemoteConnector):
 
         RemoteMetadata(
             len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-        ).serialize_into(buffer, self.remote_metadata_fmt)
+        ).serialize_into(buffer)
 
         buffer[METADATA_BYTES_LEN : METADATA_BYTES_LEN + len(kv_bytes)] = kv_bytes
 

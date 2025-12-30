@@ -9,10 +9,16 @@ import struct
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
 
+logger = init_logger(__name__)
+
+
 MAX_KEY_LENGTH = 150
+REMOTE_METADATA_FMT: Optional[str] = None
+REMOTE_METADATA_BYTES: Optional[int] = None
 
 
 class ClientCommand(IntEnum):
@@ -68,6 +74,28 @@ INT_TO_LOCATION = {
 }
 
 
+def init_remote_metadata_info(num_groups: int):
+    global REMOTE_METADATA_FMT
+    global REMOTE_METADATA_BYTES
+    # length, fmt, (dtype, shape0, shape1, shape2, shape3) * num_groups
+    fmt_length = 2 + 5 * num_groups
+    REMOTE_METADATA_FMT = "i" * fmt_length
+    REMOTE_METADATA_BYTES = 4 * fmt_length
+    logger.info(
+        "init remote metadata info with groups: %s, "
+        "remote metadata fmt: %s, remote metadata bytes: %s",
+        num_groups,
+        REMOTE_METADATA_FMT,
+        REMOTE_METADATA_BYTES,
+    )
+
+
+def get_remote_metadata_bytes():
+    global REMOTE_METADATA_BYTES
+    assert REMOTE_METADATA_BYTES is not None
+    return REMOTE_METADATA_BYTES
+
+
 @dataclass
 class RemoteMetadata:
     length: int
@@ -86,22 +114,22 @@ class RemoteMetadata:
             params.append(shape[3])
         return params
 
-    def serialize_into(self, buffer, fmt: str):
+    def serialize_into(self, buffer):
+        assert REMOTE_METADATA_FMT is not None
         params = self._prepare_params()
-        assert len(fmt) == len(params)
-        struct.pack_into(fmt, buffer, 0, *params)
+        struct.pack_into(REMOTE_METADATA_FMT, buffer, 0, *params)
 
-    def serialize(self, fmt: str) -> bytes:
+    def serialize(self) -> bytes:
+        assert REMOTE_METADATA_FMT is not None
         params = self._prepare_params()
-        assert len(fmt) == len(params)
-        packed_bytes = struct.pack(fmt, *params)
+        packed_bytes = struct.pack(REMOTE_METADATA_FMT, *params)
         return packed_bytes
 
     @staticmethod
-    def deserialize(s: bytes, fmt: str) -> "RemoteMetadata":
-        # length, fmt, dtype, shape0, shape1, shape2, shape3
-        result = struct.unpack_from(fmt, s)
-        assert len(fmt) == len(result)
+    def deserialize(s: bytes) -> "RemoteMetadata":
+        assert REMOTE_METADATA_FMT is not None
+        # length, fmt, (dtype, shape0, shape1, shape2, shape3) * num_groups
+        result = struct.unpack_from(REMOTE_METADATA_FMT, s)
         length = result[0]
         memory_fmt = MemoryFormat(result[1])
         shapes = []

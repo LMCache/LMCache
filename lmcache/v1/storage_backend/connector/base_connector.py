@@ -14,6 +14,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.protocol import get_remote_metadata_bytes, init_remote_metadata_info
 
 logger = init_logger(__name__)
 
@@ -43,7 +44,6 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         - `meta_fmt` is the memory format of the lmcache chunk.
         - `full_chunk_size` is the size of the lmcache full chunk.
         - `single_token_size` is the size of a single token.`
-        - `remote_metadata_fmt` is the format of the remote metadata.
         - `remote_metadata_bytes` is the size of the remote metadata.
 
         Input:
@@ -66,19 +66,17 @@ class RemoteConnector(metaclass=abc.ABCMeta):
         assert self.full_chunk_size % metadata.chunk_size == 0
         self.single_token_size = self.full_chunk_size // metadata.chunk_size
 
-        fmt_length = 2 + metadata.get_num_groups() * 5
-        self.remote_metadata_fmt = "i" * fmt_length
-        self.remote_metadata_bytes = fmt_length * 4
+        # init remote metadata info
+        init_remote_metadata_info(metadata.get_num_groups())
+        self.remote_metadata_bytes = get_remote_metadata_bytes()
         logger.info(
-            "init remote connector metadata info, shapes: %s, dtypes: %s, "
-            "fmt: %s, full chunk size: %s, single token size: %s, "
-            "remote metadata fmt: %s, remote metadata bytes: %s",
+            "init remote connector metadata info, shapes: %s, dtypes: %s, fmt: %s, "
+            "full chunk size: %s, single token size: %s, remote metadata bytes: %s",
             self.meta_shapes,
             self.meta_dtypes,
             self.meta_fmt,
             self.full_chunk_size,
             self.single_token_size,
-            self.remote_metadata_fmt,
             self.remote_metadata_bytes,
         )
 

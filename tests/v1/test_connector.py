@@ -375,7 +375,7 @@ def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
         memory_obj.get_dtypes(),
         memory_obj.get_memory_format(),
     )
-    metadata_bytes = meta.serialize("iiiiiii")
+    metadata_bytes = meta.serialize()
 
     # clean up memory object after getting metadata
     memory_obj.ref_count_down()

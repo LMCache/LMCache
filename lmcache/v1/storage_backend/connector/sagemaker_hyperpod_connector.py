@@ -469,7 +469,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 return None
 
             # Parse metadata
-            metadata = RemoteMetadata.deserialize(header, self.remote_metadata_fmt)
+            metadata = RemoteMetadata.deserialize(header)
             if metadata.length <= 0:
                 logger.error(f"Invalid payload length: {metadata.length}")
                 return None
@@ -837,7 +837,7 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
         # Serialize metadata header
         header = bytearray(METADATA_SIZE_BYTES)
-        metadata.serialize_into(header, self.remote_metadata_fmt)
+        metadata.serialize_into(header)
         header_bytes = bytes(header)
 
         total_len = len(header_bytes) + kv_len

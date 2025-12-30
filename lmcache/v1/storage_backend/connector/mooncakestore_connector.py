@@ -439,7 +439,7 @@ class MooncakestoreConnector(RemoteConnector):
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
             return None
 
-        metadata = RemoteMetadata.deserialize(metadata_bytes, self.remote_metadata_fmt)
+        metadata = RemoteMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.local_cpu_backend.allocate(
             metadata.shapes,
@@ -595,7 +595,7 @@ class MooncakestoreConnector(RemoteConnector):
 
             metadata_bytes = RemoteMetadata(
                 len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-            ).serialize(self.remote_metadata_fmt)
+            ).serialize()
             assert len(metadata_bytes) == METADATA_BYTES_LEN
 
             await asyncio.wait_for(

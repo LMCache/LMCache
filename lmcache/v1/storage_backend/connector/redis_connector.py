@@ -84,9 +84,7 @@ class RedisConnector(RemoteConnector):
 
             assert not inspect.isawaitable(metadata_bytes)
 
-            metadata = RemoteMetadata.deserialize(
-                memoryview(metadata_bytes), self.remote_metadata_fmt
-            )
+            metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
             memory_obj = self.local_cpu_backend.allocate(
                 metadata.shapes,
@@ -171,7 +169,7 @@ class RedisConnector(RemoteConnector):
 
         metadata_bytes = RemoteMetadata(
             len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-        ).serialize(self.remote_metadata_fmt)
+        ).serialize()
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
@@ -324,7 +322,7 @@ class RedisSentinelConnector(RemoteConnector):
 
         assert not inspect.isawaitable(metadata_bytes)
 
-        metadata = RemoteMetadata.deserialize(metadata_bytes, self.remote_metadata_fmt)
+        metadata = RemoteMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.local_cpu_backend.allocate(
             metadata.shapes,
@@ -380,7 +378,7 @@ class RedisSentinelConnector(RemoteConnector):
 
         metadata_bytes = RemoteMetadata(
             len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-        ).serialize(self.remote_metadata_fmt)
+        ).serialize()
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
@@ -464,9 +462,7 @@ class RedisClusterConnector(RemoteConnector):
 
             assert not inspect.isawaitable(metadata_bytes)
 
-            metadata = RemoteMetadata.deserialize(
-                memoryview(metadata_bytes), self.remote_metadata_fmt
-            )
+            metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
             memory_obj = self.local_cpu_backend.allocate(
                 metadata.shapes,
@@ -552,7 +548,7 @@ class RedisClusterConnector(RemoteConnector):
 
         metadata_bytes = RemoteMetadata(
             len(kv_bytes), kv_shapes, kv_dtypes, memory_format
-        ).serialize(self.remote_metadata_fmt)
+        ).serialize()
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
