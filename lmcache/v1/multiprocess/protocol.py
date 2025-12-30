@@ -14,6 +14,7 @@ functions are supported:
 - REGISTER_KV_CACHE:
     instance_id: int
     kv_caches: KVCache
+    backend_type: Optional[str]  # "sglang" or "vllm" (default: None for auto-detect)
 
 - UNREGISTER_KV_CACHE:
     instance_id: int
@@ -104,9 +105,10 @@ _PROTOCOL_DEFINTIONS = {
     # Register KV Cache
     # - instance_id: int
     # - kv_cache: KVCacheType
+    # - backend_type: Optional[str] ("sglang" or "vllm", None for auto-detect)
     # Returns: None
     RequestType.REGISTER_KV_CACHE: ProtocolDefinition(
-        payload_classes=[int, KVCache],
+        payload_classes=[int, KVCache, Optional[str]],
         response_class=None,
         handler_type=HandlerType.SYNC,
     ),
