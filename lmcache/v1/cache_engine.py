@@ -240,8 +240,6 @@ class LMCacheEngine:
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
                 )
-            if self.gpu_connector is not None:
-                self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
