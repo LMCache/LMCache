@@ -383,10 +383,13 @@ class LMCacheWorker:
             return HeartbeatRetMsg()
         try:
             # DEALER socket: send [empty_frame, payload]
+            logger.info("Sending heartbeat message to controller...")
             await self.heartbeat_socket.send_multipart(
                 [b"", msgspec.msgpack.encode(msg)]
             )
+            logger.info("Heartbeat message sent, waiting for response...")
             frames = await self.heartbeat_socket.recv_multipart()
+            logger.info("Received heartbeat response with %d frames", len(frames))
             # DEALER receives: [empty_frame, payload]
             serialized_ret_msg = frames[-1]
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
