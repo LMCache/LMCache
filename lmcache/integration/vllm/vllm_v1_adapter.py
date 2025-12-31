@@ -766,7 +766,7 @@ class LMCacheConnectorV1Impl:
         if self.lmcache_engine is not None and not implements_register_kv_caches():
             logger.warning(
                 "Please use the latest lmcache connector, otherwise some "
-                "features may not work, such as DSA with async loading."
+                "features may not work, such as DSA"
             )
             # In case of MLA, the lookup server is only created on worker 0
             async_lookup_server = None
