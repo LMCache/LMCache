@@ -23,7 +23,12 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    LayerCacheEngineKey,
+    _lmcache_nvtx_annotate,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     CuFileMemoryAllocator,
@@ -270,6 +275,7 @@ class GdsBackend(AllocatorBackendInterface):
         super().__init__(dst_device=dst_device)
 
         self.config = config
+        self.layerwise = config.use_layerwise
         self.loop = loop
         self.memory_allocator = self.initialize_allocator(config, metadata)
         self.dst_device = dst_device
@@ -354,6 +360,11 @@ class GdsBackend(AllocatorBackendInterface):
             if use_direct_io is not None:
                 self.use_direct_io = use_direct_io
 
+        if self.layerwise:
+            # In order to avoid importing non-layerwise data when
+            # layerwise is enabled, and vice versa, we create a
+            # separate directory for layerwise data.
+            self.gds_path = os.path.join(self.weka_path, "layerwise")
         os.makedirs(self.gds_path, exist_ok=True)
 
         self.stats = None  # TODO: plug into LMCache Statistics
@@ -422,7 +433,10 @@ class GdsBackend(AllocatorBackendInterface):
                         filename = os.path.basename(fentry.name)
                         key_str = filename[: -len(target_suffix)].replace("_", "/")
                         try:
-                            key = CacheEngineKey.from_string(key_str)
+                            if self.layerwise:
+                                key = LayerCacheEngineKey.from_string(key_str)
+                            else:
+                                key = CacheEngineKey.from_string(key_str)
                         except ValueError as e:
                             logger.error(
                                 f"Filename {filename} can't be converted "
@@ -452,6 +466,11 @@ class GdsBackend(AllocatorBackendInterface):
         # TODO(extra_metadata)
         # TODO(Jiayi): need to support `cached_positions`.
         # Currently we just fill it as None.
+
+        # Set the appropriate memory format for layerwise operations
+        if self.layerwise:
+            fmt = MemoryFormat.KV_T2D
+
         metadata = DiskCacheMetadata(
             filename.removesuffix(_METADATA_FILE_SUFFIX),
             size,
@@ -630,7 +649,8 @@ class GdsBackend(AllocatorBackendInterface):
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
-        size = memory_obj.get_physical_size()
+        #size = memory_obj.get_physical_size()
+        size = memory_obj.get_size()  # Use logical size to match what's stored in file
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
@@ -736,6 +756,8 @@ class GdsBackend(AllocatorBackendInterface):
             A new memory object with loaded data, or None if allocation or
             loading failed
         """
+        if self.layerwise:
+            fmt = MemoryFormat.KV_T2D
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
         if memory_obj is None:
             logger.error("Memory allocation failed during sync disk load.")
@@ -852,6 +874,11 @@ class GdsBackend(AllocatorBackendInterface):
                 paths.append(entry.path)
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
+        fmt = None
+        if self.layerwise:
+            fmt = MemoryFormat.KV_T2D
+        else:
+            fmt = MemoryFormat.KV_2LTD
 
         memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
@@ -859,7 +886,7 @@ class GdsBackend(AllocatorBackendInterface):
             if path is None:
                 memory_objs.append(None)
                 continue
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
             if memory_obj is None:
                 logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:
@@ -880,6 +907,16 @@ class GdsBackend(AllocatorBackendInterface):
             f" {gds_read_bytes / 1024 / 1024}MiB | {gds_reads} ops."
         )
         return results
+
+    async def _async_batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> list[MemoryObj | None]:
+        """
+        Asynchronously run the batched get operation in a thread pool.
+        This allows the event loop to handle other operations while I/O is happening.
+        """
+        return await asyncio.to_thread(self._batched_get_blocking, keys)
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
