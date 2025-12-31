@@ -102,6 +102,8 @@ class PinMonitor:
                     elapsed_time = current_time - register_time
                     if elapsed_time > self._pin_timeout_sec:
                         timeout_objects.append((memory_obj, elapsed_time))
+                else:
+                    self.unregister_pinned_object(memory_obj)
 
         # Force unpin timeout objects outside the lock to avoid deadlocks
         for memory_obj, elapsed_time in timeout_objects:
@@ -116,33 +118,27 @@ class PinMonitor:
         self, memory_obj: "TensorMemoryObj", elapsed_time: float
     ):
         """Force unpin a timeout object and log the event."""
+        # Get current pin_count without holding the lock for unpin calls
         with memory_obj.lock:
-            if memory_obj.meta.pin_count > 0:
-                logger.warning(
-                    "Pin timeout detected for MemoryObj %s. "
-                    "Pin count: %s, Elapsed time: %.2fs. Forcing unpin to 0.",
-                    memory_obj.meta.address,
-                    memory_obj.meta.pin_count,
-                    elapsed_time,
-                )
-
-                # Update monitoring statistics
-                LMCStatsMonitor.GetOrCreate().update_forced_unpin_count(1)
-                if memory_obj.meta.pin_count > 0:
-                    LMCStatsMonitor.GetOrCreate().update_pinned_memory_objs_count(-1)
-
-                # Force unpin
-                memory_obj.meta.pin_count = 0
-
-                # Unregister from monitoring
+            current_pin_count = memory_obj.meta.pin_count
+            if current_pin_count <= 0:
                 self.unregister_pinned_object(memory_obj)
+                return
 
-                # Free the object if ref_count is also 0
-                if (
-                    memory_obj.meta.ref_count <= 0
-                    and memory_obj.parent_allocator is not None
-                ):
-                    memory_obj.parent_allocator.free(memory_obj)
+            logger.warning(
+                "Pin timeout detected for MemoryObj %s. "
+                "Pin count: %s, Elapsed time: %.2fs. Forcing unpin to 0.",
+                memory_obj.meta.address,
+                current_pin_count,
+                elapsed_time,
+            )
+
+        # Update forced unpin statistics
+        LMCStatsMonitor.GetOrCreate().update_forced_unpin_count(1)
+
+        # Call unpin() while pin_count > 0 to properly release resources
+        while memory_obj.meta.pin_count > 0:
+            memory_obj.unpin()
 
     def _monitor_loop(self):
         """Background thread loop for monitoring pinned objects."""

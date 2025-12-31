@@ -426,6 +426,13 @@ def test_pin_monitor_timeout():
             self.lock = threading.Lock()
             self.parent_allocator = None
 
+        def unpin(self):
+            self.meta.pin_count -= 1
+            if self.meta.pin_count == 0:
+                PinMonitor.GetOrCreate().unregister_pinned_object(self)
+            if self.meta.pin_count < 0:
+                self.meta.pin_count = 0
+
     # Reset PinMonitor singleton for testing
     PinMonitor._instance = None
 
