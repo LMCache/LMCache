@@ -714,15 +714,21 @@ def _update_config_from_env(self):
 def _validate_and_set_config_value(config, config_key, value):
     """Validate and set configuration value"""
     if not hasattr(config, config_key):
-        logger.warning(f"Config key '{config_key}' does not exist in configuration")
+        logger.warning("Config key '%s' does not exist in configuration", config_key)
         return False
 
     try:
+        # Convert string to dict for extra_config
+        if config_key == "extra_config" and isinstance(value, str):
+            value = json.loads(value) if value else None
         setattr(config, config_key, value)
         return True
     except Exception as e:
         logger.error(
-            f"Failed to set config item '{config_key}' with value {value}: {e}"
+            "Failed to set config item '%s' with value %s: %s",
+            config_key,
+            value,
+            e,
         )
         return False
 

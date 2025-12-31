@@ -25,7 +25,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import get_size_bytes
+from lmcache.integration.vllm.utils import get_size_bytes, lmcache_get_or_create_config
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
@@ -573,7 +573,7 @@ def main():
     logger.info("=" * 80)
 
     try:
-        config_path = args.config or os.getenv("LMCACHE_CONFIG_FILE")
+        config_path = args.config
         if config_path:
             logger.info("Loading LMCache config file: %s", config_path)
             config = LMCacheEngineConfig.from_file(config_path)
@@ -581,7 +581,7 @@ def main():
             config.update_config_from_env()
         else:
             logger.info("No config file specified, loading from environment variables.")
-            config = LMCacheEngineConfig.from_env()
+            config = lmcache_get_or_create_config()
         # Override with any extra command-line parameters
         if args.extra_params:
             override_config_from_dict(config, args.extra_params)

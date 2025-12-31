@@ -59,7 +59,7 @@ def _fetch_remote_config(
 
         # Add lmcache_appId if provided
         if lmcache_app_id:
-            payload["appId"] = lmcache_app_id
+            remote_config_url = f"{remote_config_url}?appId={lmcache_app_id}"
 
         # Collect all environment variables
         for key, value in os.environ.items():
@@ -71,7 +71,7 @@ def _fetch_remote_config(
             remote_config_url,
             data=request_data,
             headers={"Content-Type": "application/json"},
-            method="POST",
+            method="GET",
         )
 
         with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -127,18 +127,6 @@ def _apply_remote_configs(
 
         if not key:
             logger.warning(f"Config item missing 'key': {config_item}")
-            continue
-
-        # Check if the config attribute exists
-        if not hasattr(config, key):
-            # If the key doesn't exist as a direct attribute, try to store it
-            # in extra_config
-            if config.extra_config is None:
-                config.extra_config = {}
-            if override or key not in config.extra_config:
-                config.extra_config[key] = value
-                logger.info(f"Applied remote config to extra_config: {key}={value}")
-                applied_count += 1
             continue
 
         # Get current value
