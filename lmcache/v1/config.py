@@ -471,7 +471,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "fetch additional configuration from this URL at startup."
         ),
     },
-    "lmcache_appId": {
+    "lmcache_app_id": {
         "type": Optional[str],
         "default": None,
         "env_converter": str,

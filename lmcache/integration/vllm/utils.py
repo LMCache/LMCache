@@ -18,7 +18,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -59,7 +59,7 @@ def _fetch_remote_config(
 
         # Add lmcache_appId if provided
         if lmcache_app_id:
-            payload["lmcache_appId"] = lmcache_app_id
+            payload["appId"] = lmcache_app_id
 
         # Collect all environment variables
         for key, value in os.environ.items():
@@ -112,7 +112,7 @@ def _apply_remote_configs(
     """
     configs = remote_response.get("configs", [])
     if not configs:
-        logger.debug("No configs found in remote response")
+        logger.info("No configs found in remote response")
         return config
 
     applied_count = 0
@@ -137,7 +137,7 @@ def _apply_remote_configs(
                 config.extra_config = {}
             if override or key not in config.extra_config:
                 config.extra_config[key] = value
-                logger.debug(f"Applied remote config to extra_config: {key}={value}")
+                logger.info(f"Applied remote config to extra_config: {key}={value}")
                 applied_count += 1
             continue
 
@@ -146,35 +146,20 @@ def _apply_remote_configs(
 
         # Skip if override is False and current value is not None/default
         if not override and current_value is not None:
-            logger.debug(
+            logger.info(
                 f"Skipping remote config {key} (override=False, "
                 f"current value={current_value})"
             )
             continue
 
         # Try to convert value to appropriate type
-        try:
-            if current_value is not None and value is not None:
-                # Convert to the same type as current value
-                if isinstance(current_value, bool):
-                    # Handle boolean conversion from string
-                    if isinstance(value, str):
-                        value = value.lower() in ("true", "1", "yes", "y", "on")
-                    else:
-                        value = bool(value)
-                elif isinstance(current_value, int):
-                    value = int(value)
-                elif isinstance(current_value, float):
-                    value = float(value)
-                elif isinstance(current_value, str):
-                    value = str(value)
-                # For list and dict, assume the value is already in correct format
-
-            setattr(config, key, value)
+        if _validate_and_set_config_value(config, key, value):
             logger.info(f"Applied remote config: {key}={value}")
             applied_count += 1
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Failed to apply remote config {key}={value}: {e}")
+        else:
+            logger.warning(
+                f"Failed to apply remote config {key}={value}. Using default value."
+            )
 
     logger.info(f"Applied {applied_count} remote configuration items")
     return config
@@ -220,9 +205,9 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                 remote_config_url = _config_instance.remote_config_url
                 if remote_config_url:
                     logger.info(
-                        f"Fetching remote configuration from {remote_config_url}"
+                        "Fetching remote configuration from %s", remote_config_url
                     )
-                    lmcache_app_id = _config_instance.lmcache_appId
+                    lmcache_app_id = _config_instance.lmcache_app_id
                     remote_response = _fetch_remote_config(
                         remote_config_url, lmcache_app_id, _config_instance
                     )
