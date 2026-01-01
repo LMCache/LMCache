@@ -259,6 +259,7 @@ class GdsBackend(AllocatorBackendInterface):
     /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
     is semi-arbitrary. We create two levels in the directory hierarchy to
     parallelize loading the data during initialization in the Python code.
+    (For wekafs: /{gds_path}/{metadata_dir}/{first_level}/{second_level}/{data & metadata})
 
     NOTE: If GPUDirect is not supported on that other filesystem, then CuFile will
     fall back to POSIX I/O.
@@ -366,11 +367,25 @@ class GdsBackend(AllocatorBackendInterface):
             if use_direct_io is not None:
                 self.use_direct_io = use_direct_io
 
-        if self.layerwise:
-            # In order to avoid importing non-layerwise data when
-            # layerwise is enabled, and vice versa, we create a
-            # separate directory for layerwise data.
-            self.gds_path = os.path.join(self.weka_path, "layerwise")
+        if self.fstype == "wekafs":
+            # Construct a descriptive directory name based on metadata
+            # Format:
+            # {model_name}-{world_size}-{fmt}-{kv_dtype}-{kv_shape}-{worker_id}[-layerwise]
+            dtype_str = str(metadata.kv_dtype).replace("torch.", "")
+            shape_str = "x".join(map(str, metadata.kv_shape))
+            dir_components = [
+                # Replace / in model names like "meta/Llama-2-7b"
+                metadata.model_name.replace("/", "_"),
+                str(metadata.world_size),
+                metadata.fmt,
+                dtype_str,
+                shape_str,
+                str(metadata.worker_id),
+            ]
+            if self.layerwise:
+                dir_components.append("layerwise")
+            metadata_dir = "-".join(dir_components)
+            self.gds_path = os.path.join(config.gds_path, metadata_dir)
         os.makedirs(self.gds_path, exist_ok=True)
 
         self.stats = None  # TODO: plug into LMCache Statistics
@@ -390,7 +405,9 @@ class GdsBackend(AllocatorBackendInterface):
         else:
             logger.info("No base pointer found, cufile will use bounce buffers")
             self.cufile_base_pointer = None
-        asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
+        self._scan_metadata_future = asyncio.run_coroutine_threadsafe(
+            self._scan_metadata(), self.loop
+        )
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
     async def _scan_metadata(self):
@@ -1066,17 +1083,12 @@ class GdsBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
-        if busy_loop:
-            logger.warning("GDS Backend does not support allocation with busy loop")
-        if eviction:
-            logger.warning("GDS Backend does not support eviction")
-
         """
         Allocate a memory object of shape and dtype
         evict if necessary.
         """
         logger.debug(
-            f"Allocating memory in GDS backend with busy loop: {busy_loop}"
+            f"Allocating memory with busy loop: {busy_loop}"
             f" with eviction: {eviction}"
         )
         memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
@@ -1191,6 +1203,13 @@ class GdsBackend(AllocatorBackendInterface):
 
     def close(self) -> None:
         self.memory_allocator.close()
+        # Wait for metadata scanning to complete if it's still running
+        if hasattr(self, "_scan_metadata_future"):
+            try:
+                self._scan_metadata_future.result(timeout=10.0)
+                logger.info("Metadata scanning completed during close.")
+            except Exception as e:
+                logger.warning(f"Metadata scanning did not complete cleanly: {e}")
         self.op_manager.shutdown()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)
