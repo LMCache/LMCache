@@ -537,6 +537,11 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     def get_shape(self, num_tokens: int) -> torch.Size:
         raise NotImplementedError
 
+    def close(self):
+        """Clean up GPU buffer if it was initialized."""
+        if self.gpu_buffer is not None:
+            del self.gpu_buffer
+            self.gpu_buffer = None
 
 class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
     def __init__(
@@ -944,6 +949,13 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([2, num_tokens, self.hidden_dim_size])
 
+    def close(self):
+        """Clean up GPU buffer allocator if it was initialized."""
+        if self.gpu_buffer_allocator is not None:
+            # Delete the allocator's tensor to free GPU memory
+            if hasattr(self.gpu_buffer_allocator, "tensor"):
+                del self.gpu_buffer_allocator.tensor
+            self.gpu_buffer_allocator = None
 
 class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
     """ """
@@ -1325,6 +1337,13 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # Standard format: [num_tokens, 2, hidden_dim_size]
             return torch.Size([num_tokens, 2, self.hidden_dim_size])
 
+    def close(self):
+        """Clean up GPU buffer allocator if it was initialized."""
+        if self.gpu_buffer_allocator is not None:
+            # Delete the allocator's tensor to free GPU memory
+            if hasattr(self.gpu_buffer_allocator, "tensor"):
+                del self.gpu_buffer_allocator.tensor
+            self.gpu_buffer_allocator = None
 
 class SGLangGPUConnector(GPUConnectorInterface):
     """
@@ -1512,6 +1531,10 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    def close(self):
+        """Clean up resources. No GPU buffer to clean up for this connector."""
+        pass
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
@@ -1807,3 +1830,11 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
+
+    def close(self):
+        """Clean up GPU buffer allocator if it was initialized."""
+        if self.gpu_buffer_allocator is not None:
+            # Delete the allocator's tensor to free GPU memory
+            if hasattr(self.gpu_buffer_allocator, "tensor"):
+                del self.gpu_buffer_allocator.tensor
+            self.gpu_buffer_allocator = None

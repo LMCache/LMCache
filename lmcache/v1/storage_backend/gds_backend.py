@@ -1181,6 +1181,19 @@ class GdsBackend(AllocatorBackendInterface):
     def get_memory_allocator(self):
         return self.memory_allocator
 
+    async def _wait_for_metadata_tasks(self) -> None:
+        """Wait for all pending metadata save tasks to complete."""
+        if self.save_metadata_tasks:
+            await asyncio.gather(*self.save_metadata_tasks, return_exceptions=True)
+
+    def wait_for_metadata_tasks(self) -> None:
+        """Synchronously wait for all pending metadata save tasks to complete."""
+        if self.save_metadata_tasks:
+            future = asyncio.run_coroutine_threadsafe(
+                self._wait_for_metadata_tasks(), self.loop
+            )
+            future.result()
+
     def close(self) -> None:
         self.memory_allocator.close()
         self.op_manager.shutdown()
