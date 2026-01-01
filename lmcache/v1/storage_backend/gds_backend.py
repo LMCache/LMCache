@@ -467,18 +467,36 @@ class GdsBackend(AllocatorBackendInterface):
                             )
                             continue
                         try:
-                            self._read_metadata(key, fentry.path, l1_dir + l2_dir)
+                            self._import_key_with_metadata(
+                                key, fentry.path, l1_dir + l2_dir
+                            )
                         except UnsupportedMetadataVersion:
                             logger.error(
                                 "Unsupported metadata version for "
                                 f"{fentry.path}, ignoring"
                             )
 
-    def _read_metadata(self, key, filename, subdir_key):
-        with open(filename, "rb") as f:
-            buf = f.read(_METADATA_MAX_SIZE)
+    def _read_metadata_info(self, filename: str):
+        # Use O_NOATIME to prevent updating access time and improve performance
+        # Instead of using Python's open() and read(), we use the OS's open() and
+        # read() because it is faster - the metadata file is small and we don't
+        # need any buffering.
+        #
+        # Additionally, we use O_NOATIME for two reasons:
+        # 1. Improve performance
+        # 2. To prevent updating the access time and preserve our LRU ordering
+        #    when we get rid of the metadata file separation.
+        fd = os.open(filename, os.O_RDONLY | os.O_NOATIME)
+        try:
+            buf = os.read(fd, _METADATA_MAX_SIZE)
+        finally:
+            os.close(fd)
+        return unpack_metadata(buf)
 
-        shape, dtype, size, fmt, extra_metadata = unpack_metadata(buf)
+    def _import_key_with_metadata(
+        self, key: CacheEngineKey, filename: str, subdir_key: str
+    ):
+        shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
             raise RuntimeError("unhandled lmcache metadata")
         logger.debug(
@@ -543,7 +561,7 @@ class GdsBackend(AllocatorBackendInterface):
         path += _METADATA_FILE_SUFFIX
         if os.path.exists(path):
             try:
-                return self._read_metadata(key, path, subdir_key)
+                return self._import_key_with_metadata(key, path, subdir_key)
             except UnsupportedMetadataVersion:
                 logger.error(f"Unsupported metadata version for {path}, ignoring")
             except (OSError, IOError) as e:
