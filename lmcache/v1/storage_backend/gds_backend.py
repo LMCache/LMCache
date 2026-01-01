@@ -418,7 +418,10 @@ class GdsBackend(AllocatorBackendInterface):
         return unpack_metadata(buf)
 
     def _import_key_with_metadata(
-        self, key: CacheEngineKey, filename: str, subdir_key: str
+        self,
+        key: CacheEngineKey,
+        filename: str,
+        subdir_key: str,
     ):
         shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
@@ -516,7 +519,7 @@ class GdsBackend(AllocatorBackendInterface):
                 self.gds_path,
                 l1_dir,
                 l2_dir,
-                key_str.replace("/", "_") + self.data_suffix,
+                key_str.replace("/", "_") + _DATA_FILE_SUFFIX,
             ),
             l1_dir + l2_dir,
             l1_dir,
@@ -544,72 +547,107 @@ class GdsBackend(AllocatorBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
     ) -> Union[List[Future], None]:
-        futures = []
+
+        if not keys or not memory_objs:
+            return None
+
+        # Batch setup (Synchronous & Thread-safe)
+        for memory_obj in memory_objs:
+            memory_obj.ref_count_up()
+
+        with self.put_lock:
+            self.put_tasks.update(keys)
+
+        # Offload the entire batch as one operation
+        # This returns a single Future for the background coroutine
+        master_future = asyncio.run_coroutine_threadsafe(
+            self._async_batched_submit(keys, memory_objs), self.loop
+        )
+
+        # Return a list of the same future repeated N times.
+        return [master_future] * len(keys)
+
+    async def _async_batched_submit(
+        self,
+        keys: Sequence[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
+        """
+        Asynchronously submit multiple put tasks in batch.
+        The loop happens in the async context so it doesn't block the caller.
+        """
+        # Create all async tasks
+        tasks = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            future = self.submit_put_task(key, memory_obj)
-            futures.append(future)
-        return futures
+            task = self._async_save_bytes_to_disk(key, memory_obj)
+            tasks.append(task)
+
+        # Execute all tasks concurrently
+        await asyncio.gather(*tasks)
 
     async def _async_save_bytes_to_disk(
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
     ) -> None:
-        """
-        Convert KV to bytes and async store bytes to disk.
-        """
-        kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
-        path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
-        # TODO: maybe remove `metadata_dirs` and insert mkdir calls
-        # only for the case where creating the CuFile fails on ENOENT. It
-        # also makes the code more resilient to out-of-band deletions
-        if subdir_key not in self.metadata_dirs:
-            os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
-            self.metadata_dirs.add(subdir_key)
-        tmp = ".tmp" + rand_suffix(self.rand, 8)
-        fmt = memory_obj.metadata.fmt
         try:
-            metadata = await asyncio.to_thread(
-                self._save_gds,
-                path,
-                tmp,
-                kv_chunk,
-                fmt,
-                self.cufile_base_pointer,
-                memory_obj.metadata.address,
-            )
-        except Exception as e:
-            logger.error(
-                f"GDS/cuFile write operation failed for key {key} at path {path}: "
-                f"tensor_shape={kv_chunk.shape}, tensor_dtype={kv_chunk.dtype}, "
-                f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
-                exc_info=True,
-            )
+            """
+            Convert KV to bytes and async store bytes to disk.
+            """
+            kv_chunk = memory_obj.tensor
+            assert kv_chunk is not None
+            path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
+            # TODO: maybe remove `metadata_dirs` and insert mkdir calls
+            # only for the case where creating the CuFile fails on ENOENT. It
+            # also makes the code more resilient to out-of-band deletions
+            if subdir_key not in self.metadata_dirs:
+                os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
+                self.metadata_dirs.add(subdir_key)
+            tmp = ".tmp" + rand_suffix(self.rand, 8)
+            fmt = memory_obj.metadata.fmt
+            try:
+                metadata = await asyncio.to_thread(
+                    self._save_gds,
+                    path,
+                    tmp,
+                    kv_chunk,
+                    fmt,
+                    self.cufile_base_pointer,
+                    memory_obj.metadata.address,
+                )
+            except Exception as e:
+                logger.error(
+                    f"GDS/cuFile write operation failed for key {key} at path {path}: "
+                    f"tensor_shape={kv_chunk.shape}, tensor_dtype={kv_chunk.dtype}, "
+                    f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
+                    exc_info=True,
+                )
+                with self.put_lock:
+                    self.put_tasks.discard(key)
+                return
+
+            #Register key in cache
+            self.insert_key(key, memory_obj)
+
+            try:
+                task = asyncio.create_task(
+                    save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
+                )
+                self.save_metadata_tasks.add(task)
+                task.add_done_callback(self.save_metadata_tasks.discard)
+            except Exception as e:
+                logger.error(
+                    f"POSIX metadata write operation failed for key {key} at path "
+                    f"{path + _METADATA_FILE_SUFFIX}: metadata_size_bytes={len(metadata)}, "
+                    f"tmp_suffix={tmp}, error={e}",
+                    exc_info=True,
+                )
+                with self.hot_lock:
+                    self.hot_cache.pop(key, None)
+        finally:
+            memory_obj.ref_count_down()
             with self.put_lock:
                 self.put_tasks.discard(key)
-            return
-
-        self.insert_key(key, memory_obj)
-        memory_obj.ref_count_down()
-
-        try:
-            task = asyncio.create_task(
-                save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
-            )
-            self.save_metadata_tasks.add(task)
-            task.add_done_callback(self.save_metadata_tasks.discard)
-        except Exception as e:
-            logger.error(
-                f"POSIX metadata write operation failed for key {key} at path "
-                f"{path + _METADATA_FILE_SUFFIX}: metadata_size_bytes={len(metadata)}, "
-                f"tmp_suffix={tmp}, error={e}",
-                exc_info=True,
-            )
-            with self.hot_lock:
-                self.hot_cache.pop(key, None)
-        with self.put_lock:
-            self.put_tasks.discard(key)
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
