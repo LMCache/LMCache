@@ -26,7 +26,6 @@ from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheEngineKey,
     DiskCacheMetadata,
-    LayerCacheEngineKey,
     _lmcache_nvtx_annotate,
 )
 from lmcache.v1.config import LMCacheEngineConfig
@@ -255,12 +254,6 @@ class GdsBackend(AllocatorBackendInterface):
     GDS-supported remote filesystem.  In order to use it, users need to specify
     `gds_path` and `cufile_buffer_size` in their LMCache config.
 
-    Cache Directory Structure created by this Backend:
-    /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
-    is semi-arbitrary. We create two levels in the directory hierarchy to
-    parallelize loading the data during initialization in the Python code.
-    (For wekafs: /{gds_path}/{metadata_dir}/{first_level}/{second_level}/{data & metadata})
-
     NOTE: If GPUDirect is not supported on that other filesystem, then CuFile will
     fall back to POSIX I/O.
     """
@@ -405,76 +398,7 @@ class GdsBackend(AllocatorBackendInterface):
         else:
             logger.info("No base pointer found, cufile will use bounce buffers")
             self.cufile_base_pointer = None
-        self._scan_metadata_future = asyncio.run_coroutine_threadsafe(
-            self._scan_metadata(), self.loop
-        )
         self.save_metadata_tasks: set[asyncio.Task] = set()
-
-    async def _scan_metadata(self):
-        # TODO: even though we only run it once on startup, this is still
-        # not super scalable - test whether Rust code will be faster here, or
-        # whether we can serialize meta-data in groups for faster loading.
-        tasks = []
-        start = time.perf_counter()
-        with os.scandir(self.gds_path) as it:
-            for entry in it:
-                if not entry.is_dir():
-                    continue
-                l1_dir = os.path.basename(entry.name)
-                if len(l1_dir) != 2:
-                    continue
-                tasks.append(
-                    asyncio.to_thread(
-                        self._scan_metadata_subdir,
-                        os.path.join(self.gds_path, l1_dir),
-                        l1_dir,
-                    )
-                )
-        # TODO: If Python 3.11+, can we use TaskGroup instead?
-        await asyncio.gather(*tasks)
-        end = time.perf_counter()
-        logger.info(
-            f"Read {len(self.hot_cache)} cache entries from persistent "
-            f"storage in {end - start:.2f} seconds"
-        )
-
-    def _scan_metadata_subdir(self, path, l1_dir):
-        target_suffix = self.data_suffix + _METADATA_FILE_SUFFIX
-        with os.scandir(path) as it:
-            for entry in it:
-                if not entry.is_dir():
-                    continue
-                l2_dir = os.path.basename(entry.name)
-                if len(l2_dir) != 2:
-                    continue
-                with os.scandir(os.path.join(path, l2_dir)) as it2:
-                    for fentry in it2:
-                        if not fentry.is_file():
-                            continue
-                        if not fentry.name.endswith(target_suffix):
-                            continue
-                        filename = os.path.basename(fentry.name)
-                        key_str = filename[: -len(target_suffix)].replace("_", "/")
-                        try:
-                            if self.layerwise:
-                                key = LayerCacheEngineKey.from_string(key_str)
-                            else:
-                                key = CacheEngineKey.from_string(key_str)
-                        except ValueError as e:
-                            logger.error(
-                                f"Filename {filename} can't be converted "
-                                f"back into cache key: {e}"
-                            )
-                            continue
-                        try:
-                            self._import_key_with_metadata(
-                                key, fentry.path, l1_dir + l2_dir
-                            )
-                        except UnsupportedMetadataVersion:
-                            logger.error(
-                                "Unsupported metadata version for "
-                                f"{fentry.path}, ignoring"
-                            )
 
     def _read_metadata_info(self, filename: str):
         # Use O_NOATIME to prevent updating access time and improve performance
@@ -1221,13 +1145,6 @@ class GdsBackend(AllocatorBackendInterface):
 
     def close(self) -> None:
         self.memory_allocator.close()
-        # Wait for metadata scanning to complete if it's still running
-        if hasattr(self, "_scan_metadata_future"):
-            try:
-                self._scan_metadata_future.result(timeout=10.0)
-                logger.info("Metadata scanning completed during close.")
-            except Exception as e:
-                logger.warning(f"Metadata scanning did not complete cleanly: {e}")
         self.op_manager.shutdown()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)
