@@ -461,59 +461,60 @@ class GdsBackend(AllocatorBackendInterface):
             res = key in self.hot_cache
         if res:
             return True
-        try:
-            read_from_disk = self.op_manager.run_with_timeout(
-                lambda: self._try_to_read_metadata(key),
-                self.timeout_contains,
-                "contains",
-                key,
-            )
-            if read_from_disk:
-                return True
-        except OperationHangThresholdReached:
-            logger.error(
-                "Contains hang threshold reached. Will not run operation",
-                exc_info=True,
-            )
-            return False
-        except OperationTimeoutError:
-            logger.error(
-                f"Contains timed out after {self.timeout_contains} seconds",
-                exc_info=True,
-            )
-        return False
+        return self._contains_slow_path(key)
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
         path, subdir_key, _, _ = self._key_to_path(key)
-        path += _METADATA_FILE_SUFFIX
-        if os.path.exists(path):
-            try:
-                return self._import_key_with_metadata(key, path, subdir_key)
-            except UnsupportedMetadataVersion:
-                logger.error(f"Unsupported metadata version for {path}, ignoring")
-            except (OSError, IOError) as e:
-                logger.error(
-                    f"Failed to read metadata file {path}: {type(e).__name__}: {e}. "
-                    f"File may be corrupted or inaccessible. "
-                    f"Ignoring cache entry for key {key}."
-                )
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error reading metadata file {path}: "
-                    f"{type(e).__name__}: {e}. Ignoring cache entry for key {key}."
-                )
+        path = (path + _METADATA_FILE_SUFFIX).strip()
 
+        try:
+            flags = os.O_RDONLY | os.O_NONBLOCK
+            fd = os.open(path, flags)
+            with os.fdopen(fd, 'rb') as f:
+                return self._import_key_with_metadata(key, path, subdir_key)
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            print(f"DEBUG [GDS]: Permission Denied for PID {os.getpid()} on {path}")
+            return None
+        except UnsupportedMetadataVersion:
+            logger.error(f"Unsupported metadata version for {path}, ignoring")
+        except (OSError, IOError) as e:
+            logger.error(
+                f"Failed to read metadata file {path}: {type(e).__name__}: {e}. "
+                f"File may be corrupted or inaccessible. "
+                f"Ignoring cache entry for key {key}."
+           )
+        except Exception as e:
+            logger.error(
+                f"Unexpected error reading metadata file {path}: "
+                f"{type(e).__name__}: {e}. Ignoring cache entry for key {key}."
+           )
         return None
 
     def _key_to_path(
         self,
         key: CacheEngineKey,
     ) -> Tuple[str, str, str, str]:
-        hash = str(key.chunk_hash)
-        l1_dir = hash[:2]
-        l2_dir = hash[2:4]
+        # FIX: Handle bytes correctly to get actual hex characters
+        if isinstance(key.chunk_hash, bytes):
+            hash_str = key.chunk_hash.hex()
+        else:
+            hash_str = str(key.chunk_hash)
+
+        l1_dir = hash_str[:2]
+        l2_dir = hash_str[2:4]
+
+        # Ensure key_str is also a clean string
         key_str = key.to_string()
-        assert "_" not in key_str, "key string should not contain `_`"
+        if key_str.startswith("b'") or key_str.startswith('b"'):
+            # This is a fallback in case CacheEngineKey.to_string()
+            # also has the byte-stringification bug
+            import re
+            key_str = re.sub(r"^b['\"]|['\"]$", "", key_str)
+
+        assert "_" not in key_str, f"key string '{key_str}' should not contain `_`"
+
         return (
             os.path.join(
                 self.gds_path,
@@ -933,6 +934,7 @@ class GdsBackend(AllocatorBackendInterface):
             addr = ctypes.c_void_p(base_pointer)
             dev_offset = device_offset
         tmp_path = path + tmp
+
         offset = _METADATA_MAX_SIZE
         # TODO: We can add the chunk's metadata here, e.g. Tensor parallelism shard
         # and pipeline parallelism index.
@@ -1193,6 +1195,112 @@ class GdsBackend(AllocatorBackendInterface):
                 self._wait_for_metadata_tasks(), self.loop
             )
             future.result()
+
+    def _contains_slow_path(self, key: CacheEngineKey) -> bool:
+        try:
+            read_from_disk = self.op_manager.run_with_timeout(
+                lambda: self._try_to_read_metadata(key),
+                self.timeout_contains,
+                "contains",
+                key,
+            )
+            if read_from_disk:
+                return True
+        except OperationHangThresholdReached:
+            logger.error(
+                "Contains hang threshold reached. Will not run operation",
+                exc_info=True,
+            )
+            return False
+        except OperationTimeoutError:
+            logger.error(
+                f"Contains timed out after {self.timeout_contains} seconds",
+                exc_info=True,
+            )
+        return False
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """
+        Check whether keys are in the storage backend.
+
+        :param lookup_id: Identifier for the lookup operation
+        :param keys: The keys to check
+        :param pin: Whether to pin the keys if they exist
+        :return: Number of keys that exist in the storage backend
+        """
+        num_hit_chunks = 0
+        while num_hit_chunks < len(keys):
+            # Keep the lock as long as we keep getting hits
+            # in the hot cache.
+            with self.hot_lock:
+                while (
+                    num_hit_chunks < len(keys)
+                    and keys[num_hit_chunks] in self.hot_cache
+                ):
+                    if pin:
+                        # TODO(Serapheim): implement pin() semantics
+                        pass
+                    num_hit_chunks += 1
+
+            # If we've processed all keys, return the count
+            if num_hit_chunks == len(keys):
+                return num_hit_chunks
+
+            # Check the current key that's not in hot cache using slow path
+            current_key = keys[num_hit_chunks]
+            if self._contains_slow_path(current_key):
+                num_hit_chunks += 1
+            else:
+                return num_hit_chunks
+
+        return num_hit_chunks
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+    ) -> list[MemoryObj]:
+        """
+        Non-blocking function to get memory objects from storage.
+
+        :param lookup_id: Identifier for the lookup operation
+        :param keys: The keys to retrieve
+        :return: List of MemoryObj instances
+        """
+        mem_objs: list[MemoryObj] = []
+        entries: list[DiskCacheMetadata] = []
+
+        # TODO(Serapheim): Do this properly
+
+        # First, collect metadata for all keys
+        with self.hot_lock:
+            for key in keys:
+                entry = self.hot_cache.get(key)
+                assert entry is not None, f"Key {key} not found in hot cache"
+                entries.append(entry)
+
+        # Load memory objects for each key
+        for key, entry in zip(keys, entries, strict=True):
+            assert entry is not None, f"Key {key} not found in hot cache"
+            try:
+                memory_obj = await self._async_load_bytes_from_disk(
+                    key, entry.path, entry.dtype, entry.shape
+                )
+                if memory_obj is not None:
+                    memory_obj.ref_count_up()
+                    mem_objs.append(memory_obj)
+            except Exception as e:
+                logger.error(
+                    f"Failed to load memory object for key {key}: {e}",
+                    exc_info=True,
+                )
+
+        return mem_objs
 
     def close(self) -> None:
         self.memory_allocator.close()

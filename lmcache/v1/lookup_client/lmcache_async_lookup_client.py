@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union, Any
 import threading
 import time
 
@@ -203,7 +203,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # Due to complexity in preemption or eviction in async mode
         # We will handle skipping logic in future.
 
-        hashes: list[int] = []
+        hashes: list[Any] = []
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False

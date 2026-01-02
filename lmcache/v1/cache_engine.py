@@ -1090,7 +1090,7 @@ class LMCacheEngine:
         self,
         lookup_id: str,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Any]] = None,
         offsets: Optional[List[int]] = None,
         search_range: Optional[List[str]] = None,
         pin: bool = False,
