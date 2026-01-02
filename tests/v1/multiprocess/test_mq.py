@@ -331,7 +331,7 @@ def test_mq_noop_multiple_clients():
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
-    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
+    REGISTER_KV_CACHE takes (gpu_id, kv_cache, backend_type, block_size).
     """
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []
@@ -341,6 +341,8 @@ def test_mq_register_kv_cache():
         kv_cache.append(wrapper)
 
     gpu_id = 0
+    backend_type = None  # Use default (vLLM)
+    block_size = None  # Not required for vLLM
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5559")
@@ -351,7 +353,7 @@ def test_mq_register_kv_cache():
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
         request_type=RequestType.REGISTER_KV_CACHE,
-        payloads=[gpu_id, kv_cache],
+        payloads=[gpu_id, kv_cache, backend_type, block_size],
         expected_response=None,
         num_requests=1,
     )

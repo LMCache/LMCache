@@ -31,13 +31,20 @@ def noop_handler() -> str:
 # ==============================================================================
 
 
-def register_kv_cache_handler(gpu_id: int, kv_cache: KVCache) -> None:
+def register_kv_cache_handler(
+    gpu_id: int,
+    kv_cache: KVCache,
+    backend_type: Optional[str],
+    block_size: Optional[int],
+) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
 
     Args:
         gpu_id: GPU device ID
         kv_cache: List of CudaIPCWrapper objects representing KV cache
+        backend_type: Backend type ("sglang" or "vllm", None for auto-detect)
+        block_size: KV cache block size (required for SGLang backend)
 
     Returns:
         None
@@ -47,6 +54,12 @@ def register_kv_cache_handler(gpu_id: int, kv_cache: KVCache) -> None:
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(kv_cache, list), (
         f"Expected kv_cache to be list, got {type(kv_cache)}"
+    )
+    assert backend_type is None or isinstance(backend_type, str), (
+        f"Expected backend_type to be None or str, got {type(backend_type)}"
+    )
+    assert block_size is None or isinstance(block_size, int), (
+        f"Expected block_size to be None or int, got {type(block_size)}"
     )
     # No return value (returns None implicitly)
 
