@@ -19,6 +19,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+from lmcache.server.server_storage_backend.local_backend import LMSLocalDiskBackend
 
 
 class MockLookupServer:
@@ -194,3 +195,24 @@ class TestLocalDiskBackend:
         assert result is None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+    def test_lms_get_file_not_exists(self, temp_disk_path):
+        """Test LMSLocalDiskBackend.get() when the file is deleted after put()."""
+        backend = LMSLocalDiskBackend(temp_disk_path)
+        key = "test_key"
+        data = bytearray(b"test_data")
+
+        backend.put(key, data)
+        assert backend.contains(key)
+        path = backend._key_to_path(key)
+        assert os.path.exists(path)
+
+        # Manually delete the file
+        os.remove(path)
+        assert not os.path.exists(path)
+
+        # Now get it
+        result = backend.get(key)
+        assert result is None
+        assert not backend.contains(key)

@@ -287,11 +287,19 @@ class LMSLocalDiskBackend(LMSBackendInterface):
             return None
 
         path = self.dict[key].path
-        self.evictor.update_on_get(key, self.dict)
 
-        with open(path, "rb") as binary_file:
-            kv_chunk = binary_file.read()
-        self.update_lock.release()
+        kv_chunk = None
+        try:
+            with open(path, "rb") as binary_file:
+                kv_chunk = binary_file.read()
+        except FileNotFoundError:
+            logger.warning(f"File {path} not found. Removing from index.")
+            self.dict.pop(key)
+        else:
+            self.evictor.update_on_get(key, self.dict)
+        finally:
+            self.update_lock.release()
+
         return kv_chunk
 
         # return torch.load(self._key_to_path(key))
