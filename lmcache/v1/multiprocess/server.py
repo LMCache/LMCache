@@ -11,8 +11,10 @@
 ###
 
 # Standard
+from typing import Optional
 import argparse
 import array
+import asyncio
 import threading
 import time
 
@@ -24,8 +26,12 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.mp_metadata import (
+    create_mp_server_metadata_from_gpu_context,
+)
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
@@ -206,7 +212,12 @@ class GPUCacheContext:
 
 
 class MPCacheEngine:
-    def __init__(self, chunk_size: int = 256, cpu_buffer_size: float = 5.0):
+    def __init__(
+        self,
+        chunk_size: int = 256,
+        cpu_buffer_size: float = 5.0,
+        config: Optional[LMCacheEngineConfig] = None,
+    ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
 
@@ -216,8 +227,74 @@ class MPCacheEngine:
         # thread lock to avoid tmp buffer conflicts
         self.lock = threading.Lock()
 
-        # storage manager
-        self.storage_manager = MPStorageManager(cpu_buffer_size)
+        # Store config for deferred storage manager initialization
+        self._config = config
+        self._cpu_buffer_size = cpu_buffer_size
+
+        # Event loop for async storage operations (if L2 configured)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+        if config is not None:
+            self._loop = asyncio.new_event_loop()
+            self._loop_thread = threading.Thread(
+                target=self._run_event_loop, daemon=True
+            )
+            self._loop_thread.start()
+
+        # Storage manager (created after first GPU context registers, for metadata)
+        self._storage_manager: Optional[MPStorageManager] = None
+
+        if config is not None:
+            logger.info(
+                "MPCacheEngine initialized with L2 storage plugins: %s",
+                config.storage_plugins or "none",
+            )
+
+    def _run_event_loop(self):
+        """Run the event loop in a background thread."""
+        if self._loop:
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_forever()
+
+    def _initialize_storage_manager(self, gpu_context: GPUCacheContext) -> None:
+        """Initialize storage manager after first GPU context registers."""
+        if self._storage_manager is not None:
+            return
+
+        metadata = None
+        if self._config is not None:
+            # Create metadata from GPU context for L2 storage
+            metadata = create_mp_server_metadata_from_gpu_context(
+                model_name="mp_server_model",
+                num_layers=gpu_context.num_layers,
+                hidden_dim=gpu_context.hidden_dim_size,
+                kv_dtype=gpu_context.dtype,
+                chunk_size=self.chunk_size,
+                is_mla=gpu_context.is_mla,
+            )
+
+        self._storage_manager = MPStorageManager(
+            cpu_buffer_size=self._cpu_buffer_size,
+            config=self._config,
+            metadata=metadata,
+            loop=self._loop,
+        )
+
+        if self._config is not None and self._storage_manager.has_l2_storage():
+            logger.info(
+                "MPCacheEngine storage manager initialized with L2 backends: %s",
+                self._storage_manager.get_l2_backend_names(),
+            )
+
+    @property
+    def storage_manager(self) -> MPStorageManager:
+        """Get storage manager (lazy initialization)."""
+        if self._storage_manager is None:
+            # Create basic storage manager without L2 support
+            self._storage_manager = MPStorageManager(
+                cpu_buffer_size=self._cpu_buffer_size,
+            )
+        return self._storage_manager
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -229,6 +306,10 @@ class MPCacheEngine:
         """
         gpu_context = GPUCacheContext(kv_caches)
         self.gpu_contexts[instance_id] = gpu_context
+
+        # Initialize storage manager with metadata from first GPU context
+        self._initialize_storage_manager(gpu_context)
+
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
             instance_id,
@@ -492,6 +573,99 @@ class MPCacheEngine:
             self.storage_manager.memcheck()
 
 
+def create_config_from_args(args) -> Optional[LMCacheEngineConfig]:
+    """
+    Create LMCacheEngineConfig from server CLI arguments.
+
+    Returns None if no storage plugins are configured (CPU-only mode).
+    Returns config if storage plugins are configured (L2 storage enabled).
+    """
+    # If config file is provided, use it
+    if hasattr(args, "config_file") and args.config_file:
+        config = LMCacheEngineConfig.from_file(args.config_file)
+        logger.info("Loaded config from file: %s", args.config_file)
+        return config
+
+    # Check if any storage plugin is requested via CLI
+    has_raw_block = hasattr(args, "raw_block_device") and args.raw_block_device
+    has_local_disk = hasattr(args, "local_disk") and args.local_disk
+
+    if not has_raw_block and not has_local_disk:
+        # No storage plugins, use legacy MPCacheEngine
+        return None
+
+    # Build config from CLI args
+    extra_config = {}
+    storage_plugins = []
+
+    if has_raw_block:
+        storage_plugins.append("raw_block")
+        module_path = "lmcache.v1.storage_backend.plugins.rust_raw_block_backend"
+        extra_config.update(
+            {
+                "storage_plugin.raw_block.module_path": module_path,
+                "storage_plugin.raw_block.class_name": "RustRawBlockBackend",
+                "rust_raw_block.device_path": args.raw_block_device,
+                "rust_raw_block.use_odirect": getattr(args, "enable_odirect", False),
+                "rust_raw_block.manifest_write_interval": 1,
+            }
+        )
+        if hasattr(args, "raw_block_capacity_gb") and args.raw_block_capacity_gb > 0:
+            extra_config["rust_raw_block.capacity_bytes"] = int(
+                args.raw_block_capacity_gb * (1 << 30)
+            )
+        logger.info(
+            "Configured Raw Block backend: device=%s, odirect=%s",
+            args.raw_block_device,
+            getattr(args, "enable_odirect", False),
+        )
+
+    if has_local_disk:
+        storage_plugins.append("local_disk")
+        extra_config.update(
+            {
+                "local_disk": args.local_disk,
+                "max_local_disk_size": getattr(args, "max_local_disk_size", 100.0),
+            }
+        )
+        logger.info("Configured Local Disk backend: path=%s", args.local_disk)
+
+    # Create config
+    config = LMCacheEngineConfig(
+        chunk_size=args.chunk_size,
+        local_cpu=True,
+        max_local_cpu_size=args.cpu_buffer_size,
+        storage_plugins=storage_plugins if storage_plugins else None,
+        extra_config=extra_config if extra_config else None,
+    )
+
+    return config
+
+
+def create_cache_engine(args) -> MPCacheEngine:
+    """
+    Create the cache engine with optional L2 storage support.
+
+    If storage plugins are configured (via CLI or config file),
+    the engine will support tiered storage (CPU + L2).
+    """
+    config = create_config_from_args(args)
+
+    if config is not None:
+        logger.info(
+            "Using MPCacheEngine with L2 storage plugins: %s",
+            config.storage_plugins or "none",
+        )
+    else:
+        logger.info("Using MPCacheEngine (CPU-only storage)")
+
+    return MPCacheEngine(
+        chunk_size=args.chunk_size,
+        cpu_buffer_size=args.cpu_buffer_size,
+        config=config,
+    )
+
+
 def add_handler_helper(
     server: MessageQueueServer, request_type: RequestType, handler_function
 ):
@@ -511,14 +685,41 @@ def run_cache_server(
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
+    args=None,
 ):
-    # Initialize the engine
-    engine = MPCacheEngine(chunk_size, cpu_buffer_size)
+    """
+    Run the LMCache multi-process server.
+
+    Args:
+        host: Server host address
+        port: Server port
+        chunk_size: KV cache chunk size
+        cpu_buffer_size: CPU buffer size in GB
+        max_workers: Number of worker threads
+        args: Optional parsed command-line arguments (overrides other args)
+    """
+    # Support both keyword args and argparse namespace
+    if args is None:
+        # Standard
+        import argparse
+
+        args = argparse.Namespace(
+            host=host,
+            port=port,
+            chunk_size=chunk_size,
+            cpu_buffer_size=cpu_buffer_size,
+            max_workers=max_workers,
+        )
+
+    # Initialize the appropriate engine
+    engine = create_cache_engine(args)
 
     # Initialize the message queue server
     context = zmq.Context.instance()
     server = MessageQueueServer(
-        bind_url=f"tcp://{host}:{port}", context=context, max_workers=max_workers
+        bind_url=f"tcp://{args.host}:{args.port}",
+        context=context,
+        max_workers=args.max_workers,
     )
 
     # Add handlers
@@ -536,7 +737,7 @@ def run_cache_server(
     # Start the server
     torch.cuda.init()
     server.start()
-    logger.info("LMCache cache server is running...")
+    logger.info("LMCache cache server is running on %s:%d", args.host, args.port)
 
     # Dummy loop to keep the server running
     try:
@@ -545,34 +746,108 @@ def run_cache_server(
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         server.close()
+        if hasattr(engine, "close"):
+            engine.close()
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="LMCache Cache Server")
+    parser = argparse.ArgumentParser(
+        description="LMCache Multi-process Cache Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic CPU-only server
+  python3 -m lmcache.v1.multiprocess.server --cpu-buffer-size 10
+
+  # Server with Raw Block backend (for TP > 1)
+  python3 -m lmcache.v1.multiprocess.server \\
+      --raw-block-device /dev/nvme0n1 \\
+      --cpu-buffer-size 10 \\
+      --enable-odirect
+
+  # Server with config file
+  python3 -m lmcache.v1.multiprocess.server --config-file my_config.yaml
+""",
+    )
+
+    # Basic server options
     parser.add_argument(
-        "--host", type=str, default="localhost", help="Host to bind the server"
+        "--host",
+        type=str,
+        default="localhost",
+        help="Host to bind the server (default: localhost)",
     )
     parser.add_argument(
-        "--port", type=int, default=5555, help="Port to bind the server"
+        "--port",
+        type=int,
+        default=5555,
+        help="Port to bind the server (default: 5555)",
     )
     parser.add_argument(
-        "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="Chunk size for KV cache in tokens (default: 256)",
     )
     parser.add_argument(
-        "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
+        "--cpu-buffer-size",
+        type=float,
+        default=5.0,
+        help="CPU buffer size in GB (default: 5.0)",
     )
     parser.add_argument(
-        "--max-workers", type=int, default=1, help="Maximum number of worker threads"
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Maximum number of worker threads (default: 1)",
     )
+
+    # Configuration file
+    parser.add_argument(
+        "--config-file",
+        type=str,
+        default=None,
+        help="Path to LMCache config YAML file for storage backends",
+    )
+
+    # Raw Block backend options
+    raw_block_group = parser.add_argument_group("Raw Block Backend")
+    raw_block_group.add_argument(
+        "--raw-block-device",
+        type=str,
+        default=None,
+        help="Path to raw block device (e.g., /dev/nvme0n1)",
+    )
+    raw_block_group.add_argument(
+        "--raw-block-capacity-gb",
+        type=float,
+        default=0,
+        help="Raw block capacity in GB (0 = use full device)",
+    )
+    raw_block_group.add_argument(
+        "--enable-odirect",
+        action="store_true",
+        help="Enable O_DIRECT for raw block I/O (bypasses page cache)",
+    )
+
+    # Local disk backend options
+    disk_group = parser.add_argument_group("Local Disk Backend")
+    disk_group.add_argument(
+        "--local-disk",
+        type=str,
+        default=None,
+        help="Path to local disk storage directory",
+    )
+    disk_group.add_argument(
+        "--max-local-disk-size",
+        type=float,
+        default=100.0,
+        help="Maximum local disk storage size in GB (default: 100)",
+    )
+
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_cache_server(
-        host=args.host,
-        port=args.port,
-        chunk_size=args.chunk_size,
-        cpu_buffer_size=args.cpu_buffer_size,
-        max_workers=args.max_workers,
-    )
+    run_cache_server(args)

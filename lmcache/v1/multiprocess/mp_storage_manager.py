@@ -7,7 +7,8 @@ from collections.abc import Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import compress
-from typing import Any, Generic, Iterator, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Generic, Iterator, Optional, TypeVar, Union
+import asyncio
 import threading
 import time
 
@@ -16,10 +17,16 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.config import LMCacheEngineMetadata
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 
 logger = init_logger(__name__)
 
@@ -184,11 +191,20 @@ class LRUCachePolicyWithLock(LRUCachePolicy[IPCCacheEngineKey]):
 
 
 class MPStorageManager:
-    def __init__(self, cpu_buffer_size: float):
+    def __init__(
+        self,
+        cpu_buffer_size: float,
+        config: Optional["LMCacheEngineConfig"] = None,
+        metadata: Optional["LMCacheEngineMetadata"] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ):
         """
         Args:
             cpu_buffer_size: the total size (in GB) of CPU memory buffer
                 to be used for storage
+            config: Optional LMCache config for L2 storage plugins
+            metadata: Optional metadata for L2 storage operations
+            loop: Optional asyncio event loop for async L2 operations
         """
         # Lock manager for locking memory objects
         # TODO: have separate lock manager for different storage backends
@@ -222,6 +238,153 @@ class MPStorageManager:
         # 1. allocator lock
         # 2. buffer lock
         # To avoid potential deadlock
+
+        # Optional L2 storage backends (raw block, disk, etc.)
+        self._config = config
+        self._metadata = metadata
+        self._loop = loop
+        self._l2_backends: OrderedDict[str, "StorageBackendInterface"] = OrderedDict()
+        self._l2_index: set[IPCCacheEngineKey] = set()
+        self._l2_index_lock = threading.Lock()
+
+        # Initialize L2 backends if config is provided
+        if config is not None and metadata is not None:
+            self._init_l2_backends()
+
+    def _init_l2_backends(self) -> None:
+        """Initialize L2 storage backends from config."""
+        if self._config is None or self._metadata is None:
+            return
+
+        # First Party
+        from lmcache.v1.storage_backend import CreateStorageBackends
+        from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+
+        try:
+            assert self._loop is not None
+            backends = CreateStorageBackends(
+                config=self._config,
+                metadata=self._metadata,
+                loop=self._loop,
+                dst_device="cpu",
+                lmcache_worker=None,
+            )
+
+            # Separate L2 backends (exclude LocalCPUBackend)
+            for name, backend in backends.items():
+                if not isinstance(backend, LocalCPUBackend):
+                    self._l2_backends[name] = backend
+
+            if self._l2_backends:
+                logger.info(
+                    "MPStorageManager: L2 backends initialized: %s",
+                    list(self._l2_backends.keys()),
+                )
+        except Exception as e:
+            logger.warning("Failed to initialize L2 backends: %s", e)
+
+    def _ipc_key_to_cache_key(
+        self,
+        ipc_key: IPCCacheEngineKey,
+    ) -> CacheEngineKey:
+        """Convert IPCCacheEngineKey to CacheEngineKey for storage backends."""
+        chunk_hash_int = int.from_bytes(
+            ipc_key.chunk_hash, byteorder="big", signed=True
+        )
+        fmt = self._metadata.fmt if self._metadata else "vllm"
+        dtype = self._metadata.kv_dtype if self._metadata else torch.bfloat16
+        return CacheEngineKey(
+            fmt=fmt,
+            model_name=ipc_key.model_name,
+            world_size=ipc_key.world_size,
+            worker_id=ipc_key.worker_id,
+            chunk_hash=chunk_hash_int,
+            dtype=dtype,
+        )
+
+    def _evict_to_l2(self, key: IPCCacheEngineKey, obj: MemoryObj) -> None:
+        """Evict a memory object to L2 storage."""
+        if not self._l2_backends:
+            return
+
+        cache_key = self._ipc_key_to_cache_key(key)
+
+        for name, backend in self._l2_backends.items():
+            try:
+                backend.batched_submit_put_task([cache_key], [obj])
+                with self._l2_index_lock:
+                    self._l2_index.add(key)
+                break
+            except Exception as e:
+                logger.warning("Failed to evict to L2 backend %s: %s", name, e)
+
+    def _store_to_l2_async(
+        self, key_obj_dict: dict[IPCCacheEngineKey, MemoryObj]
+    ) -> None:
+        """Asynchronously store committed objects to L2."""
+        if not self._l2_backends:
+            return
+
+        cache_keys = []
+        objs = []
+
+        for ipc_key, obj in key_obj_dict.items():
+            cache_key = self._ipc_key_to_cache_key(ipc_key)
+            cache_keys.append(cache_key)
+            objs.append(obj)
+
+        for name, backend in self._l2_backends.items():
+            try:
+                backend.batched_submit_put_task(cache_keys, objs)
+                with self._l2_index_lock:
+                    for ipc_key in key_obj_dict.keys():
+                        self._l2_index.add(ipc_key)
+                break
+            except Exception as e:
+                logger.warning("Failed to store to L2 backend %s: %s", name, e)
+
+    def _lookup_in_l2(self, keys: list[IPCCacheEngineKey]) -> int:
+        """Check how many consecutive keys exist in L2."""
+        if not self._l2_backends:
+            return 0
+
+        cache_keys = [self._ipc_key_to_cache_key(k) for k in keys]
+
+        for name, backend in self._l2_backends.items():
+            try:
+                hit_count = backend.batched_contains(cache_keys)
+                if hit_count > 0:
+                    return hit_count
+            except Exception as e:
+                logger.warning("L2 lookup failed for %s: %s", name, e)
+
+        return 0
+
+    def _load_from_l2(self, keys: list[IPCCacheEngineKey]) -> list[Optional[MemoryObj]]:
+        """Load memory objects from L2 storage."""
+        if not self._l2_backends:
+            return [None] * len(keys)
+
+        cache_keys = [self._ipc_key_to_cache_key(k) for k in keys]
+
+        for name, backend in self._l2_backends.items():
+            try:
+                objs = backend.batched_get_blocking(cache_keys)
+                if objs and any(o is not None for o in objs):
+                    logger.info("Loaded %d objects from L2 backend %s", len(objs), name)
+                    return objs
+            except Exception as e:
+                logger.warning("L2 load failed for %s: %s", name, e)
+
+        return [None] * len(keys)
+
+    def has_l2_storage(self) -> bool:
+        """Check if L2 storage is configured."""
+        return len(self._l2_backends) > 0
+
+    def get_l2_backend_names(self) -> list[str]:
+        """Get names of configured L2 backends."""
+        return list(self._l2_backends.keys())
 
     def _allocate_new_reserve_handle(self) -> ReserveHandle:
         """Allocate a new reserve handle in a thread-safe manner."""
@@ -353,11 +516,14 @@ class MPStorageManager:
 
                 for key in candidates:
                     obj = self._commited_memory_objects.pop(key)
+                    # Evict to L2 before freeing (if L2 is configured)
+                    self._evict_to_l2(key, obj)
                     obj.ref_count_down()
 
                 logger.info(
-                    "Recycled %d committed memory objects to free up space.",
+                    "Recycled %d committed memory objects to free up space%s.",
                     len(candidates),
+                    " (evicted to L2)" if self._l2_backends else "",
                 )
 
                 # Try to allocate again
@@ -401,6 +567,10 @@ class MPStorageManager:
                 self._cache_policy.update_on_put(key)
                 self._reserved_keys.remove(key)
 
+        # Async store to L2 for persistence (if L2 is configured)
+        if self._l2_backends and reserved_dict:
+            self._store_to_l2_async(reserved_dict)
+
     @_lmcache_nvtx_annotate
     def lookup(
         self,
@@ -414,7 +584,7 @@ class MPStorageManager:
         Returns:
             int: the total number of found keys (prefix matching)
         """
-        # TODO: implement LOCK mechanism
+        # Check L1 (CPU memory) first
         found_count = 0
         with self._buffer_lock:
             for key in keys:
@@ -423,6 +593,29 @@ class MPStorageManager:
                     self._obj_lock_manager.lock(key)
                 else:
                     break
+
+        if found_count == len(keys):
+            return found_count
+
+        # Check L2 for remaining keys (if L2 is configured)
+        if self._l2_backends:
+            remaining_keys = keys[found_count:]
+            l2_hits = self._lookup_in_l2(remaining_keys)
+
+            if l2_hits > 0:
+                # Load from L2 to L1 and lock
+                keys_to_load = remaining_keys[:l2_hits]
+                loaded = self._load_from_l2(keys_to_load)
+
+                with self._buffer_lock:
+                    for key, obj in zip(keys_to_load, loaded, strict=False):
+                        if obj is not None:
+                            self._commited_memory_objects[key] = obj
+                            self._obj_lock_manager.lock(key)
+                            found_count += 1
+                        else:
+                            break
+
         return found_count
 
     @_lmcache_nvtx_annotate
@@ -505,6 +698,15 @@ class MPStorageManager:
         """
         Release the resources held by the storage manager.
         """
+        # Close L2 backends first
+        for name, backend in self._l2_backends.items():
+            try:
+                backend.close()
+                logger.info("Closed L2 backend: %s", name)
+            except Exception as e:
+                logger.warning("Error closing L2 backend %s: %s", name, e)
+
+        # Close L1 memory allocator
         self._memory_allocator.close()
 
     def memcheck(self):
@@ -538,3 +740,7 @@ class MPStorageManager:
             )
             self._reserved_memory_object_pools.clear()
             self._reserved_keys.clear()
+
+        # Clear L2 index
+        with self._l2_index_lock:
+            self._l2_index.clear()
