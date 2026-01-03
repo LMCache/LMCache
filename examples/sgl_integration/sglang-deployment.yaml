@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-config
+  namespace: sgl-integration
+data:
+  lmcache.yaml: |
+    local_cpu: true
+    chunk_size: 4
+    max_local_cpu_size: 5
+    use_layerwise: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-lmcache
+  namespace: sgl-integration
+  labels:
+    app: sglang-lmcache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sglang-lmcache
+  template:
+    metadata:
+      labels:
+        app: sglang-lmcache
+    spec:
+      containers:
+        - name: sglang
+          image: <YOUR_REGISTRY>/<YOUR_IMAGE_NAME>:<YOUR_TAG>
+          command:
+            - python
+            - -m
+            - sglang.launch_server
+            - --model-path
+            - Qwen/Qwen3-14B
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --tp
+            - "4"
+            - --enable-lmcache
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LMCACHE_CONFIG_FILE
+              value: /etc/lmcache/lmcache.yaml
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+              ephemeral-storage: "50Gi"
+            requests:
+              nvidia.com/gpu: "4"
+              ephemeral-storage: "50Gi"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: lmcache-config
+              mountPath: /etc/lmcache
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 3
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: lmcache-config
+          configMap:
+            name: lmcache-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-lmcache
+  namespace: sgl-integration
+  labels:
+    app: sglang-lmcache
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+  selector:
+    app: sglang-lmcache
