@@ -72,9 +72,9 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                     logger.info(
                         "Fetching remote configuration from %s", remote_config_url
                     )
-                    lmcache_app_id = _config_instance.lmcache_app_id
+                    app_id = _config_instance.app_id
                     remote_response = fetch_remote_config(
-                        remote_config_url, lmcache_app_id, _config_instance
+                        remote_config_url, app_id, _config_instance
                     )
                     if remote_response:
                         _config_instance = apply_remote_configs(

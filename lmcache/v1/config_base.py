@@ -606,7 +606,7 @@ def validate_and_set_config_value(config, config_key, value):
 
 def fetch_remote_config(
     remote_config_url: str,
-    lmcache_app_id: Optional[str],
+    app_id: Optional[str],
     config: Any,
     timeout: int = 10,
 ) -> Optional[dict]:
@@ -614,7 +614,7 @@ def fetch_remote_config(
 
     Args:
         remote_config_url: URL of the remote config service.
-        lmcache_app_id: Optional app ID to send to the config service.
+        app_id: Optional app ID to send to the config service.
         config: Current LMCacheEngineConfig to send to the config service.
         timeout: Request timeout in seconds.
 
@@ -629,8 +629,8 @@ def fetch_remote_config(
         }
 
         # Add lmcache_appId if provided
-        if lmcache_app_id:
-            remote_config_url = "%s?appId=%s" % (remote_config_url, lmcache_app_id)
+        if app_id:
+            remote_config_url = "%s?appId=%s" % (remote_config_url, app_id)
 
         # Collect all environment variables
         for key, value in os.environ.items():
