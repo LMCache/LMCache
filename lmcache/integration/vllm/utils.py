@@ -41,7 +41,7 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     After loading the configuration, if 'remote_config_url' is configured,
     this function will attempt to fetch additional configuration from the
     remote config service. The current config and LMCACHE environment
-    variables will be sent to the service, along with 'lmcache_appId' if set.
+    variables will be sent to the service, along with 'appid' if set.
     """
     global _config_instance
 
