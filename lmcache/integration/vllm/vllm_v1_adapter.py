@@ -713,6 +713,7 @@ class LMCacheConnectorV1Impl:
                 )
                 PrometheusLogger.GetOrCreate(self.lmcache_engine_metadata)
             # Create lookup client using factory
+            self.lookup_server = None
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine_metadata, self.lmcache_engine
             )
@@ -750,28 +751,29 @@ class LMCacheConnectorV1Impl:
                 get_tensor_model_parallel_rank(),
             )
 
-            # In case of MLA, the lookup server is only created on worker 0
-            if self.async_loading and self.lookup_server is not None:
-                # if the connector implements `register_kv_caches`, we do not need to
-                # post init the lmcache engine here, do it in `register_kv_caches`.
-                def implements_register_kv_caches():
-                    child_class = self._parent.__class__
-                    parent_class = KVConnectorBase_V1
-                    child_method = getattr(child_class, "register_kv_caches", None)
-                    parent_method = getattr(parent_class, "register_kv_caches", None)
-                    if child_method is None or parent_method is None:
-                        return False
-                    return child_method is not parent_method
+        # TODO(chunxiaozheng): use `register_kv_caches` replace, remove later
+        # if the connector implements `register_kv_caches`, we do not need to
+        # post init the lmcache engine here, do it in `register_kv_caches`.
+        def implements_register_kv_caches():
+            child_class = self._parent.__class__
+            parent_class = KVConnectorBase_V1
+            child_method = getattr(child_class, "register_kv_caches", None)
+            parent_method = getattr(parent_class, "register_kv_caches", None)
+            if child_method is None or parent_method is None:
+                return False
+            return child_method is not parent_method
 
-                if not implements_register_kv_caches():
-                    logger.warning(
-                        "Please use the latest lmcache connector, otherwise some "
-                        "features may not work, such as DSA with async loading."
-                    )
-                    assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
-                    self.lmcache_engine.post_init(
-                        async_lookup_server=self.lookup_server
-                    )
+        if self.lmcache_engine is not None and not implements_register_kv_caches():
+            logger.warning(
+                "Please use the latest lmcache connector, otherwise some "
+                "features may not work, such as DSA"
+            )
+            # In case of MLA, the lookup server is only created on worker 0
+            async_lookup_server = None
+            if self.async_loading and self.lookup_server is not None:
+                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
+                async_lookup_server = self.lookup_server
+            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -969,14 +971,11 @@ class LMCacheConnectorV1Impl:
         self.kv_caches = kv_caches
         self._build_kv_layer_groups()
         if self.lmcache_engine is not None:
-            kvcaches = list(self.kv_caches.values())
             async_lookup_server = None
             if self.async_loading and self.lookup_server is not None:
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
                 async_lookup_server = self.lookup_server
-            self.lmcache_engine.post_init(
-                kvcaches=kvcaches, async_lookup_server=async_lookup_server
-            )
+            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -1012,8 +1011,6 @@ class LMCacheConnectorV1Impl:
             return
 
         assert self.lmcache_engine is not None
-
-        self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
 
