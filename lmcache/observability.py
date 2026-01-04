@@ -1104,6 +1104,12 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
+        self.pin_monitor_pinned_objects_count = self._gauge_cls(
+            name="lmcache:pin_monitor_pinned_objects_count",
+            documentation="The number of pinned objects in PinMonitor",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
         event_statuses = ["ongoing", "done", "not_found"]
         for status in event_statuses:

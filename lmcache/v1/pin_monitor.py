@@ -6,7 +6,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 
 if TYPE_CHECKING:
     # First Party
@@ -31,7 +31,7 @@ class PinMonitor:
         self._pinned_objects: dict[
             int, tuple["TensorMemoryObj", float]
         ] = {}  # {obj_id: (memory_obj, register_time)}
-        self._objects_lock = threading.RLock()
+        self._objects_lock = threading.Lock()
         self._monitor_thread = None
         self._running = False
         self._check_interval = config.pin_check_interval_sec
@@ -94,6 +94,7 @@ class PinMonitor:
         timeout_objects = []
 
         with self._objects_lock:
+            pinned_count = len(self._pinned_objects)
             for obj_id, (memory_obj, register_time) in list(
                 self._pinned_objects.items()
             ):
@@ -102,17 +103,25 @@ class PinMonitor:
                     elapsed_time = current_time - register_time
                     if elapsed_time > self._pin_timeout_sec:
                         timeout_objects.append((memory_obj, elapsed_time))
-                else:
-                    self.unregister_pinned_object(memory_obj)
 
         # Force unpin timeout objects outside the lock to avoid deadlocks
+        force_unpin_success_count = 0
         for memory_obj, elapsed_time in timeout_objects:
             try:
                 self._force_unpin_timeout_object(memory_obj, elapsed_time)
+                force_unpin_success_count += 1
             except Exception as e:
                 logger.error(
                     "Error forcing unpin for timeout object %s: %s", id(memory_obj), e
                 )
+
+        logger.info(
+            "PinMonitor check: pinned_objects=%d, timeout_objects=%d, "
+            "force_unpin_success=%d",
+            pinned_count,
+            len(timeout_objects),
+            force_unpin_success_count,
+        )
 
     def _force_unpin_timeout_object(
         self, memory_obj: "TensorMemoryObj", elapsed_time: float
@@ -122,7 +131,6 @@ class PinMonitor:
         with memory_obj.lock:
             current_pin_count = memory_obj.meta.pin_count
             if current_pin_count <= 0:
-                self.unregister_pinned_object(memory_obj)
                 return
 
             logger.warning(
@@ -163,6 +171,13 @@ class PinMonitor:
         )
         self._monitor_thread.start()
         logger.info("PinMonitor started")
+
+        # Setup metrics callback
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.pin_monitor_pinned_objects_count.set_function(
+                lambda: len(self._pinned_objects)
+            )
 
     def stop_monitoring(self):
         """Stop the background monitoring thread."""
