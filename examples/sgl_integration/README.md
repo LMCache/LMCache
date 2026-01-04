@@ -61,7 +61,6 @@ aws ecr get-login-password --region us-east-1 | \
 For standard Linux/x86_64 environments:
 
 ```bash
-cd LMCache
 docker build -f docker/Dockerfile.sglang -t ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} .
 docker push ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
 ```
@@ -69,7 +68,6 @@ docker push ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
 For ARM64 (e.g., macOS) cross-platform builds:
 
 ```bash
-cd LMCache
 docker buildx build --platform linux/amd64 \
   -f docker/Dockerfile.sglang \
   -t ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
@@ -150,12 +148,6 @@ LMCache stores KV cache data to CPU memory, which you can observe through "Finis
 To remove the deployment and clean up resources:
 
 ```bash
-# Delete the deployment
-kubectl delete deployment sglang-lmcache -n sgl-integration
-
-# Delete the ConfigMap
-kubectl delete configmap lmcache-config -n sgl-integration
-
-# Optional: Delete the namespace (removes everything)
+kubectl delete -f examples/sgl_integration/sglang-deployment.yaml
 kubectl delete namespace sgl-integration
 ```

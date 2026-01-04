@@ -13,9 +13,6 @@ WORKDIR /tmp/lmcache
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 # Limit parallel jobs to reduce memory usage
 ENV MAX_JOBS=2
-RUN pip install --no-cache-dir .
-
-# Clean up
-RUN rm -rf /tmp/lmcache
+RUN pip install --no-cache-dir . && rm -rf /tmp/lmcache
 
 WORKDIR /sgl-workspace
