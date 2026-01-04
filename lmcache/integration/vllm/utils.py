@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, Optional, Tuple
-import json
+from typing import TYPE_CHECKING, Optional, Tuple
 import os
 import threading
-import urllib.error
-import urllib.parse
-import urllib.request
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -18,7 +14,8 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -31,126 +28,6 @@ _config_lock = threading.Lock()
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
     return value.lower() in ("false", "0", "no", "n", "off")
-
-
-def _fetch_remote_config(
-    remote_config_url: str,
-    lmcache_app_id: Optional[str],
-    config: LMCacheEngineConfig,
-    timeout: int = 10,
-) -> Optional[dict]:
-    """Fetch configuration from remote config service.
-
-    Args:
-        remote_config_url: URL of the remote config service.
-        lmcache_app_id: Optional app ID to send to the config service.
-        config: Current LMCacheEngineConfig to send to the config service.
-        timeout: Request timeout in seconds.
-
-    Returns:
-        Parsed JSON response from the config service, or None if failed.
-    """
-    try:
-        # Build request payload with current config and env variables
-        payload: dict[str, Any] = {
-            "current_config": config.to_dict(),
-            "env_variables": {},
-        }
-
-        # Add lmcache_appId if provided
-        if lmcache_app_id:
-            remote_config_url = f"{remote_config_url}?appId={lmcache_app_id}"
-
-        # Collect all environment variables
-        for key, value in os.environ.items():
-            payload["env_variables"][key] = value
-
-        # Prepare and send request
-        request_data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            remote_config_url,
-            data=request_data,
-            headers={"Content-Type": "application/json"},
-            method="GET",
-        )
-
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            response_data = response.read().decode("utf-8")
-            return json.loads(response_data)
-
-    except urllib.error.URLError as e:
-        logger.warning(f"Failed to fetch remote config from {remote_config_url}: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse remote config response: {e}")
-        return None
-    except Exception as e:
-        logger.warning(f"Unexpected error fetching remote config: {e}")
-        return None
-
-
-def _apply_remote_configs(
-    config: LMCacheEngineConfig, remote_response: dict
-) -> LMCacheEngineConfig:
-    """Apply remote configuration to LMCacheEngineConfig.
-
-    This function extracts the 'configs' field from the remote response
-    and applies each config item to the LMCacheEngineConfig instance.
-
-    The expected format of remote_response['configs'] is:
-    [
-        {"override": true, "key": "config_key", "value": "config_value"},
-        ...
-    ]
-
-    Args:
-        config: LMCacheEngineConfig instance to update.
-        remote_response: Response from the remote config service.
-
-    Returns:
-        Updated LMCacheEngineConfig instance.
-    """
-    configs = remote_response.get("configs", [])
-    if not configs:
-        logger.info("No configs found in remote response")
-        return config
-
-    applied_count = 0
-    for config_item in configs:
-        if not isinstance(config_item, dict):
-            logger.warning(f"Invalid config item format: {config_item}")
-            continue
-
-        key = config_item.get("key")
-        value = config_item.get("value")
-        override = config_item.get("override", True)
-
-        if not key:
-            logger.warning(f"Config item missing 'key': {config_item}")
-            continue
-
-        # Get current value
-        current_value = getattr(config, key)
-
-        # Skip if override is False and current value is not None/default
-        if not override and current_value is not None:
-            logger.info(
-                f"Skipping remote config {key} (override=False, "
-                f"current value={current_value})"
-            )
-            continue
-
-        # Try to convert value to appropriate type
-        if _validate_and_set_config_value(config, key, value):
-            logger.info(f"Applied remote config: {key}={value}")
-            applied_count += 1
-        else:
-            logger.warning(
-                f"Failed to apply remote config {key}={value}. Using default value."
-            )
-
-    logger.info(f"Applied {applied_count} remote configuration items")
-    return config
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
@@ -196,11 +73,11 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                         "Fetching remote configuration from %s", remote_config_url
                     )
                     lmcache_app_id = _config_instance.lmcache_app_id
-                    remote_response = _fetch_remote_config(
+                    remote_response = fetch_remote_config(
                         remote_config_url, lmcache_app_id, _config_instance
                     )
                     if remote_response:
-                        _config_instance = _apply_remote_configs(
+                        _config_instance = apply_remote_configs(
                             _config_instance, remote_response
                         )
                     else:
