@@ -58,11 +58,11 @@ class TestLoadFSChunksAPI:
         thread.join(timeout=5.0)
 
     @pytest.fixture
-    def local_cpu_backend(self):
+    def local_cpu_backend(self, test_metadata):
         """Create a LocalCPUBackend for testing."""
         config = LMCacheEngineConfig.from_defaults(chunk_size=256)
         allocator = AdHocMemoryAllocator(device="cpu")
-        backend = LocalCPUBackend(config, memory_allocator=allocator)
+        backend = LocalCPUBackend(config, test_metadata, memory_allocator=allocator)
         yield backend
         backend.memory_allocator.close()
 

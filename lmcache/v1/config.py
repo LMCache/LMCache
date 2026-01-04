@@ -26,7 +26,6 @@ from lmcache.v1.config_base import (
     create_config_class,
     load_config_with_overrides,
 )
-import lmcache.config as orig_config
 
 logger = init_logger(__name__)
 
@@ -529,24 +528,6 @@ def _log_config(self):
     return self
 
 
-def _to_original_config(self):
-    """Convert to original configuration format"""
-    return orig_config.LMCacheEngineConfig(
-        chunk_size=self.chunk_size,
-        local_device="cpu" if self.local_cpu else "cuda",
-        max_local_cache_size=int(self.max_local_cpu_size),
-        remote_url=None,
-        remote_serde=None,
-        pipelined_backend=False,
-        save_decode_cache=self.save_decode_cache,
-        enable_blending=self.enable_blending,
-        blend_recompute_ratio=0.15,
-        blend_min_tokens=self.blend_min_tokens,
-        blend_separator="[BLEND_SEP]",
-        blend_add_special_in_precomp=False,
-    )
-
-
 def _get_extra_config_value(self, key, default_value=None):
     if hasattr(self, "extra_config") and self.extra_config is not None:
         return self.extra_config.get(key, default_value)
@@ -714,7 +695,6 @@ LMCacheEngineConfig = create_config_class(
     namespace_extras={
         "validate": _validate_config,
         "log_config": _log_config,
-        "to_original_config": _to_original_config,
         "get_extra_config_value": _get_extra_config_value,
         "get_lmcache_worker_ids": _get_lmcache_worker_ids,
         "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,

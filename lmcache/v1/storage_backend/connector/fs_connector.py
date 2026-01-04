@@ -20,15 +20,13 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
-METADATA_BYTES_LEN = 28
-
 
 class FSConnector(RemoteConnector):
     """File system based connector that stores data in local files.
 
     Data is stored in the following format:
     - Each key is stored as a separate file
-    - File content: metadata (METADATA_BYTES_LEN bytes) + serialized data
+    - File content: metadata (remote_metadata_bytes) + serialized data
     """
 
     def __init__(
@@ -45,6 +43,9 @@ class FSConnector(RemoteConnector):
             local_cpu_backend: Memory allocator interface
             config: Lmcache engine config
         """
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # Parse comma separated paths
         self.base_paths = (
             [Path(p.strip()) for p in base_paths_str.split(",")]
@@ -76,20 +77,6 @@ class FSConnector(RemoteConnector):
             if config is None
             else config.get_extra_config_value("fs_connector_use_odirect", False)
         )
-
-        logger.info(
-            f"Initialized FSConnector with base paths {self.base_paths}, "
-            f"relative tmp dir: {self.relative_tmp_dir}, "
-            f"read ahead size: {self.read_ahead_size}, "
-            f"use O_DIRECT: {self.use_odirect}"
-        )
-        # Create directories for all paths
-        for path in self.base_paths:
-            path.mkdir(parents=True, exist_ok=True)
-            if self.relative_tmp_dir is not None:
-                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
-
-    def post_init(self):
         self.os_disk_bs = 0
         if self.use_odirect:
             # save_chunk_meta is useful if save_unfull_chunk is True, since partial
@@ -105,6 +92,18 @@ class FSConnector(RemoteConnector):
             else:
                 stat = os.statvfs(self.base_paths[0])
                 self.os_disk_bs = stat.f_bsize
+
+        logger.info(
+            f"Initialized FSConnector with base paths {self.base_paths}, "
+            f"relative tmp dir: {self.relative_tmp_dir}, "
+            f"read ahead size: {self.read_ahead_size}, "
+            f"use O_DIRECT: {self.use_odirect}"
+        )
+        # Create directories for all paths
+        for path in self.base_paths:
+            path.mkdir(parents=True, exist_ok=True)
+            if self.relative_tmp_dir is not None:
+                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
 
     def _get_base_path(self, key: CacheEngineKey) -> Path:
         """Get file base path for the given key"""
@@ -153,7 +152,7 @@ class FSConnector(RemoteConnector):
         fd = -1
         try:
             memory_obj = self.local_cpu_backend.allocate(
-                self.meta_shape, self.meta_dtype, self.meta_fmt
+                self.meta_shapes, self.meta_dtypes, self.meta_fmt
             )
             if memory_obj is None:
                 logger.debug("Memory allocation failed.")
@@ -174,7 +173,7 @@ class FSConnector(RemoteConnector):
                 with open(file_path, "rb") as f:
                     num_read = f.readinto(buffer)
             else:
-                fd = os.open(file_path, os.O_RDONLY | os.O_DIRECT)
+                fd = os.open(file_path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     # The fd is now managed by the file object, so we "forget" it
                     # to prevent closing it in the finally block.
@@ -209,7 +208,7 @@ class FSConnector(RemoteConnector):
                 if self.save_chunk_meta:
                     # Read metadata buffer first to get shape, dtype, fmt
                     # to be able to allocate memory object for the data and read into it
-                    md_buffer = bytearray(METADATA_BYTES_LEN)
+                    md_buffer = bytearray(self.remote_metadata_bytes)
                     num_read = await f.readinto(md_buffer)
                     if num_read != len(md_buffer):
                         raise RuntimeError(
@@ -219,11 +218,11 @@ class FSConnector(RemoteConnector):
                     # Deserialize metadata and allocate memory
                     metadata = RemoteMetadata.deserialize(md_buffer)
                     memory_obj = self.local_cpu_backend.allocate(
-                        metadata.shape, metadata.dtype, metadata.fmt
+                        metadata.shapes, metadata.dtypes, metadata.fmt
                     )
                 else:
                     memory_obj = self.local_cpu_backend.allocate(
-                        self.meta_shape, self.meta_dtype, self.meta_fmt
+                        self.meta_shapes, self.meta_dtypes, self.meta_fmt
                     )
                 if memory_obj is None:
                     logger.debug("Memory allocation failed during async disk load.")
@@ -278,7 +277,11 @@ class FSConnector(RemoteConnector):
     def _put_with_odirect(self, file_path: Path, buffer: bytes) -> None:
         fd = -1
         try:
-            fd = os.open(str(file_path), os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
+            fd = os.open(
+                str(file_path),
+                os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
+                0o644,
+            )
             os.write(fd, buffer)
         except Exception as e:
             logger.error(f"Failed to write to file {file_path}: {e}")
@@ -300,8 +303,8 @@ class FSConnector(RemoteConnector):
             metadata = (
                 RemoteMetadata(
                     len(buffer),
-                    memory_obj.get_shape(),
-                    memory_obj.get_dtype(),
+                    memory_obj.get_shapes(),
+                    memory_obj.get_dtypes(),
                     memory_obj.get_memory_format(),
                 )
                 if self.save_chunk_meta
