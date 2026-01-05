@@ -89,7 +89,10 @@ def _comment_kv_init_in_worker_env(lines: list[str]) -> tuple[list[str], bool]:
     for idx in range(start, end):
         line = lines[idx]
         stripped = line.lstrip()
-        if "ensure_kv_transfer_initialized(" in stripped and not stripped.startswith("#"):
+        if (
+            "ensure_kv_transfer_initialized(" in stripped
+            and not stripped.startswith("#")
+        ):
             leading = line[: len(line) - len(stripped)]
             lines[idx] = f"{leading}# {stripped}"
             changed = True
@@ -114,7 +117,8 @@ def _patch_initialize_from_config(lines: list[str]) -> tuple[list[str], bool]:
             "inside initialize_from_config"
         )
 
-    indent = lines[ensure_idx][: len(lines[ensure_idx]) - len(lines[ensure_idx].lstrip())]
+    line = lines[ensure_idx]
+    indent = line[: len(line) - len(line.lstrip())]
     register_line = (
         f"{indent}VLLMModelTracker.register_model("
         f"ENGINE_NAME, self.model_runner.model)\n"
@@ -122,7 +126,10 @@ def _patch_initialize_from_config(lines: list[str]) -> tuple[list[str], bool]:
     ensure_line = f"{indent}ensure_kv_transfer_initialized(self.vllm_config)\n"
 
     changed = False
-    if not any("VLLMModelTracker.register_model(" in lines[idx] for idx in range(start, end)):
+    if not any(
+        "VLLMModelTracker.register_model(" in lines[idx]
+        for idx in range(start, end)
+    ):
         lines.insert(ensure_idx, register_line)
         ensure_idx += 1
         end += 1
