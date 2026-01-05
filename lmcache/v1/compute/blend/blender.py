@@ -170,6 +170,20 @@ class LMCBlender:
         Perform blending for the given tokens.
         """
 
+        token_len = len(tokens) if isinstance(tokens, list) else tokens.numel()
+        if token_len == 0:
+            if mask is None or mask.numel() == 0:
+                logger.debug("Blend skipped: empty tokens.")
+                return
+            raise ValueError(
+                f"Mask length {mask.numel()} does not match empty tokens."
+            )
+
+        if mask is not None and mask.numel() != token_len:
+            raise ValueError(
+                f"Mask length {mask.numel()} does not match tokens {token_len}."
+            )
+
         if mask is not None and mask.numel() > 0 and not mask.any():
             logger.debug("Blend skipped: mask excludes all tokens.")
             return
