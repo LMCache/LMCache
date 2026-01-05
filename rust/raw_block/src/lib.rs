@@ -691,10 +691,6 @@ impl RawBlockDevice {
                 return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
             }
         }
-        if total_len % align != 0 && self.use_odirect {
-            release_pybuffer(view);
-            return Err(PyValueError::new_err("invalid alignment"));
-        }
 
         // If padding is requested (total_len > payload_len), always use bounce.
         // For O_DIRECT we also always use bounce (Python buffer alignment is not guaranteed).

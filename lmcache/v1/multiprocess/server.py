@@ -259,6 +259,14 @@ class MPCacheEngine:
     def _initialize_storage_manager(self, gpu_context: GPUCacheContext) -> None:
         """Initialize storage manager after first GPU context registers."""
         if self._storage_manager is not None:
+            # Check for race condition: if L2 is configured but storage manager
+            # was created without L2 support (via property access before registration)
+            if self._config is not None and not self._storage_manager.has_l2_storage():
+                raise RuntimeError(
+                    "MPCacheEngine was used before GPU context registration, "
+                    "preventing L2 storage initialization. "
+                    "Ensure register_kv_cache is called first."
+                )
             return
 
         metadata = None

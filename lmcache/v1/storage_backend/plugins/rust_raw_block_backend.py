@@ -182,7 +182,6 @@ class RustRawBlockBackend(StoragePluginInterface):
         self.use_mp_issuer: bool = bool(
             extra.get("rust_raw_block.use_mp_issuer", False)
         )
-        self.mp_zero_copy: bool = bool(extra.get("rust_raw_block.mp_zero_copy", True))
 
         # Manifest persistence: save index to disk periodically and on shutdown.
         # Default interval: every 100 writes. Set to 0 to disable periodic saves.
@@ -609,31 +608,9 @@ class RustRawBlockBackend(StoragePluginInterface):
                             f"O_DIRECT payload {total_len} > slot {max_payload}"
                         )
 
-                if (
-                    self.mp_zero_copy
-                    and hasattr(memory_obj, "shm_view")
-                    and hasattr(memory_obj, "shm_off")
-                ):
-                    try:
-                        shm_view = memory_obj.shm_view()  # type: ignore[attr-defined]
-                        shm_off = int(memory_obj.shm_off)  # type: ignore[attr-defined]
-                        segs.append(
-                            (
-                                offset + self.header_bytes,
-                                shm_view,
-                                shm_off,
-                                payload_len,
-                                total_len,
-                            )
-                        )
-                    except Exception:
-                        segs.append(
-                            (offset + self.header_bytes, buf, 0, payload_len, total_len)
-                        )
-                else:
-                    segs.append(
-                        (offset + self.header_bytes, buf, 0, payload_len, total_len)
-                    )
+                segs.append(
+                    (offset + self.header_bytes, buf, 0, payload_len, total_len)
+                )
 
             f = mp.submit_pwritev(segs, priority=2)
             await asyncio.wrap_future(f)
@@ -692,33 +669,13 @@ class RustRawBlockBackend(StoragePluginInterface):
                 # Header write (copy is fine; small)
                 f0 = mp.submit_pwrite(offset, header, total_len=hdr_total, priority=2)
 
-                # Payload write: try SHM zero-copy if MemoryObj is SHM-backed.
-                f1 = None
-                if (
-                    self.mp_zero_copy
-                    and hasattr(memory_obj, "shm_view")
-                    and hasattr(memory_obj, "shm_off")
-                ):
-                    try:
-                        shm_view = memory_obj.shm_view()  # type: ignore[attr-defined]
-                        shm_off = int(memory_obj.shm_off)  # type: ignore[attr-defined]
-                        f1 = mp.submit_pwrite_shm(
-                            offset + self.header_bytes,
-                            shm_view,
-                            shm_off=shm_off,
-                            payload_len=payload_len,
-                            total_len=total_len,
-                            priority=2,
-                        )
-                    except Exception:
-                        f1 = None
-                if f1 is None:
-                    f1 = mp.submit_pwrite(
-                        offset + self.header_bytes,
-                        buf,
-                        total_len=total_len,
-                        priority=2,
-                    )
+                # Payload write
+                f1 = mp.submit_pwrite(
+                    offset + self.header_bytes,
+                    buf,
+                    total_len=total_len,
+                    priority=2,
+                )
 
                 await asyncio.wrap_future(f0)
                 await asyncio.wrap_future(f1)
@@ -819,30 +776,13 @@ class RustRawBlockBackend(StoragePluginInterface):
             pass
         if self.use_mp_issuer:
             mp = self._get_mp()
-            # If the destination is SHM-backed, do process-to-process zero-copy.
-            if (
-                self.mp_zero_copy
-                and hasattr(memory_obj, "shm_view")
-                and hasattr(memory_obj, "shm_off")
-            ):
-                shm_view = memory_obj.shm_view()  # type: ignore[attr-defined]
-                shm_off = int(memory_obj.shm_off)  # type: ignore[attr-defined]
-                f = mp.submit_pread_shm(
-                    entry.offset + self.header_bytes,
-                    shm_view,
-                    shm_off=shm_off,
-                    payload_len=payload_len,
-                    total_len=total_len,
-                    priority=0,
-                )
-            else:
-                f = mp.submit_pread_into(
-                    entry.offset + self.header_bytes,
-                    buf,
-                    payload_len=payload_len,
-                    total_len=total_len,
-                    priority=0,
-                )
+            f = mp.submit_pread_into(
+                entry.offset + self.header_bytes,
+                buf,
+                payload_len=payload_len,
+                total_len=total_len,
+                priority=0,
+            )
             f.result(timeout=60)
         else:
             raw = self._rawdev()
@@ -915,34 +855,20 @@ class RustRawBlockBackend(StoragePluginInterface):
                     total_len = payload_len
                     if self.use_odirect:
                         total_len = _round_up(payload_len, self.block_align)
-                    # Prefer SHM zero-copy when destination is SHM-backed.
-                    if hasattr(m, "shm_view") and hasattr(m, "shm_off"):
-                        shm_view = m.shm_view()  # type: ignore[attr-defined]
-                        shm_off = int(m.shm_off)  # type: ignore[attr-defined]
-                        reqs.append(
-                            (
-                                e.offset + self.header_bytes,
-                                shm_view,
-                                shm_off,
-                                payload_len,
-                                total_len,
-                            )
+                    buf = m.byte_array
+                    try:
+                        buf = buf.cast("B")
+                    except Exception:
+                        pass
+                    reqs.append(
+                        (
+                            e.offset + self.header_bytes,
+                            buf,
+                            0,
+                            payload_len,
+                            total_len,
                         )
-                    else:
-                        buf = m.byte_array
-                        try:
-                            buf = buf.cast("B")
-                        except Exception:
-                            pass
-                        reqs.append(
-                            (
-                                e.offset + self.header_bytes,
-                                buf,
-                                0,
-                                payload_len,
-                                total_len,
-                            )
-                        )
+                    )
                     m.metadata.cached_positions = e.meta.cached_positions
                 fb = mp.submit_preadv_into(reqs, priority=0)
                 await asyncio.wrap_future(fb)

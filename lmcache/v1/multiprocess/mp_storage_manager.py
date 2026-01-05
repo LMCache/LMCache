@@ -291,8 +291,9 @@ class MPStorageManager:
         chunk_hash_int = int.from_bytes(
             ipc_key.chunk_hash, byteorder="big", signed=True
         )
-        fmt = self._metadata.fmt if self._metadata else "vllm"
-        dtype = self._metadata.kv_dtype if self._metadata else torch.bfloat16
+        assert self._metadata is not None, "L2 storage operations require metadata."
+        fmt = self._metadata.fmt
+        dtype = self._metadata.kv_dtype
         return CacheEngineKey(
             fmt=fmt,
             model_name=ipc_key.model_name,
@@ -371,7 +372,10 @@ class MPStorageManager:
             try:
                 objs = backend.batched_get_blocking(cache_keys)
                 if objs and any(o is not None for o in objs):
-                    logger.info("Loaded %d objects from L2 backend %s", len(objs), name)
+                    loaded_count = sum(1 for o in objs if o is not None)
+                    logger.info(
+                        "Loaded %d objects from L2 backend %s", loaded_count, name
+                    )
                     return objs
             except Exception as e:
                 logger.warning("L2 load failed for %s: %s", name, e)
