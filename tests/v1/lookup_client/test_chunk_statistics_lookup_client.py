@@ -43,7 +43,6 @@ class MockLookupClient(BaseMockClient):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         self.lookup_calls.append((token_ids, lookup_id, request_configs))
         return len(token_ids) // 2
@@ -55,7 +54,6 @@ class FastMissLookupClient(BaseMockClient):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         time.sleep(0.008)
         return 0

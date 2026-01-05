@@ -1249,6 +1249,13 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.total_allocated_size = 0
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        logger.info(
+            "Paged tensor memory allocator initialized, "
+            "shapes: %s, dtypes: %s, align bytes: %s",
+            self.shapes,
+            self.dtypes,
+            self.align_bytes,
+        )
 
     @_lmcache_nvtx_annotate
     def allocate(

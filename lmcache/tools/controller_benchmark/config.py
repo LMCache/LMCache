@@ -19,6 +19,7 @@ class ZMQBenchmarkConfig:
     num_workers: int
     num_locations: int
     num_keys: int
+    controller_heartbeat_url: Optional[str] = None
     num_hashes: int = 100
     operations: Dict[str, float] = field(default_factory=dict)
     heartbeat_interval: float = 1.0

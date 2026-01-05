@@ -4,10 +4,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
+from lmcache.v1.config import LMCacheEngineConfig
 
 
 def generate_kv_cache(num_tokens, fmt, device):
