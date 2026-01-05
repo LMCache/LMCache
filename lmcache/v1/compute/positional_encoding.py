@@ -124,9 +124,7 @@ def _match_rope_cache_device(rope, reference: torch.Tensor) -> None:
         cos_sin_cache.device != reference.device
         or cos_sin_cache.dtype != reference.dtype
     ):
-        rope.cos_sin_cache = cos_sin_cache.to(
-            reference.device, dtype=reference.dtype
-        )
+        rope.cos_sin_cache = cos_sin_cache.to(reference.device, dtype=reference.dtype)
 
 
 def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> bool:

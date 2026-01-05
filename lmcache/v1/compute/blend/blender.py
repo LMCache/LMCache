@@ -79,7 +79,7 @@ class LMCBlender:
         if self.metadata.positions is None:
             self.metadata.positions = torch.arange(
                 q.shape[0], device=q.device, dtype=torch.int64
-        )
+            )
         layer = self.layerwise_model.vllm_model.model.layers[layer_id]
         attn_layer = layer.self_attn
         q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)

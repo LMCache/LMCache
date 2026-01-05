@@ -11,15 +11,16 @@ This script:
 It is safe to run multiple times.
 """
 
+# Future
 from __future__ import annotations
 
+# Standard
+from pathlib import Path
 import argparse
 import importlib
 import shutil
 import sys
 import time
-from pathlib import Path
-
 
 _IMPORTS_TO_ADD = [
     "from lmcache.integration.vllm.utils import ENGINE_NAME\n",
@@ -95,9 +96,8 @@ def _comment_kv_init_in_worker_env(lines: list[str]) -> tuple[list[str], bool]:
     for idx in range(start, end):
         line = lines[idx]
         stripped = line.lstrip()
-        if (
-            "ensure_kv_transfer_initialized(" in stripped
-            and not stripped.startswith("#")
+        if "ensure_kv_transfer_initialized(" in stripped and not stripped.startswith(
+            "#"
         ):
             leading = line[: len(line) - len(stripped)]
             lines[idx] = f"{leading}# {stripped}"
@@ -133,8 +133,7 @@ def _patch_initialize_from_config(lines: list[str]) -> tuple[list[str], bool]:
 
     changed = False
     has_registration = any(
-        "VLLMModelTracker.register_model(" in line
-        for line in lines[start:end]
+        "VLLMModelTracker.register_model(" in line for line in lines[start:end]
     )
     if not has_registration:
         lines.insert(ensure_idx, register_line)
