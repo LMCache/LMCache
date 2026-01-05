@@ -429,7 +429,7 @@ def test_pin_monitor_timeout():
         def unpin(self):
             self.meta.pin_count -= 1
             if self.meta.pin_count == 0:
-                PinMonitor.GetOrCreate().unregister_pinned_object(self)
+                PinMonitor.GetOrCreate().on_unpin(self)
             if self.meta.pin_count < 0:
                 self.meta.pin_count = 0
 
@@ -446,18 +446,18 @@ def test_pin_monitor_timeout():
     mock_obj = MockMemoryObj()
 
     # Test registration
-    pin_monitor.register_pinned_object(mock_obj)
+    pin_monitor.on_pin(mock_obj)
     assert pin_monitor.get_monitored_count() == 1
 
     # Test unregistration
-    pin_monitor.unregister_pinned_object(mock_obj)
+    pin_monitor.on_unpin(mock_obj)
     assert pin_monitor.get_monitored_count() == 0
 
     # Test timeout detection
     try:
         # Register object first
         mock_obj.meta.pin_count = 1
-        pin_monitor.register_pinned_object(mock_obj)
+        pin_monitor.on_pin(mock_obj)
 
         # Manually set old register time to simulate timeout
         # Set to 2 seconds ago to exceed the 1 second timeout

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Optional
 import threading
 import time
@@ -11,7 +12,7 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.memory_management import TensorMemoryObj
+    from lmcache.v1.memory_management import MemoryObj
 
 
 logger = init_logger(__name__)
@@ -19,7 +20,8 @@ logger = init_logger(__name__)
 
 class PinMonitor:
     """
-    Global monitor for pinned TensorMemoryObj instances to handle timeout detection.
+    Global monitor (singleton per process, shared across all cache engines)
+    for pinned TensorMemoryObj instances to handle timeout detection.
     This class runs a background thread that periodically checks for pinned objects
     that have exceeded their timeout duration.
     """
@@ -28,8 +30,9 @@ class PinMonitor:
     _lock = threading.Lock()
 
     def __init__(self, config: "LMCacheEngineConfig"):
+        # obj_id is the virtual memory address given by Python's id() function
         self._pinned_objects: dict[
-            int, tuple["TensorMemoryObj", float]
+            int, tuple["MemoryObj", float]
         ] = {}  # {obj_id: (memory_obj, register_time)}
         self._objects_lock = threading.Lock()
         self._monitor_thread = None
@@ -59,7 +62,7 @@ class PinMonitor:
                     PinMonitor._instance = PinMonitor(config)
         return PinMonitor._instance
 
-    def register_pinned_object(self, memory_obj: "TensorMemoryObj"):
+    def on_pin(self, memory_obj: "MemoryObj"):
         """Register a pinned memory object for timeout monitoring.
 
         Note: The same memory_obj can be pinned multiple times, so this
@@ -67,8 +70,8 @@ class PinMonitor:
         Each call updates the register time, effectively resetting the
         timeout countdown.
         """
+        obj_id = id(memory_obj)
         with self._objects_lock:
-            obj_id = id(memory_obj)
             current_time = time.time()
             self._pinned_objects[obj_id] = (memory_obj, current_time)
             logger.debug(
@@ -77,10 +80,10 @@ class PinMonitor:
                 current_time,
             )
 
-    def unregister_pinned_object(self, memory_obj: "TensorMemoryObj"):
+    def on_unpin(self, memory_obj: "MemoryObj"):
         """Unregister a memory object from timeout monitoring."""
+        obj_id = id(memory_obj)
         with self._objects_lock:
-            obj_id = id(memory_obj)
             if obj_id in self._pinned_objects:
                 del self._pinned_objects[obj_id]
                 logger.debug(
@@ -123,12 +126,12 @@ class PinMonitor:
             force_unpin_success_count,
         )
 
-    def _force_unpin_timeout_object(
-        self, memory_obj: "TensorMemoryObj", elapsed_time: float
-    ):
+    def _force_unpin_timeout_object(self, memory_obj: "MemoryObj", elapsed_time: float):
         """Force unpin a timeout object and log the event."""
         # Get current pin_count without holding the lock for unpin calls
-        with memory_obj.lock:
+        # Use nullcontext if memory_obj doesn't have a lock attribute
+        obj_lock = getattr(memory_obj, "lock", None) or nullcontext()
+        with obj_lock:
             current_pin_count = memory_obj.meta.pin_count
             if current_pin_count <= 0:
                 return

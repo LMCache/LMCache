@@ -446,11 +446,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": int,
         "default": 300,
         "env_converter": int,
+        "description": (
+            "Maximum duration in seconds that a memory object can remain pinned. "
+            "If a pinned object exceeds this timeout, it will be forcibly unpinned "
+            "by the PinMonitor to prevent memory leaks. Default is 300 seconds."
+        ),
     },
     "pin_check_interval_sec": {
         "type": int,
         "default": 30,
         "env_converter": int,
+        "description": (
+            "Interval in seconds between PinMonitor timeout checks. "
+            "The background thread periodically scans all pinned objects at this "
+            "interval to detect and handle timeouts. Default is 30 seconds."
+        ),
     },
 }
 

@@ -505,7 +505,7 @@ class TensorMemoryObj(MemoryObj):
 
             # Register/update with PinMonitor for timeout tracking on every pin
             pin_monitor = PinMonitor.GetOrCreate()
-            pin_monitor.register_pinned_object(self)
+            pin_monitor.on_pin(self)
             return True
 
     def unpin(self) -> bool:
@@ -517,7 +517,7 @@ class TensorMemoryObj(MemoryObj):
                 TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
                 # Unregister from PinMonitor when fully unpinned
                 pin_monitor = PinMonitor.GetOrCreate()
-                pin_monitor.unregister_pinned_object(self)
+                pin_monitor.on_unpin(self)
 
             if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
                 if self.parent_allocator is None:
