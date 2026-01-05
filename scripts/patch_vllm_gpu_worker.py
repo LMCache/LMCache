@@ -86,6 +86,11 @@ def _comment_kv_init_in_worker_env(lines: list[str]) -> tuple[list[str], bool]:
         return lines, False
 
     start, end = block
+    if not (0 <= start < end <= len(lines)):
+        raise RuntimeError(
+            "Invalid initialize_from_config range in gpu_worker.py: "
+            f"start={start}, end={end}, total={len(lines)}"
+        )
     changed = False
     for idx in range(start, end):
         line = lines[idx]
@@ -127,10 +132,11 @@ def _patch_initialize_from_config(lines: list[str]) -> tuple[list[str], bool]:
     ensure_line = f"{indent}ensure_kv_transfer_initialized(self.vllm_config)\n"
 
     changed = False
-    if not any(
-        "VLLMModelTracker.register_model(" in lines[idx]
-        for idx in range(start, end)
-    ):
+    has_registration = any(
+        "VLLMModelTracker.register_model(" in line
+        for line in lines[start:end]
+    )
+    if not has_registration:
         lines.insert(ensure_idx, register_line)
         ensure_idx += 1
         end += 1
