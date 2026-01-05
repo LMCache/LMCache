@@ -43,7 +43,7 @@ LMCache is used, integrated, or referenced across a growing ecosystem of LLM ser
 - Initiated and officially supported by: [Tensormesh](https://www.tensormesh.ai/).
 - Adopted by inference providers: GMI cloud ([blog post](https://www.gmicloud.ai/blog/gmi-cloud-achieves-4x-llm-performance-boost-with-tensormesh)), Google cloud ([blog post](https://cloud.google.com/blog/topics/developers-practitioners/boosting-llm-performance-with-tiered-kv-cache-on-google-kubernetes-engine)), CoreWeave ([blog post](https://www.coreweave.com/news/coreweave-unveils-ai-object-storage-redefining-how-ai-workloads-access-and-scale-data)) and more.
 - Integrated with data and storage infrastructure providers: Redis ([blog post](https://redis.io/blog/get-faster-llm-inference-and-cheaper-responses-with-lmcache-and-redis/)), Weka ([blog post](https://www.weka.io/blog/ai-ml/open-sourcing-gds-integration-from-augmented-memory-grid-see-results-for-yourself/)), PliOps ([blog post](https://www.manilatimes.net/2025/03/12/tmt-newswire/globenewswire/pliops-announces-collaboration-with-vllm-production-stack-to-enhance-llm-inference-performance/2072000)) and more.
-- Used by open-source projects and platforms: vLLM [Production Stack](https://github.com/vllm-project/production-stack), [llm-d](https://github.com/llm-d/llm-d/), [NVIDIA dynamo](https://github.com/ai-dynamo/dynamo), [KServe](https://github.com/kserve/kserve) and more.
+- Used by open-source projects and platforms: [vLLM](https://github.com/vllm-project/vllm), [SGLang](https://github.com/sgl-project/sglang), [vLLM Production Stack](https://github.com/vllm-project/production-stack), [llm-d](https://github.com/llm-d/llm-d/), [NVIDIA dynamo](https://github.com/ai-dynamo/dynamo), [KServe](https://github.com/kserve/kserve) and more.
 
 For more details, please check our [Ray Summit talk](https://www.youtube.com/watch?v=TwLd15HE6AM) and [technical report](https://lmcache.ai/tech_report.pdf).
 
@@ -55,8 +55,6 @@ For more details, please check our [Ray Summit talk](https://www.youtube.com/wat
   * Disaggregated prefill
   * P2P KVCache sharing
 - [x] Integration with SGLang for KV cache offloading
-- [x] LMCache is supported in the [vLLM production stack](https://github.com/vllm-project/production-stack/), [llm-d](https://github.com/llm-d/llm-d/), and [KServe](https://github.com/kserve/kserve) 
-- [x] Stable support for non-prefix KV caches
 - [x] Storage support as follows:
   * CPU
   * Disk
