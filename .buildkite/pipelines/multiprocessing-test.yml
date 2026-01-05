@@ -6,6 +6,6 @@ steps:
     key: "test"
     timeout_in_minutes: 20
     commands:
-      - echo "Starting multiprocessing tests..."
-      - echo "Test 2"
+      - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Reuse the trigger condition for comprehensive tests
+      - chmod +x .buildkite/scripts/multiprocessing-test/build-mp-docker-image.sh
 
