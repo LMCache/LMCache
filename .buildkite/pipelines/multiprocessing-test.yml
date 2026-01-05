@@ -7,4 +7,5 @@ steps:
     timeout_in_minutes: 20
     commands:
       - echo "Starting multiprocessing tests..."
+      - echo "Test 2"
 
