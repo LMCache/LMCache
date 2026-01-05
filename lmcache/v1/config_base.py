@@ -14,11 +14,10 @@ import json
 import os
 import re
 import threading
-import urllib.error
-import urllib.request
 import uuid
 
 # Third Party
+import requests
 import yaml
 
 # First Party
@@ -612,6 +611,13 @@ def fetch_remote_config(
 ) -> Optional[dict]:
     """Fetch configuration from remote config service.
 
+    The config server protocol:
+    - Request: POST with JSON body containing 'current_config' and 'env_variables'
+    - Query parameter: 'appId' if app_id is provided
+    - Response: JSON with 'configs' array, each item has 'key', 'value', 'override'
+
+    See examples/remote_config_server/ for a reference implementation.
+
     Args:
         remote_config_url: URL of the remote config service.
         app_id: Optional app ID to send to the config service.
@@ -625,31 +631,24 @@ def fetch_remote_config(
         # Build request payload with current config and env variables
         payload: dict[str, Any] = {
             "current_config": config.to_dict(),
-            "env_variables": {},
+            "env_variables": {k: v for k, v in os.environ.items()},
         }
 
-        # Add lmcache_appId if provided
-        if app_id:
-            remote_config_url = "%s?appId=%s" % (remote_config_url, app_id)
+        # Build URL with app_id query parameter if provided
+        params = {"appId": app_id} if app_id else None
 
-        # Collect all environment variables
-        for key, value in os.environ.items():
-            payload["env_variables"][key] = value
-
-        # Prepare and send request
-        request_data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
+        # Send POST request with JSON payload
+        response = requests.get(
             remote_config_url,
-            data=request_data,
+            json=payload,
+            params=params,
             headers={"Content-Type": "application/json"},
-            method="GET",
+            timeout=timeout,
         )
+        response.raise_for_status()
+        return response.json()
 
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            response_data = response.read().decode("utf-8")
-            return json.loads(response_data)
-
-    except urllib.error.URLError as e:
+    except requests.RequestException as e:
         logger.warning(
             "Failed to fetch remote config from %s: %s", remote_config_url, e
         )
