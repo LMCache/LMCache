@@ -727,20 +727,8 @@ def apply_remote_configs(config: Any, remote_response: dict) -> Any:
             logger.warning("Config item missing 'key': %s", config_item)
             continue
 
-        # Get current value
-        current_value = getattr(config, key)
-
-        # Skip if override is False and current value is not None/default
-        if not override and current_value is not None:
-            logger.info(
-                "Skipping remote config %s (override=False, current value=%s)",
-                key,
-                current_value,
-            )
-            continue
-
         # Try to convert value to appropriate type
-        if validate_and_set_config_value(config, key, value):
+        if validate_and_set_config_value(config, key, value, override=override):
             logger.info("Applied remote config: %s=%s", key, value)
             applied_count += 1
         else:

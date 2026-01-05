@@ -8,7 +8,7 @@ import pytest
 
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
 
 BASE_DIR = Path(__file__).parent
 
@@ -277,3 +277,150 @@ class TestValidateAndSetConfigValue:
         assert result is False
         # Original value should be preserved on error
         assert config.extra_config == original_config
+
+
+class TestApplyRemoteConfigs:
+    """Test cases for apply_remote_configs function with override parameter."""
+
+    def test_apply_remote_configs_override_true(self):
+        """Test that override=True completely replaces the config value."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.chunk_size = 256
+
+        remote_response = {
+            "configs": [{"key": "chunk_size", "value": 512, "override": True}]
+        }
+        apply_remote_configs(config, remote_response)
+        assert config.chunk_size == 512
+
+    def test_apply_remote_configs_override_false_basic(self):
+        """Test override=False for basic config - value should still be set."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.chunk_size = 256
+
+        remote_response = {
+            "configs": [{"key": "chunk_size", "value": 512, "override": False}]
+        }
+        apply_remote_configs(config, remote_response)
+        # For non-extra_config keys, override=False still sets the value
+        assert config.chunk_size == 512
+
+    def test_apply_remote_configs_extra_config_override_true(self):
+        """Test override=True completely replaces extra_config."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.extra_config = {"key1": "value1", "key2": "value2"}
+
+        remote_response = {
+            "configs": [
+                {"key": "extra_config", "value": {"key3": "value3"}, "override": True}
+            ]
+        }
+        apply_remote_configs(config, remote_response)
+        assert config.extra_config == {"key3": "value3"}
+        assert "key1" not in config.extra_config
+        assert "key2" not in config.extra_config
+
+    def test_apply_remote_configs_extra_config_override_false_merge(self):
+        """Test override=False merges extra_config dictionaries."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.extra_config = {"key1": "value1", "key2": "value2"}
+
+        remote_response = {
+            "configs": [
+                {
+                    "key": "extra_config",
+                    "value": {"key2": "new_value2", "key3": "value3"},
+                    "override": False,
+                }
+            ]
+        }
+        apply_remote_configs(config, remote_response)
+        # key1 should be preserved
+        assert config.extra_config["key1"] == "value1"
+        # key2 should be updated (new values take precedence)
+        assert config.extra_config["key2"] == "new_value2"
+        # key3 should be added
+        assert config.extra_config["key3"] == "value3"
+
+    def test_apply_remote_configs_extra_config_override_false_current_none(self):
+        """Test override=False when current extra_config is None."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.extra_config = None
+
+        remote_response = {
+            "configs": [
+                {"key": "extra_config", "value": {"key1": "value1"}, "override": False}
+            ]
+        }
+        apply_remote_configs(config, remote_response)
+        assert config.extra_config == {"key1": "value1"}
+
+    def test_apply_remote_configs_default_override_is_true(self):
+        """Test that default override behavior is True when not specified."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.extra_config = {"key1": "value1"}
+
+        # No 'override' key in config item, should default to True
+        remote_response = {
+            "configs": [{"key": "extra_config", "value": {"key2": "value2"}}]
+        }
+        apply_remote_configs(config, remote_response)
+        # Should completely replace
+        assert config.extra_config == {"key2": "value2"}
+        assert "key1" not in config.extra_config
+
+    def test_apply_remote_configs_multiple_items_mixed_override(self):
+        """Test applying multiple config items with different override settings."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.chunk_size = 256
+        config.extra_config = {"existing": "value"}
+
+        remote_response = {
+            "configs": [
+                {"key": "chunk_size", "value": 512, "override": True},
+                {
+                    "key": "extra_config",
+                    "value": {"new": "data"},
+                    "override": False,
+                },
+            ]
+        }
+        apply_remote_configs(config, remote_response)
+        assert config.chunk_size == 512
+        assert config.extra_config["existing"] == "value"
+        assert config.extra_config["new"] == "data"
+
+    def test_apply_remote_configs_empty_configs(self):
+        """Test applying empty configs list."""
+        config = LMCacheEngineConfig.from_defaults()
+        original_chunk_size = config.chunk_size
+
+        remote_response = {"configs": []}
+        apply_remote_configs(config, remote_response)
+        assert config.chunk_size == original_chunk_size
+
+    def test_apply_remote_configs_invalid_config_item(self):
+        """Test that invalid config items are skipped."""
+        config = LMCacheEngineConfig.from_defaults()
+        remote_response = {
+            "configs": [
+                "invalid_item",  # Not a dict
+                {"value": 512},  # Missing 'key'
+                {"key": "chunk_size", "value": 1024, "override": True},  # Valid
+            ]
+        }
+        apply_remote_configs(config, remote_response)
+        assert config.chunk_size == 1024
+
+    def test_apply_remote_configs_nonexistent_key(self):
+        """Test applying config with non-existent key."""
+        config = LMCacheEngineConfig.from_defaults()
+
+        remote_response = {
+            "configs": [
+                {"key": "nonexistent_key", "value": "some_value", "override": True}
+            ]
+        }
+        # Should not raise, just log warning
+        result = apply_remote_configs(config, remote_response)
+        assert result is config  # Returns the config object
