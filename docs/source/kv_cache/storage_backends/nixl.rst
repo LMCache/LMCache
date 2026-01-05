@@ -43,7 +43,7 @@ Key settings:
 
 - ``nixl_buffer_size``: buffer size for NIXL transfers.
 
-- ``nixl_pool_size``: number of descriptors opened at init time for nixl backend.
+- ``nixl_pool_size``: number of descriptors opened at init time for nixl backend. Set to 0 for dynamic mode.
 
 - ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
 
@@ -74,3 +74,42 @@ Example ``lmcache-config.yaml`` for OBJ backend using S3 API:
         secret_key: <your_secret_key>
         bucket: <your_bucket>
         region: <your_region>
+
+Dynamic Mode
+~~~~~~~~~~~~~
+
+Nixl Storage Backend also supports a dynamic mode, which creates nixl storage descriptors on demand instead of at init time.
+
+In order to use dynamic mode, extra_config.nixl_pool_size should be set to 0.
+
+Restrictions
+^^^^^^^^^^^^
+
+- Dynamic mode is currently only supported for nixl OBJ backend.
+- save_unfull_chunk must be set to False.
+
+Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:
+
+.. code-block:: yaml
+
+  chunk_size: 256
+  local_cpu: False
+  save_unfull_chunk: False
+  enable_async_loading: False # set to True to test async loading
+  # buffer size has to be divisible by chunk size
+  # 2880MiB is divisible by 256 token chunk for Qwen3-4B/8B/32B
+  nixl_buffer_size: 3019898880
+  nixl_buffer_device: cpu
+  extra_config:
+    enable_nixl_storage: true
+    nixl_backend: OBJ
+    nixl_pool_size: 0
+    nixl_presence_cache: False
+    nixl_async_put: False
+    nixl_backend_params:
+      access_key: <your_access_key>
+      secret_key: <your_secret_key>
+      bucket: <your_bucket>
+      region: <your_region>
+      endpoint_override: https://url-to-object-storage
+      ca_bundle: path to self-signed certificate # remove this line if not using self-signed certificate

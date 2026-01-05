@@ -173,13 +173,17 @@ def generate_sglang_kv_cache_paged_list_tensors(
 
 
 def generate_mla_kv_cache_paged_list_tensors(
-    num_blocks, device, block_size=64, dtype=torch.bfloat16, num_layers=32
+    num_blocks,
+    device,
+    block_size=64,
+    dtype=torch.bfloat16,
+    num_layers=32,
+    head_size=576,
 ):
     """
     return KV cache of MLA
     """
     ret = []
-    head_size = 576
     shape = [num_blocks, block_size, head_size]
 
     for i in range(num_layers):

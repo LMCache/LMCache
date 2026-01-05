@@ -40,8 +40,16 @@ class WorkerMsg(MsgBase):
         return ""
 
 
-class RegisterMsg(WorkerMsg):
-    """Message for Registration"""
+"""Worker Request (requiring a reply) Message from LMCache to Controller"""
+
+
+class WorkerReqMsg(MsgBase):
+    def describe(self) -> str:
+        return ""
+
+
+class RegisterMsg(WorkerReqMsg):
+    """Message for Registration (REQ-REP mode)"""
 
     instance_id: str
     worker_id: int
@@ -190,14 +198,6 @@ class FullSyncEndMsg(WorkerMsg):
         )
 
 
-"""Worker Request (requiring an reply) Message from LMcache to Controller"""
-
-
-class WorkerReqMsg(MsgBase):
-    def describe(self) -> str:
-        return ""
-
-
 class HeartbeatMsg(WorkerReqMsg):
     """Message for heartbeat (REQ-REP mode), include register info for re-register"""
 
@@ -270,6 +270,21 @@ class FullSyncStatusMsg(WorkerReqMsg):
 class WorkerReqRetMsg(MsgBase):
     def describe(self) -> str:
         return ""
+
+
+class RegisterRetMsg(WorkerReqRetMsg):
+    """Register response message with controller configuration
+
+    Returns configuration information that the worker needs for initialization,
+    such as dedicated heartbeat URL.
+    """
+
+    # Extra configuration from controller to worker
+    # e.g., {"heartbeat_url": "tcp://...:8082"}
+    extra_config: dict[str, str] = msgspec.field(default_factory=dict)
+
+    def describe(self) -> str:
+        return f"RegisterRet extra_config={self.extra_config}"
 
 
 class HeartbeatRetMsg(WorkerReqRetMsg):
@@ -760,6 +775,7 @@ class ErrorMsg(WorkerReqRetMsg):
 
 Msg = Union[
     RegisterMsg,
+    RegisterRetMsg,
     DeRegisterMsg,
     KVAdmitMsg,
     KVEvictMsg,

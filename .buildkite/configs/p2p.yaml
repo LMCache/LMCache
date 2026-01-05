@@ -3,7 +3,6 @@ workload:
   num-documents: 20
   max-inflight-requests: 1
   repeat-count: 1
-  expected-latency: true
 
 feature:
   type: p2p
@@ -61,3 +60,6 @@ vllm2:
     - "--no-enable-prefix-caching"
     - "--kv-transfer-config"
     - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"
+
+checking-fields:
+  - warmup_round_time_per_prompt

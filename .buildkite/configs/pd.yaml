@@ -2,7 +2,6 @@ workload:
   type: long_doc_qa
   max-inflight-requests: 2
   repeat-count: 1
-  expected-latency: true
   completion: true
   num-documents: 20
 
@@ -53,3 +52,6 @@ vllm-decoder:
     - "--no-enable-prefix-caching"
     - "--kv-transfer-config"
     - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_consumer\",\"kv_connector_extra_config\": {\"discard_partial_chunks\": false, \"lmcache_rpc_port\": \"consumer1\", \"skip_last_n_tokens\": 1}}"
+
+checking-fields:
+  - warmup_round_time_per_prompt
