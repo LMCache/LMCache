@@ -91,13 +91,13 @@ PORT=$(find_free_port)
 echo "[INFO] Starting BASE vLLM server on port ${PORT}..."
 
 VLLM_SERVER_DEV_MODE=1 \
+VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 VLLM_BATCH_INVARIANT=1 \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --enforce-eager \
     --gpu-memory-utilization 0.8 \
-    --attention-backend FLASH_ATTN \
     -cc.level=0 \
     >"${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!
@@ -134,7 +134,7 @@ echo "[INFO] Preparing LMCache config (cpu.yaml)..."
 cat <<EOF > cpu.yaml
 chunk_size: 16
 local_cpu: true 
-max_local_cpu_size: 5
+max_local_cpu_size: 50
 EOF
 
 PORT=$(find_free_port)
@@ -143,12 +143,12 @@ echo "[INFO] Starting LMCACHE vLLM server on port ${PORT}..."
 LMCACHE_CONFIG_FILE=cpu.yaml \
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
+VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --enforce-eager \
     --gpu-memory-utilization 0.8 \
-    --attention-backend FLASH_ATTN \
     -cc.level=0 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
     >>"${VLLM_LOG}" 2>&1 &
