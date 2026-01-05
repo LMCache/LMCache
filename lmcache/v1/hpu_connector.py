@@ -119,26 +119,6 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             use_mla=metadata.use_mla,
         )
 
-    def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
-        device = kv_caches[0].device
-        assert device.type == "hpu", "The device should be HPU."
-        idx = device.index
-        if idx not in self.kv_cache_pointers_on_gpu:
-            self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-                self.num_layers, dtype=torch.int64, device=device
-            )
-        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
-        if self.use_mla:
-            # kv_caches[0].shape: [num_pages, page_size, head_size]
-            assert kv_caches[0].dim() == 3
-            self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
-        else:
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
-            assert kv_caches[0].dim() == 5
-            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
-        return self.kv_cache_pointers_on_gpu[idx]
-
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
