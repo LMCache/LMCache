@@ -581,8 +581,20 @@ def parse_command_line_extra_params(extra_args: list[str]) -> dict[str, Any]:
     return params
 
 
-def validate_and_set_config_value(config, config_key, value):
-    """Validate and set configuration value."""
+def validate_and_set_config_value(config, config_key, value, override: bool = True):
+    """Validate and set configuration value.
+
+    Args:
+        config: Configuration object to update.
+        config_key: The configuration key to set.
+        value: The value to set.
+        override: If True, completely replace the value. If False and the key is
+            'extra_config', merge with existing dict (new values take precedence
+            for conflicting keys). Default is True.
+
+    Returns:
+        True if the value was set successfully, False otherwise.
+    """
     if not hasattr(config, config_key):
         logger.warning("Config key '%s' does not exist in configuration", config_key)
         return False
@@ -591,6 +603,22 @@ def validate_and_set_config_value(config, config_key, value):
         # Convert string to dict for extra_config
         if config_key == "extra_config" and isinstance(value, str):
             value = json.loads(value) if value else None
+
+        # Handle partial merge for extra_config when override is False
+        if config_key == "extra_config" and not override:
+            current_value = getattr(config, config_key, None)
+            if current_value is not None and isinstance(current_value, dict):
+                if value is not None and isinstance(value, dict):
+                    # Merge: current values are preserved, new values override conflicts
+                    merged_value = {**current_value, **value}
+                    setattr(config, config_key, merged_value)
+                    return True
+                # If new value is None or not a dict, keep current value
+                return True
+            # If current value is None or not a dict, just set the new value
+            setattr(config, config_key, value)
+            return True
+
         setattr(config, config_key, value)
         return True
     except Exception as e:
