@@ -475,12 +475,12 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 return None
 
             # Restore original shape (remove padding zeros)
-            actual_shape = self._parse_shape(metadata.shape)
+            actual_shape = self._parse_shape(metadata.shapes[0])
 
             # Allocate local CPU memory
             memory_obj = self.local_cpu_backend.allocate(
                 actual_shape,
-                metadata.dtype,
+                metadata.dtypes[0],
                 metadata.fmt,
             )
             if memory_obj is None:
@@ -503,9 +503,11 @@ class SageMakerHyperPodConnector(RemoteConnector):
                 return None
 
             logger.debug(
-                f"Read from shared memory: key={key.to_string()}, "
-                f"shape={actual_shape}, dtype={metadata.dtype},"
-                f"size={metadata.length} bytes"
+                "Read from shared memory: key=%s, shape=%s, dtype=%s, size=%s bytes",
+                key.to_string(),
+                actual_shape,
+                metadata.dtypes[0],
+                metadata.length,
             )
 
             return memory_obj
@@ -828,8 +830,8 @@ class SageMakerHyperPodConnector(RemoteConnector):
 
         metadata = RemoteMetadata(
             kv_len,
-            torch.Size(padded_shape),
-            memory_obj.get_dtype(),
+            [torch.Size(padded_shape)],
+            [memory_obj.get_dtype()],
             memory_obj.get_memory_format(),
         )
 

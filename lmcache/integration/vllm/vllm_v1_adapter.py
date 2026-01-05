@@ -738,6 +738,7 @@ class LMCacheConnectorV1Impl:
                 )
                 PrometheusLogger.GetOrCreate(self.lmcache_engine_metadata)
             # Create lookup client using factory
+            self.lookup_server = None
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine_metadata, self.lmcache_engine
             )
@@ -775,10 +776,29 @@ class LMCacheConnectorV1Impl:
                 get_tensor_model_parallel_rank(),
             )
 
+        # TODO(chunxiaozheng): use `register_kv_caches` replace, remove later
+        # if the connector implements `register_kv_caches`, we do not need to
+        # post init the lmcache engine here, do it in `register_kv_caches`.
+        def implements_register_kv_caches():
+            child_class = self._parent.__class__
+            parent_class = KVConnectorBase_V1
+            child_method = getattr(child_class, "register_kv_caches", None)
+            parent_method = getattr(parent_class, "register_kv_caches", None)
+            if child_method is None or parent_method is None:
+                return False
+            return child_method is not parent_method
+
+        if self.lmcache_engine is not None and not implements_register_kv_caches():
+            logger.warning(
+                "Please use the latest lmcache connector, otherwise some "
+                "features may not work, such as DSA"
+            )
             # In case of MLA, the lookup server is only created on worker 0
+            async_lookup_server = None
             if self.async_loading and self.lookup_server is not None:
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
-                self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
+                async_lookup_server = self.lookup_server
+            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -946,6 +966,9 @@ class LMCacheConnectorV1Impl:
             )
             kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
 
+    # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
+    #  to init self.kv_caches, we keep it in order to be compatible with old versions
+    #  and will be removed in the future.
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -973,8 +996,11 @@ class LMCacheConnectorV1Impl:
         self.kv_caches = kv_caches
         self._build_kv_layer_groups()
         if self.lmcache_engine is not None:
-            kvcaches = list(self.kv_caches.values())
-            self.lmcache_engine.post_init(kvcaches=kvcaches)
+            async_lookup_server = None
+            if self.async_loading and self.lookup_server is not None:
+                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
+                async_lookup_server = self.lookup_server
+            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -992,6 +1018,10 @@ class LMCacheConnectorV1Impl:
         self.current_layer = 0
 
         if len(self.kv_caches) == 0:
+            logger.warning(
+                "Please update LMCacheConnector, "
+                "use register_kv_caches to init kv_caches"
+            )
             self._init_kv_caches_from_forward_context(forward_context)
 
         metadata = self._parent._get_connector_metadata()
@@ -1006,8 +1036,6 @@ class LMCacheConnectorV1Impl:
             return
 
         assert self.lmcache_engine is not None
-
-        self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
 
@@ -1554,14 +1582,6 @@ class LMCacheConnectorV1Impl:
             logger.debug(f"Looking up cache for the first time for request {req_id}!")
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
-            # Align computed tokens once to avoid repeated
-            # chunk-size rounding downstream
-            aligned_num_computed_tokens = (
-                num_computed_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
-
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
             token_ids = request.all_token_ids
@@ -1582,7 +1602,6 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
-                num_computed_tokens=aligned_num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:
