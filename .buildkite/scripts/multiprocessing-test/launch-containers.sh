@@ -46,6 +46,7 @@ docker run -d \
     --name "$VLLM_CONTAINER_NAME" \
     --runtime nvidia \
     --gpus all \
+    --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
     --ipc host \
     --env VLLM_ENABLE_V1_MULTIPROCESSING=0 \
