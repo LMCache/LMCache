@@ -28,7 +28,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
-NONE_HASH: int
+NONE_HASH = 0
 
 # Type alias for process_tokens return value
 # (start_index, end_index, cache_engine_key｜hash)
@@ -221,6 +221,25 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             request_configs,
         )
 
+    def _canonicalize_hash_inputs(
+        self,
+        prefix_hash: Optional[int],
+        tokens_tuple: Tuple[int, ...],
+        extra_keys: Optional[List[Any]],
+    ) -> Tuple[int, Tuple[int, ...], Tuple[Any, ...]]:
+        """
+        Canonicalize hash inputs so that semantically identical requests
+        produce structurally identical hash inputs across instances.
+        - prefix_hash: int or NONE_HASH if None
+        - tokens_tuple: tuple of token IDs
+        - extra_keys: tuple of additional keys, empty if None
+        """
+        return (
+            prefix_hash if prefix_hash is not None else NONE_HASH,
+            tokens_tuple,
+            tuple(extra_keys) if extra_keys is not None else (),
+        )
+
     def _hash_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -238,13 +257,14 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # Extra keys are for multi-modal inputs and
         # request specific metadata (e.g., LoRA ID).
         # Use default values for None to maintain a fixed tuple structure for hashing.
-        # This ensures consistency across processes and avoids
-        # breaking changes in tuple length.
 
-        _prefix_hash = prefix_hash if prefix_hash is not None else ""
-        _extra_keys = tuple(extra_keys) if extra_keys is not None else ()
+        # Use helper to canonicalize inputs to ensure consistent hashing
+        # This replaces the logic that was causing inconsistency
+        canon_prefix, canon_tokens, canon_extra = self._canonicalize_hash_inputs(
+            prefix_hash, tokens_tuple, extra_keys
+        )
 
-        return self.hash_func((_prefix_hash, tokens_tuple, _extra_keys))
+        return self.hash_func((canon_prefix, canon_tokens, canon_extra))
 
 
 class ChunkedTokenDatabase(TokenDatabase):
@@ -379,9 +399,9 @@ class ChunkedTokenDatabase(TokenDatabase):
                     else:
                         yield start_idx, end_idx, hash_val
         elif hashes is not None:
-            assert (
-                offsets is not None
-            ), "If hashes are provided, offsets must also be provided."
+            assert offsets is not None, (
+                "If hashes are provided, offsets must also be provided."
+            )
             start_idx = 0
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
@@ -510,9 +530,9 @@ class SegmentTokenDatabase(TokenDatabase):
                         yield start_idx, end_idx, self._hash_tokens(token_chunk)
                 start_idx = end_idx
         elif hashes is not None:
-            assert (
-                offsets is not None
-            ), "If hashes are provided, offsets must also be provided."
+            assert offsets is not None, (
+                "If hashes are provided, offsets must also be provided."
+            )
             start_idx = 0
             for hash_val, offset in zip(hashes, offsets, strict=False):
                 end_idx = start_idx + offset
