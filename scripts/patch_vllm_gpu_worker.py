@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Patch vLLM GPU worker for LMCache model tracking.
 
 This script:
