@@ -23,11 +23,6 @@ except (ModuleNotFoundError, ImportError):
     lmc_ops = None
 
 logger = init_logger(__name__)
-try:
-    # First Party
-    import lmcache.c_ops as lmc_ops
-except (ModuleNotFoundError, ImportError):
-    lmc_ops = None
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):

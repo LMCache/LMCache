@@ -122,7 +122,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
         device = kv_caches[0].device
-        assert device.type == "cuda", "The device should be CUDA."
+        assert device.type == "hpu", "The device should be HPU."
         idx = device.index
         if idx not in self.kv_cache_pointers_on_gpu:
             self.kv_cache_pointers_on_gpu[idx] = torch.empty(
