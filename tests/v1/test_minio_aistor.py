@@ -88,7 +88,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
         nixl_backend.batched_submit_put_task(keys, objs)
 
-        for key, obj in zip(keys, objs):
+        for key, obj in zip(keys, objs, strict=False):
             returned_memory_obj = nixl_backend.get_blocking(key)
             assert returned_memory_obj is not None
             assert returned_memory_obj.get_size() == obj.get_size()
@@ -120,7 +120,8 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skip(reason='This test requires a working MinIO server instance and customization of the data/minio-aistor.yaml template')
+@pytest.mark.skip(reason="""This test requires a working MinIO server instance and
+customization of the data/minio-aistor.yaml template""")
 def test_nixl_aistor_backend():
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/minio-aistor.yaml")
