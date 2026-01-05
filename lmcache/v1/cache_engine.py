@@ -50,6 +50,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.v1.token_database import (
@@ -198,6 +199,8 @@ class LMCacheEngine:
 
         InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        # Initialize PinMonitor singleton with config
+        PinMonitor.GetOrCreate(config)
 
         self.post_inited = False
 

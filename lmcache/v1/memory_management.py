@@ -19,6 +19,7 @@ from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.system_detection import NUMAMapping
 
 if torch.cuda.is_available():
@@ -501,6 +502,10 @@ class TensorMemoryObj(MemoryObj):
                 TensorMemoryObj.monitor.update_pinned_memory_objs_count(1)
 
             self.meta.pin_count += 1
+
+            # Register/update with PinMonitor for timeout tracking on every pin
+            pin_monitor = PinMonitor.GetOrCreate()
+            pin_monitor.on_pin(self)
             return True
 
     def unpin(self) -> bool:
@@ -510,6 +515,9 @@ class TensorMemoryObj(MemoryObj):
             # if pin_count is 0, indicates that the object is unpinned
             if self.meta.pin_count == 0:
                 TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
+                # Unregister from PinMonitor when fully unpinned
+                pin_monitor = PinMonitor.GetOrCreate()
+                pin_monitor.on_unpin(self)
 
             if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
                 if self.parent_allocator is None:
