@@ -1,0 +1,10 @@
+env:
+  DOCKER_BUILDKIT: 1
+
+steps:
+  - label: ":compression: Multiprocessing tests"
+    key: "test"
+    timeout_in_minutes: 20
+    commands:
+      - echo "Starting multiprocessing tests..."
+
