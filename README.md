@@ -30,16 +30,23 @@
 | [**Interest Form**](https://forms.gle/MHwLiYDU6kcW3dLj7)
 | [**Roadmap**](https://github.com/LMCache/LMCache/issues/1253)
 
-🔥 **NEW: For enterprise-scale deployment of LMCache and vLLM, please check out vLLM [Production Stack](https://github.com/vllm-project/production-stack). LMCache is also officially supported in [llm-d](https://github.com/llm-d/llm-d/) and [KServe](https://github.com/kserve/kserve)!**
-
-
 ## Summary
 
-LMCache is an **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts across various locations, including (GPU, CPU DRAM, Local Disk), LMCache reuses the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces user response delay.  
+LMCache is an **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts all over the datacenter (including GPU, CPU, Disk and even S3) with a wide range of acceleration technqiue (zero cpu copy, NIXL, GDS and more). LMCache reuses the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces user response delay.  
 
 By combining LMCache with vLLM, developers achieve 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
 ![performance](https://github.com/user-attachments/assets/86137f17-f216-41a0-96a7-e537764f7a4c)
+
+LMCache is **used, integrated, or referenced** across a growing LLM serving ecosystem, spanning cloud providers, infrastructure vendors, and open-source projects.
+
+- KV Cache solution providers: [TensorMesh](https://www.tensormesh.ai/) and more
+- Inference providers: GMI cloud ([blog post](https://www.gmicloud.ai/blog/gmi-cloud-achieves-4x-llm-performance-boost-with-tensormesh)), Google cloud ([blog post](https://cloud.google.com/blog/topics/developers-practitioners/boosting-llm-performance-with-tiered-kv-cache-on-google-kubernetes-engine)), CoreWeave ([blog post](https://www.coreweave.com/news/coreweave-unveils-ai-object-storage-redefining-how-ai-workloads-access-and-scale-data)) and more
+- Data infrastructure providers: Redis ([blog post](https://redis.io/blog/get-faster-llm-inference-and-cheaper-responses-with-lmcache-and-redis/)), Weka ([blog post](https://www.weka.io/blog/ai-ml/open-sourcing-gds-integration-from-augmented-memory-grid-see-results-for-yourself/)), PliOps ([blog post](https://www.manilatimes.net/2025/03/12/tmt-newswire/globenewswire/pliops-announces-collaboration-with-vllm-production-stack-to-enhance-llm-inference-performance/2072000)) and more
+- Open-source projects: vLLM [Production Stack](https://github.com/vllm-project/production-stack), [llm-d](https://github.com/llm-d/llm-d/), [NVIDIA dynamo](https://github.com/ai-dynamo/dynamo), [KServe](https://github.com/kserve/kserve) and more
+
+For more details, please check our [Ray Summit talk](https://www.youtube.com/watch?v=TwLd15HE6AM) and [technical report](https://lmcache.ai/tech_report.pdf).
+
 
 ## Features
 
