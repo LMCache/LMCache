@@ -13,6 +13,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 import asyncio
 import functools
@@ -212,6 +213,7 @@ class StorageManager:
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
     ):
         self.config = config
         self.metadata = metadata
@@ -258,7 +260,9 @@ class StorageManager:
 
         self.event_manager = event_manager
 
-        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
+            async_lookup_server
+        )
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
@@ -270,6 +274,10 @@ class StorageManager:
         # freeze mode: only use local_cpu backend for retrieval
         self._freeze = False
         self._freeze_lock = threading.RLock()
+
+        if not self.enable_pd and self.config.enable_async_loading:
+            assert self.allocator_backend is not None
+            self.async_serializer = AsyncSingleSerializer(self.loop)
 
         self._setup_metrics()
 
@@ -295,14 +303,6 @@ class StorageManager:
                     EventType.LOADING, s
                 )
             )
-
-    def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-        # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and self.config.enable_async_loading:
-            assert self.allocator_backend is not None
-            self.async_serializer = AsyncSingleSerializer(self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -475,6 +475,26 @@ class StorageManager:
         for backend_name, storage_backend in self.get_active_storage_backends(location):
             memory_objs = storage_backend.batched_get_blocking(keys)
             if memory_objs:
+                # Align with single-key `get()` logic:
+                # auto-write remote data to local CPU cache
+                if (
+                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    and "LocalCPUBackend" in self.storage_backends
+                    and None not in memory_objs
+                ):
+                    logger.debug(
+                        "Storing %s objects from %s to LocalCPUBackend",
+                        len(keys),
+                        backend_name,
+                    )
+                    local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+                    assert isinstance(local_cpu_backend, LocalCPUBackend)
+                    # Type cast: Safe (we verified no Nones above)
+                    # `batched_submit_put_task` expects list[MemoryObj]
+                    # TODO (lisiG9): Refactor this write-back logic into caching
+                    #  policy module
+                    memory_objs_no_none = cast(List[MemoryObj], memory_objs)
+                    local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
                 return memory_objs
         return None
 

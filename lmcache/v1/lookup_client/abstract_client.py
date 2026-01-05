@@ -34,12 +34,14 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
         Should be called for first lookup and pinning. Subsequent lookups for the same
         request should call lookup_cache instead.
+
+        Caller should handle overlaps between tokens that exist in LMCache
+        and tokens that are already computed by the caller.
 
         Args:
             token_ids: The token IDs to lookup
@@ -49,11 +51,8 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             request_configs: The configs of the request,
             includes tags and the other configs
 
-            num_computed_tokens: The number of leading tokens that
-            the caller has already computed.
-
         Returns:
-            The number of tokens that can be loaded from cache.
+            The number of tokens that exist inside LMCache.
             None indicates the lookup/prefetch is in progress.
         """
         raise NotImplementedError
