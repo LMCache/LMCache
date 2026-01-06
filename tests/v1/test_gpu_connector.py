@@ -688,6 +688,88 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMBufferLayerwiseGPUConnector",
+)
+def test_layerwise_buffer_connector_unshared_mapping():
+    # Ensure the GPU buffer can allocate two aligned chunks (2 * 4096 bytes).
+    num_blocks = 16
+    block_size = 16
+    num_layers = 2
+    num_heads = 1
+    head_size = 8
+    device = "cuda"
+    hidden_dim = num_heads * head_size
+    dtype = torch.bfloat16
+
+    num_tokens = 8
+    chunk_size = 4
+
+    kvcaches = [
+        torch.zeros(
+            [2, num_blocks, block_size, num_heads, head_size],
+            dtype=dtype,
+            device=device,
+        )
+        for _ in range(num_layers)
+    ]
+
+    slot_mapping = torch.arange(num_tokens, device=device, dtype=torch.int64)
+
+    connector = VLLMBufferLayerwiseGPUConnector(
+        hidden_dim,
+        num_layers,
+        use_gpu=True,
+        dtype=dtype,
+        device=device,
+    )
+    connector.fused_rotary_emb = lambda old_pos, new_pos, k: k
+
+    allocator = PinMemoryAllocator(1024 * 1024)
+
+    starts = [0, chunk_size]
+    ends = [chunk_size, num_tokens]
+    memory_objs = []
+
+    for start, end in zip(starts, ends, strict=False):
+        shape = connector.get_shape(end - start)
+        layer_objs = []
+        for _ in range(num_layers):
+            mem_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2TD)
+            assert mem_obj is not None
+            mem_obj.tensor.zero_()
+            mem_obj.metadata.cached_positions = torch.arange(
+                start, end, device=device, dtype=torch.int64
+            )
+            layer_objs.append(mem_obj)
+        memory_objs.append(layer_objs)
+
+    memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
+
+    mem_obj_consumer = connector.batched_to_gpu(
+        starts,
+        ends,
+        kvcaches=kvcaches,
+        slot_mapping=slot_mapping,
+        use_shared_buffer_mapping=False,
+    )
+    next(mem_obj_consumer)
+    for layer_id in range(num_layers):
+        mem_obj_consumer.send(memory_objs[layer_id])
+    next(mem_obj_consumer)
+
+    assert connector.buffer_mapping == {}
+    assert connector.gpu_buffer_allocator.memcheck()
+
+    for mem_obj_multi_layer in memory_objs:
+        for mem_obj in mem_obj_multi_layer:
+            mem_obj.ref_count_down()
+
+    assert allocator.memcheck()
+    allocator.close()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):

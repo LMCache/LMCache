@@ -63,6 +63,39 @@ def _slice_kv_at(
     ]
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non CUDA implementations for CUDA enhanced functions",
+)
+def test_load_and_reshape_flash_empty_slot_mapping():
+    device = "cuda"
+    num_blocks = 4
+    block_size = 16
+    num_layers = 32
+    num_heads = 8
+    head_size = 128
+    dtype = torch.bfloat16
+
+    kv_cache = generate_kv_cache_paged(
+        num_blocks, device, block_size=block_size, dtype=dtype
+    )
+    slot_mapping = torch.empty(0, device=device, dtype=torch.int64)
+
+    key_value = torch.empty(
+        (2, num_layers, 0, num_heads * head_size),
+        device=device,
+        dtype=dtype,
+    )
+
+    lmc_ops.load_and_reshape_flash(
+        key_value,
+        kv_cache[0][0],
+        kv_cache[0][1],
+        slot_mapping,
+        0,
+    )
+
+
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_extract_and_load_back(num_tokens):
     device = "cuda"
