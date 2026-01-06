@@ -207,8 +207,7 @@ class LMCacheMPSchedulerAdapter:
         """
         return self.blocks_in_chunk
 
-    # Helper functions
-    def _cleanup_lookup_result(self, request_id: str) -> None:
+    def cleanup_lookup_result(self, request_id: str) -> None:
         """
         Clean up lookup future for a finished request to prevent memory leak.
         Args:
@@ -216,6 +215,7 @@ class LMCacheMPSchedulerAdapter:
         """
         self.lookup_futures.pop(request_id, None)
 
+    # Helper functions
     def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
         """Convert a block hash to an IPC cache engine key"""
         return IPCCacheEngineKey(
