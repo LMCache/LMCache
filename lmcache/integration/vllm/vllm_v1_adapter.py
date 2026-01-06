@@ -453,11 +453,13 @@ class LMCacheConnectorV1Impl:
         self.config = config
 
         # Initialize LMCacheManager to handle internal components
-        self._manager = LMCacheManager(
-            config=config,
-            vllm_config=vllm_config,
-            role=role.name.lower(),
-            connector=self,
+        self._manager = (
+            LMCacheManager.builder()
+            .with_config(config)
+            .with_vllm_config(vllm_config)
+            .with_role(role.name.lower())
+            .with_connector(self)
+            .build()
         )
 
         # Start services managed by LMCacheManager
@@ -731,7 +733,7 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
         self._build_kv_layer_groups()
-        self._manager.post_init(kv_caches)
+        self._manager.post_init()
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:

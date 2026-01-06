@@ -9,34 +9,34 @@ decoupling the vLLM adapter from internal LMCache implementation details.
 # Standard
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 import time
 
 # Third Party
 import torch
+
+# First Party
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.logging import init_logger
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.internal_api_server.api_server import InternalAPIServer
+from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
+from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 if TYPE_CHECKING:
     # Third Party
     from vllm.config import VllmConfig
 
     # First Party
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from lmcache.config import LMCacheEngineMetadata
+    from lmcache.observability import PrometheusLogger
+    from lmcache.v1.lookup_client.factory import LookupClientFactory
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-
-# First Party
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.logging import init_logger
-from lmcache.observability import PrometheusLogger
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-from lmcache.v1.lookup_client import LookupClientFactory
-from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
 
@@ -55,33 +55,31 @@ class LMCacheManager:
     - InternalAPIServer
     - RuntimePluginLauncher
 
-    It provides a clean interface for the vLLM adapter, reducing coupling
-    and simplifying maintenance.
+    This manager supports two main modes:
+    - vLLM integration mode (requires vllm_config)
+    - Standalone mode (requires metadata and GPU connector)
     """
 
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        vllm_config: "VllmConfig",
-        role: str,
-        connector: "LMCacheConnectorV1Impl",
+        vllm_config: Optional["VllmConfig"] = None,
+        role: str = "worker",
+        connector: Optional[Any] = None,
     ):
         """
-        Initialize LMCacheManager.
+        Initialize LMCacheManager for vLLM integration mode.
 
         Args:
             config: LMCache engine configuration
-            vllm_config: vLLM configuration
-                TODO(baoloongmao): In the future, we should avoid introducing
-                vLLM dependencies in LMCacheManager. Consider extracting only
-                the necessary parameters from vllm_config.
+            vllm_config: vLLM configuration (required for vLLM integration mode)
             role: The role string ("scheduler" or "worker")
             connector: Reference to LMCacheConnectorV1Impl for internal API server
         """
         self._config = config
-        self._vllm_config = vllm_config
+        self._vllm_config: Optional["VllmConfig"] = vllm_config
         self._role = role
-        self._connector = connector
+        self._connector: Any = connector
 
         # Components (initialized later)
         self._lmcache_engine: Optional[LMCacheEngine] = None
@@ -97,17 +95,26 @@ class LMCacheManager:
         # Initialize components based on role
         self._init_components()
 
+    @classmethod
+    def builder(cls) -> "LMCacheManagerBuilder":
+        """Create a builder for constructing LMCacheManager instances."""
+        return LMCacheManagerBuilder()
+
     def _init_components(self) -> None:
-        """Initialize components based on the role."""
+        """Initialize components based on the role for vLLM mode."""
         if self._role == "scheduler":
+            # Initialize vLLM scheduler components
             self._init_scheduler_components()
         else:
+            # Initialize vLLM worker components
             self._init_worker_components()
 
     def _init_scheduler_components(self) -> None:
         """Initialize components for scheduler role."""
         # First Party
         from lmcache.integration.vllm.utils import create_lmcache_metadata
+
+        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
         if self._config.enable_scheduler_bypass_lookup:
             # Create LMCacheEngine for scheduler when bypass is enabled
@@ -134,6 +141,8 @@ class LMCacheManager:
         # Third Party
         from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 
+        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
+
         # Create LMCacheEngine
         self._lmcache_engine = self._create_lmcache_engine(role="worker")
         self._lmcache_engine_metadata = self._lmcache_engine.metadata
@@ -156,8 +165,10 @@ class LMCacheManager:
 
     def _init_dp_rank0_components(self) -> None:
         """Initialize components that only run on DP rank 0."""
+        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
+
         # Start internal API server
-        self._api_server = InternalAPIServer(self._connector)
+        self._api_server = InternalAPIServer(self)
 
         # Create plugin launcher
         worker_id = (
@@ -190,6 +201,8 @@ class LMCacheManager:
 
         if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
             return curr_engine
+
+        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
         # Third Party
         from vllm.platforms import current_platform
@@ -314,6 +327,8 @@ class LMCacheManager:
 
     def _calculate_draft_layers(self) -> int:
         """Calculate the number of draft layers for speculative decoding."""
+        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
+
         num_draft_layers = 0
         vllm_config = self._vllm_config
         model_config = vllm_config.model_config
@@ -345,6 +360,8 @@ class LMCacheManager:
 
     def _get_device_info(self, current_platform):
         """Get device information based on platform."""
+        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
+
         if current_platform.is_cuda_alike():
             logger.info("CUDA device is available. Using CUDA for LMCache engine.")
             torch_dev = torch.cuda
@@ -415,16 +432,14 @@ class LMCacheManager:
         if self._runtime_plugin_launcher is not None:
             self._runtime_plugin_launcher.launch_plugins()
 
-    def post_init(self, kv_caches: Optional[dict[str, torch.Tensor]] = None) -> None:
+    def post_init(self) -> None:
         """
         Post-initialization after KV caches are registered.
-
-        Args:
-            kv_caches: Optional KV cache dictionary for building layer groups
         """
         if self._lmcache_engine is None:
             return
 
+        # vLLM mode post-init
         # First Party
         from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
             LMCacheAsyncLookupServer,
@@ -490,6 +505,7 @@ class LMCacheManager:
 
         # Destroy cache engine
         try:
+            # In vLLM mode, use ENGINE_NAME constant
             logger.info("Destroying LMCache engine: %s", ENGINE_NAME)
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(LMCacheEngineBuilder.destroy, ENGINE_NAME)
@@ -549,6 +565,95 @@ class LMCacheManager:
         return self._offload_server
 
     @property
+    def api_server(self) -> Optional[InternalAPIServer]:
+        """Get the API server instance."""
+        return self._api_server
+
+    @property
     def config(self) -> LMCacheEngineConfig:
         """Get the LMCache engine configuration."""
         return self._config
+
+
+class LMCacheManagerBuilder:
+    """
+    Builder for constructing LMCacheManager instances for vLLM integration mode.
+
+    This builder pattern allows creating LMCacheManager instances specifically
+    for vLLM integration, requiring vllm_config for proper initialization.
+    """
+
+    def __init__(self):
+        self._config: Optional[LMCacheEngineConfig] = None
+        self._metadata: Optional[LMCacheEngineMetadata] = None
+        self._gpu_connector: Optional[Any] = None
+        self._vllm_config: Optional[Any] = None
+        self._connector: Optional[Any] = None
+        self._role: str = "worker"
+        self._broadcast_fn: Optional[Callable] = None
+        self._broadcast_object_fn: Optional[Callable] = None
+
+    def with_config(self, config: LMCacheEngineConfig) -> "LMCacheManagerBuilder":
+        """Set LMCache engine configuration."""
+        self._config = config
+        return self
+
+    def with_metadata(self, metadata: LMCacheEngineMetadata) -> "LMCacheManagerBuilder":
+        """Set LMCache engine metadata."""
+        self._metadata = metadata
+        return self
+
+    def with_gpu_connector(self, gpu_connector: Any) -> "LMCacheManagerBuilder":
+        """Set GPU connector instance."""
+        self._gpu_connector = gpu_connector
+        return self
+
+    def with_vllm_config(self, vllm_config: Any) -> "LMCacheManagerBuilder":
+        """Set vLLM configuration for vLLM integration mode."""
+        self._vllm_config = vllm_config
+        return self
+
+    def with_connector(self, connector: Any) -> "LMCacheManagerBuilder":
+        """Set connector reference for API server."""
+        self._connector = connector
+        return self
+
+    def with_role(self, role: str) -> "LMCacheManagerBuilder":
+        """Set role ("scheduler" or "worker")."""
+        self._role = role
+        return self
+
+    def with_broadcast_fn(self, broadcast_fn: Callable) -> "LMCacheManagerBuilder":
+        """Set broadcast function for tensor parallel."""
+        self._broadcast_fn = broadcast_fn
+        return self
+
+    def with_broadcast_object_fn(
+        self, broadcast_object_fn: Callable
+    ) -> "LMCacheManagerBuilder":
+        """Set broadcast function for objects."""
+        self._broadcast_object_fn = broadcast_object_fn
+        return self
+
+    def build(self) -> LMCacheManager:
+        """
+        Build and return a configured LMCacheManager instance for vLLM mode.
+
+        Returns:
+            LMCacheManager: Configured manager instance
+
+        Raises:
+            ValueError: If required configuration is missing
+        """
+        if self._config is None:
+            raise ValueError("config is required for LMCacheManager")
+
+        if self._vllm_config is None:
+            raise ValueError("vllm_config is required for vLLM integration mode")
+
+        return LMCacheManager(
+            config=self._config,
+            vllm_config=self._vllm_config,
+            role=self._role,
+            connector=self._connector,
+        )
