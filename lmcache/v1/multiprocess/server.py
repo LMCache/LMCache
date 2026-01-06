@@ -67,8 +67,23 @@ class GPUCacheContext:
 
         # MLA flag
         # MLA shape: [num_blocks, block_size, hidden_dim]
-        # MHA shape: [2, num_blocks, block_size, num_heads, head_size]
+        # MHA shape:
+        #   KVFirst: [2, num_blocks, block_size, num_heads, head_size]
+        #   BlockFirst: [num_blocks, 2, block_size, num_heads, head_size]
         self.is_mla_ = self.kv_caches_[0].ndim == 3
+        if self.is_mla_:
+            self.kv_layout_ = lmc_ops.KVLayout.MLA
+        elif self.kv_caches_[0].shape[0] == 2:
+            self.kv_layout_ = lmc_ops.KVLayout.KVFirst
+        elif self.kv_caches_[0].shape[1] == 2:
+            self.kv_layout_ = lmc_ops.KVLayout.BlockFirst
+        else:
+            raise ValueError(
+                "Unsupported KV cache layout. Expected [2, num_blocks, block_size, "
+                "num_heads, head_size] or [num_blocks, 2, block_size, num_heads, "
+                "head_size] for non-MLA, or [num_blocks, block_size, hidden_dim] "
+                "for MLA."
+            )
 
         # Shape related
         self.num_layers_ = len(self.kv_caches_)
@@ -76,10 +91,16 @@ class GPUCacheContext:
             self.num_blocks_ = self.kv_caches_[0].shape[0]
             self.block_size_ = self.kv_caches_[0].shape[1]
             self.hidden_dim_size_ = self.kv_caches_[0].shape[2]
-        else:
+        elif self.kv_layout_ == lmc_ops.KVLayout.KVFirst:
             self.num_blocks_ = self.kv_caches_[0].shape[1]
             self.block_size_ = self.kv_caches_[0].shape[2]
             # hidden_dim = num_heads * head_size
+            num_heads = self.kv_caches_[0].shape[3]
+            head_size = self.kv_caches_[0].shape[4]
+            self.hidden_dim_size_ = num_heads * head_size
+        else:
+            self.num_blocks_ = self.kv_caches_[0].shape[0]
+            self.block_size_ = self.kv_caches_[0].shape[2]
             num_heads = self.kv_caches_[0].shape[3]
             head_size = self.kv_caches_[0].shape[4]
             self.hidden_dim_size_ = num_heads * head_size
@@ -180,6 +201,13 @@ class GPUCacheContext:
         Returns whether the model uses MLA
         """
         return self.is_mla_
+
+    @property
+    def kv_layout(self) -> "lmc_ops.KVLayout":
+        """
+        Returns the KV cache layout.
+        """
+        return self.kv_layout_
 
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
@@ -321,8 +349,8 @@ class MPCacheEngine:
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
                         lmc_ops.TransferDirection.D2H,
-                        self.kv_layout,
-                        self.block_size,
+                        gpu_context.kv_layout,
+                        gpu_context.block_size,
                     )
 
                     assert memory_obj.tensor is not None
@@ -402,8 +430,8 @@ class MPCacheEngine:
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
                         lmc_ops.TransferDirection.H2D,
-                        self.kv_layout,
-                        self.block_size,
+                        gpu_context.kv_layout,
+                        gpu_context.block_size,
                     )
 
         with (
