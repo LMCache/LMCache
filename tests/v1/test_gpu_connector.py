@@ -212,31 +212,22 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, use_mla, num_groups):
     src_kv_caches: dict[str, torch.Tensor] = {}
     dst_kv_caches: dict[str, torch.Tensor] = {}
     for i in range(num_groups):
-        src_kv_group = generate_kv_cache_paged_list_tensors(
-            num_blocks=num_blocks,
-            device=device,
-            block_size=block_size,
-            use_mla=use_mla,
-            dtype=dtypes[i],
-            num_layers=8,
-            head_size=head_sizes[i],
-        )
-        src_kv_groups.append(src_kv_group)
-        for j, layer_tensor in enumerate(src_kv_group):
-            src_kv_caches[str(i) + "-" + str(j)] = layer_tensor
-
-        dst_kv_group = generate_kv_cache_paged_list_tensors(
-            num_blocks=num_blocks,
-            device=device,
-            block_size=block_size,
-            use_mla=use_mla,
-            dtype=dtypes[i],
-            num_layers=8,
-            head_size=head_sizes[i],
-        )
-        dst_kv_groups.append(dst_kv_group)
-        for j, layer_tensor in enumerate(dst_kv_group):
-            dst_kv_caches[str(i) + "-" + str(j)] = layer_tensor
+        for groups, kv_caches in [
+            (src_kv_groups, src_kv_caches),
+            (dst_kv_groups, dst_kv_caches),
+        ]:
+            kv_group = generate_kv_cache_paged_list_tensors(
+                num_blocks=num_blocks,
+                device=device,
+                block_size=block_size,
+                use_mla=use_mla,
+                dtype=dtypes[i],
+                num_layers=8,
+                head_size=head_sizes[i],
+            )
+            groups.append(kv_group)
+            for j, layer_tensor in enumerate(kv_group):
+                kv_caches[f"{i}-{j}"] = layer_tensor
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device, dtype=torch.int64)
@@ -257,28 +248,9 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, use_mla, num_groups):
                     head_sizes[i],
                 )
 
-    # init the kv layer groups
-    metadata = LMCacheEngineMetadata(
-        "test",
-        8,
-        0,
-        "vllm",
-        torch.bfloat16,
-        (32, 2, chunk_size, num_heads, 128),
-        use_mla,
-    )
-    metadata.kv_layer_groups_manager.build_kv_layer_groups(src_kv_caches)
-
-    metadata2 = LMCacheEngineMetadata(
-        "test",
-        8,
-        0,
-        "vllm",
-        torch.bfloat16,
-        (32, 2, chunk_size, num_heads, 128),
-        use_mla,
-    )
-    metadata2.kv_layer_groups_manager.build_kv_layer_groups(dst_kv_caches)
+    # create metadata and init kv layer groups
+    metadata = _create_metadata(use_mla, src_kv_caches)
+    metadata2 = _create_metadata(use_mla, dst_kv_caches)
 
     # connector will copy with src_kv_groups
     connector = VLLMPagedMemGPUConnectorV3(
@@ -299,7 +271,9 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, use_mla, num_groups):
     # and then copy from memory_obj to dst_kv_groups
     for start in range(0, num_tokens, chunk_size):
         end = min(start + chunk_size, num_tokens)
-        memory_obj = allocator.allocate(metadata.get_shapes(), metadata.get_dtypes())
+        memory_obj = allocator.allocate(
+            metadata.get_shapes(end - start), metadata.get_dtypes()
+        )
         connector.from_gpu(
             memory_obj,
             start,
@@ -887,3 +861,18 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         )
 
     allocator.close()
+
+
+def _create_metadata(use_mla, kv_caches):
+    num_heads = 1 if use_mla else 8
+    metadata = LMCacheEngineMetadata(
+        "test",
+        8,
+        0,
+        "vllm",
+        torch.bfloat16,
+        (32, 2, 256, num_heads, 128),
+        use_mla,
+    )
+    metadata.kv_layer_groups_manager.build_kv_layer_groups(kv_caches)
+    return metadata
