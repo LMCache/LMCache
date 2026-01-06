@@ -136,7 +136,11 @@ def generate_kv_cache_paged_list_tensors(
     )
 
     for i in range(num_layers):
-        kv = torch.rand(shape, dtype=dtype, device=device)
+        # TODO(chunxiaozheng): support more dtypes
+        if dtype == torch.uint8:
+            kv = torch.randint(0, 256, shape, dtype=dtype, device=device)
+        else:
+            kv = torch.rand(shape, dtype=dtype, device=device)
         ret.append(kv)
 
     return ret
