@@ -12,6 +12,15 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(c_ops, m) {
+  py::enum_<TransferDirection>(m, "TransferDirection")
+      .value("H2D", TransferDirection::H2D)
+      .value("D2H", TransferDirection::D2H)
+      .export_values();
+  py::enum_<KVLayout>(m, "KVLayout")
+      .value("KVFirst", KVLayout::KVFirst)
+      .value("BlockFirst", KVLayout::BlockFirst)
+      .value("MLA", KVLayout::MLA)
+      .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);

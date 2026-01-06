@@ -46,6 +46,14 @@ def _tuple_kv_to_blob(
     return kv_tensors_flatten
 
 
+def _normalize_kv_cache_layout(kv_cache, kv_layout):
+    if kv_layout == lmc_ops.KVLayout.KVFirst:
+        return kv_cache
+    if kv_layout == lmc_ops.KVLayout.BlockFirst:
+        return [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache]
+    raise ValueError(f"Unsupported kv_layout for normalization: {kv_layout}")
+
+
 def _slice_kv_at(
     start_idx: int,
     kv_tensors: torch.Tensor,
@@ -166,7 +174,11 @@ def test_extract_and_load_back(num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_multi_layer_kernel(num_tokens):
+@pytest.mark.parametrize(
+    "kv_layout",
+    [lmc_ops.KVLayout.KVFirst, lmc_ops.KVLayout.BlockFirst],
+)
+def test_multi_layer_kernel(num_tokens, kv_layout):
     device = "cuda"
 
     num_blocks = 1000
@@ -178,6 +190,8 @@ def test_multi_layer_kernel(num_tokens):
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
+    if kv_layout == lmc_ops.KVLayout.BlockFirst:
+        kv_cache = [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache]
     page_buffer_size = num_blocks * block_size
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -237,9 +251,8 @@ def test_multi_layer_kernel(num_tokens):
             slot_mapping_temp,
             kv_cache[0].device,
             page_buffer_size,
-            True,
-            False,
-            True,
+            lmc_ops.TransferDirection.D2H,
+            kv_layout,
             block_size,
         )
         memory_obj_new_list.append(memory_obj_new)
@@ -259,6 +272,8 @@ def test_multi_layer_kernel(num_tokens):
     kv_cache_new = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
+    if kv_layout == lmc_ops.KVLayout.BlockFirst:
+        kv_cache_new = [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache_new]
 
     kv_cache_pointers_new = torch.empty(
         32, dtype=torch.int64, device="cpu", pin_memory=True
@@ -274,15 +289,16 @@ def test_multi_layer_kernel(num_tokens):
             slot_mapping_temp,
             kv_cache_new[0].device,
             page_buffer_size,
-            False,
-            False,
-            True,
+            lmc_ops.TransferDirection.H2D,
+            kv_layout,
             block_size,
         )
 
+    kv_cache_for_check = _normalize_kv_cache_layout(kv_cache, kv_layout)
+    kv_cache_new_for_check = _normalize_kv_cache_layout(kv_cache_new, kv_layout)
     check_paged_kv_cache_equal(
-        kv_cache,
-        kv_cache_new,
+        kv_cache_for_check,
+        kv_cache_new_for_check,
         slot_mapping,
     )
 
@@ -359,9 +375,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             slot_mapping_temp,
             kv_cache[0].device,
             0,
-            True,
-            True,
-            True,
+            lmc_ops.TransferDirection.D2H,
+            lmc_ops.KVLayout.MLA,
             block_size,
         )
         memory_obj_new_list.append(memory_obj_new)
@@ -402,9 +417,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             slot_mapping_temp,
             kv_cache_new[0].device,
             0,
-            False,
-            True,
-            True,
+            lmc_ops.TransferDirection.H2D,
+            lmc_ops.KVLayout.MLA,
             block_size,
         )
 
@@ -426,7 +440,11 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 @pytest.mark.parametrize("token_major", [True, False])
-def test_single_layer_kernel(num_tokens, token_major):
+@pytest.mark.parametrize(
+    "kv_layout",
+    [lmc_ops.KVLayout.KVFirst, lmc_ops.KVLayout.BlockFirst],
+)
+def test_single_layer_kernel(num_tokens, token_major, kv_layout):
     device = "cuda"
 
     num_layers = 32
@@ -442,6 +460,9 @@ def test_single_layer_kernel(num_tokens, token_major):
     kv_cache_new = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
+    if kv_layout == lmc_ops.KVLayout.BlockFirst:
+        kv_cache = [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache]
+        kv_cache_new = [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache_new]
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
@@ -459,23 +480,23 @@ def test_single_layer_kernel(num_tokens, token_major):
             tmp_gpu_buffer,
             kv_cache[layer_id],
             slot_mapping,
-            True,
+            lmc_ops.TransferDirection.D2H,
             token_major,
-            True,
-            False,
+            kv_layout,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache_new[layer_id],
             slot_mapping,
-            False,
+            lmc_ops.TransferDirection.H2D,
             token_major,
-            True,
-            False,
+            kv_layout,
         )
 
+    kv_cache_for_check = _normalize_kv_cache_layout(kv_cache, kv_layout)
+    kv_cache_new_for_check = _normalize_kv_cache_layout(kv_cache_new, kv_layout)
     check_paged_kv_cache_equal(
-        kv_cache,
-        kv_cache_new,
+        kv_cache_for_check,
+        kv_cache_new_for_check,
         slot_mapping,
     )

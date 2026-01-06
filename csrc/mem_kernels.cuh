@@ -8,31 +8,43 @@
 // #ifndef MEM_KERNELS_CUH
 // #define MEM_KERNELS_CUH
 
+enum class TransferDirection : int {
+  H2D = 0,
+  D2H = 1,
+};
+
+enum class KVLayout : int {
+  KVFirst = 0,
+  BlockFirst = 1,
+  MLA = 2,
+};
+
 void multi_layer_kv_transfer(torch::Tensor& key_value,
                              const torch::Tensor& key_value_ptrs,
                              const torch::Tensor& slot_mapping,
                              const torch::Device& paged_memory_device,
-                             const int page_buffer_size, const bool direction,
-                             const bool use_mla, const bool vllm_two_major,
-                             const int block_size);
+                             const int page_buffer_size,
+                             const TransferDirection direction,
+                             const KVLayout kv_layout, const int block_size);
 
 void multi_layer_kv_transfer_unilateral(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
-    const int page_buffer_size, const bool direction, const bool use_mla);
+    const int page_buffer_size, const TransferDirection direction,
+    const KVLayout kv_layout, const int block_size);
 
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_value_cache,
-                              torch::Tensor& slot_mapping, const bool direction,
+                              torch::Tensor& slot_mapping,
+                              const TransferDirection direction,
                               const bool token_major = false,
-                              const bool vllm_two_major = false,
-                              const bool use_mla = false);
+                              const KVLayout kv_layout = KVLayout::KVFirst);
 
 void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
                                   torch::Tensor& sgl_key_cache,
                                   torch::Tensor& sgl_value_cache,
                                   torch::Tensor& slot_mapping,
-                                  const bool direction,
+                                  const TransferDirection direction,
                                   const bool token_major = false);
 
 void load_and_reshape_flash(torch::Tensor& key_value, torch::Tensor& key_cache,
