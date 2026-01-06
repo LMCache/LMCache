@@ -16,6 +16,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 
@@ -71,14 +72,32 @@ def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> Memor
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = create_test_config()
-    return LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    # Initialize PinMonitor before creating backend
+    PinMonitor.GetOrCreate(config)
+
+    backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    yield backend
+
+    # Cleanup: destroy PinMonitor after test
+    PinMonitor.DestroyInstance()
 
 
 @pytest.fixture
 def local_cpu_backend_disabled(memory_allocator):
     """Create a LocalCPUBackend with local_cpu disabled."""
     config = create_test_config(local_cpu=False)
-    return LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    # Initialize PinMonitor before creating backend
+    PinMonitor.GetOrCreate(config)
+
+    backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    yield backend
+
+    # Cleanup: destroy PinMonitor after test
+    PinMonitor.DestroyInstance()
 
 
 class TestLocalCPUBackend:

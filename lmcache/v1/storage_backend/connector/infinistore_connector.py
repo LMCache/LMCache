@@ -103,18 +103,18 @@ class InfinistoreConnector(RemoteConnector):
 
         metadata = RemoteMetadata.deserialize(buffer)
 
-        num_elements = reduce(operator.mul, metadata.shape)
-        assert metadata.dtype is not None
+        num_elements = reduce(operator.mul, metadata.shapes[0])
+        assert len(metadata.dtypes) == 1
         temp_tensor = torch.frombuffer(
             buffer,
-            dtype=metadata.dtype,
+            dtype=metadata.dtypes[0],
             offset=METADATA_BYTES_LEN,
             count=num_elements,
-        ).reshape(metadata.shape)
+        ).reshape(metadata.shapes[0])
 
         memory_obj = self.memory_allocator.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes[0],
+            metadata.dtypes[0],
             metadata.fmt,
         )
 
@@ -134,16 +134,16 @@ class InfinistoreConnector(RemoteConnector):
         key_str = key.to_string()
 
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
 
         buf_idx = await self.send_queue.get()
         buffer = self.send_buffers[buf_idx]
 
-        RemoteMetadata(len(kv_bytes), kv_shape, kv_dtype, memory_format).serialize_into(
-            buffer
-        )
+        RemoteMetadata(
+            len(kv_bytes), kv_shapes, kv_dtypes, memory_format
+        ).serialize_into(buffer)
 
         buffer[METADATA_BYTES_LEN : METADATA_BYTES_LEN + len(kv_bytes)] = kv_bytes
 

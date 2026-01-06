@@ -24,6 +24,7 @@ import zmq.asyncio
 from lmcache.logging import init_logger
 from lmcache.v1.storage_backend.pd_backend import (
     PDMsg,
+    ProxyNotif,
 )
 
 logger = init_logger(__name__)
@@ -233,21 +234,42 @@ run_proxy = True  # Shutdown flag
 async def zmq_pull_server():
     socket = zmq_ctx.socket(zmq.PULL)
     proxy_url = f"{global_args.proxy_host}:{global_args.proxy_port}"
-    socket.bind(f"tcp://{proxy_url}")
-    logger.info(f"ZMQ proxy server started on {proxy_url}")
+    try:
+        socket.bind(f"tcp://{proxy_url}")
+    except zmq.ZMQError:
+        logger.exception("ZMQ proxy server failed to bind on %s", proxy_url)
+        return
+    logger.info("ZMQ proxy server started on %s", proxy_url)
 
     while run_proxy:
         try:
             msg_bytes = await socket.recv()
-            msg = msgspec.msgpack.decode(msg_bytes, type=PDMsg)
-            req_id = msg.req_id
-            app.state.finished_reqs[req_id] += 1
-            logger.debug(f"Prefill of req {req_id} done.")
         except zmq.Again:
             await asyncio.sleep(0.01)  # Avoid busy loop
-        except Exception as e:
-            print("ZMQ Error:", e)
-            break
+            continue
+        except zmq.ZMQError as exc:
+            if exc.errno in (zmq.ETERM, zmq.ENOTSOCK):
+                break
+            logger.warning("ZMQ recv error: %s", exc)
+            await asyncio.sleep(0.05)
+            continue
+
+        try:
+            msg = msgspec.msgpack.decode(msg_bytes, type=PDMsg)
+        except msgspec.DecodeError as exc:
+            logger.warning("ZMQ received non-PD message: %s", exc)
+            continue
+        except Exception as exc:
+            logger.exception("ZMQ message decode failed: %s", exc)
+            continue
+
+        if not isinstance(msg, ProxyNotif):
+            logger.debug("ZMQ ignored message type: %s", type(msg).__name__)
+            continue
+
+        req_id = msg.req_id
+        app.state.finished_reqs[req_id] += 1
+        logger.debug("Prefill of req %s done.", req_id)
 
     socket.close()
     logger.info("ZMQ PULL server stopped.")

@@ -52,6 +52,8 @@ class LMCacheStats:
     interval_local_cpu_evict_keys_count: int  # evict keys count
     interval_local_cpu_evict_failed_count: int  # evict failed count
 
+    interval_forced_unpin_count: int  # forced unpin count due to timeout
+
     # Real time value measurements (will be reset after each log)
     retrieve_hit_rate: float
     lookup_hit_rate: float
@@ -194,6 +196,8 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
+
+        self.interval_forced_unpin_count = 0
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -382,6 +386,10 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_failed_count += evict_failed_count
 
     @thread_safe
+    def update_forced_unpin_count(self, delta: int):
+        self.interval_forced_unpin_count += delta
+
+    @thread_safe
     def update_active_memory_objs_count(self, active_memory_objs_count: int):
         self.active_memory_objs_count = active_memory_objs_count
 
@@ -430,6 +438,8 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
+
+        self.interval_forced_unpin_count = 0
 
         self.interval_p2p_requests = 0
         self.interval_p2p_transferred_tokens = 0
@@ -545,6 +555,7 @@ class LMCStatsMonitor:
             interval_local_cpu_evict_count=self.interval_local_cpu_evict_count,
             interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
             interval_local_cpu_evict_failed_count=self.interval_local_cpu_evict_failed_count,
+            interval_forced_unpin_count=self.interval_forced_unpin_count,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
             local_storage_usage_bytes=self.local_storage_usage_bytes,
@@ -710,6 +721,12 @@ class PrometheusLogger:
         self.counter_local_cpu_evict_failed_count = self._counter_cls(
             name="lmcache:local_cpu_evict_failed_count",
             documentation="Total number of failed eviction in local cpu backend",
+            labelnames=labelnames,
+        )
+
+        self.counter_forced_unpin_count = self._counter_cls(
+            name="lmcache:forced_unpin_count",
+            documentation="Total number of forced unpin due to timeout",
             labelnames=labelnames,
         )
 
@@ -1087,6 +1104,12 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
+        self.pin_monitor_pinned_objects_count = self._gauge_cls(
+            name="lmcache:pin_monitor_pinned_objects_count",
+            documentation="The number of pinned objects in PinMonitor",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
         event_statuses = ["ongoing", "done", "not_found"]
         for status in event_statuses:
@@ -1240,6 +1263,10 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_local_cpu_evict_failed_count,
             stats.interval_local_cpu_evict_failed_count,
+        )
+        self._log_counter(
+            self.counter_forced_unpin_count,
+            stats.interval_forced_unpin_count,
         )
         self._log_counter(
             self.counter_lookup_0_hit_requests,

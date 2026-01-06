@@ -212,8 +212,8 @@ class P2PBackend(StorageBackendInterface):
         self.memory_allocator = local_cpu_backend.get_memory_allocator()
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
-        self.dtype = metadata.kv_dtype
-        self.full_size_shape = list(self.memory_allocator.cpu_allocator.shapes[0])
+        self.full_size_shapes = self.memory_allocator.cpu_allocator.shapes
+        self.dtypes = self.memory_allocator.cpu_allocator.dtypes
         self.fmt: MemoryFormat = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
@@ -452,14 +452,17 @@ class P2PBackend(StorageBackendInterface):
             r_mem_indexes_to_read = []
             keys_to_read = []
             local_mem_objs = []
+            keys_len = len(keys)
             for idx, key in enumerate(keys):
                 if self.local_cpu_backend.contains(key, pin=False):
                     continue
                 r_mem_indexes_to_read.append(r_mem_indexes[idx])
-                shape = self.full_size_shape.copy()
-                shape[self.fmt.token_dim()] = offsets[idx]
+                if not self.config.save_unfull_chunk or idx < keys_len - 1:
+                    shapes = self.full_size_shapes
+                else:
+                    shapes = self._get_unfull_chunk_shapes(offsets[idx])
                 local_mem_obj = self.local_cpu_backend.allocate(
-                    torch.Size(shape), self.dtype, self.fmt
+                    shapes, self.dtypes, self.fmt
                 )
                 local_mem_objs.append(local_mem_obj)
                 keys_to_read.append(key)
@@ -555,14 +558,15 @@ class P2PBackend(StorageBackendInterface):
 
         mem_objs = []
         str_keys = []
+        keys_len = len(keys)
         for idx, key in enumerate(keys):
-            shape = self.full_size_shape.copy()
-            shape[self.fmt.token_dim()] = (
-                cum_chunk_lengths[idx + 1] - cum_chunk_lengths[idx]
-            )
-            mem_obj = self.local_cpu_backend.allocate(
-                torch.Size(shape), self.dtype, self.fmt
-            )
+            if not self.config.save_unfull_chunk or idx < keys_len - 1:
+                shapes = self.full_size_shapes
+            else:
+                shapes = self._get_unfull_chunk_shapes(
+                    cum_chunk_lengths[idx + 1] - cum_chunk_lengths[idx]
+                )
+            mem_obj = self.local_cpu_backend.allocate(shapes, self.dtypes, self.fmt)
             mem_objs.append(mem_obj)
             str_keys.append(key.to_string())
 
@@ -639,6 +643,14 @@ class P2PBackend(StorageBackendInterface):
         for missed_mem_obj in mem_objs[num_hit_chunks:]:
             missed_mem_obj.ref_count_down()
         return hit_mem_objs
+
+    def _get_unfull_chunk_shapes(self, num_tokens: int) -> list[torch.Size]:
+        shapes = []
+        for shape in self.full_size_shapes:
+            shape_list = list(shape)
+            shape_list[self.fmt.token_dim()] = num_tokens
+            shapes.append(torch.Size(shape_list))
+        return shapes
 
     # NOTE: put-related functions are not supported for now.
     async def async_batched_submit_put_task(
