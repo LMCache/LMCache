@@ -9,10 +9,6 @@ Tests for the vLLM GPU worker patch script.
 from pathlib import Path
 import importlib.util
 
-# Third Party
-import pytest
-
-
 def _load_patch_module():
     repo_root = Path(__file__).resolve().parents[2]
     script_path = repo_root / "scripts" / "patch_vllm_gpu_worker.py"
