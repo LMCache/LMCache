@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.config import LMCacheEngineMetadata
     from lmcache.observability import PrometheusLogger
-    from lmcache.v1.lookup_client.factory import LookupClientFactory
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
@@ -113,6 +112,7 @@ class LMCacheManager:
         """Initialize components for scheduler role."""
         # First Party
         from lmcache.integration.vllm.utils import create_lmcache_metadata
+        from lmcache.v1.lookup_client.factory import LookupClientFactory
 
         assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
@@ -140,6 +140,9 @@ class LMCacheManager:
         """Initialize components for worker role."""
         # Third Party
         from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+
+        # First Party
+        from lmcache.v1.lookup_client.factory import LookupClientFactory
 
         assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
