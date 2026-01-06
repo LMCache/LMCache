@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-import torch
+# Third Party
 import pytest
+import torch
 
+# First Party
 from lmcache.v1.compute.blend.blender import LMCBlender
 
 
@@ -18,7 +20,7 @@ def blender_factory():
             for _ in range(blender.num_layers + 2):
                 yield None
 
-        blender.blend_layer = fake_blend_layer
+        blender.blend_layer = fake_blend_layer  # type: ignore[method-assign]
         return blender, calls
 
     return _make_blender

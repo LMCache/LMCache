@@ -175,9 +175,7 @@ class LMCBlender:
             if mask is None or mask.numel() == 0:
                 logger.debug("Blend skipped: empty tokens.")
                 return
-            raise ValueError(
-                f"Mask length {mask.numel()} does not match empty tokens."
-            )
+            raise ValueError(f"Mask length {mask.numel()} does not match empty tokens.")
 
         if mask is not None and mask.numel() != token_len:
             raise ValueError(
