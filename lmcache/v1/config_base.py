@@ -223,6 +223,11 @@ def create_config_class(
 
     def _post_init(self):
         """Post-initialization setup"""
+        # Initialize user-set keys tracking set
+        # This tracks which config keys were explicitly set by user
+        # (via file, env vars, or overrides) vs. using default values
+        if not hasattr(self, "_user_set_keys"):
+            object.__setattr__(self, "_user_set_keys", set())
         # Generate instance ID if not set
         if not hasattr(self, "lmcache_instance_id"):
             self.lmcache_instance_id = f"{config_name.lower()}_{uuid.uuid4().hex}"
@@ -252,6 +257,7 @@ def create_config_class(
         )
 
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
             if name in resolved_config:
                 try:
@@ -261,6 +267,7 @@ def create_config_class(
                     config_values[name] = _apply_env_converter_safely(
                         config_definitions, name, value
                     )
+                    user_set_keys.add(name)  # Mark as user-set
                 except (ValueError, json.JSONDecodeError) as e:
                     raw_value_for_log = resolved_config.get(name, "unknown value")
                     log_message = (
@@ -279,6 +286,8 @@ def create_config_class(
                 )
 
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _from_file(cls, file_path: str):
@@ -296,27 +305,41 @@ def create_config_class(
         )
 
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
-            value = resolved_config.get(name, config["default"])
+            if name in resolved_config:
+                value = resolved_config[name]
+                user_set_keys.add(name)  # Mark as user-set
+            else:
+                value = config["default"]
             # Apply env_converter safely regardless of whether value is None or not
             config_values[name] = _apply_env_converter_safely(
                 config_definitions, name, value
             )
 
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _from_defaults(cls, **kwargs):
         """Create configuration from defaults"""
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
-            value = kwargs.get(name, config["default"])
+            if name in kwargs:
+                value = kwargs[name]
+                user_set_keys.add(name)  # Mark as user-set
+            else:
+                value = config["default"]
             # Apply env_converter safely regardless of whether value is None or not
             config_values[name] = _apply_env_converter_safely(
                 config_definitions, name, value
             )
 
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _update_config_from_env(self):
@@ -343,6 +366,10 @@ def create_config_class(
             deprecated_configs,
         )
 
+        # Ensure _user_set_keys exists
+        if not hasattr(self, "_user_set_keys"):
+            object.__setattr__(self, "_user_set_keys", set())
+
         # Update config object
         for name, config in config_definitions.items():
             if name in resolved_config:
@@ -351,6 +378,8 @@ def create_config_class(
                     value = _parse_quoted_string(raw_value)
                     converted_value = config["env_converter"](value)
                     setattr(self, name, converted_value)
+                    # Mark as user-set
+                    self._user_set_keys.add(name)
                 except (ValueError, json.JSONDecodeError) as e:
                     raw_value_for_log = resolved_config.get(name, "unknown value")
                     log_message = (
@@ -371,12 +400,19 @@ def create_config_class(
             deprecated_configs,
         )
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
-            value = resolved_config.get(name, config["default"])
+            if name in resolved_config:
+                value = resolved_config[name]
+                user_set_keys.add(name)  # Mark as user-set
+            else:
+                value = config["default"]
             if value is not None:
                 value = config["env_converter"](value)
             config_values[name] = value
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _to_dict(self):
@@ -588,9 +624,11 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
         config: Configuration object to update.
         config_key: The configuration key to set.
         value: The value to set.
-        override: If True, completely replace the value. If False and the key is
-            'extra_config', merge with existing dict (new values take precedence
-            for conflicting keys). Default is True.
+        override: If True, completely replace the value. If False:
+            - For 'extra_config': merge with existing dict (new values take
+              precedence for conflicting keys).
+            - For other keys: skip if current value is not None.
+            Default is True.
 
     Returns:
         True if the value was set successfully, False otherwise.
@@ -618,6 +656,18 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
             # If current value is None or not a dict, just set the new value
             setattr(config, config_key, value)
             return True
+
+        # For non-extra_config keys: skip if override is False and key was user-set
+        if not override:
+            user_set_keys: set[str] = getattr(config, "_user_set_keys", set())
+            if config_key in user_set_keys:
+                current_value = getattr(config, config_key, None)
+                logger.info(
+                    "Skipping config %s (override=False, user-set value=%s)",
+                    config_key,
+                    current_value,
+                )
+                return True  # Return True as this is expected behavior, not an error
 
         setattr(config, config_key, value)
         return True

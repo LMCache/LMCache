@@ -278,6 +278,71 @@ class TestValidateAndSetConfigValue:
         # Original value should be preserved on error
         assert config.extra_config == original_config
 
+    def test_set_basic_config_override_false_skip_when_user_set(self):
+        """Test override=False skips setting value for user-set config keys."""
+        # Create config with user-set chunk_size
+        config = LMCacheEngineConfig.from_defaults(chunk_size=256)
+        # Verify chunk_size is marked as user-set
+        assert "chunk_size" in config._user_set_keys
+
+        result = validate_and_set_config_value(
+            config, "chunk_size", 512, override=False
+        )
+        assert result is True
+        # Value should not be changed because override=False and key is user-set
+        assert config.chunk_size == 256
+
+    def test_set_basic_config_override_false_set_when_not_user_set(self):
+        """Test override=False sets value for non-user-set keys (default values)."""
+        config = LMCacheEngineConfig.from_defaults()
+        # chunk_size has default value 256, not user-set
+        assert "chunk_size" not in config._user_set_keys
+        assert config.chunk_size == 256  # Default value
+
+        result = validate_and_set_config_value(
+            config, "chunk_size", 512, override=False
+        )
+        assert result is True
+        # Value should be set because key is not user-set (just default)
+        assert config.chunk_size == 512
+
+    def test_set_basic_config_override_false_with_none_default(self):
+        """Test override=False sets value for None default keys when not user-set."""
+        config = LMCacheEngineConfig.from_defaults()
+        assert config.remote_url is None  # Default is None
+        assert "remote_url" not in config._user_set_keys
+
+        result = validate_and_set_config_value(
+            config, "remote_url", "http://example.com", override=False
+        )
+        assert result is True
+        # Value should be set because key is not user-set
+        assert config.remote_url == "http://example.com"
+
+    def test_set_basic_config_override_false_skip_user_set_none(self):
+        """Test override=False skips even if user explicitly set value to None."""
+        # User explicitly sets remote_url to None
+        config = LMCacheEngineConfig.from_defaults(remote_url=None)
+        assert "remote_url" in config._user_set_keys
+        assert config.remote_url is None
+
+        result = validate_and_set_config_value(
+            config, "remote_url", "http://example.com", override=False
+        )
+        assert result is True
+        # Value should NOT be changed because key is user-set (even though it's None)
+        assert config.remote_url is None
+
+    def test_set_basic_config_override_true_always_sets(self):
+        """Test that override=True always sets the value regardless of current value."""
+        config = LMCacheEngineConfig.from_defaults()
+        config.chunk_size = 256
+
+        result = validate_and_set_config_value(config, "chunk_size", 512, override=True)
+        assert result is True
+        # Value should be changed because override=True
+        assert config.chunk_size == 512
+
 
 class TestApplyRemoteConfigs:
     """Test cases for apply_remote_configs function with override parameter."""
@@ -293,16 +358,30 @@ class TestApplyRemoteConfigs:
         apply_remote_configs(config, remote_response)
         assert config.chunk_size == 512
 
-    def test_apply_remote_configs_override_false_basic(self):
-        """Test override=False for basic config - value should still be set."""
-        config = LMCacheEngineConfig.from_defaults()
-        config.chunk_size = 256
+    def test_apply_remote_configs_override_false_basic_skip(self):
+        """Test override=False for basic config - skip if user-set."""
+        # Create config with user-set chunk_size
+        config = LMCacheEngineConfig.from_defaults(chunk_size=256)
+        assert "chunk_size" in config._user_set_keys
 
         remote_response = {
             "configs": [{"key": "chunk_size", "value": 512, "override": False}]
         }
         apply_remote_configs(config, remote_response)
-        # For non-extra_config keys, override=False still sets the value
+        # For user-set keys, override=False should skip
+        assert config.chunk_size == 256  # Original user-set value preserved
+
+    def test_apply_remote_configs_override_false_basic_set_when_default(self):
+        """Test override=False for basic config - set value if using default."""
+        config = LMCacheEngineConfig.from_defaults()
+        assert "chunk_size" not in config._user_set_keys
+        assert config.chunk_size == 256  # Default value
+
+        remote_response = {
+            "configs": [{"key": "chunk_size", "value": 512, "override": False}]
+        }
+        apply_remote_configs(config, remote_response)
+        # For non-user-set keys, override=False should set value
         assert config.chunk_size == 512
 
     def test_apply_remote_configs_extra_config_override_true(self):
@@ -424,3 +503,104 @@ class TestApplyRemoteConfigs:
         # Should not raise, just log warning
         result = apply_remote_configs(config, remote_response)
         assert result is config  # Returns the config object
+
+
+class TestUserSetKeysTracking:
+    """Test cases for _user_set_keys tracking functionality."""
+
+    def test_from_defaults_no_kwargs_empty_user_set_keys(self):
+        """Test that from_defaults without kwargs has empty _user_set_keys."""
+        config = LMCacheEngineConfig.from_defaults()
+        assert hasattr(config, "_user_set_keys")
+        assert len(config._user_set_keys) == 0
+
+    def test_from_defaults_with_kwargs_tracks_user_set_keys(self):
+        """Test that from_defaults with kwargs tracks user-set keys."""
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=512,
+            remote_url="http://example.com",
+        )
+        assert "chunk_size" in config._user_set_keys
+        assert "remote_url" in config._user_set_keys
+        # Other keys should not be in _user_set_keys
+        assert "local_cpu" not in config._user_set_keys
+
+    def test_from_defaults_user_set_same_as_default(self):
+        """Test that user-set value same as default is still tracked."""
+        # Default chunk_size is 256
+        config = LMCacheEngineConfig.from_defaults(chunk_size=256)
+        # Even though value is same as default, it's user-set
+        assert "chunk_size" in config._user_set_keys
+        assert config.chunk_size == 256
+
+    def test_from_env_tracks_env_set_keys(self):
+        """Test that from_env tracks keys set via environment variables."""
+        os.environ["LMCACHE_CHUNK_SIZE"] = "1024"
+        os.environ["LMCACHE_REMOTE_URL"] = "http://env.example.com"
+        try:
+            config = LMCacheEngineConfig.from_env()
+            assert "chunk_size" in config._user_set_keys
+            assert "remote_url" in config._user_set_keys
+            assert config.chunk_size == 1024
+            assert config.remote_url == "http://env.example.com"
+        finally:
+            del os.environ["LMCACHE_CHUNK_SIZE"]
+            del os.environ["LMCACHE_REMOTE_URL"]
+
+    def test_update_config_from_env_adds_to_user_set_keys(self):
+        """Test that update_config_from_env adds newly set keys to _user_set_keys."""
+        config = LMCacheEngineConfig.from_defaults()
+        assert "chunk_size" not in config._user_set_keys
+
+        os.environ["LMCACHE_CHUNK_SIZE"] = "2048"
+        try:
+            config.update_config_from_env()
+            assert "chunk_size" in config._user_set_keys
+            assert config.chunk_size == 2048
+        finally:
+            del os.environ["LMCACHE_CHUNK_SIZE"]
+
+    def test_from_file_tracks_file_set_keys(self):
+        """Test that from_file tracks keys set in config file."""
+        config = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_config.yaml")
+        # Keys in the config file should be in _user_set_keys
+        assert "extra_config" in config._user_set_keys
+
+    def test_from_dict_tracks_dict_set_keys(self):
+        """Test that from_dict tracks keys set in dictionary."""
+        config_dict = {
+            "chunk_size": 512,
+            "remote_url": "http://dict.example.com",
+        }
+        config = LMCacheEngineConfig.from_dict(config_dict)
+        assert "chunk_size" in config._user_set_keys
+        assert "remote_url" in config._user_set_keys
+        assert "local_cpu" not in config._user_set_keys
+
+    def test_override_false_respects_user_set_for_non_none_defaults(self):
+        """Test override=False respects user-set keys even for non-None defaults."""
+        # chunk_size has default 256 (not None)
+        # User explicitly sets it to 512
+        config = LMCacheEngineConfig.from_defaults(chunk_size=512)
+        assert config.chunk_size == 512
+        assert "chunk_size" in config._user_set_keys
+
+        # Remote config tries to set it with override=False
+        result = validate_and_set_config_value(
+            config, "chunk_size", 1024, override=False
+        )
+        assert result is True
+        # Value should NOT change because user set it
+        assert config.chunk_size == 512
+
+    def test_override_true_ignores_user_set_keys(self):
+        """Test that override=True changes value even if user-set."""
+        config = LMCacheEngineConfig.from_defaults(chunk_size=512)
+        assert "chunk_size" in config._user_set_keys
+
+        result = validate_and_set_config_value(
+            config, "chunk_size", 1024, override=True
+        )
+        assert result is True
+        # Value SHOULD change because override=True
+        assert config.chunk_size == 1024
