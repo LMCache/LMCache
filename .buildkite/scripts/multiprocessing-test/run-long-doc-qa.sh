@@ -26,9 +26,9 @@ MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 
 # Performance thresholds for LMCache (test fails if exceeded)
 # 0.22s for loading 10K tokens of Qwen3-14B
-# 0.58s for query round time of Qwen3-14B
+# 0.50s for query round time of Qwen3-14B
 MAX_LMCACHE_TTFT="${MAX_LMCACHE_TTFT:-0.22}"
-MAX_LMCACHE_QUERY_ROUND_TIME="${MAX_LMCACHE_QUERY_ROUND_TIME:-0.58}"
+MAX_LMCACHE_QUERY_ROUND_TIME="${MAX_LMCACHE_QUERY_ROUND_TIME:-0.50}"
 
 # Output directory (subdirectory of shared RESULTS_DIR)
 LONG_DOC_QA_DIR="$RESULTS_DIR/long_doc_qa"
