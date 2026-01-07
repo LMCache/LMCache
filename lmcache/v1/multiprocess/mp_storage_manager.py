@@ -7,7 +7,7 @@ from collections.abc import Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import compress
-from typing import Any, Generic, Iterator, TypeVar, Union
+from typing import Any, Generic, Iterator, TypeVar
 import threading
 import time
 
@@ -246,7 +246,7 @@ class MPStorageManager:
     def reserve(
         self,
         keys: list[IPCCacheEngineKey],
-        shape: Union[torch.Size, tuple[int, ...]],
+        shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat,
     ) -> ReserveResult:
@@ -327,7 +327,7 @@ class MPStorageManager:
         # Allocate memory objects
         with self._allocator_lock:
             objects = self._memory_allocator.batched_allocate(
-                shape, dtype, num_objects_to_allocate, fmt
+                [shape], [dtype], num_objects_to_allocate, fmt
             )
 
         if objects is not None:
@@ -362,7 +362,7 @@ class MPStorageManager:
 
                 # Try to allocate again
                 objects = self._memory_allocator.batched_allocate(
-                    shape, dtype, num_objects_to_allocate, fmt
+                    [shape], [dtype], num_objects_to_allocate, fmt
                 )
 
         if objects is not None:
