@@ -19,6 +19,7 @@ from typing import List, Optional
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -75,6 +76,41 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.gpu_buffer = torch.empty(
                 shape, dtype=kwargs["dtype"], device=kwargs["device"]
             )
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: LMCacheEngineMetadata,
+        use_gpu: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> "VLLMPagedMemXPUConnectorV2":
+        """Create a connector from LMCacheEngineMetadata.
+
+        Args:
+            metadata: The LMCache engine metadata containing model configuration.
+            use_gpu: Whether to use GPU intermediate buffer.
+            device: The device to use for the connector.
+
+        Returns:
+            A new instance of VLLMPagedMemXPUConnectorV2.
+        """
+        # Extract parameters from metadata
+        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
+        num_layers = metadata.kv_shape[0]
+        chunk_size = metadata.kv_shape[2]
+        num_kv_head = metadata.kv_shape[3]
+        head_size = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_head * head_size
+
+        return cls(
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=metadata.kv_dtype,
+            device=device,
+            use_mla=metadata.use_mla,
+        )
 
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.

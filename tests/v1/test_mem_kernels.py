@@ -94,7 +94,7 @@ def test_extract_and_load_back(num_tokens):
     kv_blob = _tuple_kv_to_blob(kv_tuple_list)
     kv_chunked = _slice_kv_at(0, kv_blob, chunk_size)
     for chunk_id, chunk in enumerate(kv_chunked):
-        mem_obj_shape = [2, 32, chunk.shape[2], num_heads * head_size]
+        mem_obj_shape = torch.Size([2, 32, chunk.shape[2], num_heads * head_size])
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         chunk = chunk.contiguous()
@@ -118,7 +118,9 @@ def test_extract_and_load_back(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(32):
@@ -184,12 +186,6 @@ def test_multi_layer_kernel(num_tokens):
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
 
-    # lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
-    #                                kv_cache_pointers, # TODO: initialize this
-    #                                slot_mapping_temp,
-    #                                kv_cache[0].device,
-    #                                len(slot_mapping_temp), True)
-
     # layer by layer extract
     memory_obj_old_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -197,7 +193,9 @@ def test_multi_layer_kernel(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(32):
@@ -228,7 +226,9 @@ def test_multi_layer_kernel(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -286,17 +286,17 @@ def test_multi_layer_kernel(num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_multi_layer_kernel_use_mla(num_tokens):
+@pytest.mark.parametrize("head_size", [576, 66])  # Use 68 for dsv32 (132x int8)
+def test_multi_layer_kernel_use_mla(num_tokens, head_size):
     device = "cuda"
 
     num_blocks = 1000
     block_size = 64
-    head_size = 576
     chunk_size = 256
     dtype = torch.bfloat16
     num_layers = 32
     kv_cache = generate_mla_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype, num_layers
+        num_blocks, device, block_size, dtype, num_layers, head_size
     )
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -312,7 +312,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
 
         for layer_id in range(num_layers):
@@ -346,7 +346,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -379,7 +379,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 
     # Generate new paged kv_cache
     kv_cache_new = generate_mla_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype, num_layers
+        num_blocks, device, block_size, dtype, num_layers, head_size
     )
 
     kv_cache_pointers_new = torch.empty(
