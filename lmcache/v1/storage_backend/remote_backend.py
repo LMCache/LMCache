@@ -12,6 +12,7 @@ from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.exceptions import IrrecoverableException
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector import CreateConnector
@@ -78,15 +79,10 @@ class RemoteBackend(StorageBackendInterface):
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
-        # Create RemoteMonitor instance, which initializes the
-        # connection status and active connector dynamically
-        # First Party
-        from lmcache.v1.storage_backend.remote_monitor import RemoteMonitor
-
-        self.remote_monitor = RemoteMonitor(self)
-
-        # Start the remote monitor thread (if ping is supported)
-        self.remote_monitor.start()
+        # NOTE: Health monitoring is now handled at the LMCacheEngine level
+        # through HealthMonitor. RemoteBackend no longer manages its own
+        # health monitoring. The HealthMonitor in LMCacheEngine will
+        # register RemoteBackendHealthCheck for each RemoteBackend.
 
         self._setup_metrics()
 
@@ -123,6 +119,9 @@ class RemoteBackend(StorageBackendInterface):
             logger.info(
                 f"Connection initialized/re-established at {self.config.remote_url}"
             )
+        except IrrecoverableException:
+            logger.error("Irrecoverable error during connection initialization")
+            raise
         except Exception as e:
             with self.lock:
                 self.failure_time = time.time()
