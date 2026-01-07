@@ -310,19 +310,6 @@ class LMCacheManager:
         ):
             raise ValueError("MLA only works with naive serde mode..")
 
-        if use_mla and not self._config.save_unfull_chunk:
-            logger.warning(
-                "MLA (Multi-Level Attention) requires save_unfull_chunk=True "
-                "for correct KV cache storage. Automatically setting "
-                "save_unfull_chunk=True."
-            )
-            self._config.save_unfull_chunk = True
-        elif use_mla:
-            logger.info(
-                "MLA mode enabled with save_unfull_chunk=True - all KV cache "
-                "including partial chunks will be stored"
-            )
-
         if use_mla and self._config.use_layerwise and self._config.enable_blending:
             raise ValueError(
                 "We haven't supported MLA with Cacheblend yet. Please disable blending."
