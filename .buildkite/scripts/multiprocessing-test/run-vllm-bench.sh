@@ -6,7 +6,9 @@ set -e
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+
+# Source common utilities
+source "$SCRIPT_DIR/common.sh"
 
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
@@ -15,9 +17,6 @@ MODEL="${MODEL:-Qwen/Qwen3-14B}"
 NUM_PROMPTS="${NUM_PROMPTS:-50}"
 RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-10000}"
 RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1}"
-VENV_DIR="${VENV_DIR:-$WORKSPACE_DIR/.venv}"
-BUILD_ID="${BUILD_ID:-local_$(date +%Y%m%d_%H%M%S)}"
-RESULTS_DIR="${RESULTS_DIR:-/tmp/vllm_bench_results_${BUILD_ID}}"
 
 # Expected values
 EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
@@ -26,6 +25,9 @@ MAX_SLOWDOWN_PERCENT=5
 
 # Generate a random seed once for reproducibility across both benchmarks
 RANDOM_SEED="${RANDOM_SEED:-$(date +%s)}"
+
+# Output directory (subdirectory of shared RESULTS_DIR)
+VLLM_BENCH_DIR="$RESULTS_DIR/vllm_bench"
 
 echo "=== vLLM Bench Serve Test ==="
 echo "Model: $MODEL"
@@ -36,43 +38,11 @@ echo "Random input length: $RANDOM_INPUT_LEN"
 echo "Random output length: $RANDOM_OUTPUT_LEN"
 echo "Virtual env: $VENV_DIR"
 echo "Build ID: $BUILD_ID"
-echo "Results dir: $RESULTS_DIR"
+echo "Results dir: $VLLM_BENCH_DIR"
 echo ""
 
 # Create results directory
-mkdir -p "$RESULTS_DIR"
-
-# Setup virtual environment
-setup_venv() {
-    echo "=== Setting up virtual environment ==="
-    
-    if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/activate" ]; then
-        echo "Virtual environment already exists at $VENV_DIR"
-    else
-        echo "Creating virtual environment with uv..."
-        
-        # Check if uv is available
-        if ! command -v uv &> /dev/null; then
-            echo "uv not found, installing..."
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-            export PATH="$HOME/.local/bin:$PATH"
-        fi
-        
-        # Create venv with uv
-        uv venv "$VENV_DIR"
-        echo "Virtual environment created"
-    fi
-    
-    # Activate virtual environment
-    source "$VENV_DIR/bin/activate"
-    echo "Virtual environment activated"
-    
-    # Install dependencies
-    echo "Installing dependencies..."
-    uv pip install vllm openai --quiet
-    echo "Dependencies installed"
-    echo ""
-}
+mkdir -p "$VLLM_BENCH_DIR"
 
 # Run vllm bench serve
 run_vllm_bench() {
@@ -84,7 +54,7 @@ run_vllm_bench() {
     echo "=== Running vllm bench serve ($description) ==="
     echo "Port: $port"
     echo "Seed: $seed"
-    echo "Result file: $RESULTS_DIR/$result_filename"
+    echo "Result file: $VLLM_BENCH_DIR/$result_filename"
     
     vllm bench serve \
         --seed "$seed" \
@@ -97,7 +67,7 @@ run_vllm_bench() {
         --ignore-eos \
         --backend openai-chat \
         --endpoint /v1/chat/completions \
-        --result-dir "$RESULTS_DIR" \
+        --result-dir "$VLLM_BENCH_DIR" \
         --result-filename "$result_filename" \
         --save-result
     
@@ -120,8 +90,8 @@ print(data.get('$field', 'null'))
 
 # Verify benchmark results
 verify_results() {
-    local lmcache_result="$RESULTS_DIR/lmcache.json"
-    local baseline_result="$RESULTS_DIR/baseline.json"
+    local lmcache_result="$VLLM_BENCH_DIR/lmcache.json"
+    local baseline_result="$VLLM_BENCH_DIR/baseline.json"
     
     echo "=== Verifying benchmark results ==="
     
@@ -241,7 +211,7 @@ else:
 
 # Main execution
 main() {
-    setup_venv
+    setup_venv vllm openai
     
     echo "Using random seed: $RANDOM_SEED"
     echo ""
@@ -270,10 +240,9 @@ main() {
     echo "============================================"
     echo "=== ✅ vLLM Bench test completed ==="
     echo "============================================"
-    echo "Results saved to: $RESULTS_DIR"
-    echo "  - LMCache: $RESULTS_DIR/lmcache.json"
-    echo "  - Baseline: $RESULTS_DIR/baseline.json"
+    echo "Results saved to: $VLLM_BENCH_DIR"
+    echo "  - LMCache: $VLLM_BENCH_DIR/lmcache.json"
+    echo "  - Baseline: $VLLM_BENCH_DIR/baseline.json"
 }
 
 main "$@"
-

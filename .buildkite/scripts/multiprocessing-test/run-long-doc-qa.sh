@@ -6,8 +6,9 @@ set -e
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-LMCACHE_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# Source common utilities
+source "$SCRIPT_DIR/common.sh"
 
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
@@ -23,15 +24,14 @@ REPEAT_MODE="${REPEAT_MODE:-tile}"
 SHUFFLE_SEED="${SHUFFLE_SEED:-0}"
 MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 
-VENV_DIR="${VENV_DIR:-$WORKSPACE_DIR/.venv}"
-BUILD_ID="${BUILD_ID:-local_$(date +%Y%m%d_%H%M%S)}"
-RESULTS_DIR="${RESULTS_DIR:-/tmp/long_doc_qa_results_${BUILD_ID}}"
-
 # Performance thresholds for LMCache (test fails if exceeded)
 # 0.22s for loading 10K tokens of Qwen3-14B
 # 0.58s for query round time of Qwen3-14B
 MAX_LMCACHE_TTFT="${MAX_LMCACHE_TTFT:-0.22}"
 MAX_LMCACHE_QUERY_ROUND_TIME="${MAX_LMCACHE_QUERY_ROUND_TIME:-0.58}"
+
+# Output directory (subdirectory of shared RESULTS_DIR)
+LONG_DOC_QA_DIR="$RESULTS_DIR/long_doc_qa"
 
 echo "=== Long Doc QA Test ==="
 echo "Model: $MODEL"
@@ -46,7 +46,7 @@ echo "Shuffle seed: $SHUFFLE_SEED"
 echo "Max inflight requests: $MAX_INFLIGHT_REQUESTS"
 echo "Virtual env: $VENV_DIR"
 echo "Build ID: $BUILD_ID"
-echo "Results dir: $RESULTS_DIR"
+echo "Results dir: $LONG_DOC_QA_DIR"
 echo ""
 echo "Performance thresholds (LMCache):"
 echo "  Max TTFT: ${MAX_LMCACHE_TTFT}s"
@@ -54,39 +54,7 @@ echo "  Max query round time: ${MAX_LMCACHE_QUERY_ROUND_TIME}s"
 echo ""
 
 # Create results directory
-mkdir -p "$RESULTS_DIR"
-
-# Setup virtual environment
-setup_venv() {
-    echo "=== Setting up virtual environment ==="
-    
-    if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/activate" ]; then
-        echo "Virtual environment already exists at $VENV_DIR"
-    else
-        echo "Creating virtual environment with uv..."
-        
-        # Check if uv is available
-        if ! command -v uv &> /dev/null; then
-            echo "uv not found, installing..."
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-            export PATH="$HOME/.local/bin:$PATH"
-        fi
-        
-        # Create venv with uv
-        uv venv "$VENV_DIR"
-        echo "Virtual environment created"
-    fi
-    
-    # Activate virtual environment
-    source "$VENV_DIR/bin/activate"
-    echo "Virtual environment activated"
-    
-    # Install dependencies
-    echo "Installing dependencies..."
-    uv pip install openai pandas matplotlib --quiet
-    echo "Dependencies installed"
-    echo ""
-}
+mkdir -p "$LONG_DOC_QA_DIR"
 
 # Run long_doc_qa benchmark
 run_long_doc_qa() {
@@ -98,7 +66,7 @@ run_long_doc_qa() {
     echo "Port: $port"
     echo "Result file: $result_file"
     
-    local output_file="$RESULTS_DIR/${description}_output.txt"
+    local output_file="$LONG_DOC_QA_DIR/${description}_output.txt"
     
     # Run long_doc_qa.py and capture JSON output
     python3 "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
@@ -142,8 +110,8 @@ except json.JSONDecodeError:
 
 # Compare and summarize results
 compare_results() {
-    local lmcache_result="$RESULTS_DIR/lmcache_result.json"
-    local baseline_result="$RESULTS_DIR/baseline_result.json"
+    local lmcache_result="$LONG_DOC_QA_DIR/lmcache_result.json"
+    local baseline_result="$LONG_DOC_QA_DIR/baseline_result.json"
     
     echo "=== Comparing benchmark results ==="
     
@@ -261,7 +229,7 @@ EOF
 
 # Verify LMCache performance meets thresholds
 verify_thresholds() {
-    local lmcache_result="$RESULTS_DIR/lmcache_result.json"
+    local lmcache_result="$LONG_DOC_QA_DIR/lmcache_result.json"
     
     echo "=== Verifying LMCache performance thresholds ==="
     echo "Max allowed TTFT: ${MAX_LMCACHE_TTFT}s"
@@ -326,19 +294,19 @@ EOF
 
 # Main execution
 main() {
-    setup_venv
+    setup_venv openai pandas matplotlib
     
     # Run benchmark against baseline vLLM (without LMCache)
     echo "============================================"
     echo "=== Benchmark: Baseline vLLM (without LMCache) ==="
     echo "============================================"
-    run_long_doc_qa "$VLLM_BASELINE_PORT" "$RESULTS_DIR/baseline_result.json" "baseline"
+    run_long_doc_qa "$VLLM_BASELINE_PORT" "$LONG_DOC_QA_DIR/baseline_result.json" "baseline"
     
     # Run benchmark against vLLM with LMCache
     echo "============================================"
     echo "=== Benchmark: vLLM with LMCache ==="
     echo "============================================"
-    run_long_doc_qa "$VLLM_PORT" "$RESULTS_DIR/lmcache_result.json" "lmcache"
+    run_long_doc_qa "$VLLM_PORT" "$LONG_DOC_QA_DIR/lmcache_result.json" "lmcache"
     
     # Compare and summarize results
     echo "============================================"
@@ -361,10 +329,9 @@ main() {
     echo "============================================"
     echo "=== ✅ Long Doc QA test completed ==="
     echo "============================================"
-    echo "Results saved to: $RESULTS_DIR"
-    echo "  - LMCache: $RESULTS_DIR/lmcache_result.json"
-    echo "  - Baseline: $RESULTS_DIR/baseline_result.json"
+    echo "Results saved to: $LONG_DOC_QA_DIR"
+    echo "  - LMCache: $LONG_DOC_QA_DIR/lmcache_result.json"
+    echo "  - Baseline: $LONG_DOC_QA_DIR/baseline_result.json"
 }
 
 main "$@"
-

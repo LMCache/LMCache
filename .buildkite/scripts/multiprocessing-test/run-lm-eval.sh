@@ -6,20 +6,20 @@ set -e
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+
+# Source common utilities
+source "$SCRIPT_DIR/common.sh"
 
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
 LIMIT="${LIMIT:-300}"
-VENV_DIR="${VENV_DIR:-$WORKSPACE_DIR/.venv}"
-BUILD_ID="${BUILD_ID:-local_$(date +%Y%m%d_%H%M%S)}"
-RESULTS_DIR="${RESULTS_DIR:-/tmp/lm_eval_results_${BUILD_ID}}"
 
-# Output directories for first and second runs
-FIRST_RUN_DIR="$RESULTS_DIR/first_run"
-SECOND_RUN_DIR="$RESULTS_DIR/second_run"
+# Output directories for first and second runs (subdirectories of shared RESULTS_DIR)
+LM_EVAL_DIR="$RESULTS_DIR/lm_eval"
+FIRST_RUN_DIR="$LM_EVAL_DIR/first_run"
+SECOND_RUN_DIR="$LM_EVAL_DIR/second_run"
 
 echo "=== LM-Eval Workload Test ==="
 echo "Model: $MODEL"
@@ -28,44 +28,12 @@ echo "Concurrent requests: $NUM_CONCURRENT"
 echo "Limit: $LIMIT"
 echo "Virtual env: $VENV_DIR"
 echo "Build ID: $BUILD_ID"
-echo "Results dir: $RESULTS_DIR"
+echo "Results dir: $LM_EVAL_DIR"
 echo ""
 
 # Create results directories
 mkdir -p "$FIRST_RUN_DIR"
 mkdir -p "$SECOND_RUN_DIR"
-
-# Setup virtual environment
-setup_venv() {
-    echo "=== Setting up virtual environment ==="
-    
-    if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/activate" ]; then
-        echo "Virtual environment already exists at $VENV_DIR"
-    else
-        echo "Creating virtual environment with uv..."
-        
-        # Check if uv is available
-        if ! command -v uv &> /dev/null; then
-            echo "uv not found, installing..."
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-            export PATH="$HOME/.local/bin:$PATH"
-        fi
-        
-        # Create venv with uv
-        uv venv "$VENV_DIR"
-        echo "Virtual environment created"
-    fi
-    
-    # Activate virtual environment
-    source "$VENV_DIR/bin/activate"
-    echo "Virtual environment activated"
-    
-    # Install dependencies
-    echo "Installing dependencies..."
-    uv pip install 'lm-eval[api]' openai pandas --quiet
-    echo "Dependencies installed"
-    echo ""
-}
 
 # Run lm_eval
 run_lm_eval() {
@@ -138,7 +106,7 @@ verify_samples_match() {
 
 # Main execution
 main() {
-    setup_venv
+    setup_venv 'lm-eval[api]' openai pandas
     
     # First run - populates cache
     echo "============================================"
@@ -164,10 +132,9 @@ main() {
     echo "============================================"
     echo "=== ✅ LM-Eval workload test completed ==="
     echo "============================================"
-    echo "Results saved to: $RESULTS_DIR"
+    echo "Results saved to: $LM_EVAL_DIR"
     echo "  - First run: $FIRST_RUN_DIR"
     echo "  - Second run: $SECOND_RUN_DIR"
 }
 
 main "$@"
-
