@@ -190,8 +190,12 @@ def test_multi_layer_kernel(num_tokens, kv_layout):
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
+    # By default kv_cache is generated in KVFirst layout [2, ...]
+    # to test if multi_layer_kv_transfer() can handle BlockFirst layout
+    # Copy it to kv_cache_layout with proper layout
+    kv_cache_layout = kv_cache
     if kv_layout == lmc_ops.KVLayout.BlockFirst:
-        kv_cache = [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache]
+        kv_cache_layout = [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache]
     page_buffer_size = num_blocks * block_size
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -213,6 +217,7 @@ def test_multi_layer_kernel(num_tokens, kv_layout):
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(32):
+            # this function handles default KVFirst layout only
             lmc_ops.load_and_reshape_flash(
                 memory_obj_old.tensor,
                 kv_cache[layer_id][0],
@@ -232,7 +237,7 @@ def test_multi_layer_kernel(num_tokens, kv_layout):
         32, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(32):
-        kv_cache_pointers[i] = kv_cache[i].data_ptr()
+        kv_cache_pointers[i] = kv_cache_layout[i].data_ptr()
 
     memory_obj_new_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -245,11 +250,12 @@ def test_multi_layer_kernel(num_tokens, kv_layout):
         )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
+        # multi_layer_kv_transfer() handles both BlockFirst and KVFirst
         lmc_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
-            kv_cache[0].device,
+            kv_cache_layout[0].device,
             page_buffer_size,
             lmc_ops.TransferDirection.D2H,
             kv_layout,
@@ -268,21 +274,26 @@ def test_multi_layer_kernel(num_tokens, kv_layout):
         memory_obj_new_list,
     )
 
-    # Generate new paged kv_cache
+    # Generate new paged kv_cache in KVFirst layout
     kv_cache_new = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
+    # Convert it to kv_cache_new_layout according to kv_layout parameter
+    kv_cache_new_layout = kv_cache_new
     if kv_layout == lmc_ops.KVLayout.BlockFirst:
-        kv_cache_new = [kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache_new]
+        kv_cache_new_layout = [
+            kv.permute(1, 0, 2, 3, 4).contiguous() for kv in kv_cache_new
+        ]
 
     kv_cache_pointers_new = torch.empty(
         32, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(32):
-        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+        kv_cache_pointers_new[i] = kv_cache_new_layout[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
+        # copy memory_obj_new to kv_cache_new_layout
         lmc_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers_new,
@@ -294,10 +305,11 @@ def test_multi_layer_kernel(num_tokens, kv_layout):
             block_size,
         )
 
-    kv_cache_for_check = _normalize_kv_cache_layout(kv_cache, kv_layout)
-    kv_cache_new_for_check = _normalize_kv_cache_layout(kv_cache_new, kv_layout)
+    # Convert kv_cache_new_layout back to KVFirst layout
+    # because check_paged_kv_cache_equal() only handles KVFirst layout
+    kv_cache_new_for_check = _normalize_kv_cache_layout(kv_cache_new_layout, kv_layout)
     check_paged_kv_cache_equal(
-        kv_cache_for_check,
+        kv_cache,
         kv_cache_new_for_check,
         slot_mapping,
     )
