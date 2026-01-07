@@ -40,15 +40,15 @@ echo "vLLM port: $VLLM_PORT"
 echo ""
 
 # Step 1: Build docker images
-#echo "============================================"
-#echo "=== Step 1: Building Docker images ==="
-#echo "============================================"
-#if ! "$SCRIPT_DIR/build-mp-docker-image.sh"; then
-#    echo "❌ Failed to build docker images"
-#    TEST_RESULT=1
-#    exit 1
-#fi
-#echo ""
+echo "============================================"
+echo "=== Step 1: Building Docker images ==="
+echo "============================================"
+if ! "$SCRIPT_DIR/build-mp-docker-image.sh"; then
+    echo "❌ Failed to build docker images"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
 
 # Step 2: Launch containers
 echo "============================================"
