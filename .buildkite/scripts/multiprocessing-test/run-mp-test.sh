@@ -98,9 +98,20 @@ if ! "$SCRIPT_DIR/run-vllm-bench.sh"; then
 fi
 echo ""
 
+# Step 6: Run long doc QA test
+echo "============================================"
+echo "=== Step 6: Running long doc QA ==="
+echo "============================================"
+if ! "$SCRIPT_DIR/run-long-doc-qa.sh"; then
+    echo "❌ long doc QA test failed"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
+
 echo "============================================"
 echo "=== ✅ All tests passed! ==="
 echo "============================================"
 
-# Step 6: Cleanup runs automatically via trap
+# Step 7: Cleanup runs automatically via trap
 
