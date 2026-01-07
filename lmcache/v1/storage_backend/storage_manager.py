@@ -13,6 +13,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 import asyncio
 import functools
@@ -86,8 +87,8 @@ def allocate_and_copy_objects(
         if allocator_backend.contains(key):
             continue
         memory_obj = allocator_backend.allocate(
-            shape=src_memory_obj.get_shape(),
-            dtype=src_memory_obj.get_dtype(),
+            src_memory_obj.get_shape(),
+            src_memory_obj.get_dtype(),
             fmt=src_memory_obj.meta.fmt,
             eviction=True,
             busy_loop=False,
@@ -212,6 +213,7 @@ class StorageManager:
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
     ):
         self.config = config
         self.metadata = metadata
@@ -258,7 +260,9 @@ class StorageManager:
 
         self.event_manager = event_manager
 
-        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
+            async_lookup_server
+        )
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
@@ -266,6 +270,14 @@ class StorageManager:
             self.internal_copy_stream = torch.cuda.Stream()
         else:
             self.internal_copy_stream = None
+
+        # freeze mode: only use local_cpu backend for retrieval
+        self._freeze = False
+        self._freeze_lock = threading.RLock()
+
+        if not self.enable_pd and self.config.enable_async_loading:
+            assert self.allocator_backend is not None
+            self.async_serializer = AsyncSingleSerializer(self.loop)
 
         self._setup_metrics()
 
@@ -292,14 +304,6 @@ class StorageManager:
                 )
             )
 
-    def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-        # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and self.config.enable_async_loading:
-            assert self.allocator_backend is not None
-            self.async_serializer = AsyncSingleSerializer(self.loop)
-
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
     ) -> AllocatorBackendInterface:
@@ -313,8 +317,8 @@ class StorageManager:
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
         busy_loop=True,
@@ -327,14 +331,14 @@ class StorageManager:
         # disk in a similar way as CPU.
         assert self.allocator_backend is not None
         return self.allocator_backend.allocate(
-            shape, dtype, fmt, eviction=eviction, busy_loop=busy_loop
+            shapes, dtypes, fmt, eviction=eviction, busy_loop=busy_loop
         )
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction=True,
@@ -349,7 +353,7 @@ class StorageManager:
         if self.allocator_backend is None:
             raise RuntimeError("Allocator backend not available for scheduler role")
         return self.allocator_backend.batched_allocate(
-            shape, dtype, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
+            shapes, dtypes, batch_size, fmt, eviction=eviction, busy_loop=busy_loop
         )
 
     def put(
@@ -366,12 +370,6 @@ class StorageManager:
         raise RuntimeError(
             "StorageManager.put is deprecated and should not be called anymore"
         )
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
-            backend.submit_put_task(key, memory_obj)
-
-        memory_obj.ref_count_down()
 
     def batched_put(
         self,
@@ -430,9 +428,7 @@ class StorageManager:
         """
 
         # Search all backends for blocking get
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
+        for backend_name, backend in self.get_active_storage_backends(location):
             # TODO(Jiayi): need to make sure all memory_objs returned
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
@@ -459,9 +455,7 @@ class StorageManager:
         # TODO (Jiayi): incorporate prefetching here
 
         # Search all backends for non-blocking get
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
+        for backend_name, backend in self.get_active_storage_backends(location):
             # NOTE(Jiayi): bypass the allocator for now
             task = backend.get_non_blocking(key)
             if task:
@@ -478,11 +472,29 @@ class StorageManager:
         Blocking function to get the memory objects from the storages.
         """
         # TODO (ApostaC): remove the nested optional here
-        for backend_name, storage_backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
+        for backend_name, storage_backend in self.get_active_storage_backends(location):
             memory_objs = storage_backend.batched_get_blocking(keys)
             if memory_objs:
+                # Align with single-key `get()` logic:
+                # auto-write remote data to local CPU cache
+                if (
+                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    and "LocalCPUBackend" in self.storage_backends
+                    and None not in memory_objs
+                ):
+                    logger.debug(
+                        "Storing %s objects from %s to LocalCPUBackend",
+                        len(keys),
+                        backend_name,
+                    )
+                    local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+                    assert isinstance(local_cpu_backend, LocalCPUBackend)
+                    # Type cast: Safe (we verified no Nones above)
+                    # `batched_submit_put_task` expects list[MemoryObj]
+                    # TODO (lisiG9): Refactor this write-back logic into caching
+                    #  policy module
+                    memory_objs_no_none = cast(List[MemoryObj], memory_objs)
+                    local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
                 return memory_objs
         return None
 
@@ -662,9 +674,9 @@ class StorageManager:
         tier_expected_chunks = []
         # we also keep track of the keys for each tier and each chunk
         loading_task_keys: list[list[CacheEngineKey]] = []
-        for backend_name, backend in self.storage_backends.items():
-            if search_range and backend_name not in search_range:
-                continue
+        for backend_name, backend in self.get_active_storage_backends(
+            search_range=search_range
+        ):
             num_hit_chunks = await backend.batched_async_contains(lookup_id, keys, pin)
 
             if num_hit_chunks == 0:
@@ -747,6 +759,26 @@ class StorageManager:
             )
         )
 
+    def set_freeze(self, enabled: bool) -> None:
+        """
+        Set freeze mode.
+
+        When enabled, only local_cpu backend will be used for retrieval.
+        """
+        with self._freeze_lock:
+            self._freeze = enabled
+        logger.info("StorageManager freeze mode set to %s", enabled)
+
+    def is_frozen(self) -> bool:
+        """
+        Get freeze mode status.
+
+        Returns:
+            bool: True if freeze mode is enabled, False otherwise
+        """
+        with self._freeze_lock:
+            return self._freeze
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -768,15 +800,11 @@ class StorageManager:
         return: True if the key exists in the specified storage backends.
         """
 
-        for backend_name, backend in self.storage_backends.items():
-            if search_range and backend_name not in search_range:
-                continue
-
+        for backend_name, backend in self.get_active_storage_backends(
+            search_range=search_range
+        ):
             # NOTE(Jiayi): We do not pin for PDBackend
-            if backend_name == "PDBackend":
-                pin_in_backend = False
-            else:
-                pin_in_backend = pin
+            pin_in_backend = pin if backend_name != "PDBackend" else False
 
             if backend.contains(key, pin_in_backend):
                 return backend_name
@@ -806,15 +834,11 @@ class StorageManager:
         total_keys = len(keys)
         total_hit_chunks = 0
         block_mapping = {}
-        for backend_name, backend in self.storage_backends.items():
-            if search_range and backend_name not in search_range:
-                continue
-
+        for backend_name, backend in self.get_active_storage_backends(
+            search_range=search_range
+        ):
             # NOTE(Jiayi): We do not pin for PDBackend
-            if backend_name == "PDBackend":
-                pin_in_backend = False
-            else:
-                pin_in_backend = pin
+            pin_in_backend = pin if backend_name != "PDBackend" else False
 
             hit_chunks = backend.batched_contains(keys, pin_in_backend)
             if hit_chunks == 0:
@@ -844,7 +868,7 @@ class StorageManager:
         total_keys = len(keys)
         block_mapping = {}
         total_hit_chunks = 0
-        for backend_name, backend in self.storage_backends.items():
+        for backend_name, backend in self.get_active_storage_backends():
             hit_chunks = backend.batched_contains(keys)
             if hit_chunks == 0:
                 continue
@@ -980,6 +1004,32 @@ class StorageManager:
             if not backend.get_memory_allocator().memcheck():
                 return False
         return True
+
+    def get_active_storage_backends(
+        self,
+        location: Optional[str] = None,
+        search_range: Optional[List[str]] = None,
+    ) -> Generator[Tuple[str, StorageBackendInterface], None, None]:
+        """
+        Get the active storage backends based on freeze mode and filters.
+
+        :param Optional[str] location: If specified, only yield backends
+            matching this exact name.
+        :param Optional[List[str]] search_range: If specified, only yield
+            backends whose names are in this list.
+
+        :return: Generator of (backend_name, backend) tuples.
+        """
+        for backend_name, backend in self.storage_backends.items():
+            # In freeze mode, only use local_cpu backend
+            with self._freeze_lock:
+                if self._freeze and backend_name != "LocalCPUBackend":
+                    continue
+            if location and backend_name != location:
+                continue
+            if search_range and backend_name not in search_range:
+                continue
+            yield backend_name, backend
 
     def get_non_allocator_backends(self) -> List[str]:
         """

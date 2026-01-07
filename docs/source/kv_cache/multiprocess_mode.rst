@@ -140,6 +140,180 @@ Once both containers are running, you can send requests to vLLM the same way as 
         \"max_tokens\": 10
     }"
 
+Kubernetes Deployment
+---------------------
+
+You can deploy LMCache and vLLM on Kubernetes using a DaemonSet pattern. This approach runs one LMCache server per node that can be shared by multiple vLLM pods on the same node, making it suitable for production deployments.
+
+.. note::
+    The DaemonSet deployment does not request GPU resources, allowing GPUs to remain exclusively allocated to vLLM pods. The NVIDIA container runtime automatically provides GPU access to the LMCache server for IPC-based memory transfers.
+
+Prerequisites
+~~~~~~~~~~~~~
+
+- Kubernetes cluster with GPU support (NVIDIA GPU Operator installed)
+- At least 4 GPUs per node
+- ``kubectl`` configured to access your cluster
+
+**Step 1: Create Namespace**
+
+.. code-block:: bash
+
+    kubectl create namespace multi-process
+
+**Step 2: Deploy LMCache DaemonSet**
+
+First, deploy the LMCache server as a DaemonSet (one instance per node):
+
+.. code-block:: bash
+
+    kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
+
+**Step 3: Deploy vLLM Application**
+
+Deploy one or more vLLM instances that will connect to the LMCache DaemonSet:
+
+.. code-block:: bash
+
+    kubectl apply -f examples/multi_process/vllm-deployment.yaml
+
+.. note::
+    The default model is ``Qwen/Qwen3-14B``, which does not require a Hugging Face token. If you want to use a gated model (like Llama), you need to:
+    
+    1. Add a Secret with your Hugging Face token:
+    
+    .. code-block:: bash
+    
+        kubectl create secret generic vllm-secrets \
+          --from-literal=hf_token=your_hf_token_here \
+          -n multi-process
+    
+    2. Add the HF_TOKEN environment variable to the vLLM container in the YAML:
+    
+    .. code-block:: yaml
+    
+        env:
+          - name: HF_TOKEN
+            valueFrom:
+              secretKeyRef:
+                key: hf_token
+                name: vllm-secrets
+    
+    3. Update the model name in the args section to your desired gated model.
+
+.. note::
+    Multiple vLLM pods on the same node will automatically connect to the same LMCache DaemonSet instance via ``status.hostIP``.
+
+**Step 4: Monitor Deployment**
+
+Check DaemonSet status:
+
+.. code-block:: bash
+
+    kubectl get daemonset -n multi-process
+    kubectl get pods -n multi-process -l app=lmcache-server
+
+Check vLLM deployment status:
+
+.. code-block:: bash
+
+    kubectl get pods -n multi-process -l app=vllm-deployment -w
+
+Check vLLM server logs:
+
+.. code-block:: bash
+
+    kubectl logs -n multi-process -l app=vllm-deployment -f
+
+Check LMCache server logs (on the same node as a vLLM pod):
+
+.. code-block:: bash
+
+    # Get the node where a vLLM pod is running
+    VLLM_NODE=$(kubectl get pod -n multi-process -l app=vllm-deployment -o jsonpath='{.items[0].spec.nodeName}')
+    
+    # Get the LMCache pod on that node and view its logs
+    LMCACHE_POD=$(kubectl get pod -n multi-process -l app=lmcache-server --field-selector spec.nodeName=$VLLM_NODE -o jsonpath='{.items[0].metadata.name}')
+    kubectl logs -n multi-process $LMCACHE_POD -f
+
+Wait for the pods to be ready (this may take several minutes for model loading).
+
+**Step 5: Send Test Requests**
+
+Forward the port to your local machine:
+
+.. code-block:: bash
+
+    kubectl port-forward -n multi-process deployment/vllm-deployment 8000:8000
+
+Send a test request with repeated prompts:
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:8000/v1/completions \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"model\": \"Qwen/Qwen3-14B\",
+        \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+        \"max_tokens\": 10
+      }"
+
+On the first request, check LMCache server logs for:
+
+.. code-block:: text
+
+    [LMCache INFO] Stored X tokens in Y seconds
+
+On subsequent identical requests, you should see:
+
+.. code-block:: text
+
+    [LMCache INFO] Retrieved X tokens in Y seconds
+
+Kubernetes Configuration Notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**DaemonSet Architecture:**
+
+- One LMCache server runs per node as a DaemonSet
+- Multiple vLLM pods on the same node can share the same LMCache instance
+- LMCache uses ``hostNetwork: true`` so vLLM pods can connect via node IP
+- vLLM pods use ``status.hostIP`` to discover the LMCache server on their node
+- Both containers mount the host's ``/dev/shm`` to enable CUDA IPC memory sharing
+
+**GPU Access:**
+
+- GPUs are NOT requested in the DaemonSet resources section
+- This allows GPUs to remain exclusively allocated to vLLM pods
+- LMCache can still access GPUs for IPC-based memory transfers via the NVIDIA container runtime
+
+.. note::
+    LMCache pods on nodes without GPUs will crash with CUDA initialization errors. This is expected behavior - LMCache only needs to run successfully on GPU nodes where vLLM pods are scheduled.
+
+**Minimal Configuration Requirements:**
+
+**vLLM Deployment:**
+
+- ``/dev/shm`` hostPath mount (required for CUDA IPC shared memory)
+
+**LMCache DaemonSet:**
+
+- ``hostNetwork: true`` (required for vLLM to connect via node IP using ``status.hostIP``)
+- ``/dev/shm`` hostPath mount (required for CUDA IPC shared memory)
+- ``LMCACHE_LOG_LEVEL=DEBUG`` environment variable (optional, for observability)
+
+**Key Insight:**
+
+Mounting the same ``/dev/shm`` from the host in both containers provides the shared memory space needed for CUDA IPC communication. The NVIDIA container runtime (installed via NVIDIA GPU Operator) automatically provides GPU access to the LMCache server.
+
+**Cleanup:**
+
+.. code-block:: bash
+
+    kubectl delete -f examples/multi_process/vllm-deployment.yaml
+    kubectl delete -f examples/multi_process/lmcache-daemonset.yaml
+    kubectl delete namespace multi-process
+
 Detailed Configuration
 ----------------------
 

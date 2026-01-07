@@ -18,9 +18,10 @@ import requests
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
+from lmcache.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
     # First Party
@@ -68,14 +69,14 @@ class EnvMessage:
 class EngineMessage:
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
         self.chunksize = config.chunk_size
-        self.local_device = config.local_device
-        self.max_local_cache_size = config.max_local_cache_size
+        self.local_device = "cpu" if config.local_cpu else "cuda"
+        self.max_local_cache_size = int(config.max_local_cpu_size)
         self.remote_url = config.remote_url
         self.remote_serde = config.remote_serde
-        self.pipelined_backend = config.pipelined_backend
+        self.pipelined_backend = False
         self.save_decode_cache = config.save_decode_cache
         self.enable_blending = config.enable_blending
-        self.blend_recompute_ratio = config.blend_recompute_ratio
+        self.blend_recompute_ratio = 0.15
         self.blend_min_tokens = config.blend_min_tokens
         self.model_name = metadata.model_name
         self.world_size = metadata.world_size

@@ -14,15 +14,19 @@ if TYPE_CHECKING:
     from ..benchmark import TestData, ZMQControllerBenchmark
 
 # Local
-from .base import OperationHandler
+from .base import OperationHandler, SocketType
 
 
 class HeartbeatHandler(OperationHandler):
-    """Handler for heartbeat operations"""
+    """Handler for heartbeat operations (dedicated heartbeat socket)"""
 
     @property
     def operation_name(self) -> str:
         return "heartbeat"
+
+    @property
+    def socket_type(self) -> SocketType:
+        return SocketType.HEARTBEAT
 
     def create_message(
         self, benchmark: "ZMQControllerBenchmark", test_data: "TestData"
