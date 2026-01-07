@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest import mock
 import asyncio
 import os
 import shutil
@@ -184,3 +185,98 @@ class TestGdsBackend:
         key = create_test_key(0)
         assert not gds_backend.pin(key)
         assert not gds_backend.unpin(key)
+
+    def test_weka_initialization_suffix(self, temp_gds_path, async_loop):
+        class DummyAllocator:
+            def __init__(self):
+                self.base_pointer = 0
+
+            def close(self):
+                pass
+
+        class DummyCuFileDriver:
+            def __init__(self):
+                pass
+
+        class DummyCuFile:
+            def __init__(self, *_, **__):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def write(self, *_, **__):
+                return None
+
+            def read(self, *_, **__):
+                return 0
+
+        dummy_cufile_module = type(
+            "DummyCuFileModule",
+            (),
+            {"CuFileDriver": DummyCuFileDriver, "CuFile": DummyCuFile},
+        )()
+
+        with mock.patch.dict(sys.modules, {"cufile": dummy_cufile_module}):
+            with (
+                mock.patch(
+                    "lmcache.v1.storage_backend.gds_backend.get_fstype",
+                    return_value="wekafs",
+                ),
+                mock.patch.object(
+                    GdsBackend,
+                    "initialize_allocator",
+                    return_value=DummyAllocator(),
+                ),
+            ):
+                config = create_test_config(temp_gds_path)
+                metadata = create_test_metadata()
+
+                backend = GdsBackend(
+                    config=config,
+                    loop=async_loop,
+                    metadata=metadata,
+                    dst_device="cuda:0",
+                )
+                try:
+                    key = create_test_key(0)
+                    path, _, _, _ = backend._key_to_path(key)
+                    assert path.endswith(".weka1")
+                    assert backend.data_suffix == ".weka1"
+                    assert backend.use_cufile
+                finally:
+                    backend.close()
+
+    def test_weka_disallows_disabling_cufile(self, temp_gds_path, async_loop):
+        class DummyAllocator:
+            def __init__(self):
+                self.base_pointer = 0
+
+            def close(self):
+                pass
+
+        with (
+            mock.patch(
+                "lmcache.v1.storage_backend.gds_backend.get_fstype",
+                return_value="wekafs",
+            ),
+            mock.patch.object(
+                GdsBackend,
+                "initialize_allocator",
+                return_value=DummyAllocator(),
+            ),
+        ):
+            config = create_test_config(temp_gds_path)
+            config.extra_config["use_cufile"] = False
+            metadata = create_test_metadata()
+
+            with pytest.raises(AssertionError):
+                GdsBackend(
+                    config=config,
+                    loop=async_loop,
+                    metadata=metadata,
+                    dst_device="cuda:0",
+                )

@@ -10,7 +10,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.storage_backend.mem_pool import KVObj
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 
 logger = init_logger(__name__)
@@ -60,7 +59,7 @@ class BaseEvictor(metaclass=abc.ABCMeta):
 
     # TODO (Jiayi): KV object should have a better abstraction
     # e.g., a kv_obj class wize size field
-    def get_size(self, kv_obj: Union[torch.Tensor, bytes, KVObj]) -> int:
+    def get_size(self, kv_obj: Union[torch.Tensor, bytes]) -> int:
         """
         Get the size of the kv cache
 
@@ -77,8 +76,6 @@ class BaseEvictor(metaclass=abc.ABCMeta):
             size_in_bytes = num_elements * element_size
         elif isinstance(kv_obj, bytearray):
             size_in_bytes = len(kv_obj)
-        elif isinstance(kv_obj, KVObj):
-            size_in_bytes = kv_obj.size
         elif isinstance(kv_obj, DiskCacheMetadata):
             size_in_bytes = kv_obj.size
         else:

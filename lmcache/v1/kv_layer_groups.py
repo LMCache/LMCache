@@ -57,6 +57,19 @@ class KVLayerGroupInfo:
         """Return the number of layers in this group."""
         return len(self.layer_names)
 
+    @property
+    def hidden_dim_size(self) -> int:
+        """Return the size of the hidden dimension in this group."""
+        # hidden_dim_size = num_heads * head_size
+        if len(self.shape) == 5:
+            # MHA
+            return self.shape[3] * self.shape[4]
+        elif len(self.shape) == 3:
+            # MLA
+            return self.shape[2]
+        else:
+            raise ValueError(f"Invalid shape: {self.shape}")
+
     def contains_layer(self, layer_idx: int) -> bool:
         """Check if a layer index belongs to this group."""
         return layer_idx in self._layer_indices_set
@@ -75,6 +88,11 @@ class KVLayerGroupsManager:
     """
 
     kv_layer_groups: list[KVLayerGroupInfo] = field(default_factory=list)
+
+    @property
+    def num_groups(self) -> int:
+        """Return the number of KV layer groups."""
+        return len(self.kv_layer_groups)
 
     def get_group_by_layer_idx(self, layer_idx: int) -> Optional[KVLayerGroupInfo]:
         """Get the KVLayerGroupInfo for a given layer index.

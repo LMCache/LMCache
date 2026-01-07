@@ -58,11 +58,13 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
-from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config_base import validate_and_set_config_value
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemGPUConnectorV3,
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
@@ -515,22 +517,6 @@ def _init_lmcache_engine(
     ):
         raise ValueError("MLA only works with naive serde mode..")
 
-    # MLA requires save_unfull_chunk=True for correct KV cache storage and retrieval.
-    # Without this, partial chunks would be discarded, causing incomplete cache
-    # and incorrect results in MLA mode.
-    if use_mla and not lmcache_config.save_unfull_chunk:
-        logger.warning(
-            "MLA (Multi-Level Attention) requires save_unfull_chunk=True "
-            "for correct KV cache storage. Automatically setting "
-            "save_unfull_chunk=True."
-        )
-        lmcache_config.save_unfull_chunk = True
-    elif use_mla:
-        logger.info(
-            "MLA mode enabled with save_unfull_chunk=True - all KV cache "
-            "including partial chunks will be stored"
-        )
-
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
@@ -573,6 +559,7 @@ def _init_lmcache_engine(
         use_mla,
         role,
         served_model_name=model_config.served_model_name,
+        chunk_size=lmcache_config.chunk_size,
     )
 
     use_gpu = need_gpu_interm_buffer(lmcache_config)
@@ -603,9 +590,15 @@ def _init_lmcache_engine(
         tpg = get_tp_group()
     else:
         if current_platform.is_cuda_alike():
-            vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
-                metadata, use_gpu, device
-            )
+            # TODO(chunxiaozheng): unify use VLLMPagedMemGPUConnectorV3 after stable
+            if lmcache_config.use_gpu_connector_v3:
+                vllm_gpu_connector = VLLMPagedMemGPUConnectorV3.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
+                    metadata, use_gpu, device
+                )
         elif current_platform.is_xpu():
             vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
                 metadata, use_gpu, device
@@ -670,7 +663,7 @@ class LMCacheConnectorV1Impl:
             for key, value in kv_connector_extra_config.items():
                 if key.startswith("lmcache."):
                     config_key = key[8:]  # Remove "lmcache." prefix
-                    if _validate_and_set_config_value(config, config_key, value):
+                    if validate_and_set_config_value(config, config_key, value):
                         logger.info(
                             f"Updated config {config_key} from vLLM "
                             f"extra config: {value}"
@@ -705,6 +698,7 @@ class LMCacheConnectorV1Impl:
                 )
                 PrometheusLogger.GetOrCreate(self.lmcache_engine_metadata)
             # Create lookup client using factory
+            self.lookup_server = None
             self.lookup_client = LookupClientFactory.create_lookup_client(
                 vllm_config, config, self.lmcache_engine_metadata, self.lmcache_engine
             )
@@ -742,10 +736,29 @@ class LMCacheConnectorV1Impl:
                 get_tensor_model_parallel_rank(),
             )
 
+        # TODO(chunxiaozheng): use `register_kv_caches` replace, remove later
+        # if the connector implements `register_kv_caches`, we do not need to
+        # post init the lmcache engine here, do it in `register_kv_caches`.
+        def implements_register_kv_caches():
+            child_class = self._parent.__class__
+            parent_class = KVConnectorBase_V1
+            child_method = getattr(child_class, "register_kv_caches", None)
+            parent_method = getattr(parent_class, "register_kv_caches", None)
+            if child_method is None or parent_method is None:
+                return False
+            return child_method is not parent_method
+
+        if self.lmcache_engine is not None and not implements_register_kv_caches():
+            logger.warning(
+                "Please use the latest lmcache connector, otherwise some "
+                "features may not work, such as DSA"
+            )
             # In case of MLA, the lookup server is only created on worker 0
+            async_lookup_server = None
             if self.async_loading and self.lookup_server is not None:
                 assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
-                self.lmcache_engine.post_init(async_lookup_server=self.lookup_server)
+                async_lookup_server = self.lookup_server
+            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -904,6 +917,18 @@ class LMCacheConnectorV1Impl:
         """
         return VLLM_VERSION
 
+    def _build_kv_layer_groups(self):
+        # Build KV layer groups structure if not already built
+        if self.lmcache_engine is not None:
+            assert len(self.kv_caches) > 0
+            kv_layer_groups_manager = (
+                self.lmcache_engine.metadata.kv_layer_groups_manager
+            )
+            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+
+    # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
+    #  to init self.kv_caches, we keep it in order to be compatible with old versions
+    #  and will be removed in the future.
     @_lmcache_nvtx_annotate
     def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
         for layer_name in forward_context.no_compile_layers:
@@ -917,16 +942,25 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
-        # Build KV layer groups structure if not already built
-        if self.lmcache_engine is not None:
-            kv_layer_groups_manager = (
-                self.lmcache_engine.metadata.kv_layer_groups_manager
-            )
-            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
+        self._build_kv_layer_groups()
 
     ####################
     # Worker side APIs
     ####################
+    @_lmcache_nvtx_annotate
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        logger.info("Registering KV caches")
+        # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
+        #  not called, we should consider removing it.
+        assert len(self.kv_caches) == 0 and len(kv_caches) > 0
+        self.kv_caches = kv_caches
+        self._build_kv_layer_groups()
+        if self.lmcache_engine is not None:
+            async_lookup_server = None
+            if self.async_loading and self.lookup_server is not None:
+                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
+                async_lookup_server = self.lookup_server
+            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -944,6 +978,10 @@ class LMCacheConnectorV1Impl:
         self.current_layer = 0
 
         if len(self.kv_caches) == 0:
+            logger.warning(
+                "Please update LMCacheConnector, "
+                "use register_kv_caches to init kv_caches"
+            )
             self._init_kv_caches_from_forward_context(forward_context)
 
         metadata = self._parent._get_connector_metadata()
@@ -958,8 +996,6 @@ class LMCacheConnectorV1Impl:
             return
 
         assert self.lmcache_engine is not None
-
-        self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
 
@@ -1246,6 +1282,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
                     sync=is_first,
+                    req_id=request.req_id,
                 )
                 self.layerwise_storers.append(layerwise_storer)
                 if is_first:
@@ -1350,6 +1387,7 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
+                req_id=request.req_id,
             )
 
             # Update skip_leading_tokens only on last rank to ensure
@@ -1506,14 +1544,6 @@ class LMCacheConnectorV1Impl:
             logger.debug(f"Looking up cache for the first time for request {req_id}!")
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
-            # Align computed tokens once to avoid repeated
-            # chunk-size rounding downstream
-            aligned_num_computed_tokens = (
-                num_computed_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
-
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
             token_ids = request.all_token_ids
@@ -1534,7 +1564,6 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
-                num_computed_tokens=aligned_num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:
@@ -1757,6 +1786,7 @@ class LMCacheConnectorV1Impl:
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
+                    save_decode_cache=self._save_decode_cache,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)

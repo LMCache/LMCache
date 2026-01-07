@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Mock GPU connector for testing and standalone mode without real GPU."""
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.v1.gpu_connector import GPUConnectorInterface
 
@@ -48,12 +51,14 @@ class MockGPUConnector(GPUConnectorInterface):
         """
         if num_tokens is None:
             num_tokens = self.kv_shape[2]
-        return (
-            self.num_layers,
-            self.kv_shape[1],
-            num_tokens,
-            self.kv_shape[3],
-            self.kv_shape[4],
+        return torch.Size(
+            [
+                self.num_layers,
+                self.kv_shape[1],
+                num_tokens,
+                self.kv_shape[3],
+                self.kv_shape[4],
+            ]
         )
 
     def initialize_kvcaches_ptr(self, **kwargs):

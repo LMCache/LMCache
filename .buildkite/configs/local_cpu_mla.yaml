@@ -1,7 +1,6 @@
 workload:
   type: long_doc_qa
   max-inflight-requests: 20
-  expected-latency-gain: true
 
 docker:
   env:
@@ -24,3 +23,6 @@ vllm:
     - "fp8_e4m3"
     - "--quantization"
     - "fp8"
+
+checking-fields:
+  - query_round_time_per_prompt
