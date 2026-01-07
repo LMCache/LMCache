@@ -21,7 +21,7 @@ RESULTS_DIR="${RESULTS_DIR:-/tmp/vllm_bench_results_${BUILD_ID}}"
 
 # Expected values
 EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
-EXPECTED_COMPLETED=NUM_PROMPTS
+EXPECTED_COMPLETED=$NUM_PROMPTS
 MAX_SLOWDOWN_PERCENT=5
 
 # Generate a random seed once for reproducibility across both benchmarks
