@@ -236,7 +236,6 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_REMOTE_URL="redis-sentinel://localhost:26379,localhost:26380,localhost:26381" \
     # LMCACHE_REMOTE_SERDE="naive"
     LMCACHE_CONFIG_FILE="redis-sentinel-offload.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 16384 \
@@ -262,7 +261,6 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_REMOTE_URL="lm://localhost:65432" \
     # LMCACHE_REMOTE_SERDE="naive"
     LMCACHE_CONFIG_FILE="lmcache-server-offload.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 16384 \

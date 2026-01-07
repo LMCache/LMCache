@@ -263,7 +263,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
-  int64_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
+  scalar_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
 
   if (slot_idx < 0) {
     return;
@@ -305,8 +305,8 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
-  int64_t* key_ptr = paged_buffer_ptrs[layer_id];
-  int64_t* value_ptr = paged_buffer_ptrs[layer_id + num_layers];
+  scalar_t* key_ptr = paged_buffer_ptrs[layer_id];
+  scalar_t* value_ptr = paged_buffer_ptrs[layer_id + num_layers];
 
   if (slot_idx < 0) {
     return;
@@ -381,7 +381,8 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  *  - direction: false  means LMCache to PagedBuffer, true  means PagedBuffer to
  * LMCache
  */
-void multi_layer_kv_transfer(
+template <typename T>
+void multi_layer_kv_transfer_templated(
     torch::Tensor&
         key_value,  // key/value must be on gpu/pinned cpu.
                     // [2, num_layer, num_tokens, num_heads*head_size] for
@@ -393,17 +394,17 @@ void multi_layer_kv_transfer(
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla) {
-  int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
-  int64_t** page_buffer_ptrs =
-      get_kernel_ptr<int64_t*, const torch::Tensor>(key_value_ptrs);
+  T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
+  T** page_buffer_ptrs =
+      get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
   const int64_t* slot_mapping_ptr =
       get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
 
   int num_layers = key_value.size(1);
   int num_tokens = slot_mapping.size(0);
   int num_origin_elements = key_value.size(3);
-  int elements_per_qword = 8 / key_value.element_size();
-  int num_qwords = num_origin_elements / elements_per_qword;
+  int elements_per_xword = sizeof(T) / key_value.element_size();
+  int num_xwords = num_origin_elements / elements_per_xword;
 
   int k_or_v_size = 2;
   if (use_mla) {
@@ -411,24 +412,55 @@ void multi_layer_kv_transfer(
   }
 
   dim3 grid(key_value.size(2), num_layers, k_or_v_size);
-  dim3 block(std::min(num_qwords, 128));
+  dim3 block(std::min(num_xwords, 128));
 
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (not direction) {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, false>
+    lmc::load_and_reshape_multi_layer_kernel<T, false>
         <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     slot_mapping_ptr, num_xwords, num_tokens,
                                      num_layers, page_buffer_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, true>
+    lmc::load_and_reshape_multi_layer_kernel<T, true>
         <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     slot_mapping_ptr, num_xwords, num_tokens,
                                      num_layers, page_buffer_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
+}
+
+/**
+ * @see multi_layer_kv_transfer_templated
+ */
+void multi_layer_kv_transfer(torch::Tensor& key_value,
+                             const torch::Tensor& key_value_ptrs,
+                             const torch::Tensor& slot_mapping,
+                             const torch::Device& paged_memory_device,
+                             const int page_buffer_size, const bool direction,
+                             const bool use_mla) {
+  int num_origin_elements = key_value.size(3);
+  int copy_size = num_origin_elements * key_value.element_size();
+#ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
+  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                          \
+    do {                                                                \
+      multi_layer_kv_transfer_templated<type>(                          \
+          key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
+          page_buffer_size, direction, use_mla);                        \
+    } while (0)
+#endif
+  if (copy_size % 8 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int64_t);
+  } else if (copy_size % 4 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int32_t);
+  } else if (copy_size % 2 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int16_t);
+  } else {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int8_t);
+  }
+#undef LAUNCH_MULTI_LAYER_KV_TRANSFER
 }
 
 /**

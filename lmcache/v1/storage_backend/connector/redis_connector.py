@@ -45,6 +45,9 @@ class RedisConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # set a large max
         self.max_connections = 150
         # redis will crash if we have more than max_connections connections
@@ -84,8 +87,8 @@ class RedisConnector(RemoteConnector):
             metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
             memory_obj = self.local_cpu_backend.allocate(
-                metadata.shape,
-                metadata.dtype,
+                metadata.shapes,
+                metadata.dtypes,
                 metadata.fmt,
             )
             if memory_obj is None:
@@ -160,12 +163,12 @@ class RedisConnector(RemoteConnector):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
 
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
+            len(kv_bytes), kv_shapes, kv_dtypes, memory_format
         ).serialize()
 
         key_str = key.to_string()
@@ -270,6 +273,9 @@ class RedisSentinelConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # Get service name
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
@@ -319,8 +325,8 @@ class RedisSentinelConnector(RemoteConnector):
         metadata = RemoteMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
         if memory_obj is None:
@@ -366,20 +372,18 @@ class RedisSentinelConnector(RemoteConnector):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
 
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
+            len(kv_bytes), kv_shapes, kv_dtypes, memory_format
         ).serialize()
 
         key_str = key.to_string()
         # kv bytes needs to be set first to avoid race condition
         self.master.set(key_str + "kv_bytes", kv_bytes)
         self.master.set(key_str + "metadata", metadata_bytes)
-
-        memory_obj.ref_count_down()
 
     # TODO
     @no_type_check
@@ -411,6 +415,9 @@ class RedisClusterConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         # Convert hosts_and_ports to startup_nodes format expected by RedisCluster
         startup_nodes = [ClusterNode(h, p) for (h, p) in hosts_and_ports]
 
@@ -458,8 +465,8 @@ class RedisClusterConnector(RemoteConnector):
             metadata = RemoteMetadata.deserialize(memoryview(metadata_bytes))
 
             memory_obj = self.local_cpu_backend.allocate(
-                metadata.shape,
-                metadata.dtype,
+                metadata.shapes,
+                metadata.dtypes,
                 metadata.fmt,
             )
             if memory_obj is None:
@@ -535,12 +542,12 @@ class RedisClusterConnector(RemoteConnector):
         # TODO(Jiayi): The following code is ugly.
         # Please use a function like `memory_obj.to_meta()`.
         kv_bytes = memory_obj.byte_array
-        kv_shape = memory_obj.get_shape()
-        kv_dtype = memory_obj.get_dtype()
+        kv_shapes = memory_obj.get_shapes()
+        kv_dtypes = memory_obj.get_dtypes()
         memory_format = memory_obj.get_memory_format()
 
         metadata_bytes = RemoteMetadata(
-            len(kv_bytes), kv_shape, kv_dtype, memory_format
+            len(kv_bytes), kv_shapes, kv_dtypes, memory_format
         ).serialize()
 
         key_str = key.to_string()

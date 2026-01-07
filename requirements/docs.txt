@@ -13,3 +13,4 @@ sphinxcontrib-mermaid==1.2.2
 sphinx-multiversion==0.2.4
 sphinxcontrib-images
 msgspec
+sphinx-design

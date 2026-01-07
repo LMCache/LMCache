@@ -14,7 +14,7 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controller_manager import LMCacheControllerManager
-from lmcache.v1.cache_controller.message import HeartbeatMsg, RegisterMsg
+from lmcache.v1.cache_controller.message import HeartbeatMsg, Msg, RegisterMsg
 from lmcache.v1.internal_api_server.api_server import app
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 
@@ -29,15 +29,17 @@ class TestWorkerInfoAPI:
 
     @pytest.fixture
     def zmq_context(self):
-        return get_zmq_context()
+        return get_zmq_context(use_asyncio=False)
 
     @pytest.fixture
     def controller_urls(self):
         pull_port = get_available_port()
         reply_port = get_available_port()
+        heartbeat_port = get_available_port()
         return {
             "pull": f"127.0.0.1:{pull_port}",
             "reply": f"127.0.0.1:{reply_port}",
+            "heartbeat": f"127.0.0.1:{heartbeat_port}",
         }
 
     @pytest.fixture
@@ -76,6 +78,32 @@ class TestWorkerInfoAPI:
         socket.close()
 
     @pytest.fixture
+    def req_socket(self, zmq_context, controller_urls):
+        """DEALER socket for register operations (DEALER-ROUTER mode)"""
+        socket = get_zmq_socket(
+            zmq_context,
+            controller_urls["reply"],
+            protocol="tcp",
+            role=zmq.DEALER,
+            bind_or_connect="connect",
+        )
+        yield socket
+        socket.close()
+
+    @pytest.fixture
+    def heartbeat_socket(self, zmq_context, controller_urls):
+        """DEALER socket for heartbeat operations"""
+        socket = get_zmq_socket(
+            zmq_context,
+            controller_urls["heartbeat"],
+            protocol="tcp",
+            role=zmq.DEALER,
+            bind_or_connect="connect",
+        )
+        yield socket
+        socket.close()
+
+    @pytest.fixture
     def client_with_real_controller(self, real_controller_manager):
         app.state.lmcache_controller_manager = real_controller_manager
         return TestClient(app)
@@ -85,8 +113,13 @@ class TestWorkerInfoAPI:
         app.state.lmcache_controller_manager = None
         return TestClient(app)
 
-    def _send_message(self, worker_socket, msg_type, instance_id, worker_id, ip, port):
-        """Send message to controller via ZMQ"""
+    def _send_message(self, socket, msg_type, instance_id, worker_id, ip, port):
+        """Send message to controller via ZMQ
+
+        For register: uses DEALER socket (DEALER-ROUTER mode), returns response
+        For heartbeat: uses DEALER socket (dedicated heartbeat socket)
+        For others: uses PUSH socket (fire-and-forget)
+        """
         msg_classes = {
             "register": RegisterMsg,
             "heartbeat": HeartbeatMsg,
@@ -105,7 +138,18 @@ class TestWorkerInfoAPI:
         )
 
         message_data = msgspec.msgpack.encode(msg)
-        worker_socket.send(message_data)
+
+        # DEALER-ROUTER mode for register and heartbeat
+        if msg_type in ("register", "heartbeat"):
+            # DEALER socket: send [empty_frame, payload]
+            socket.send_multipart([b"", message_data])
+            # DEALER receives: [empty_frame, payload]
+            frames = socket.recv_multipart()
+            response = frames[-1]
+            return msgspec.msgpack.decode(response, type=Msg)
+        else:
+            socket.send(message_data)
+            return None
 
     def _wait_for_workers(self, client, expected_count, timeout=5):
         """Wait for expected number of workers to be registered"""
@@ -161,25 +205,25 @@ class TestWorkerInfoAPI:
         return data
 
     def test_real_worker_registration_and_query(
-        self, client_with_real_controller, worker_socket
+        self, client_with_real_controller, req_socket, heartbeat_socket
     ):
-        # Register workers via real ZMQ communication
-        self._send_message(worker_socket, "register", "instance1", 0, "127.0.0.1", 8000)
-        self._send_message(worker_socket, "register", "instance1", 1, "127.0.0.1", 8001)
-        self._send_message(worker_socket, "register", "instance2", 0, "127.0.0.2", 8002)
+        # Register workers via DEALER-ROUTER communication
+        self._send_message(req_socket, "register", "instance1", 0, "127.0.0.1", 8000)
+        self._send_message(req_socket, "register", "instance1", 1, "127.0.0.1", 8001)
+        self._send_message(req_socket, "register", "instance2", 0, "127.0.0.2", 8002)
 
         # Wait for workers to be registered
         self._wait_for_workers(client_with_real_controller, 3)
 
         # Send heartbeats to update last_heartbeat_time
         self._send_message(
-            worker_socket, "heartbeat", "instance1", 0, "127.0.0.1", 8000
+            heartbeat_socket, "heartbeat", "instance1", 0, "127.0.0.1", 8000
         )
         self._send_message(
-            worker_socket, "heartbeat", "instance1", 1, "127.0.0.1", 8001
+            heartbeat_socket, "heartbeat", "instance1", 1, "127.0.0.1", 8001
         )
         self._send_message(
-            worker_socket, "heartbeat", "instance2", 0, "127.0.0.2", 8002
+            heartbeat_socket, "heartbeat", "instance2", 0, "127.0.0.2", 8002
         )
 
         # Test getting all workers
@@ -197,9 +241,9 @@ class TestWorkerInfoAPI:
             assert worker["registration_time"] == pytest.approx(time.time(), abs=2)
             assert worker["last_heartbeat_time"] == pytest.approx(time.time(), abs=2)
 
-    def test_real_workers_by_instance(self, client_with_real_controller, worker_socket):
-        self._send_message(worker_socket, "register", "instance1", 0, "127.0.0.1", 8000)
-        self._send_message(worker_socket, "register", "instance2", 0, "127.0.0.2", 8002)
+    def test_real_workers_by_instance(self, client_with_real_controller, req_socket):
+        self._send_message(req_socket, "register", "instance1", 0, "127.0.0.1", 8000)
+        self._send_message(req_socket, "register", "instance2", 0, "127.0.0.2", 8002)
 
         # Wait for workers to be registered
         self._wait_for_workers(client_with_real_controller, 2)
@@ -215,11 +259,11 @@ class TestWorkerInfoAPI:
         assert workers[0]["worker_id"] == 0
 
     def test_real_specific_worker_query(
-        self, client_with_real_controller, worker_socket
+        self, client_with_real_controller, req_socket, heartbeat_socket
     ):
-        self._send_message(worker_socket, "register", "instance1", 0, "127.0.0.1", 8000)
+        self._send_message(req_socket, "register", "instance1", 0, "127.0.0.1", 8000)
         self._send_message(
-            worker_socket, "heartbeat", "instance1", 0, "127.0.0.1", 8000
+            heartbeat_socket, "heartbeat", "instance1", 0, "127.0.0.1", 8000
         )
 
         # Wait for worker to be available
