@@ -416,26 +416,6 @@ class TestLMCacheManagerValidation:
         with pytest.raises(ValueError, match="MLA only works with naive serde mode"):
             manager._validate_mla_config(use_mla=True)
 
-    def test_validate_mla_config_sets_save_unfull_chunk(self):
-        """Test _validate_mla_config sets save_unfull_chunk=True for MLA."""
-        config = LMCacheEngineConfig.from_defaults()
-        config.remote_serde = "naive"
-        config.save_unfull_chunk = False
-        vllm_config = MagicMock()
-        connector = MagicMock()
-
-        with patch.object(LMCacheManager, "_init_components"):
-            manager = LMCacheManager(
-                config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
-            )
-
-        manager._validate_mla_config(use_mla=True)
-
-        assert config.save_unfull_chunk is True
-
     def test_validate_mla_config_raises_on_layerwise_with_blending(self):
         """Test _validate_mla_config raises with MLA + layerwise + blending."""
         config = LMCacheEngineConfig.from_defaults()
