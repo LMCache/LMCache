@@ -197,12 +197,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-        num_computed_tokens: int = 0,
     ) -> Optional[int]:
-        # TODO(ziruiliu) num_computed_tokens is passed in
-        # Due to complexity in preemption or eviction in async mode
-        # We will handle skipping logic in future.
-
         hashes: list[int] = []
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(

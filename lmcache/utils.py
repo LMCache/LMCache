@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import asyncio
 import hashlib
+import re
 import threading
 import traceback
 
@@ -49,6 +50,176 @@ def cdiv(a: int, b: int) -> int:
 def round_down(x: int, y: int) -> int:
     """Round down x to the nearest multiple of y."""
     return (x // y) * y
+
+
+def compress_slot_mapping(slots: list[int]) -> list[Union[int, list[int]]]:
+    """Compress a list of slot indices into ranges while preserving order.
+
+    Consecutive slots (3 or more) are represented as [start, end] ranges.
+    Single elements or pairs are kept as individual integers.
+    For example: [1, 2, 3, 4, 5, 9, 10, 11, 12] -> [[1, 5], [9, 12]]
+    Order-preserving: [5, 3, 1, 2, 4] -> [5, 3, 1, 2, 4] (no compression)
+    Mixed: [1, 2, 3, 4, 5, 7, 8] -> [[1, 5], 7, 8]
+
+    Args:
+        slots: List of slot indices (order is preserved).
+
+    Returns:
+        List of integers or [start, end] ranges. Ranges are only used
+        when there are 3 or more consecutive elements.
+    """
+    if not slots:
+        return []
+
+    result: list[Union[int, list[int]]] = []
+    range_start = slots[0]
+    range_end = slots[0]
+
+    for slot in slots[1:]:
+        if slot == range_end + 1:
+            # Extend current range
+            range_end = slot
+        else:
+            # Close current range and start a new one
+            _append_range_or_elements(result, range_start, range_end)
+            range_start = slot
+            range_end = slot
+
+    # Append the last range
+    _append_range_or_elements(result, range_start, range_end)
+    return result
+
+
+def _append_range_or_elements(
+    result: list[Union[int, list[int]]], start: int, end: int
+) -> None:
+    """Helper to append range or individual elements based on length.
+
+    Only compresses to [start, end] if there are 3 or more consecutive elements.
+    """
+    length = end - start + 1
+    if length >= 3:
+        # Compress: 3 or more consecutive elements
+        result.append([start, end])
+    else:
+        # Don't compress: 1 or 2 elements
+        for i in range(start, end + 1):
+            result.append(i)
+
+
+def decompress_slot_mapping(compressed: list[Union[int, list[int]]]) -> list[int]:
+    """Decompress slot ranges back to a list of slot indices.
+
+    Inverse operation of compress_slot_mapping.
+    For example: [[1, 5], [9, 12]] -> [1, 2, 3, 4, 5, 9, 10, 11, 12]
+    Mixed: [[1, 5], 7, 8] -> [1, 2, 3, 4, 5, 7, 8]
+
+    Args:
+        compressed: List of integers or [start, end] ranges from
+            compress_slot_mapping.
+
+    Returns:
+        List of slot indices.
+    """
+    slots: list[int] = []
+    for item in compressed:
+        if isinstance(item, list):
+            start, end = item
+            slots.extend(range(start, end + 1))
+        else:
+            slots.append(item)
+    return slots
+
+
+def parse_mixed_slot_mapping(
+    slot_mapping_str: str,
+) -> Tuple[Optional[list[int]], Optional[dict]]:
+    """Parse mixed format slot_mapping string.
+
+    Supports two formats:
+    1. Single numbers: "1,2,3,17,19"
+    2. Range format: "[9,12]" (represents 9,10,11,12)
+    3. Mixed format: "1,2,3,[9,12],17,19" (represents 1,2,3,9,10,11,12,17,19)
+
+    Args:
+        slot_mapping_str: String containing slot mapping information.
+
+    Returns:
+        Tuple of (slot_indices list, error dict).
+        If error dict is not None, slot_indices will be None.
+    """
+    try:
+        # Remove all whitespace
+        clean_str = "".join(slot_mapping_str.split())
+
+        # Split by comma but preserve range expressions
+        parts = []
+        buffer = ""
+        in_brackets = False
+
+        for char in clean_str:
+            if char == "[":
+                if in_brackets:
+                    raise ValueError("Nested brackets not allowed")
+                in_brackets = True
+                buffer += char
+            elif char == "]":
+                if not in_brackets:
+                    raise ValueError("Unmatched closing bracket")
+                in_brackets = False
+                buffer += char
+                parts.append(buffer)
+                buffer = ""
+            elif char == "," and not in_brackets:
+                if buffer:
+                    parts.append(buffer)
+                    buffer = ""
+            else:
+                buffer += char
+
+        # Add the last part if any
+        if buffer:
+            parts.append(buffer)
+
+        if in_brackets:
+            raise ValueError("Unclosed bracket")
+
+        # Parse each part
+        compressed: list[Union[int, list[int]]] = []
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            # Check if it's a range format [start,end]
+            range_match = re.match(r"^\[(\d+),(\d+)\]$", part)
+            if range_match:
+                start = int(range_match.group(1))
+                end = int(range_match.group(2))
+                if start > end:
+                    raise ValueError(f"Range start {start} must be <= end {end}")
+                compressed.append([start, end])
+            else:
+                # Single number
+                try:
+                    num = int(part)
+                    compressed.append(num)
+                except ValueError as ve:
+                    raise ValueError(f"Invalid slot format: '{part}'") from ve
+
+        # Decompress to individual slot indices
+        slot_indices = decompress_slot_mapping(compressed)
+        return slot_indices, None
+
+    except Exception as e:
+        return None, {
+            "error": "Invalid slot_mapping format",
+            "message": (
+                f"slot_mapping must be comma-separated integers "
+                f"or ranges like [start,end]: {str(e)}"
+            ),
+        }
 
 
 try:
