@@ -568,23 +568,23 @@ def _init_lmcache_engine(
     # Change current device.
     if hasattr(torch, "hpu") and torch.hpu.is_available():
         logger.info("HPU device is available. Using HPU for LMCache engine.")
-        device = torch.device(f"hpu:{parallel_config.rank}")
+        torch_dev = torch.hpu
+        dev_name = "hpu"
+    elif current_platform.is_cuda_alike():
+        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
+        torch_dev = torch.cuda
+        dev_name = "cuda"
+    elif current_platform.is_xpu():
+        logger.info("XPU device is available. Using XPU for LMCache engine.")
+        torch_dev = torch.xpu
+        dev_name = "xpu"
     else:
-        if current_platform.is_cuda_alike():
-            logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-            torch_dev = torch.cuda
-            dev_name = "cuda"
-        elif current_platform.is_xpu():
-            logger.info("XPU device is available. Using XPU for LMCache engine.")
-            torch_dev = torch.xpu
-            dev_name = "xpu"
-        else:
-            raise RuntimeError("Unsupported device platform for LMCache engine.")
+        raise RuntimeError("Unsupported device platform for LMCache engine.")
 
-        num_gpus = torch_dev.device_count()
-        local_rank = parallel_config.rank % num_gpus
-        torch_dev.set_device(local_rank)
-        device = torch.device(f"{dev_name}:{local_rank}")
+    num_gpus = torch_dev.device_count()
+    local_rank = parallel_config.rank % num_gpus
+    torch_dev.set_device(local_rank)
+    device = torch.device(f"{dev_name}:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,

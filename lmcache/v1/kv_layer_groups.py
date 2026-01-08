@@ -188,9 +188,8 @@ class KVLayerGroupsManager:
                 shape = kv_cache.shape
                 dtype = kv_cache.dtype
 
-            if shape is not None and dtype is not None:
-                key = (shape, dtype)
-                groups_dict[key].append((layer_name, idx))
+            key = (shape, dtype)
+            groups_dict[key].append((layer_name, idx))
 
         # Build KVLayerGroupInfo list
         # Sort groups by the first layer index to maintain order

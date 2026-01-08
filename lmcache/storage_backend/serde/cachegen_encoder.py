@@ -17,13 +17,10 @@ from lmcache.storage_backend.serde.serde import Serializer
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 
-try:
-    if torch.cuda.is_available():
-        # First Party
-        import lmcache.c_ops as lmc_ops
-except (ModuleNotFoundError, ImportError):
+if hasattr(torch, "hpu") and torch.hpu.is_available():
     lmc_ops = None
-    pass
+elif torch.cuda.is_available():
+    import lmcache.c_ops as lmc_ops
 
 # First Party
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics

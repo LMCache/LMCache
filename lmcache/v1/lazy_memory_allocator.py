@@ -28,13 +28,10 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.config import LMCacheEngineConfig
 
-if torch.cuda.is_available():
-    # First Party
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except (ModuleNotFoundError, ImportError):
-        lmc_ops = None
+if hasattr(torch, "hpu") and torch.hpu.is_available():
+    lmc_ops = None
+elif torch.cuda.is_available():
+    import lmcache.c_ops as lmc_ops
 else:
     # First Party
     import lmcache.non_cuda_equivalents as lmc_ops

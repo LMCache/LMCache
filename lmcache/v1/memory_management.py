@@ -22,15 +22,13 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.system_detection import NUMAMapping
 
-try:
-    if torch.cuda.is_available():
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    else:
-        # First Party
-        import lmcache.non_cuda_equivalents as lmc_ops
-except (ModuleNotFoundError, ImportError):
+if hasattr(torch, "hpu") and torch.hpu.is_available():
     lmc_ops = None
+elif torch.cuda.is_available():
+    import lmcache.c_ops as lmc_ops
+else:
+    # First Party
+    import lmcache.non_cuda_equivalents as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -370,6 +368,8 @@ def _allocate_cpu_memory(
         buf = array_type.from_address(ptr)
         buffer = torch.frombuffer(buf, dtype=torch.uint8)
     else:
+        # TODO currently we are not supporting numa for HPU,
+        # we will revisit the code later to add numa mapping.
         buffer = torch.empty(size, dtype=torch.uint8)
 
     return buffer

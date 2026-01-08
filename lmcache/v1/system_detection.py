@@ -8,14 +8,16 @@ import platform
 import psutil
 import torch
 
-try:
-    if torch.cuda.is_available():
+if hasattr(torch, "hpu") and torch.hpu.is_available():
+    lmc_ops = None
+    get_gpu_pci_bus_id = None
+elif torch.cuda.is_available():
+    try:
         # First Party
         from lmcache.c_ops import get_gpu_pci_bus_id
-except ImportError:
-    # Fallback if c_ops is not available
-    get_gpu_pci_bus_id = None
-    lmc_ops = None
+    except ImportError:
+        # Fallback if c_ops is not available
+        get_gpu_pci_bus_id = None
 
 # First Party
 from lmcache.logging import init_logger
