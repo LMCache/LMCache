@@ -9,7 +9,7 @@ decoupling the vLLM adapter from internal LMCache implementation details.
 # Standard
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 import time
 
 # Third Party
@@ -92,11 +92,6 @@ class LMCacheManager:
 
         # Initialize components based on role
         self._init_components()
-
-    @classmethod
-    def builder(cls) -> "LMCacheManagerBuilder":
-        """Create a builder for constructing LMCacheManager instances."""
-        return LMCacheManagerBuilder()
 
     def _init_components(self) -> None:
         """Initialize components based on the role for vLLM mode."""
@@ -563,87 +558,3 @@ class LMCacheManager:
     def config(self) -> LMCacheEngineConfig:
         """Get the LMCache engine configuration."""
         return self._config
-
-
-class LMCacheManagerBuilder:
-    """
-    Builder for constructing LMCacheManager instances for vLLM integration mode.
-
-    This builder pattern allows creating LMCacheManager instances specifically
-    for vLLM integration, requiring vllm_config for proper initialization.
-    """
-
-    def __init__(self):
-        self._config: Optional[LMCacheEngineConfig] = None
-        self._metadata: Optional[LMCacheEngineMetadata] = None
-        self._gpu_connector: Optional[Any] = None
-        self._vllm_config: Optional[Any] = None
-        self._connector: Optional[Any] = None
-        self._role: str = "worker"
-        self._broadcast_fn: Optional[Callable] = None
-        self._broadcast_object_fn: Optional[Callable] = None
-
-    def with_config(self, config: LMCacheEngineConfig) -> "LMCacheManagerBuilder":
-        """Set LMCache engine configuration."""
-        self._config = config
-        return self
-
-    def with_metadata(self, metadata: LMCacheEngineMetadata) -> "LMCacheManagerBuilder":
-        """Set LMCache engine metadata."""
-        self._metadata = metadata
-        return self
-
-    def with_gpu_connector(self, gpu_connector: Any) -> "LMCacheManagerBuilder":
-        """Set GPU connector instance."""
-        self._gpu_connector = gpu_connector
-        return self
-
-    def with_vllm_config(self, vllm_config: Any) -> "LMCacheManagerBuilder":
-        """Set vLLM configuration for vLLM integration mode."""
-        self._vllm_config = vllm_config
-        return self
-
-    def with_connector(self, connector: Any) -> "LMCacheManagerBuilder":
-        """Set connector reference for API server."""
-        self._connector = connector
-        return self
-
-    def with_role(self, role: str) -> "LMCacheManagerBuilder":
-        """Set role ("scheduler" or "worker")."""
-        self._role = role
-        return self
-
-    def with_broadcast_fn(self, broadcast_fn: Callable) -> "LMCacheManagerBuilder":
-        """Set broadcast function for tensor parallel."""
-        self._broadcast_fn = broadcast_fn
-        return self
-
-    def with_broadcast_object_fn(
-        self, broadcast_object_fn: Callable
-    ) -> "LMCacheManagerBuilder":
-        """Set broadcast function for objects."""
-        self._broadcast_object_fn = broadcast_object_fn
-        return self
-
-    def build(self) -> LMCacheManager:
-        """
-        Build and return a configured LMCacheManager instance for vLLM mode.
-
-        Returns:
-            LMCacheManager: Configured manager instance
-
-        Raises:
-            ValueError: If required configuration is missing
-        """
-        if self._config is None:
-            raise ValueError("config is required for LMCacheManager")
-
-        if self._vllm_config is None:
-            raise ValueError("vllm_config is required for vLLM integration mode")
-
-        return LMCacheManager(
-            config=self._config,
-            vllm_config=self._vllm_config,
-            role=self._role,
-            connector=self._connector,
-        )

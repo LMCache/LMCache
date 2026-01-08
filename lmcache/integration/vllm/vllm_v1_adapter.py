@@ -453,13 +453,11 @@ class LMCacheConnectorV1Impl:
         self.config = config
 
         # Initialize LMCacheManager to handle internal components
-        self._manager = (
-            LMCacheManager.builder()
-            .with_config(config)
-            .with_vllm_config(vllm_config)
-            .with_role(role.name.lower())
-            .with_connector(self)
-            .build()
+        self._manager = LMCacheManager(
+            config=config,
+            vllm_config=vllm_config,
+            role=role.name.lower(),
+            connector=self,
         )
 
         # Start services managed by LMCacheManager
