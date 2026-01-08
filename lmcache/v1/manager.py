@@ -410,7 +410,15 @@ class LMCacheManager:
         return not self._config.enable_pd
 
     def start_services(self) -> None:
-        """Start all managed services."""
+        """
+        Start all managed services.
+
+        Managed services include:
+        - InternalAPIServer: HTTP server exposing internal APIs for
+          monitoring and management (e.g., cache stats, flush operations).
+        - RuntimePluginLauncher: Launches external plugin processes defined
+          in the configuration (e.g., custom telemetry, cache warming scripts).
+        """
         if self._api_server is not None:
             self._api_server.start()
 
