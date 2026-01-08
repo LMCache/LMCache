@@ -63,7 +63,6 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          max_local_cpu_size: 10  # GB
          EOF
 
-         export LMCACHE_USE_EXPERIMENTAL=True
          export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
 
          python -m sglang.launch_server \

@@ -2,7 +2,7 @@
 """Lazy memory allocator with async progressive expansion and zero-copy."""
 
 # Standard
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, List, Optional, Union
 import threading
 
 # Third Party
@@ -393,7 +393,7 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -406,7 +406,7 @@ class LazyMixedMemoryAllocator(MixedMemoryAllocator):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,

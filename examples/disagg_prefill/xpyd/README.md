@@ -60,6 +60,47 @@ python disagg_proxy_server.py \
     --decoder-init-port  "7300,7301,7302,7303,7304,7305,7306,7307" \
     --decoder-alloc-port "7400,7401,7402,7403,7404,7405,7406,7407"
 ```
+
+#### To support bound prefiller and decoder for the same session
+
+For xPyD multi-round QA scenario, disagg_proxy_server can provide the clients with bound prefiller/decoder during the same session, in addition to round-robin.
+
+http requests can provide a header (e.g., 'session-id: \<unique-id\>') for the disagg_proxy_server to select bound prefiller/decoder during the same session:
+- **Header Value**: A unique identifier (e.g., \<unique-id\>) for the session. All requests within the same multi-round conversation must use the same identifier.
+- **Header Name**: The name of the header field (e.g., 'session-id') for disagg_proxy_server to find the \<unique-id\>. \
+                   This **Header Name** must match the value of the '$CLIENT_BOUND_KEY' environment variable set on the proxy server.
+
+```
+export CLIENT_BOUND="true"
+
+# The proxy uses the value of $CLIENT_BOUND_KEY as the header name to find the session ID.
+# For example, if CLIENT_BOUND_KEY="session-id", the proxy looks for the "session-id" header.
+# Requests with the same session ID are routed to the same services.
+# If $CLIENT_BOUND_KEY is not set, it defaults to "session-id".
+
+export CLIENT_BOUND_KEY="session-id"  # optional, configure a constant string name.
+python disagg_proxy_server.py \
+    .... \ # other arguments
+```
+
+```
+# client side, set the kv pair, such as (session-id: uid) in header
+# openai python sdk, put the kv pair in extra_headers param
+import uuid
+uid = str(uuid.uuid4()) # the uid can be changed to any other unique identifier string for a session
+extra_headers = {"session-id" : uid}
+response = await self.client.chat.completions.create(
+    messages=messages,
+    model=self.model,
+    temperature=0,
+    stream=True,
+    max_tokens=max_tokens,
+    stream_options={"include_usage": True},
+    extra_headers=extra_headers,
+    extra_body=extra_body
+)
+```
+
 #### Example benchmark command
 
 If you have vLLM's serving benchmark tool, you can run the following command to benchmark the serving performance of the disaggregated prefill setup:

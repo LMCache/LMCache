@@ -20,6 +20,7 @@ from lmcache.v1.cache_controller.observability import (
     SocketType,
 )
 from lmcache.v1.rpc_utils import (
+    get_ip,
     get_zmq_context,
     get_zmq_socket,
 )
@@ -101,9 +102,21 @@ class LMCacheControllerManager:
                 self.zmq_context,
                 self.controller_urls["reply"],
                 protocol="tcp",
-                role=zmq.REP,  # type: ignore[attr-defined]
+                role=zmq.ROUTER,  # type: ignore[attr-defined]
                 bind_or_connect="bind",
             )
+
+        # Dedicated heartbeat socket to avoid blocking from other requests
+        if self.controller_urls.get("heartbeat") is not None:
+            self.controller_heartbeat_socket = get_zmq_socket(
+                self.zmq_context,
+                self.controller_urls["heartbeat"],
+                protocol="tcp",
+                role=zmq.ROUTER,  # type: ignore[attr-defined]
+                bind_or_connect="bind",
+            )
+        else:
+            self.controller_heartbeat_socket = None
         self.reg_controller = RegistrationController()
         self.kv_controller = KVController(self.reg_controller.registry)
 
@@ -154,7 +167,22 @@ class LMCacheControllerManager:
         self, msg: WorkerReqMsg
     ) -> Union[WorkerReqRetMsg, ErrorMsg]:
         ret_msg: Union[WorkerReqRetMsg, ErrorMsg]
-        if isinstance(msg, BatchedP2PLookupMsg):
+        if isinstance(msg, RegisterMsg):
+            # Build extra_config with heartbeat_url if available
+            extra_config: dict[str, str] = {}
+            if self.controller_urls.get("heartbeat") is not None:
+                # Convert bind address (e.g., "0.0.0.0:8082" or "*:8082")
+                # to a connectable address using actual controller IP
+                heartbeat_bind_url = self.controller_urls["heartbeat"]
+                heartbeat_url = self._convert_bind_to_connect_url(heartbeat_bind_url)
+                extra_config["heartbeat_url"] = heartbeat_url
+                logger.debug(
+                    "Returning heartbeat_url to worker: %s (bind: %s)",
+                    heartbeat_url,
+                    heartbeat_bind_url,
+                )
+            ret_msg = await self.reg_controller.register(msg, extra_config)
+        elif isinstance(msg, BatchedP2PLookupMsg):
             ret_msg = await self.kv_controller.batched_p2p_lookup(msg)
         elif isinstance(msg, HeartbeatMsg):
             ret_msg = await self.reg_controller.heartbeat(msg)
@@ -230,6 +258,29 @@ class LMCacheControllerManager:
                 lambda: self.reply_socket_active_requests
             )
 
+    def _convert_bind_to_connect_url(self, bind_url: str) -> str:
+        """Convert a bind address to a connectable address.
+
+        Bind addresses like "0.0.0.0:port" or "*:port" cannot be used
+        by workers to connect. We need to replace them with the actual
+        controller IP address.
+
+        Args:
+            bind_url: The bind URL (e.g., "0.0.0.0:8082" or "*:8082")
+
+        Returns:
+            A connectable URL (e.g., "192.168.1.100:8082")
+        """
+        if ":" not in bind_url:
+            return bind_url
+
+        host, port = bind_url.rsplit(":", 1)
+        # Replace bind-all addresses with actual IP
+        if host in ("0.0.0.0", "*", ""):
+            actual_ip = get_ip()
+            return f"{actual_ip}:{port}"
+        return bind_url
+
     def _check_socket_has_pending(self, socket) -> int:
         """Check if socket has pending messages.
 
@@ -273,10 +324,29 @@ class LMCacheControllerManager:
                         logger.error(f"Unknown message type: {type(msg)}")
 
     async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
+        """Handle requests on ROUTER socket.
+
+        ROUTER socket receives multi-part messages:
+        [identity, empty_frame, payload]
+        and must reply with the same identity frame.
+        """
         while True:
-            part = await socket.recv()
+            frames = await socket.recv_multipart()
             with SocketMetricsContext(self, SocketType.REPLY):
+                identity = None
                 try:
+                    # ROUTER socket: [identity, empty_frame, payload]
+                    if len(frames) < 3:
+                        logger.error(
+                            "Invalid ROUTER message format, expected >= 3 frames, "
+                            "got %d",
+                            len(frames),
+                        )
+                        continue
+                    identity = frames[0]
+                    # frames[1] is empty delimiter
+                    part = frames[2]
+
                     # Parse message based on format
                     if part.startswith(b"{"):
                         # JSON format - typically from external systems like Mooncake
@@ -288,19 +358,96 @@ class LMCacheControllerManager:
 
                     if isinstance(msg, WorkerReqMsg):
                         ret_msg = await self.handle_worker_req_message(msg)
-                        await socket.send(msgspec.msgpack.encode(ret_msg))
+                        # Reply with identity frame for ROUTER socket
+                        await socket.send_multipart(
+                            [identity, b"", msgspec.msgpack.encode(ret_msg)]
+                        )
                     else:
                         logger.error("Unknown message type: %s", type(msg))
                         err_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
-                        await socket.send(msgspec.msgpack.encode(err_msg))
-                except Exception as e:
+                        await socket.send_multipart(
+                            [identity, b"", msgspec.msgpack.encode(err_msg)]
+                        )
+                except (
+                    json.JSONDecodeError,
+                    msgspec.DecodeError,
+                    msgspec.ValidationError,
+                    zmq.ZMQError,
+                ) as e:
                     logger.error("Error handling request message: %s", e, exc_info=True)
                     err_msg = ErrorMsg(error=str(e))
-                    await socket.send(msgspec.msgpack.encode(err_msg))
+                    # Try to reply with error if we have identity
+                    if identity is not None:
+                        await socket.send_multipart(
+                            [identity, b"", msgspec.msgpack.encode(err_msg)]
+                        )
+
+    async def handle_heartbeat_request(self, socket) -> None:
+        """Handle heartbeat requests on dedicated ROUTER socket.
+
+        This runs on a separate socket to ensure heartbeats are processed
+        without being blocked by other requests.
+
+        ROUTER socket receives multi-part messages:
+        [identity, empty_frame, payload]
+        """
+        while True:
+            frames = await socket.recv_multipart()
+            with SocketMetricsContext(self, SocketType.REPLY):
+                identity = None
+                try:
+                    # ROUTER socket: [identity, empty_frame, payload]
+                    if len(frames) < 3:
+                        logger.error(
+                            "Invalid heartbeat ROUTER message format, "
+                            "expected >= 3 frames, got %d",
+                            len(frames),
+                        )
+                        continue
+                    identity = frames[0]
+                    part = frames[2]
+
+                    if part.startswith(b"{"):
+                        msg_dict = json.loads(part)
+                        msg = msgspec.convert(msg_dict, type=Msg)
+                    else:
+                        msg = msgspec.msgpack.decode(part, type=Msg)
+
+                    if isinstance(msg, HeartbeatMsg):
+                        ret_msg = await self.reg_controller.heartbeat(msg)
+                        await socket.send_multipart(
+                            [identity, b"", msgspec.msgpack.encode(ret_msg)]
+                        )
+                    else:
+                        logger.error(
+                            "Unexpected message type on heartbeat socket: %s",
+                            type(msg),
+                        )
+                        err_msg = ErrorMsg(
+                            error=f"Expected HeartbeatMsg, got {type(msg)}"
+                        )
+                        await socket.send_multipart(
+                            [identity, b"", msgspec.msgpack.encode(err_msg)]
+                        )
+                except (
+                    json.JSONDecodeError,
+                    msgspec.DecodeError,
+                    msgspec.ValidationError,
+                    zmq.ZMQError,
+                ) as e:
+                    logger.error(
+                        "Error handling heartbeat request: %s", e, exc_info=True
+                    )
+                    err_msg = ErrorMsg(error=str(e))
+                    # Try to reply with error if we have identity
+                    if identity is not None:
+                        await socket.send_multipart(
+                            [identity, b"", msgspec.msgpack.encode(err_msg)]
+                        )
 
     async def health_check(self):
         while True:
-            time.sleep(self.health_check_interval)
+            await asyncio.sleep(self.health_check_interval)
             worker_infos = self.reg_controller.registry.get_all_worker_infos()
             for worker_info in worker_infos:
                 if (
@@ -329,6 +476,10 @@ class LMCacheControllerManager:
         tasks = []
         if self.controller_urls["reply"] is not None:
             tasks.append(self.handle_batched_req_request(self.controller_reply_socket))
+        if self.controller_heartbeat_socket is not None:
+            tasks.append(
+                self.handle_heartbeat_request(self.controller_heartbeat_socket)
+            )
         tasks.append(self.handle_batched_push_request(self.controller_pull_socket))
         await asyncio.gather(
             *tasks,

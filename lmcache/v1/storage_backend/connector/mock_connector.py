@@ -177,6 +177,9 @@ class MockConnector(RemoteConnector):
         read_throughput: GB/s for reading
         write_throughput: GB/s for writing
         """
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
