@@ -122,6 +122,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
     def __init__(
         self,
+        num_kv_head: int,
+        head_size: int,
         hidden_dim_size: int,
         num_layers: int,
         use_gpu: bool = False,
@@ -133,8 +135,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         - chunk_size: The MAX size of the chunk to be copied to GPU.
         - dtype: The data type of the intermediate buffer.
         """
+        self.num_kv_head = num_kv_head
+        self.head_size = head_size
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
+        assert "block_size" in kwargs, (
+            "block_size should be provided to create a GPU buffer."
+        )
+        self.block_size = kwargs["block_size"]
         self.kv_cache_pointers = torch.empty(
             num_layers, dtype=torch.int64, device="cpu"
         )
@@ -167,6 +175,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
     def from_metadata(
         cls,
         metadata: LMCacheEngineMetadata,
+        block_size: int,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV2":
@@ -189,6 +198,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         hidden_dim_size = num_kv_head * head_size
 
         return cls(
+            num_kv_head=num_kv_head,
+            head_size=head_size,
             hidden_dim_size=hidden_dim_size,
             num_layers=num_layers,
             use_gpu=use_gpu,
@@ -196,6 +207,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             dtype=metadata.kv_dtype,
             device=device,
             use_mla=metadata.use_mla,
+            block_size=block_size,
         )
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
@@ -216,7 +228,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         else:
             # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
             assert kv_caches[0].dim() == 5
-            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[3]
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -266,12 +278,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
-        lmc_ops.multi_layer_kv_transfer(
+        lmc_ops.multi_layer_kv_transfer_vllm(
             memory_obj.tensor,
             kv_cache_pointers,
             slot_mapping[start:end],
             self.device,
             self.page_buffer_size,
+            self.block_size,
+            self.head_size,
             False,
             self.use_mla,
         )
@@ -311,12 +325,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                lmc_ops.multi_layer_kv_transfer(
+                lmc_ops.multi_layer_kv_transfer_vllm(
                     memory_obj.tensor,
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
+                    self.block_size,
+                    self.head_size,
                     True,
                     self.use_mla,
                 )
@@ -324,12 +340,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches[0].device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                lmc_ops.multi_layer_kv_transfer(
+                lmc_ops.multi_layer_kv_transfer_vllm(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
                     self.page_buffer_size,
+                    self.block_size,
+                    self.head_size,
                     True,
                     self.use_mla,
                 )
@@ -358,24 +376,27 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         kv_size = 1 if self.use_mla else 2
-        return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
+        return torch.Size([kv_size, self.num_layers, self.num_kv_head, num_tokens * self.head_size])
 
 
 class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     def __init__(
         self,
         metadata: LMCacheEngineMetadata,
+        block_size: int,
         device: torch.device,
         use_gpu: bool = False,
     ):
         assert device.type == "cuda", "The device should be CUDA."
         self.metadata = metadata
+        self.block_size = block_size
         self.device = device
         self.use_mla = metadata.use_mla
         self.chunk_size = metadata.chunk_size
         self.use_gpu = use_gpu
         self.kvcaches: Optional[List[torch.Tensor]] = None
         self.page_buffer_size = 0
+        self.head_size = 0
 
         self.init = False
         self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
@@ -388,11 +409,12 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     def from_metadata(
         cls,
         metadata: LMCacheEngineMetadata,
+        block_size: int,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV3":
         assert device is not None
-        return cls(metadata, device, use_gpu)
+        return cls(metadata, block_size, device, use_gpu)
 
     def _initialize_kv_cache_pointers(self):
         if self.init:
@@ -431,12 +453,14 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             self.page_buffer_size = (
                 self.kvcaches[0].shape[0] * self.kvcaches[0].shape[1]
             )
+            self.head_size = self.kvcaches[0].shape[2]
         else:
             # kvcaches[0].shape: [2, num_pages, page_size, num_heads, head_size]
             assert self.kvcaches[0].dim() == 5
             self.page_buffer_size = (
-                self.kvcaches[0].shape[1] * self.kvcaches[0].shape[2]
+                self.kvcaches[0].shape[1] * self.kvcaches[0].shape[3]
             )
+            self.head_size = self.kvcaches[0].shape[4]
         self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
 
@@ -458,12 +482,14 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
-            lmc_ops.multi_layer_kv_transfer(
+            lmc_ops.multi_layer_kv_transfer_vllm(
                 memory_obj_tensor,
                 kv_cache_pointer,
                 slot_mapping[start:end],
                 self.device,
                 self.page_buffer_size,
+                self.block_size,
+                self.head_size,
                 False,
                 self.use_mla,
             )
@@ -486,12 +512,14 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 ):
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
-                    lmc_ops.multi_layer_kv_transfer(
+                    lmc_ops.multi_layer_kv_transfer_vllm(
                         memory_obj_tensor,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
+                        self.block_size,
+                        self.head_size,
                         True,
                         self.use_mla,
                     )
@@ -502,12 +530,14 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                     self.group_kv_cache_pointers_on_gpu
                 ):
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
-                    lmc_ops.multi_layer_kv_transfer(
+                    lmc_ops.multi_layer_kv_transfer_vllm(
                         tmp_gpu_buffer,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
+                        self.block_size,
+                        self.head_size,
                         True,
                         self.use_mla,
                     )

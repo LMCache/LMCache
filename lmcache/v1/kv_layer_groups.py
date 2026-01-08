@@ -70,6 +70,30 @@ class KVLayerGroupInfo:
         else:
             raise ValueError(f"Invalid shape: {self.shape}")
 
+    @property
+    def num_kv_heads(self) -> int:
+        """Return the size of the number of kv heads in this group."""
+        if len(self.shape) == 5:
+            # MHA
+            return self.shape[3]
+        elif len(self.shape) == 3:
+            # MLA
+            return 1
+        else:
+            raise ValueError(f"Invalid shape: {self.shape}")
+
+    @property
+    def head_size(self) -> int:
+        """Return the head size in this group."""
+        if len(self.shape) == 5:
+            # MHA
+            return self.shape[4]
+        elif len(self.shape) == 3:
+            # MLA
+            return self.shape[2]
+        else:
+            raise ValueError(f"Invalid shape: {self.shape}")
+
     def contains_layer(self, layer_idx: int) -> bool:
         """Check if a layer index belongs to this group."""
         return layer_idx in self._layer_indices_set

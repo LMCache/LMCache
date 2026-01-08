@@ -8,6 +8,16 @@
 // #ifndef MEM_KERNELS_CUH
 // #define MEM_KERNELS_CUH
 
+void multi_layer_kv_transfer_vllm(torch::Tensor& key_value,
+                                  const torch::Tensor& key_value_ptrs,
+                                  const torch::Tensor& slot_mapping,
+                                  const torch::Device& paged_memory_device,
+                                  const int page_buffer_size,
+                                  const int block_size,
+                                  const int head_size,
+                                  const bool direction,
+                                  const bool use_mla);
+
 void multi_layer_kv_transfer(torch::Tensor& key_value,
                              const torch::Tensor& key_value_ptrs,
                              const torch::Tensor& slot_mapping,
