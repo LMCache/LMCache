@@ -556,9 +556,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             pass
 
         raw = self._rawdev()
-        raw.pread_into(
-            entry.offset + self.header_bytes, buf, payload_len, total_len
-        )
+        raw.pread_into(entry.offset + self.header_bytes, buf, payload_len, total_len)
 
         memory_obj.metadata.cached_positions = meta.cached_positions
         with self._lock:
