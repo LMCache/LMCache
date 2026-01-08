@@ -53,11 +53,18 @@ def storage_plugin_launcher(
     Looks for backend configurations in config.extra_config and instantiates
     them using the specified module and class names.
     """
-    if not config.extra_config:
-        return
-
     # Get the list of allowed external backends if configured
     storage_plugins = set(config.storage_plugins) if config.storage_plugins else set()
+    if storage_plugins and not config.extra_config:
+        logger.warning(
+            "storage_plugins=%s is set but extra_config is empty; "
+            "plugin settings must be provided under extra_config, e.g. "
+            "extra_config.storage_plugin.<name>.module_path/class_name",
+            sorted(storage_plugins),
+        )
+        return
+    if not config.extra_config:
+        return
 
     for storage_plugin in storage_plugins:
         try:
