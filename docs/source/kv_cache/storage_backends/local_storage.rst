@@ -64,6 +64,61 @@ backends have asynchronous put() operations so that the IO latency will not slow
 The local disk backend also has a prefetch() operation that will preemptively move KV caches from the disk to CPU RAM offloading storage
 (i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM <./cpu_ram>`) for specified tokens (these KV caches are also still kept in the disk).
 
+.. _staging-buffer-mode:
+
+Staging Buffer Mode (Disk-Only Caching)
+---------------------------------------
+
+When you want to use **only disk** for KV cache storage (without CPU caching), you need to enable
+the ``use_only_staging_buffer`` flag along with ``local_cpu: false``.
+
+**Why is this needed?**
+
+Even with ``local_cpu: false``, CPU memory is still required as a **staging buffer** for data transfers
+between GPU and disk. By default, this staging buffer also participates in cache lookups, which means
+data might be served from CPU memory instead of disk.
+
+With ``use_only_staging_buffer: true``, the CPU memory is used **only** as a temporary staging buffer:
+
+- Cache lookups skip the CPU backend entirely
+- Data is always retrieved from disk
+- No write-back to CPU after disk retrieval
+- CPU memory usage is minimized
+
+**Configuration comparison:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 25 50
+
+   * - Configuration
+     - CPU in Lookups
+     - Behavior
+   * - ``local_cpu: true``
+     - Yes
+     - Normal CPU+Disk tiered caching
+   * - ``local_cpu: false``
+     - Yes
+     - CPU still participates in lookups (default behavior)
+   * - | ``local_cpu: false``
+       | ``use_only_staging_buffer: true``
+     - No
+     - **Disk-only caching** (CPU is staging buffer only)
+
+**Environment Variables:**
+
+.. code-block:: bash
+
+    export LMCACHE_LOCAL_CPU=false
+    export LMCACHE_USE_ONLY_STAGING_BUFFER=true
+
+**Configuration File:**
+
+.. code-block:: yaml
+
+    local_cpu: false
+    use_only_staging_buffer: true
+
 .. _local-storage-online-inference-example:
 
 Online Inference Example
@@ -114,7 +169,7 @@ GPU memory and LMCache is necessary to keep KV caches in non-GPU memory:
 
 **Step 2. Start a vLLM server with Disk offloading enabled:**
 
-*Generally, it is not recommended but we will disable CPU offloading to feel just the disk offloading latency.*
+*Generally, it is not recommended but we will disable CPU caching to feel just the disk offloading latency.*
 
 Create a an lmcache configuration file called: ``disk-offload.yaml``
 
@@ -124,17 +179,27 @@ Example ``config.yaml``:
 
     chunk_size: 256
     local_cpu: false
+    use_only_staging_buffer: true  # Required for disk-only caching
     max_local_cpu_size: 5.0
     local_disk: "file:///local/disk_test/local_disk/"
     max_local_disk_size: 5.0
 
-If you don't want to use a config file, uncomment the first five environment variables
+.. note::
+
+    The ``use_only_staging_buffer: true`` flag is required to ensure that cache lookups
+    go directly to disk and skip the CPU backend. Without this flag, CPU memory would
+    still participate in cache lookups even with ``local_cpu: false``.
+
+    See :ref:`staging-buffer-mode` for more details.
+
+If you don't want to use a config file, uncomment the first six environment variables
 and then comment out the ``LMCACHE_CONFIG_FILE`` below:
 
 .. code-block:: bash
 
     # LMCACHE_CHUNK_SIZE=256 \
     # LMCACHE_LOCAL_CPU=False \
+    # LMCACHE_USE_ONLY_STAGING_BUFFER=True \
     # LMCACHE_MAX_LOCAL_CPU_SIZE=5.0 \
     # LMCACHE_LOCAL_DISK="file:///local/disk_test/local_disk/" \
     # LMCACHE_MAX_LOCAL_DISK_SIZE=5.0 \
@@ -229,11 +294,23 @@ Then run:
 Since we're in streaming mode, you'll be able to feel the TTFT differential in
 real time!
 
-Note that if we were to enable ``LMCACHE_LOCAL_CPU=True``, we would just be using
-the same example from :doc:`CPU RAM <./cpu_ram>` since the CPU RAM is checked before
-the disk by LMCache. In practice, the disk will be capable of storing a larger
-quantity of KV caches so the CPU RAM offloading will only be able to store a
-subset of the disk's KV caches.
+.. note::
+
+    **Understanding CPU and Disk interaction:**
+
+    - With ``local_cpu: true`` (default), CPU RAM is checked **before** disk.
+      This provides faster access for cached data but uses more CPU memory.
+
+    - With ``local_cpu: false`` and ``use_only_staging_buffer: false`` (default),
+      CPU still participates in cache lookups. This is the legacy behavior.
+
+    - With ``local_cpu: false`` and ``use_only_staging_buffer: true``,
+      lookups go **directly to disk**, skipping CPU entirely.
+      CPU is only used as a temporary staging buffer for GPU-to-disk transfers.
+
+    In practice, the disk will be capable of storing a larger quantity of KV caches,
+    so when both CPU and disk caching are enabled, the CPU RAM will only store a
+    subset (the most recently used) of the disk's KV caches.
 
 **Example Output:**
 
