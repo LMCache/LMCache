@@ -1265,10 +1265,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
-        offset = starts[0]
         current_stream = torch.cuda.current_stream()
 
         for layer_id in range(self.num_layers):
+            offset = starts[0]
+            prev_end = starts[0]
             memory_objs_layer = memory_objs[layer_id]
             # kvcaches -> gpu_buffer -> memobj
             with torch.cuda.stream(self.store_stream):
@@ -1288,6 +1289,10 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 ):
                     assert memory_obj.tensor is not None
                     if self.use_gpu:
+                        # adjust the offset due to non-contiguous chunks
+                        if start != prev_end:
+                            offset += start - prev_end
+                        
                         memory_obj.tensor.copy_(
                             tmp_gpu_buffer_obj.tensor[start - offset : end - offset],
                             non_blocking=True,
@@ -1306,6 +1311,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     if self.use_mla:
                         memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
+                    prev_end = end
             yield
             if sync:
                 self.store_stream.synchronize()
