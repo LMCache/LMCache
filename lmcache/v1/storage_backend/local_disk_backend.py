@@ -292,6 +292,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ):
         assert memory_obj.tensor is not None
 
@@ -339,6 +340,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.async_save_bytes_to_disk,
                 key=key,
                 memory_obj=memory_obj,
+                on_complete_callback=on_complete_callback,
             ),
             self.loop,
         )
@@ -349,9 +351,10 @@ class LocalDiskBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            self.submit_put_task(key, memory_obj, on_complete_callback)
 
     def get_blocking(
         self,
@@ -458,9 +461,17 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Convert KV to bytes and async store bytes to disk.
+
+        Args:
+            key: The cache key for this KV chunk.
+            memory_obj: The memory object containing the KV data.
+            on_complete_callback: Optional callback to invoke after the disk
+                write completes. Used by StorageManager to release staging
+                buffer entries when use_only_staging_buffer is enabled.
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
@@ -490,6 +501,13 @@ class LocalDiskBackend(StorageBackendInterface):
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
 
         self.disk_worker.remove_put_task(key)
+
+        # Call the completion callback if provided (e.g., to release staging buffer)
+        if on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     def batched_async_load_bytes_from_disk(
         self,
