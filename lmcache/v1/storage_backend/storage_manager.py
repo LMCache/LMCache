@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
+    from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
 logger = init_logger(__name__)
 
@@ -397,6 +398,22 @@ class StorageManager:
             memory_objs,
         )
 
+        # When staging buffer mode is enabled, create a callback to release
+        # CPU cache entries after disk write completes
+        staging_buffer_callback = None
+        if (
+            not self.config.local_cpu
+            and self.config.use_only_staging_buffer
+            and "LocalCPUBackend" in self.storage_backends
+        ):
+            local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+            assert isinstance(local_cpu_backend, LocalCPUBackend)
+
+            def staging_buffer_callback(key: CacheEngineKey) -> None:
+                """Release CPU staging buffer entry after disk write completes."""
+                local_cpu_backend.remove(key, force=True)
+                logger.debug(f"Released staging buffer for key {key}")
+
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
                 continue
@@ -412,7 +429,21 @@ class StorageManager:
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
             ks, objs = obj_dict[cname]
-            backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
+
+            # Pass callback to disk backend for staging buffer release
+            if (
+                backend_name == "LocalDiskBackend"
+                and staging_buffer_callback is not None
+            ):
+                disk_backend = cast("LocalDiskBackend", backend)
+                disk_backend.batched_submit_put_task(
+                    ks,
+                    objs,
+                    transfer_spec=transfer_spec,
+                    on_complete_callback=staging_buffer_callback,
+                )
+            else:
+                backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
 
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:
@@ -433,9 +464,14 @@ class StorageManager:
             # are allocated by the allocator backend.
             memory_obj = backend.get_blocking(key)
             if memory_obj:
+                # Write-back to CPU cache (skip if use_only_staging_buffer is enabled)
                 if (
                     backend_name not in ["LocalCPUBackend", "PDBackend"]
                     and "LocalCPUBackend" in self.storage_backends
+                    and not (
+                        not self.config.local_cpu
+                        and self.config.use_only_staging_buffer
+                    )
                 ):
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
@@ -477,10 +513,15 @@ class StorageManager:
             if memory_objs:
                 # Align with single-key `get()` logic:
                 # auto-write remote data to local CPU cache
+                # (skip if use_only_staging_buffer is enabled)
                 if (
                     backend_name not in ["LocalCPUBackend", "PDBackend"]
                     and "LocalCPUBackend" in self.storage_backends
                     and None not in memory_objs
+                    and not (
+                        not self.config.local_cpu
+                        and self.config.use_only_staging_buffer
+                    )
                 ):
                     logger.debug(
                         "Storing %s objects from %s to LocalCPUBackend",
@@ -1025,6 +1066,15 @@ class StorageManager:
             with self._freeze_lock:
                 if self._freeze and backend_name != "LocalCPUBackend":
                     continue
+            # When use_only_staging_buffer is enabled with local_cpu disabled,
+            # skip LocalCPUBackend for lookups/gets.
+            # CPU is only used as allocator/staging buffer, not for caching.
+            if (
+                backend_name == "LocalCPUBackend"
+                and not self.config.local_cpu
+                and self.config.use_only_staging_buffer
+            ):
+                continue
             if location and backend_name != location:
                 continue
             if search_range and backend_name not in search_range:
