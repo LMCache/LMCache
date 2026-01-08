@@ -256,15 +256,11 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def support_batched_contains(self) -> bool:
-        return False
-
     def batched_contains(
         self,
         keys: List[CacheEngineKey],
         pin: bool = False,
-        stop_after_first_not_exits: bool = True,
-    ) -> List[bool]:
+    ) -> int:
         """
         Check whether the keys are in the storage backend.
 
@@ -274,12 +270,14 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             If True, the corresponding KV cache will be
             pinned in the storage backend.
 
-        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
-        all subsequent results will return False directly.
-
-        :return: Return a bool list, True if the key exists, False otherwise.
+        :return: Return hit chunks by prefix match.
         """
-        raise NotImplementedError
+        hit_chunks = 0
+        for key in keys:
+            if not self.contains(key, pin):
+                break
+            hit_chunks += 1
+        return hit_chunks
 
 
 class AllocatorBackendInterface(StorageBackendInterface):
@@ -315,8 +313,8 @@ class AllocatorBackendInterface(StorageBackendInterface):
     @abc.abstractmethod
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -324,8 +322,10 @@ class AllocatorBackendInterface(StorageBackendInterface):
         """
         Allocates memory in the backend to hold a tensor of the given shape.
 
-        :param torch.Size shape: The shape of the tensor to allocate.
-        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param Union[torch.Size, list[torch.Size]] shapes:
+            The shape of the tensor to allocate.
+        :param Union[torch.dtype, list[torch.dtype]] dtypes:
+            The dtype of the tensor to allocate.
         :param MemoryFormat fmt: The format of the memory to allocate.
         :param bool eviction: whether to enable eviction when allocating.
         :param bool busy_loop: whether to enable a busy loop to wait
@@ -342,8 +342,8 @@ class AllocatorBackendInterface(StorageBackendInterface):
     @abc.abstractmethod
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -354,8 +354,10 @@ class AllocatorBackendInterface(StorageBackendInterface):
         in a batched manner. The allocated memory objects will have the same
         shape, dtype, and format.
 
-        :param torch.Size shape: The shape of the tensor to allocate.
-        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param Union[torch.Size, list[torch.Size]] shapes:
+            The shape of the tensor to allocate.
+        :param Union[torch.dtype, list[torch.dtype]] dtypes:
+            The dtype of the tensor to allocate.
         :param int batch_size: The number of memory objects to allocate.
         :param MemoryFormat fmt: The format of the memory to allocate.
         :param bool eviction: whether to enable eviction when allocating.
@@ -377,7 +379,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
         raise NotImplementedError
 
 
-class ConfigurableStorageBackendInterface(StorageBackendInterface):
+class StoragePluginInterface(StorageBackendInterface):
     """The Configurable Storage Backend Interface needs to be implemented
     when you want to add a storage backend in a configurable or plug and play
     fashion."""
@@ -410,3 +412,7 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
         self.metadata = metadata
         self.local_cpu_backend = local_cpu_backend
         self.loop = loop
+
+
+# TODO: Alias for backwards compatibility - remove when applicable
+ConfigurableStorageBackendInterface = StoragePluginInterface

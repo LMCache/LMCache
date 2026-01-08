@@ -37,6 +37,7 @@ extensions = [
     # "sphinx_copybutton",
     "sphinx_multiversion",
     "sphinxcontrib.images",
+    "sphinx_design",
 ]
 
 copybutton_prompt_text = r"^(\$ |>>> |\# )"

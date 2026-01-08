@@ -34,7 +34,7 @@ python -m infinistore.server --service-port 12345 --dev-name mlx5_0 --link-type 
 
 2. start lmcache
 ```
-LMCACHE_CONFIG_FILE=backend_type.yaml LMCACHE_USE_EXPERIMENTAL=True python -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2  --max-model-len 8192
+LMCACHE_CONFIG_FILE=backend_type.yaml python -m lmcache_vllm.vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2  --max-model-len 8192
 ```
 
 

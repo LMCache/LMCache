@@ -127,6 +127,14 @@ class ConnectorContext:
         self.config = config
         self.metadata = metadata
 
+    def get_full_chunk_size(self) -> int:
+        """
+        return the number of bytes in a full chunk
+        useful for S3Connector where we need to preallocate filesystem buffers
+        in ramfs for zero-copy transfers
+        """
+        return self.local_cpu_backend.get_full_chunk_size()
+
 
 class ConnectorAdapter(ABC):
     """Base class for connector adapters."""
@@ -211,9 +219,8 @@ class ConnectorManager:
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
             if adapter.can_parse(self.context.url):
+                logger.info(f"Creating connector for URL: {self.context.url}")
                 connector = adapter.create_connector(self.context)
-                connector.init_chunk_meta(self.context.config, self.context.metadata)
-                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")

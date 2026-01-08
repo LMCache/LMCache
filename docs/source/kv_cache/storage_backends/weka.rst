@@ -16,16 +16,12 @@ Ways to configure LMCache WEKA Offloading
 
 **1. Environment Variables:**
 
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
-
 .. code-block:: bash
 
-    # Specify LMCache V1
-    export LMCACHE_USE_EXPERIMENTAL=True
     # 256 Tokens per KV Chunk
     export LMCACHE_CHUNK_SIZE=256
     # Path to Weka Mount
-    export LMCACHE_WEKA_PATH="/mnt/weka/cache"
+    export LMCACHE_GDS_PATH="/mnt/weka/cache"
     # CuFile Buffer Size in MiB
     export LMCACHE_CUFILE_BUFFER_SIZE="8192"
     # Disabling CPU RAM offload is sometimes recommended as the
@@ -38,8 +34,6 @@ Ways to configure LMCache WEKA Offloading
 
 Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
 
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
-
 Example ``config.yaml``:
 
 .. code-block:: yaml
@@ -49,7 +43,7 @@ Example ``config.yaml``:
     # Disable local CPU
     local_cpu: false
     # Path to Weka Mount
-    weka_path: "/mnt/weka/cache"
+    gds_path: "/mnt/weka/cache"
     # CuFile Buffer Size in MiB
     cufile_buffer_size: 8192
     # GDS I/O Threads
@@ -113,7 +107,7 @@ Create a an lmcache configuration file called: ``weka-offload.yaml``
 
     local_cpu: false
     chunk_size: 256
-    weka_path: "/mnt/weka/cache"
+    gds_path: "/mnt/weka/cache"
     cufile_buffer_size: 8192
     extra_config:
       gds_io_threads: 32
@@ -125,11 +119,10 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
 
     # LMCACHE_LOCAL_CPU=False \
     # LMCACHE_CHUNK_SIZE=256 \
-    # LMCACHE_WEKA_PATH="/mnt/weka/cache" \
+    # LMCACHE_GDS_PATH="/mnt/weka/cache" \
     # LMCACHE_CUFILE_BUFFER_SIZE=8192 \
     # LMCACHE_EXTRA_CONFIG='{"gds_io_threads": 32}' \
     LMCACHE_CONFIG_FILE="weka-offload.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 65536 \

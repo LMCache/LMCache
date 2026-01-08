@@ -12,7 +12,6 @@ import os
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -20,6 +19,7 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.system_detection import NUMADetector
 
 logger = init_logger(__name__)
 
@@ -44,6 +44,9 @@ class MooncakeStoreConfig:
         """Load the config from a JSON file."""
         with open(file_path) as fin:
             config = json.load(fin)
+        # Read Mooncake-specific knob
+        prefer_local_alloc = config.get("mooncake_prefer_local_alloc", False)
+
         return MooncakeStoreConfig(
             local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
@@ -54,7 +57,7 @@ class MooncakeStoreConfig:
             master_server_address=config.get("master_server_address"),
             transfer_timeout=config.get("transfer_timeout", 1),
             storage_root_dir=config.get("storage_root_dir", ""),
-            prefer_local_alloc=config.get("prefer_local_alloc", False),
+            prefer_local_alloc=prefer_local_alloc,
         )
 
     @staticmethod
@@ -75,6 +78,9 @@ class MooncakeStoreConfig:
         extra_config = config.extra_config
         if extra_config is None:
             raise ValueError("The extra config is not set.")
+        # Read Mooncake-specific knob
+        prefer_local_alloc = extra_config.get("mooncake_prefer_local_alloc", False)
+
         return MooncakeStoreConfig(
             local_hostname=extra_config["local_hostname"],
             metadata_server=extra_config["metadata_server"],
@@ -85,7 +91,7 @@ class MooncakeStoreConfig:
             master_server_address=extra_config["master_server_address"],
             transfer_timeout=extra_config.get("transfer_timeout", 1),
             storage_root_dir=extra_config.get("storage_root_dir", ""),
-            prefer_local_alloc=extra_config.get("prefer_local_alloc", False),
+            prefer_local_alloc=prefer_local_alloc,
         )
 
 
@@ -99,9 +105,16 @@ class MooncakestoreConnector(RemoteConnector):
         local_cpu_backend: LocalCPUBackend,
         lmcache_config: Optional[LMCacheEngineConfig],
     ):
+        # initialize base class, which includes some common attributes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
         try:
             # Third Party
-            from mooncake.store import MooncakeDistributedStore, ReplicateConfig
+            from mooncake.store import (
+                MooncakeDistributedStore,
+                ReplicateConfig,
+                bind_to_numa_node,
+            )
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
@@ -121,8 +134,9 @@ class MooncakestoreConnector(RemoteConnector):
             else:
                 raise ValueError("MOONCAKE_CONFIG_PATH/lmcache_config must be provided")
 
-            if host != "" and port != 0:
-                self.config.master_server_address = host + ":" + str(port)
+            if not self.config.master_server_address:
+                if host != "" and port != 0:
+                    self.config.master_server_address = host + ":" + str(port)
             if dev_name != "":
                 self.config.device_name = dev_name
             logger.info("Mooncake Configuration loaded. config: %s", self.config)
@@ -145,6 +159,36 @@ class MooncakestoreConnector(RemoteConnector):
             logger.info(f"  protocol: {self.config.protocol}")
             logger.info(f"  device_name: {self.config.device_name}")
             logger.info(f"  master_server_address: {self.config.master_server_address}")
+
+            try:
+                numa_mapping = getattr(
+                    local_cpu_backend.memory_allocator, "numa_mapping", None
+                )
+                if numa_mapping is None and lmcache_config is not None:
+                    numa_mapping = NUMADetector.get_numa_mapping(lmcache_config)
+
+                if numa_mapping:
+                    current_device_id = torch.cuda.current_device()
+                    gpu_to_numa = getattr(numa_mapping, "gpu_to_numa_mapping", {})
+                    numa_id = gpu_to_numa.get(current_device_id)
+                    logger.info(
+                        f"NUMA mapping detected (pre-Mooncake setup): {gpu_to_numa}"
+                    )
+                    if numa_id is not None:
+                        bind_to_numa_node(numa_id)
+                        logger.info(
+                            f"GPU {current_device_id}, NUMA node {numa_id} binding done"
+                        )
+                    else:
+                        logger.info(
+                            f"NUMA mapping not found for GPU {current_device_id}"
+                        )
+                else:
+                    logger.info("NUMA mapping unavailable or disabled")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to determine NUMA mapping before Mooncake setup: {e}"
+                )
 
             self.store.setup(
                 self.config.local_hostname,
@@ -180,23 +224,6 @@ class MooncakestoreConnector(RemoteConnector):
         self._register_cpu_buffer()
 
         logger.info("MooncakeConnector initialized successfully.")
-
-    def init_chunk_meta(
-        self,
-        config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
-    ) -> None:
-        """Initialize chunk metadata and log the configuration."""
-        super().init_chunk_meta(config, metadata)
-
-        if self.meta_shape and self.meta_dtype and self.meta_fmt:
-            logger.info("MooncakeConnector using optimized mode")
-        else:
-            logger.info("MooncakeConnector using legacy mode")
-            logger.info(
-                "Try setting 'save_chunk_meta' to False in the configuration "
-                "for better performance"
-            )
 
     def _register_cpu_buffer(self):
         """Register CPU buffer for zero-copy operations."""
@@ -264,6 +291,22 @@ class MooncakestoreConnector(RemoteConnector):
             # Use optimized mode with local metadata
             return await self._batch_get_into(keys)
 
+    def support_batched_async_contains(self) -> bool:
+        return True
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        num_hit_counts = 0
+        for key in keys:
+            if not self.store.is_exist(key.to_string()):
+                break
+            num_hit_counts += 1
+        return num_hit_counts
+
     async def _batch_get_into(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
@@ -271,11 +314,11 @@ class MooncakestoreConnector(RemoteConnector):
         Zero-copy batch get using batch_get_into when metadata is available locally.
         This is used when save_chunk_meta=False (metadata not stored remotely).
         """
-        if not self.meta_shape or not self.meta_dtype or not self.meta_fmt:
+        if not self.meta_shapes or not self.meta_dtypes or not self.meta_fmt:
             logger.error(
                 f"Metadata required for batch_get_into but not available: "
-                f"meta_shape={self.meta_shape}, "
-                f"meta_dtype={self.meta_dtype}, "
+                f"meta_shapes={self.meta_shapes}, "
+                f"meta_dtypes={self.meta_dtypes}, "
                 f"meta_fmt={self.meta_fmt}"
             )
             return [None] * len(keys)
@@ -292,7 +335,7 @@ class MooncakestoreConnector(RemoteConnector):
 
         for i, _ in enumerate(keys):
             buf = self.local_cpu_backend.allocate(
-                self.meta_shape, self.meta_dtype, self.meta_fmt
+                self.meta_shapes, self.meta_dtypes, self.meta_fmt
             )
             memory_objs.append(buf)
             buf_tensor = buf.tensor
@@ -399,8 +442,8 @@ class MooncakestoreConnector(RemoteConnector):
         metadata = RemoteMetadata.deserialize(metadata_bytes)
 
         memory_obj = self.local_cpu_backend.allocate(
-            metadata.shape,
-            metadata.dtype,
+            metadata.shapes,
+            metadata.dtypes,
             metadata.fmt,
         )
         assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
@@ -410,14 +453,14 @@ class MooncakestoreConnector(RemoteConnector):
             return None
 
         if memory_obj.tensor is not None:
-            assert metadata.dtype is not None
-            num_elements = reduce(operator.mul, metadata.shape)
+            assert len(metadata.dtypes) == 1
+            num_elements = reduce(operator.mul, metadata.shapes[0])
             temp_tensor = torch.frombuffer(
                 buffer,
-                dtype=metadata.dtype,
+                dtype=metadata.dtypes[0],
                 offset=METADATA_BYTES_LEN,
                 count=num_elements,
-            ).reshape(metadata.shape)
+            ).reshape(metadata.shapes[0])
 
             memory_obj.tensor.copy_(temp_tensor)
             return memory_obj
@@ -439,6 +482,71 @@ class MooncakestoreConnector(RemoteConnector):
         else:
             # Use put_from without metadata (zero-copy)
             await self._put_without_metadata(key_str, memory_obj)
+
+    def support_batched_put(self) -> bool:
+        return True
+
+    async def batched_put(
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ):
+        """
+        Batched put with clear split by metadata mode.
+        - save_chunk_meta False: use Mooncake's batch_put_from (zero-copy).
+        - save_chunk_meta True: no batch API; fall back to sequential put_parts.
+        """
+        if not keys:
+            return
+
+        if self.save_chunk_meta:
+            await self._batched_put_with_metadata(keys, memory_objs)
+        else:
+            await self._batched_put_zero_copy(keys, memory_objs)
+
+    async def _batched_put_zero_copy(
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
+        key_strs = [k.to_string() for k in keys]
+        buffer_ptrs: list[int] = []
+        buffer_sizes: list[int] = []
+        for obj in memory_objs:
+            tensor = obj.tensor
+            assert tensor is not None
+            buffer_ptrs.append(tensor.data_ptr())
+            buffer_sizes.append(tensor.numel() * tensor.element_size())
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.batch_put_from,
+                    key_strs,
+                    buffer_ptrs,
+                    buffer_sizes,
+                    self.replica_config,
+                ),
+                timeout=self.config.transfer_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout during batch_put_from; some decoders may redo prefill."
+            )
+        finally:
+            for obj in memory_objs:
+                obj.ref_count_down()
+
+    async def _batched_put_with_metadata(
+        self,
+        keys: List[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
+        for key, obj in zip(keys, memory_objs, strict=False):
+            try:
+                await self._put_with_metadata(key.to_string(), obj)
+            finally:
+                obj.ref_count_down()
 
     async def _put_without_metadata(self, key_str: str, memory_obj: MemoryObj):
         """
@@ -481,12 +589,12 @@ class MooncakestoreConnector(RemoteConnector):
         try:
             # Serialize data and metadata
             kv_bytes = memory_obj.byte_array
-            kv_shape = memory_obj.get_shape()
-            kv_dtype = memory_obj.get_dtype()
+            kv_shapes = memory_obj.get_shapes()
+            kv_dtypes = memory_obj.get_dtypes()
             memory_format = memory_obj.get_memory_format()
 
             metadata_bytes = RemoteMetadata(
-                len(kv_bytes), kv_shape, kv_dtype, memory_format
+                len(kv_bytes), kv_shapes, kv_dtypes, memory_format
             ).serialize()
             assert len(metadata_bytes) == METADATA_BYTES_LEN
 

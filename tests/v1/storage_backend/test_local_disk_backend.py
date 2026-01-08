@@ -72,7 +72,7 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
 def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
     """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
     # First Party
-    from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
+    from lmcache.v1.memory_management import AdHocMemoryAllocator
 
     allocator = AdHocMemoryAllocator(device="cpu")
     memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
@@ -193,70 +193,4 @@ class TestLocalDiskBackend:
 
         assert result is None
 
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_async_load_bytes_from_disk(self, local_disk_backend):
-        """Test async_load_bytes_from_disk()"""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Create the file first
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        result = local_disk_backend.load_bytes_from_disk(
-            key,
-            path,
-            memory_obj.metadata.dtype,
-            memory_obj.metadata.shape,
-            memory_obj.metadata.fmt,
-        )
-
-        assert result is not None
-        assert isinstance(result, MemoryObj)
-        assert result.metadata.shape == memory_obj.metadata.shape
-        assert result.metadata.dtype == memory_obj.metadata.dtype
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_load_bytes_from_disk(self, local_disk_backend):
-        """Test load_bytes_from_disk()."""
-        key = create_test_key(3)
-        memory_obj = create_test_memory_obj()
-
-        # Create the file first
-        path = local_disk_backend._key_to_path(key)
-        with open(path, "wb") as f:
-            f.write(memory_obj.byte_array)
-
-        result = local_disk_backend.load_bytes_from_disk(
-            key,
-            path,
-            memory_obj.metadata.dtype,
-            memory_obj.metadata.shape,
-            memory_obj.metadata.fmt,
-        )
-
-        assert result is not None
-        assert isinstance(result, MemoryObj)
-        assert result.metadata.shape == memory_obj.metadata.shape
-        assert result.metadata.dtype == memory_obj.metadata.dtype
-
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
-
-    def test_file_operations_error_handling(self, local_disk_backend):
-        """Test error handling in file operations."""
-        # Test with non-existent file
-        key = create_test_key(3)
-        non_existent_path = "/non/existent/path/file.pt"
-
-        memory_obj = local_disk_backend.load_bytes_from_disk(
-            key,
-            non_existent_path,
-            torch.bfloat16,
-            torch.Size([2, 16, 8, 128]),
-            MemoryFormat.KV_T2D,
-        )
-        assert memory_obj is not None
         local_disk_backend.local_cpu_backend.memory_allocator.close()

@@ -21,12 +21,18 @@
 # Note: L4 CI runners cannot use Flash Infer
 
 set -e
-trap 'cleanup $?' EXIT
+trap 'cleanup $?' EXIT INT TERM
 
 CID=
+PREFILLER_CID=
+DECODER_CID=
+CID1=
+CID2=
 HF_TOKEN=
 SERVER_WAIT_TIMEOUT=180
 PORT=
+PORT1=
+PORT2=
 
 #############
 # UTILITIES #
@@ -35,14 +41,16 @@ PORT=
 cleanup() {
     local code="${1:-0}"
 
-    echo "→ Cleaning up Docker containers and ports..."
+    echo "→ Cleaning up Docker containers and ports..." >&2
 
     # Clean up container IDs if defined
-    for cid_var in CID PREFILLER_CID DECODER_CID; do
+    for cid_var in CID PREFILLER_CID DECODER_CID CID1 CID2; do
         local cid="${!cid_var:-}"
         if [[ -n "$cid" ]]; then
-            docker kill "$cid" &>/dev/null || true
-            docker rm "$cid" &>/dev/null || true
+            echo "  - Killing and removing container: $cid" >&2
+            docker kill "$cid" >&2 || true
+            docker rm "$cid" >&2 || true
+            printf -v "$cid_var" ''
         fi
     done
 
@@ -50,7 +58,11 @@ cleanup() {
     for port_var in PORT PORT1 PORT2; do
         local port="${!port_var:-}"
         if [[ -n "$port" ]]; then
-            fuser -k "${port}/tcp" &>/dev/null || true
+            echo "  - Killing and removing port: $port" >&2
+            fuser -k "${port}/tcp" >&2 || true
+            if [[ "$port_var" != "PORT" ]]; then
+                printf -v "$port_var" ''
+            fi
         fi
     done
 }
@@ -433,6 +445,11 @@ test_vllmopenai_server_with_lmcache_integrated() {
 run_long_doc_qa() {
     local workload_config="$1"
     local port="$2"
+    local check_warmup_round_time_per_prompt="${3:-"false"}"
+    local check_query_ttft_per_prompt="${4:-"false"}"
+    local check_query_round_time_per_prompt="${5:-"false"}"
+    local feature_type="${6:-"dummy"}"
+    local need_upload="${7:-"false"}"
 
     echo "→ Running long_doc_qa with customed workload config:"
     printf '%s\n' "$workload_config"
@@ -465,10 +482,91 @@ run_long_doc_qa() {
     fi
     source .venv/bin/activate
     uv -q pip install openai pandas matplotlib
-    python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
-        "${workload_args[@]}" \
-        --port="$port" \
-        --output="response.txt"
+    json=$(
+        python3 "$ORIG_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
+            "${workload_args[@]}" \
+            --port="$port" \
+            --output="response.txt" \
+            --json-output \
+            2>>response.txt | tail -n 1
+    )
+    query_ttft_per_prompt=$(echo "$json" | jq -r '.query_ttft_per_prompt')
+    query_round_time_per_prompt=$(echo "$json" | jq -r '.query_round_time_per_prompt')
+    warmup_round_time_per_prompt=$(echo "$json" | jq -r '.warmup_round_time_per_prompt')
+
+    if [ "$need_upload" = "true" ]; then
+        local baseline_path="$ORIG_DIR/benchmarks/long_doc_qa/$feature_type.json"
+        echo "$json"
+        printf '%s\n' "$json" > "$baseline_path"
+
+        git config user.email "$USER_EMAIL"
+        git config user.name "$USER_NAME"
+        git add "$baseline_path"
+        git commit -m "Update long_doc_qa baseline: $feature_type.json" || true
+        if ! git remote get-url internal >/dev/null 2>&1; then
+            git remote add internal git@github.com:LMCache/LMCache.git
+        fi
+        git push internal +HEAD:benchmarks-main >/dev/null 2>&1
+        return 0
+    fi
+
+    # Fetch branch
+    git fetch origin benchmarks-main >/dev/null 2>&1 || true
+
+    # Load baseline from branch
+    baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/$feature_type.json 2>/dev/null || echo "")
+
+    # Check if baseline exists, skip comparisons if not
+    if [[ -z "$baseline_json" ]] || ! echo "$baseline_json" | jq -e . >/dev/null 2>&1; then
+        echo "⚠️  No baseline found for $feature_type.json - skipping performance comparisons"
+        echo "   This is expected for newly added configs. Baseline will be generated on next nightly run."
+        echo "   Current metrics: TTFT=$query_ttft_per_prompt, Latency=$query_round_time_per_prompt, Warmup=$warmup_round_time_per_prompt"
+        return 0
+    fi
+
+    # Extract baseline numbers
+    expected_query_ttft_per_prompt=$(echo "$baseline_json" | jq -r '.query_ttft_per_prompt')
+    expected_query_round_time_per_prompt=$(echo "$baseline_json" | jq -r '.query_round_time_per_prompt')
+    expected_warmup_round_time_per_prompt=$(echo "$baseline_json" | jq -r '.warmup_round_time_per_prompt')
+
+    if [ "$check_query_ttft_per_prompt" = "true" ]; then
+        echo "Expected query ttft per prompt: $expected_query_ttft_per_prompt"
+        echo "Actual query ttft per prompt: $query_ttft_per_prompt"
+        awk -v expected="$expected_query_ttft_per_prompt" -v actual="$query_ttft_per_prompt" 'BEGIN {
+            if (actual > expected * 1.1) {
+                print "Query ttft per prompt requirement not met"
+                exit 1
+            } else {
+                print "Query ttft per prompt requirement met"
+            }
+        }'
+    fi
+
+    if [ "$check_query_round_time_per_prompt" = "true" ]; then
+        echo "Expected query round time per prompt: $expected_query_round_time_per_prompt"
+        echo "Actual query round time per prompt: $query_round_time_per_prompt"
+        awk -v expected="$expected_query_round_time_per_prompt" -v actual="$query_round_time_per_prompt" 'BEGIN {
+            if (actual > expected * 1.1) {
+                print "Query round time per prompt requirement not met"
+                exit 1
+            } else {
+                print "Query round time per prompt requirement met"
+            }
+        }'
+    fi
+
+    if [ "$check_warmup_round_time_per_prompt" = "true" ]; then
+        echo "Expected warmup round time per prompt: $expected_warmup_round_time_per_prompt"
+        echo "Actual warmup round time per prompt: $warmup_round_time_per_prompt"
+        awk -v expected="$expected_warmup_round_time_per_prompt" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
+            if (actual > expected * 1.1) {
+                print "Warmup round time per prompt requirement not met"
+                exit 1
+            } else {
+                print "Warmup round time per prompt requirement met"
+            }
+        }'
+    fi
 }
 
 #########
@@ -573,12 +671,24 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         test_vllmopenai_server_with_lmcache_integrated "$model"
     elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
+        cfg_json="$(yq '.' "$cfg_file")"
+        check_warmup_round_time_per_prompt=$(
+            jq -e '(.["checking-fields"] // []) | index("warmup_round_time_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
+        )
+        check_query_round_time_per_prompt=$(
+            jq -e '(.["checking-fields"] // []) | index("query_round_time_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
+        )
+        check_query_ttft_per_prompt=$(
+            jq -e '(.["checking-fields"] // []) | index("warmup_ttft_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
+        )
         if [[ "$feature_type" == "p2p" ]]; then
-            tmp_workload_yaml=$(jq 'del(."expected-latency")' <<< "$workload_yaml")
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
-            run_long_doc_qa "$workload_yaml" "$PORT2"
+            run_long_doc_qa "$workload_yaml" "$PORT1"
+            run_long_doc_qa "$workload_yaml" "$PORT2" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         else
-            run_long_doc_qa "$workload_yaml" "$PORT"
+            run_long_doc_qa "$workload_yaml" "$PORT" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         fi
     fi
 

@@ -35,6 +35,16 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
+
+        Args: kv_caches:
+            dictionary of layer names, kv cache
+        """
+        self._lmcache_engine.register_kv_caches(kv_caches)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
@@ -117,6 +127,14 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return block IDs that failed to load during the last interval."""
         return self._lmcache_engine.get_block_ids_with_load_errors()
+
+    def shutdown(self):
+        """
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return self._lmcache_engine.shutdown()
 
     # ==============================
     # Scheduler-side methods

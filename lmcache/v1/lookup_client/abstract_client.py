@@ -14,6 +14,20 @@ if TYPE_CHECKING:
 class LookupClientInterface(metaclass=abc.ABCMeta):
     """Abstract interface for lookup clients."""
 
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        """
+        Lookup the cache for the given lookup ID.
+
+        Args:
+            lookup_id: The lookup ID to lookup
+
+        Returns:
+            -1 means not found;
+            None means ongoing; (this semantic is not supported in sync lookup clients)
+            int >= 0 means number of hit tokens
+        """
+        return None
+
     @abc.abstractmethod
     def lookup(
         self,
@@ -23,6 +37,11 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
+        Should be called for first lookup and pinning. Subsequent lookups for the same
+        request should call lookup_cache instead.
+
+        Caller should handle overlaps between tokens that exist in LMCache
+        and tokens that are already computed by the caller.
 
         Args:
             token_ids: The token IDs to lookup
@@ -33,7 +52,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             includes tags and the other configs
 
         Returns:
-            The number of tokens that can be loaded from cache.
+            The number of tokens that exist inside LMCache.
             None indicates the lookup/prefetch is in progress.
         """
         raise NotImplementedError

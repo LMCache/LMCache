@@ -10,9 +10,11 @@ import time
 
 # Third Party
 import pytest
+import torch
 
 # First Party
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
 
 # This is to mock the constructor and destructor of
@@ -432,7 +434,9 @@ def autorelease(request):
 def autorelease_v1(request):
     objects = []
 
-    def _factory(obj):
+    def _factory(obj, **kwargs):
+        if isinstance(obj, LMCacheEngine):
+            obj.post_init(**kwargs)
         objects.append(obj)
         return obj
 
@@ -486,3 +490,18 @@ def use_shared_allocator(request, monkeypatch, memory_allocator):
         _create_shared_allocator,
     )
     yield
+
+
+@pytest.fixture(scope="function")
+def lmcache_engine_metadata(role="worker"):
+    """Create a fresh LMCacheEngineMetadata for each test."""
+    return LMCacheEngineMetadata(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        fmt="vllm",
+        kv_dtype=torch.bfloat16,
+        kv_shape=(32, 2, 256, 32, 128),
+        use_mla=False,
+        role=role,
+    )

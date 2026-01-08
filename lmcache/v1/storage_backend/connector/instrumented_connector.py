@@ -123,16 +123,11 @@ class InstrumentedRemoteConnector(RemoteConnector):
     def remove_sync(self, key: CacheEngineKey) -> bool:
         return self._connector.remove_sync(key)
 
-    def batched_contains(
-        self, keys: List[CacheEngineKey], stop_after_first_not_exits: bool = True
-    ) -> List[bool]:
-        return self._connector.batched_contains(keys, stop_after_first_not_exits)
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        return self._connector.batched_contains(keys)
 
     def support_batched_contains(self) -> bool:
         return self._connector.support_batched_contains()
-
-    def init_chunk_meta(self, config, metadata) -> None:
-        return self._connector.init_chunk_meta(config, metadata)
 
     def reshape_partial_chunk(
         self, memory_obj: MemoryObj, bytes_read: int

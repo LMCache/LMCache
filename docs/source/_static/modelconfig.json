@@ -127,5 +127,19 @@
         "num_attention_heads": 32,
         "num_hidden_layers": 32,
         "num_key_value_heads": 32
+    },
+    "zai-org/GLM-4.5": {
+        "hidden_size": 5120,
+        "num_attention_heads": 96,
+        "num_hidden_layers": 92,
+        "num_key_value_heads": 8,
+        "head_dim": 128
+    },
+    "zai-org/GLM-4.6": {
+        "hidden_size": 5120,
+        "num_attention_heads": 96,
+        "num_hidden_layers": 92,
+        "num_key_value_heads": 8,
+        "head_dim": 128
     }
 }

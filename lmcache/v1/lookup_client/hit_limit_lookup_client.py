@@ -33,6 +33,9 @@ class HitLimitLookupClient(LookupClientInterface):
             f"is {self.hit_ratio_upper}, chunk size is {self.chunk_size}"
         )
 
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        return self.actual_lookup_client.lookup_cache(lookup_id)
+
     def lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
@@ -40,7 +43,11 @@ class HitLimitLookupClient(LookupClientInterface):
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
         # get real hit tokens
-        result = self.actual_lookup_client.lookup(token_ids, lookup_id, request_configs)
+        result = self.actual_lookup_client.lookup(
+            token_ids,
+            lookup_id,
+            request_configs,
+        )
         if result is not None:
             total_tokens_length = len(token_ids)
             assert result <= total_tokens_length

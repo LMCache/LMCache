@@ -11,13 +11,15 @@ import time
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
-from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
+from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
@@ -100,6 +102,7 @@ class LocalDiskBackend(StorageBackendInterface):
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
     ):
         if torch.cuda.is_available():
             super().__init__(dst_device)
@@ -150,6 +153,20 @@ class LocalDiskBackend(StorageBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+
+        # Batched message sender for controller communication
+        self.batched_msg_sender: Optional[BatchedMessageSender] = None
+
+        # Initialize batched message sender
+        if lmcache_worker and metadata is not None:
+            self.batched_msg_sender = BatchedMessageSender(
+                metadata=metadata,
+                config=config,
+                location=str(self),
+                lmcache_worker=lmcache_worker,
+            )
+        else:
+            logger.warning("Controller message sender is not initialized")
 
     def __str__(self):
         return "LocalDiskBackend"
@@ -233,10 +250,11 @@ class LocalDiskBackend(StorageBackendInterface):
             self.cache_policy.update_on_force_evict(key)
             self.disk_lock.release()
 
-        # push kv evict msg
-        if self.lmcache_worker is not None:
-            self.lmcache_worker.put_msg(
-                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+        # Push kv evict msg with batching
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.EVICT,
+                key=key.chunk_hash,
             )
 
         return True
@@ -248,6 +266,7 @@ class LocalDiskBackend(StorageBackendInterface):
         shape: torch.Size,
         dtype: torch.dtype,
         fmt: MemoryFormat,
+        cached_positions: Optional[torch.Tensor] = None,
     ) -> None:
         path = self._key_to_path(key)
 
@@ -258,12 +277,15 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.cache_policy.update_on_hit(key, self.dict)
                 has_stored = True
             else:
-                self.dict[key] = DiskCacheMetadata(path, size, shape, dtype, fmt, 0)
+                self.dict[key] = DiskCacheMetadata(
+                    path, size, shape, dtype, cached_positions, fmt, 0
+                )
 
-        # push kv admit msg
-        if self.lmcache_worker is not None and not has_stored:
-            self.lmcache_worker.put_msg(
-                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+        # Push kv admit msg with batching
+        if self.batched_msg_sender is not None and not has_stored:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.ADMIT,
+                key=key.chunk_hash,
             )
 
     def submit_put_task(
@@ -370,7 +392,7 @@ class LocalDiskBackend(StorageBackendInterface):
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
-        logger.info(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
+        logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
@@ -456,13 +478,16 @@ class LocalDiskBackend(StorageBackendInterface):
         # `submit_put_task` above.
         # Ref count down better be before `insert_key` for testing
         # purposes (e.g., testing mem_leak).
+        # TODO(Jiayi): This could be problematic if the
+        # freed memory object is immediately reused.
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
+        cached_positions = memory_obj.metadata.cached_positions
         memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt)
+        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
 
         self.disk_worker.remove_put_task(key)
 
@@ -482,6 +507,11 @@ class LocalDiskBackend(StorageBackendInterface):
         for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
             buffer = mem_obj.byte_array
             self.read_file(key, buffer, path)
+
+            # TODO(Jiayi): Please recover the metadata in a more
+            # elegant way in the future.
+            cached_positions = self.dict[key].cached_positions
+            mem_obj.metadata.cached_positions = cached_positions
 
             self.disk_lock.acquire()
             self.dict[key].unpin()
@@ -506,6 +536,12 @@ class LocalDiskBackend(StorageBackendInterface):
 
         buffer = memory_obj.byte_array
         self.read_file(key, buffer, path)
+
+        # TODO(Jiayi): Please recover the metadata in a more
+        # elegant way in the future.
+        cached_positions = self.dict[key].cached_positions
+        memory_obj.metadata.cached_positions = cached_positions
+
         return memory_obj
 
     def write_file(self, buffer, path):
@@ -543,6 +579,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     fdo.readinto(buffer)
         except FileNotFoundError:
+            logger.warning(f"File not found on disk: {path}")
             if self.dict.get(key, None):
                 self.dict.pop(key)
             return
@@ -557,4 +594,6 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.close()
         self.disk_worker.close()

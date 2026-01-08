@@ -18,7 +18,6 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
-from lmcache.v1.storage_backend.weka_gds_backend import WekaGdsBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -40,7 +39,7 @@ def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
     return metadata.role != "scheduler" and torch.cuda.is_available()
 
 
-def create_dynamic_backends(
+def storage_plugin_launcher(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
@@ -49,7 +48,7 @@ def create_dynamic_backends(
     storage_backends: OrderedDict[str, StorageBackendInterface],
 ) -> None:
     """
-    Dynamically create backends based on configuration.
+    Loads custom storage backends based on configuration.
 
     Looks for backend configurations in config.extra_config and instantiates
     them using the specified module and class names.
@@ -58,22 +57,20 @@ def create_dynamic_backends(
         return
 
     # Get the list of allowed external backends if configured
-    allowed_backends = (
-        set(config.external_backends) if config.external_backends else set()
-    )
+    storage_plugins = set(config.storage_plugins) if config.storage_plugins else set()
 
-    for backend_name in allowed_backends:
+    for storage_plugin in storage_plugins:
         try:
             module_path = config.extra_config.get(
-                f"external_backend.{backend_name}.module_path"
+                f"storage_plugin.{storage_plugin}.module_path"
             )
             class_name = config.extra_config.get(
-                f"external_backend.{backend_name}.class_name"
+                f"storage_plugin.{storage_plugin}.class_name"
             )
 
             if not module_path or not class_name:
                 logger.warning(
-                    f"Backend {backend_name} missing module_path or class_name"
+                    f"Backend {storage_plugin} missing module_path or class_name"
                 )
                 continue
 
@@ -99,11 +96,11 @@ def create_dynamic_backends(
             )
 
             # Add to storage backends
-            storage_backends[backend_name] = backend_instance
-            logger.info(f"Created dynamic backend: {backend_name}")
+            storage_backends[storage_plugin] = backend_instance
+            logger.info(f"Created dynamic backend: {storage_plugin}")
 
         except Exception as e:
-            logger.error(f"Failed to create backend {backend_name}: {str(e)}")
+            logger.error(f"Failed to create backend {storage_plugin}: {str(e)}")
 
 
 def CreateStorageBackends(
@@ -115,9 +112,10 @@ def CreateStorageBackends(
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_cuda_worker(metadata):
         dst_device = f"cuda:{torch.cuda.current_device()}"
+    elif dst_device == "xpu":
+        dst_device = f"xpu:{torch.xpu.current_device()}"
     else:
         dst_device = "cpu"
-
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 
     extra_config = config.extra_config
@@ -153,6 +151,7 @@ def CreateStorageBackends(
 
     if config.enable_p2p:
         assert local_cpu_backend is not None
+        assert lmcache_worker is not None
         p2p_backend = P2PBackend(
             config,
             metadata,
@@ -176,18 +175,12 @@ def CreateStorageBackends(
     if config.local_disk and config.max_local_disk_size > 0:
         assert local_cpu_backend is not None
         local_disk_backend = LocalDiskBackend(
-            config, loop, local_cpu_backend, dst_device, lmcache_worker
+            config, loop, local_cpu_backend, dst_device, lmcache_worker, metadata
         )
 
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 
-    if config.weka_path is not None:
-        weka_backend = WekaGdsBackend(config, metadata, loop, dst_device)
-        # TODO(Serapheim): there's a chance we don't want the local
-        # CPU cache in front of ours. Let's experiment and potentially
-        # change that in the future.
-        storage_backends[str(weka_backend)] = weka_backend
     if config.gds_path is not None:
         gds_backend = GdsBackend(config, metadata, loop, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
@@ -203,8 +196,8 @@ def CreateStorageBackends(
         storage_backends[backend_name] = remote_backend
 
     if not config.enable_pd or config.local_cpu:
-        # Create dynamic backends from configuration
-        create_dynamic_backends(
+        # Load storage backends from configuration
+        storage_plugin_launcher(
             config,
             metadata,
             loop,

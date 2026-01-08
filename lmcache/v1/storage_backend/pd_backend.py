@@ -223,8 +223,8 @@ class PDBackend(AllocatorBackendInterface):
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         paged_mem_allocator.init_gpu_memory_allocator(
             config.pd_buffer_size,
-            torch.Size(metadata.kv_shape),
-            metadata.kv_dtype,
+            [torch.Size(metadata.kv_shape)],
+            [metadata.kv_dtype],
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
             corrected_device,
         )
@@ -239,8 +239,8 @@ class PDBackend(AllocatorBackendInterface):
 
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -249,15 +249,15 @@ class PDBackend(AllocatorBackendInterface):
             fmt = MemoryFormat.KV_2LTD
         # NOTE: no eviction and busy_loop in PD
         return self.memory_allocator.allocate(
-            shape=shape, dtype=dtype, fmt=fmt, allocator_type="gpu"
+            shapes, dtypes, fmt=fmt, allocator_type="gpu"
         )
 
     # TODO(Jiayi): Please implement batched allocate to reduce memory
     # allocation overhead.
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: Optional[torch.dtype],
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -266,7 +266,7 @@ class PDBackend(AllocatorBackendInterface):
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
         return self.memory_allocator.batched_allocate(
-            shape, dtype, batch_size, fmt, allocator_type="gpu"
+            shapes, dtypes, batch_size, fmt, allocator_type="gpu"
         )
 
     # NOTE(Jiayi): If two requests have overlapped keys, will
