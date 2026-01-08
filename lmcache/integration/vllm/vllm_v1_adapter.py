@@ -593,11 +593,11 @@ def _init_lmcache_engine(
             # TODO(chunxiaozheng): unify use VLLMPagedMemGPUConnectorV3 after stable
             if lmcache_config.use_gpu_connector_v3:
                 vllm_gpu_connector = VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, cache_config.block_size, use_gpu, device
                 )
             else:
                 vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, cache_config.block_size, use_gpu, device
                 )
         elif current_platform.is_xpu():
             vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
