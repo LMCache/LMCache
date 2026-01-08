@@ -510,7 +510,11 @@ void multi_layer_kv_transfer_vllm_templated(
     lmc::load_and_reshape_multi_layer_vllm_kernel<T, true>
         <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs, slot_mapping_ptr,
                                      num_xwords, num_xwords_in_gpu_kv, elements_per_xword,
+<<<<<<< HEAD
                                      page_buffer_size, num_layers, num_heads, block_size, head_size);
+=======
+                                     num_layers, page_buffer_size, num_heads, block_size, head_size);
+>>>>>>> d2add44 (Fix kvcache layout bug.)
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 }
