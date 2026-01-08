@@ -409,7 +409,7 @@ class LMCacheManager:
         """Check if GPU intermediate buffer is needed."""
         return not self._config.enable_pd
 
-    def start(self) -> None:
+    def start_services(self) -> None:
         """Start all managed services."""
         if self._api_server is not None:
             self._api_server.start()
@@ -437,9 +437,9 @@ class LMCacheManager:
 
         self._lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
-    def shutdown(self) -> None:
-        """Shutdown all managed components gracefully."""
-        logger.info("Starting LMCacheManager shutdown...")
+    def stop_services(self) -> None:
+        """Stop all managed components gracefully."""
+        logger.info("Stopping LMCacheManager services...")
         start_time = time.time()
         errors: list[tuple[str, Union[str, Exception]]] = []
 
@@ -517,7 +517,7 @@ class LMCacheManager:
             )
         else:
             logger.info(
-                "LMCacheManager shutdown completed successfully in %.2fs", elapsed
+                "LMCacheManager services stopped successfully in %.2fs", elapsed
             )
 
     # ==================== Property Accessors ====================

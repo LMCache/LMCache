@@ -461,7 +461,7 @@ class LMCacheConnectorV1Impl:
         )
 
         # Start services managed by LMCacheManager
-        self._manager.start()
+        self._manager.start_services()
 
         # Initialize connector-specific state
         self._init_connector_state(role, vllm_config, config)
@@ -1184,7 +1184,7 @@ class LMCacheConnectorV1Impl:
     def shutdown(self):
         """Shutdown the connector by delegating to LMCacheManager."""
         logger.info("Starting LMCacheConnector shutdown...")
-        self._manager.shutdown()
+        self._manager.stop_services()
 
     ###################
     # Scheduler side APIs

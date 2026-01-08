@@ -97,11 +97,11 @@ class StandaloneLMCacheManager(LMCacheManager):
         # Standalone mode post-init is simpler (no async_lookup_server)
         self._lmcache_engine.post_init()
 
-    def shutdown(self) -> None:
+    def stop_services(self) -> None:
         """Shutdown for standalone mode with simplified logic."""
         logger.info("Starting StandaloneLMCacheManager shutdown...")
 
         # Let parent handle common shutdown logic
-        super().shutdown()
+        super().stop_services()
 
         logger.info("StandaloneLMCacheManager shutdown completed")

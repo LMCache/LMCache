@@ -168,7 +168,7 @@ class TestLMCacheManagerStart:
         manager._api_server = mock_api_server
         manager._runtime_plugin_launcher = mock_plugin_launcher
 
-        manager.start()
+        manager.start_services()
 
         mock_api_server.start.assert_called_once()
         mock_plugin_launcher.launch_plugins.assert_called_once()
@@ -191,7 +191,7 @@ class TestLMCacheManagerStart:
         manager._runtime_plugin_launcher = None
 
         # Should not raise any exception
-        manager.start()
+        manager.start_services()
 
 
 class TestLMCacheManagerPostInit:
@@ -305,7 +305,7 @@ class TestLMCacheManagerShutdown:
         manager._lookup_client = mock_lookup_client
 
         with patch("lmcache.v1.manager.LMCacheEngineBuilder") as mock_builder:
-            manager.shutdown()
+            manager.stop_services()
 
             # Verify all components were closed
             mock_offload_server.close.assert_called_once()
@@ -338,7 +338,7 @@ class TestLMCacheManagerShutdown:
 
         with patch("lmcache.v1.manager.LMCacheEngineBuilder"):
             # Should not raise any exception
-            manager.shutdown()
+            manager.stop_services()
 
     def test_shutdown_handles_component_errors(self):
         """Test shutdown() handles errors from components gracefully."""
@@ -365,7 +365,7 @@ class TestLMCacheManagerShutdown:
 
         with patch("lmcache.v1.manager.LMCacheEngineBuilder"):
             # Should not raise exception, but should continue shutdown
-            manager.shutdown()
+            manager.stop_services()
 
             # lookup_client should still be closed even if offload_server failed
             mock_lookup_client.close.assert_called_once()

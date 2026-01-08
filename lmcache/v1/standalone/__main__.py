@@ -379,7 +379,7 @@ class LMCacheStandaloneStarter:
         self._manager.post_init()
         logger.info("LMCache engine post-initialized with fixed kvcaches")
 
-        self._manager.start()
+        self._manager.start_services()
 
         self.running = True
         logger.info("LMCache engine started successfully")
@@ -393,7 +393,7 @@ class LMCacheStandaloneStarter:
         logger.info("Stopping LMCache engine...")
         self.running = False
 
-        self._manager.shutdown()
+        self._manager.stop_services()
 
         logger.info("LMCache engine stopped")
 
