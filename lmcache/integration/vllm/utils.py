@@ -17,6 +17,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -38,6 +39,11 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
 
     This function is thread-safe and implements singleton pattern,
     ensuring the configuration is loaded only once.
+
+    After loading the configuration, if 'remote_config_url' is configured,
+    this function will attempt to fetch additional configuration from the
+    remote config service. The current config and LMCACHE environment
+    variables will be sent to the service, along with 'appid' if set.
     """
     global _config_instance
 
@@ -61,6 +67,27 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                     _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
+
+                # Fetch and apply remote configuration if configured
+                remote_config_url = _config_instance.remote_config_url
+                if remote_config_url:
+                    logger.info(
+                        "Fetching remote configuration from %s", remote_config_url
+                    )
+                    app_id = _config_instance.app_id
+                    remote_response = fetch_remote_config(
+                        remote_config_url, app_id, _config_instance
+                    )
+                    if remote_response:
+                        _config_instance = apply_remote_configs(
+                            _config_instance, remote_response
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to fetch remote configuration from %s. "
+                            "Using local configuration only.",
+                            remote_config_url,
+                        )
     return _config_instance
 
 

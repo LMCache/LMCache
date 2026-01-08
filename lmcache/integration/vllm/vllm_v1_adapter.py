@@ -58,7 +58,8 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.compute.blend import LMCBlenderBuilder
-from lmcache.v1.config import LMCacheEngineConfig, _validate_and_set_config_value
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config_base import validate_and_set_config_value
 from lmcache.v1.gpu_connector import (
     GPUConnectorInterface,
     VLLMBufferLayerwiseGPUConnector,
@@ -533,22 +534,6 @@ def _init_lmcache_engine(
     ):
         raise ValueError("MLA only works with naive serde mode..")
 
-    # MLA requires save_unfull_chunk=True for correct KV cache storage and retrieval.
-    # Without this, partial chunks would be discarded, causing incomplete cache
-    # and incorrect results in MLA mode.
-    if use_mla and not lmcache_config.save_unfull_chunk:
-        logger.warning(
-            "MLA (Multi-Level Attention) requires save_unfull_chunk=True "
-            "for correct KV cache storage. Automatically setting "
-            "save_unfull_chunk=True."
-        )
-        lmcache_config.save_unfull_chunk = True
-    elif use_mla:
-        logger.info(
-            "MLA mode enabled with save_unfull_chunk=True - all KV cache "
-            "including partial chunks will be stored"
-        )
-
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
     num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
@@ -703,7 +688,7 @@ class LMCacheConnectorV1Impl:
             for key, value in kv_connector_extra_config.items():
                 if key.startswith("lmcache."):
                     config_key = key[8:]  # Remove "lmcache." prefix
-                    if _validate_and_set_config_value(config, config_key, value):
+                    if validate_and_set_config_value(config, config_key, value):
                         logger.info(
                             f"Updated config {config_key} from vLLM "
                             f"extra config: {value}"
