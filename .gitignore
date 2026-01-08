@@ -123,3 +123,6 @@ lmcache/experimental/tests
 
 # Ignore all log files
 *.log
+# Rust build outputs
+**/target/
+**/Cargo.lock
