@@ -71,8 +71,8 @@ class LMCacheEngineMetadata:
                         [
                             kv_size,
                             group.num_layers,
-                            num_tokens,
-                            group.hidden_dim_size,
+                            group.num_kv_heads,
+                            num_tokens * group.head_size,
                         ]
                     )
                 )
@@ -83,8 +83,8 @@ class LMCacheEngineMetadata:
                     [
                         self.kv_shape[1],
                         self.kv_shape[0],
-                        num_tokens,
-                        self.kv_shape[3] * self.kv_shape[4],
+                        self.kv_shape[3],
+                        num_tokens * self.kv_shape[4],
                     ]
                 )
             ]
