@@ -18,7 +18,6 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
-from lmcache.v1.storage_backend.weka_gds_backend import WekaGdsBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -182,12 +181,6 @@ def CreateStorageBackends(
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 
-    if config.weka_path is not None:
-        weka_backend = WekaGdsBackend(config, metadata, loop, dst_device)
-        # TODO(Serapheim): there's a chance we don't want the local
-        # CPU cache in front of ours. Let's experiment and potentially
-        # change that in the future.
-        storage_backends[str(weka_backend)] = weka_backend
     if config.gds_path is not None:
         gds_backend = GdsBackend(config, metadata, loop, dst_device)
         storage_backends[str(gds_backend)] = gds_backend
