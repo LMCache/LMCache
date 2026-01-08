@@ -287,7 +287,8 @@
             
             // Calculate based on model architecture
             const isDeepSeek = model.includes('DeepSeek');
-            const isQwen3 = model.toLowerCase().includes('qwen/qwen3-');
+            const hasHeadDim = Number.isFinite(config.head_dim)
+                && Number.isFinite(config.num_key_value_heads);
             
             let totalElements;
             let totalBytes;
@@ -309,8 +310,8 @@
                     <strong>Total Bytes:</strong> ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
                     <strong>KV Cache Size:</strong> ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
                 `;
-            } else if (isQwen3 && config.head_dim) {
-                // Qwen3 with explicit head_dim
+            } else if (hasHeadDim) {
+                // Models with explicit head_dim (e.g., GQA architectures)
                 totalElements = 2 * config.num_hidden_layers * tokens * config.num_key_value_heads * config.head_dim;
                 totalBytes = totalElements * dtypeSize;
                 sizeGB = totalBytes / (1024 ** 3);
@@ -389,7 +390,8 @@
             
             // Calculate based on model architecture
             const isDeepSeek = model.includes('DeepSeek');
-            const isQwen3 = model.toLowerCase().includes('qwen/qwen3-');
+            const hasHeadDim = Number.isFinite(config.head_dim)
+                && Number.isFinite(config.num_key_value_heads);
             
             let maxTokens;
             let details = '';
@@ -411,8 +413,8 @@
                     <strong>Bytes per Token:</strong> ${elementsPerToken} × ${dtypeSize} = ${bytesPerToken} bytes<br>
                     <strong>Maximum Tokens:</strong> ${totalBytes} / ${bytesPerToken} = ${maxTokens} tokens
                 `;
-            } else if (isQwen3 && config.head_dim) {
-                // Qwen3: tokens = total_bytes / (2 × layers × kv_heads × head_dim × dtype_size)
+            } else if (hasHeadDim) {
+                // Explicit head_dim: tokens = total_bytes / (2 × layers × kv_heads × head_dim × dtype_size)
                 const elementsPerToken = 2 * config.num_hidden_layers * config.num_key_value_heads * config.head_dim;
                 const bytesPerToken = elementsPerToken * dtypeSize;
                 maxTokens = Math.floor(totalBytes / bytesPerToken);
@@ -486,4 +488,3 @@
     </script>
 </body>
 </html>
-
