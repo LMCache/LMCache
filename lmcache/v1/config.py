@@ -67,6 +67,17 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": True,
         "env_converter": _to_bool,
     },
+    "use_only_staging_buffer": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "When enabled with local_cpu=False, CPU memory is only used as a "
+            "staging buffer for disk/remote backends. Lookups and gets will skip "
+            "CPU backend and go directly to disk/remote. This prevents CPU cache "
+            "hits when the intent is to use disk as the persistent storage tier."
+        ),
+    },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
     "reserve_local_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
     "local_disk": {
