@@ -68,6 +68,8 @@ class LMCacheControllerManager:
         controller_urls: dict[str, str],
         health_check_interval: int,
         lmcache_worker_timeout: int,
+        full_sync_completion_threshold: float = 0.8,
+        full_sync_timeout_s: float = 300.0,
     ):
         # Initialize stats logger
         prometheus_labels = {
@@ -118,7 +120,11 @@ class LMCacheControllerManager:
         else:
             self.controller_heartbeat_socket = None
         self.reg_controller = RegistrationController()
-        self.kv_controller = KVController(self.reg_controller.registry)
+        self.kv_controller = KVController(
+            registry=self.reg_controller.registry,
+            full_sync_completion_threshold=full_sync_completion_threshold,
+            full_sync_timeout_s=full_sync_timeout_s,
+        )
 
         # Cluster executor
         self.cluster_executor = LMCacheClusterExecutor(
@@ -174,7 +180,9 @@ class LMCacheControllerManager:
                 # Convert bind address (e.g., "0.0.0.0:8082" or "*:8082")
                 # to a connectable address using actual controller IP
                 heartbeat_bind_url = self.controller_urls["heartbeat"]
-                heartbeat_url = self._convert_bind_to_connect_url(heartbeat_bind_url)
+                heartbeat_url = self._convert_bind_to_connect_url(
+                    heartbeat_bind_url, worker_ip=msg.ip
+                )
                 extra_config["heartbeat_url"] = heartbeat_url
                 logger.debug(
                     "Returning heartbeat_url to worker: %s (bind: %s)",
@@ -258,18 +266,24 @@ class LMCacheControllerManager:
                 lambda: self.reply_socket_active_requests
             )
 
-    def _convert_bind_to_connect_url(self, bind_url: str) -> str:
+    def _convert_bind_to_connect_url(
+        self, bind_url: str, worker_ip: Optional[str] = None
+    ) -> str:
         """Convert a bind address to a connectable address.
 
         Bind addresses like "0.0.0.0:port" or "*:port" cannot be used
         by workers to connect. We need to replace them with the actual
         controller IP address.
 
+        If worker_ip is provided and matches the controller's IP, use
+        127.0.0.1 for loopback connection (more reliable than external IP).
+
         Args:
             bind_url: The bind URL (e.g., "0.0.0.0:8082" or "*:8082")
+            worker_ip: The IP address of the requesting worker (optional)
 
         Returns:
-            A connectable URL (e.g., "192.168.1.100:8082")
+            A connectable URL (e.g., "192.168.1.100:8082" or "127.0.0.1:8082")
         """
         if ":" not in bind_url:
             return bind_url
@@ -278,6 +292,15 @@ class LMCacheControllerManager:
         # Replace bind-all addresses with actual IP
         if host in ("0.0.0.0", "*", ""):
             actual_ip = get_ip()
+            # If worker is on the same machine, use loopback for reliability
+            # This handles cases where external IP (e.g., VPN) doesn't support
+            # local loopback connections
+            if worker_ip is not None and worker_ip == actual_ip:
+                logger.debug(
+                    "Worker IP %s matches controller IP, using 127.0.0.1",
+                    worker_ip,
+                )
+                return f"127.0.0.1:{port}"
             return f"{actual_ip}:{port}"
         return bind_url
 
@@ -391,8 +414,10 @@ class LMCacheControllerManager:
         ROUTER socket receives multi-part messages:
         [identity, empty_frame, payload]
         """
+        logger.info("Heartbeat handler task started, waiting for heartbeat requests...")
         while True:
             frames = await socket.recv_multipart()
+            logger.debug("Received heartbeat request with %d frames", len(frames))
             with SocketMetricsContext(self, SocketType.REPLY):
                 identity = None
                 try:
@@ -448,7 +473,7 @@ class LMCacheControllerManager:
     async def health_check(self):
         while True:
             await asyncio.sleep(self.health_check_interval)
-            worker_infos = self.reg_controller.registry.get_all_worker_infos()
+            worker_infos = self.reg_controller.registry.get_all_worker_infos_cached(1)
             for worker_info in worker_infos:
                 if (
                     time.time() - worker_info.last_heartbeat_time
@@ -475,11 +500,21 @@ class LMCacheControllerManager:
     async def start_all(self):
         tasks = []
         if self.controller_urls["reply"] is not None:
+            logger.info(
+                "Starting reply request handler on %s", self.controller_urls["reply"]
+            )
             tasks.append(self.handle_batched_req_request(self.controller_reply_socket))
         if self.controller_heartbeat_socket is not None:
+            logger.info(
+                "Starting heartbeat request handler on %s",
+                self.controller_urls.get("heartbeat"),
+            )
             tasks.append(
                 self.handle_heartbeat_request(self.controller_heartbeat_socket)
             )
+        else:
+            logger.warning("Heartbeat socket is None, heartbeat handler not started!")
+        logger.info("Starting pull request handler on %s", self.controller_urls["pull"])
         tasks.append(self.handle_batched_push_request(self.controller_pull_socket))
         await asyncio.gather(
             *tasks,
