@@ -346,8 +346,8 @@ def check_kv_cache_device(kvs, device):
         assert v.device == torch.device(device)
 
 
-def create_gpu_connector(hidden_dim, num_layers):
-    return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+def create_gpu_connector(num_heads, head_dim, hidden_dim, num_layers, block_size):
+    return VLLMPagedMemGPUConnectorV2(num_heads, head_dim, hidden_dim, num_layers, block_size=block_size)
 
 
 def get_all_methods_from_base(base_class):

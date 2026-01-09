@@ -255,12 +255,14 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, use_mla, num_groups):
     # connector will copy with src_kv_groups
     connector = VLLMPagedMemGPUConnectorV3(
         metadata=metadata,
+        block_size=block_size,
         use_gpu=use_gpu,
         device=slot_mapping.device,
     )
     # connector2 will copy with dst_kv_groups
     connector2 = VLLMPagedMemGPUConnectorV3(
         metadata=metadata2,
+        block_size=block_size,
         use_gpu=use_gpu,
         device=slot_mapping.device,
     )
