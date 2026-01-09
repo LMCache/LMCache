@@ -204,6 +204,13 @@ def create_lmcache_metadata(
     head_size = model_cfg.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
 
+    # Extract engine_id from vllm_config if available
+    engine_id = None
+    if vllm_config is not None and hasattr(vllm_config, "kv_transfer_config"):
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            engine_id = getattr(kv_transfer_config, "engine_id", None)
+
     # Create metadata
     metadata = LMCacheEngineMetadata(
         model_cfg.model,
@@ -215,6 +222,7 @@ def create_lmcache_metadata(
         use_mla,
         role,
         served_model_name=model_cfg.served_model_name,
+        engine_id=engine_id,
     )
 
     return metadata, config
