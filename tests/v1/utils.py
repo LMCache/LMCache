@@ -18,6 +18,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 
 
 def recover_engine_states(engine):
@@ -556,3 +557,12 @@ def create_mock_vllm_config(
     )
 
     return vllm_config
+
+
+def create_test_memory_obj(shape=None, dtype=torch.bfloat16, device="cpu") -> MemoryObj:
+    """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
+    if shape is None:
+        shape = torch.Size([2, 16, 8, 128])
+    allocator = AdHocMemoryAllocator(device=device)
+    memory_obj = allocator.allocate([shape], [dtype], fmt=MemoryFormat.KV_T2D)
+    return memory_obj

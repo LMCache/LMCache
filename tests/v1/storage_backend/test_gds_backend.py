@@ -16,8 +16,9 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
+from tests.v1.utils import create_test_memory_obj
 
 
 def create_test_config(gds_path: str):
@@ -33,14 +34,6 @@ def create_test_config(gds_path: str):
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     return CacheEngineKey("vllm", "testmodel", 3, 123, key_id, torch.bfloat16)
-
-
-def create_test_memory_obj(
-    shape=(2, 16, 8, 128), dtype=torch.bfloat16, device="cuda"
-) -> MemoryObj:
-    allocator = AdHocMemoryAllocator(device=device)
-    memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-    return memory_obj
 
 
 def create_test_metadata():
@@ -110,7 +103,7 @@ class TestGdsBackend:
 
     def test_key_to_path_and_insert_key(self, gds_backend):
         key = create_test_key(0)
-        memory_obj = create_test_memory_obj()
+        memory_obj = create_test_memory_obj(device="cuda")
         gds_backend.insert_key(key, memory_obj)
         # Check that the key is in hot_cache
         assert key in gds_backend.hot_cache
@@ -125,7 +118,7 @@ class TestGdsBackend:
 
     def test_contains_key_exists(self, gds_backend):
         key = create_test_key(0)
-        memory_obj = create_test_memory_obj()
+        memory_obj = create_test_memory_obj(device="cuda")
         gds_backend.insert_key(key, memory_obj)
         assert gds_backend.contains(key)
         assert gds_backend.contains(key, pin=True)

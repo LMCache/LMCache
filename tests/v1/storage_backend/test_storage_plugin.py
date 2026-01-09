@@ -24,7 +24,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
 from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
-    MemoryFormat,
     MemoryObj,
 )
 from lmcache.v1.storage_backend import CreateStorageBackends
@@ -33,6 +32,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StoragePluginInterface,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
+from tests.v1.utils import create_test_memory_obj
 
 
 class MockStoragePlugin(StoragePluginInterface):
@@ -180,13 +180,6 @@ def create_test_metadata():
             128,
         ),  # (num_layers, 2, chunk_size, num_heads, head_dim)
     )
-
-
-def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
-    """Create a test MemoryObj using AdHocMemoryAllocator."""
-    allocator = AdHocMemoryAllocator(device="cpu")
-    memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-    return memory_obj
 
 
 def get_mock_backend(storage_manager_or_backends):
