@@ -4,6 +4,7 @@
 
 LMCACHE_CONTAINER_NAME="${LMCACHE_CONTAINER_NAME:-lmcache-mp-test}"
 VLLM_CONTAINER_NAME="${VLLM_CONTAINER_NAME:-vllm-mp-test}"
+VLLM_BASELINE_CONTAINER_NAME="${VLLM_BASELINE_CONTAINER_NAME:-vllm-baseline-test}"
 
 echo "=== Cleaning up containers ==="
 
@@ -31,14 +32,15 @@ cleanup_container() {
     fi
 }
 
-# Cleanup both containers
+# Cleanup all containers
+cleanup_container "$VLLM_BASELINE_CONTAINER_NAME"
 cleanup_container "$VLLM_CONTAINER_NAME"
 cleanup_container "$LMCACHE_CONTAINER_NAME"
 
 echo "=== Cleanup complete ==="
 
 # List any remaining test containers (for debugging)
-remaining=$(docker ps -a --format '{{.Names}}' | grep -E "(lmcache|vllm).*-mp-test" || true)
+remaining=$(docker ps -a --format '{{.Names}}' | grep -E "(lmcache|vllm).*-(mp|baseline)-test" || true)
 if [ -n "$remaining" ]; then
     echo "Warning: Some test containers may still exist:"
     echo "$remaining"
