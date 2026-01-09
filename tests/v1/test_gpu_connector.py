@@ -129,6 +129,8 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
             )
 
     connector = VLLMPagedMemGPUConnectorV2(
+        num_heads,
+        head_size,
         hidden_dim,
         num_layers,
         use_gpu=use_gpu,
@@ -136,8 +138,11 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
         dtype=gpu_kv_src[0].dtype,
         device=device,
         use_mla=use_mla,
+        block_size=block_size,
     )
     connector2 = VLLMPagedMemGPUConnectorV2(
+        num_heads,
+        head_size,
         hidden_dim,
         num_layers,
         use_gpu=use_gpu,
@@ -145,6 +150,7 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
         dtype=gpu_kv_src[0].dtype,
         device=device,
         use_mla=use_mla,
+        block_size=block_size,
     )
     assert connector.use_mla == use_mla
     assert connector2.use_mla == use_mla
@@ -719,7 +725,7 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     slot_mapping = random.sample(range(0, num_blocks * block_size), chunk_size)
     slot_mapping = torch.tensor(slot_mapping, device=device, dtype=torch.int64)
 
-    connector = VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+    connector = VLLMPagedMemGPUConnectorV2(num_heads, head_size, hidden_dim, num_layers)
     shape = connector.get_shape(chunk_size)
     memory_obj = allocator.allocate(shape, gpu_kv_src[0][0].dtype)
     connector.from_gpu(
