@@ -11,13 +11,10 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, OpType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from tests.v1.utils import create_test_memory_obj
 
 
 class MockLookupServer:
@@ -59,13 +56,6 @@ def create_test_config(
 def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), torch.bfloat16)
-
-
-def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
-    """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
-    allocator = AdHocMemoryAllocator(device="cpu")
-    memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-    return memory_obj
 
 
 @pytest.fixture
@@ -200,8 +190,8 @@ class TestLocalCPUBackend:
     def test_submit_put_task_reinsert(self, local_cpu_backend):
         """Test submit_put_task() with reinsertion."""
         key = create_test_key("test_key")
-        memory_obj1 = create_test_memory_obj(shape=(2, 16, 8, 128))
-        memory_obj2 = create_test_memory_obj(shape=(2, 32, 8, 128))
+        memory_obj1 = create_test_memory_obj(shape=torch.Size([2, 16, 8, 128]))
+        memory_obj2 = create_test_memory_obj(shape=torch.Size([2, 32, 8, 128]))
 
         # First insertion
         local_cpu_backend.submit_put_task(key, memory_obj1)

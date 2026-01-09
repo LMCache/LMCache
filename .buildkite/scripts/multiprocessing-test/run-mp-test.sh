@@ -9,8 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Export container names and configuration for all scripts
 export LMCACHE_CONTAINER_NAME="lmcache-mp-test-$$"
 export VLLM_CONTAINER_NAME="vllm-mp-test-$$"
+export VLLM_BASELINE_CONTAINER_NAME="vllm-baseline-test-$$"
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
+export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILD_ID:-local_$$}"
 
@@ -35,8 +37,10 @@ echo "============================================"
 echo "Build ID: $BUILD_ID"
 echo "LMCache container: $LMCACHE_CONTAINER_NAME"
 echo "vLLM container: $VLLM_CONTAINER_NAME"
+echo "vLLM baseline container: $VLLM_BASELINE_CONTAINER_NAME"
 echo "LMCache port: $LMCACHE_PORT"
 echo "vLLM port: $VLLM_PORT"
+echo "vLLM baseline port: $VLLM_BASELINE_PORT"
 echo ""
 
 # Step 1: Build docker images
@@ -83,9 +87,31 @@ if ! "$SCRIPT_DIR/run-lm-eval.sh"; then
 fi
 echo ""
 
+# Step 5: Run vllm bench serve test
+echo "============================================"
+echo "=== Step 5: Running vllm bench serve ==="
+echo "============================================"
+if ! "$SCRIPT_DIR/run-vllm-bench.sh"; then
+    echo "❌ vllm bench serve test failed"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
+
+# Step 6: Run long doc QA test
+echo "============================================"
+echo "=== Step 6: Running long doc QA ==="
+echo "============================================"
+if ! "$SCRIPT_DIR/run-long-doc-qa.sh"; then
+    echo "❌ long doc QA test failed"
+    TEST_RESULT=1
+    exit 1
+fi
+echo ""
+
 echo "============================================"
 echo "=== ✅ All tests passed! ==="
 echo "============================================"
 
-# Step 5: Cleanup runs automatically via trap
+# Step 7: Cleanup runs automatically via trap
 
