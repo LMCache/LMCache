@@ -160,7 +160,7 @@ def test_store_1GB(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_gpu_connector(num_heads, head_dim, num_heads * head_dim, num_layers, block_size)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -275,7 +275,7 @@ def test_retrieve_1GB_allhit(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_gpu_connector(num_heads, head_dim, num_heads * head_dim, num_layers, block_size)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -393,7 +393,7 @@ def test_lookup_20K_tokens(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_gpu_connector(num_heads, head_dim, num_heads * head_dim, num_layers, block_size)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
