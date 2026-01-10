@@ -961,9 +961,8 @@ class AddressManager:
                 size,
             )
             raise RuntimeError(
-                "Failed to allocate memory block of size %d "
-                "because no memory is available",
-                size,
+                f"Failed to allocate memory block of size {size} "
+                "because no memory is available"
             )
 
         self._explicit_list.remove(block)
@@ -1051,11 +1050,15 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     Uses AddressManager for address space management.
     """
 
-    def __init__(self, tensor: torch.Tensor):
+    def __init__(
+        self,
+        tensor: torch.Tensor,
+        align_bytes: int = AddressManager.ALIGN_BYTES,
+    ):
         self.buffer = tensor.view(torch.uint8).flatten()
 
         # Use AddressManager for address space management
-        self.address_manager = AddressManager(self.buffer.numel())
+        self.address_manager = AddressManager(self.buffer.numel(), align_bytes)
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
@@ -1217,6 +1220,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         curr_size = 0
         curr_count = 0
 
+        memory_objs.sort(key=lambda x: x.meta.address)
         for memory_obj in memory_objs:
             if not memory_obj.is_valid():
                 logger.warning("Trying to free an invalidated MemoryObj")
