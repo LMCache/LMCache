@@ -870,7 +870,6 @@ class AddressManager:
         self._explicit_list.add(FreeBlock(start=0, size=size))
 
         # For debugging purposes
-        self.num_active_allocations = 0
         self.total_allocated_size = 0
 
     def compute_aligned_size(self, raw_size: int) -> int:
@@ -976,7 +975,6 @@ class AddressManager:
 
         # For debug
         self.total_allocated_size += aligned_size
-        self.num_active_allocations += 1
 
         return block.start, aligned_size
 
@@ -1001,7 +999,6 @@ class AddressManager:
 
         # For debug
         self.total_allocated_size -= size
-        self.num_active_allocations -= 1
 
     def sbrk(self, size: int):
         """
@@ -1060,11 +1057,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Use AddressManager for address space management
         self.address_manager = AddressManager(self.buffer.numel(), align_bytes)
 
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        # For debugging purposes
+        self.num_active_allocations = 0
 
-    @property
-    def num_active_allocations(self) -> int:
-        return self.address_manager.num_active_allocations
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
     @property
     def total_allocated_size(self) -> int:
@@ -1090,13 +1086,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             # No block found
             return None
 
+        # For debug
+        self.num_active_allocations += 1
+
         # Update stats
         self.stats_monitor.update_local_cache_usage(
             self.address_manager.total_allocated_size
         )
-        self.stats_monitor.update_active_memory_objs_count(
-            self.address_manager.num_active_allocations
-        )
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         raw_data = self._get_buffer_slice(block_start, raw_size)
@@ -1145,17 +1142,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         except RuntimeError:
             return None
 
-        # Address manager only tracks one allocation, but we have batch_size items
-        # Adjust the tracking: we allocated once but have batch_size logical items
-        self.address_manager.num_active_allocations += batch_size - 1
+        # For debug
+        self.num_active_allocations += batch_size
 
         # Update stats
         self.stats_monitor.update_local_cache_usage(
             self.address_manager.total_allocated_size
         )
-        self.stats_monitor.update_active_memory_objs_count(
-            self.address_manager.num_active_allocations
-        )
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         raw_datas = torch.chunk(
             self.buffer[block_start : block_start + total_aligned_size],
@@ -1193,13 +1187,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.address_manager.free(memory_obj.meta.address, memory_obj.meta.phy_size)
         memory_obj.invalidate()
 
+        # For debug
+        self.num_active_allocations -= 1
+
         # Update stats
         self.stats_monitor.update_local_cache_usage(
             self.address_manager.total_allocated_size
         )
-        self.stats_monitor.update_active_memory_objs_count(
-            self.address_manager.num_active_allocations
-        )
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
     @_lmcache_nvtx_annotate
     def batched_free(
@@ -1246,18 +1241,20 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             coalesced_blocks.append((curr_start, curr_size, curr_count))
 
         # Free all coalesced blocks
+        total_count = 0
         for address, size, count in coalesced_blocks:
             self.address_manager.free(address, size)
-            # AddressManager.free decrements by 1, but we freed 'count' objects
-            # Adjust the count accordingly
-            self.address_manager.num_active_allocations -= count - 1
+            total_count += count
+
+        # For debug
+        self.num_active_allocations -= total_count
 
         if update_stats:
             self.stats_monitor.update_local_cache_usage(
                 self.address_manager.total_allocated_size
             )
             self.stats_monitor.update_active_memory_objs_count(
-                self.address_manager.num_active_allocations
+                self.num_active_allocations
             )
 
     def memcheck(self):
@@ -1266,10 +1263,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         clear = True
         logger.info("Checking memory allocator consistency")
-        logger.info(
-            f" - Total active allocations: "
-            f"{self.address_manager.num_active_allocations}"
-        )
+        logger.info(f" - Total active allocations: {self.num_active_allocations}")
         logger.info(
             f" - Total allocated size: "
             f"{self.address_manager.total_allocated_size / 1048576} MB"
