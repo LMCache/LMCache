@@ -101,6 +101,10 @@ class LMCacheManager:
         else:
             # Initialize vLLM worker components
             self._init_worker_components()
+        # Initialize API server and plugin launcher only on DP rank 0
+        assert self._vllm_config is not None
+        if self._vllm_config.parallel_config.data_parallel_rank_local == 0:
+            self._init_dp_rank0_components()
 
     def _init_scheduler_components(self) -> None:
         """Initialize components for scheduler role."""
@@ -156,10 +160,6 @@ class LMCacheManager:
             self._vllm_config,
             get_tensor_model_parallel_rank(),
         )
-
-        # Initialize API server and plugin launcher only on DP rank 0
-        if self._vllm_config.parallel_config.data_parallel_rank_local == 0:
-            self._init_dp_rank0_components()
 
     def _init_dp_rank0_components(self) -> None:
         """Initialize components that only run on DP rank 0."""
