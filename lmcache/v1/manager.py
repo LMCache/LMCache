@@ -566,3 +566,16 @@ class LMCacheManager:
     def config(self) -> LMCacheEngineConfig:
         """Get the LMCache engine configuration."""
         return self._config
+
+    def get_inference_info(self) -> dict:
+        """Get inference information by delegating to the connector.
+
+        Returns:
+            dict: Dictionary containing inference information,
+                  or empty dict if connector is not available.
+        """
+        if self._connector is not None and hasattr(
+            self._connector, "get_inference_info"
+        ):
+            return self._connector.get_inference_info()
+        return {}
