@@ -4,6 +4,7 @@ from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
+from functools import wraps
 from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
@@ -31,6 +32,25 @@ else:
 
 
 logger = init_logger(__name__)
+
+
+# Helper functions for thread safety
+def synchronized(lock_attr_name):
+    """
+    Decorator to make a method thread-safe by acquiring the lock
+    specified by lock_attr_name on the instance.
+    """
+
+    def decorator(method):
+        @wraps(method)
+        def wrapper(self, *args, **kwargs):
+            lock = getattr(self, lock_attr_name)
+            with lock:
+                return method(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class MemoryFormat(Enum):
@@ -869,6 +889,9 @@ class AddressManager:
         self._explicit_list: SortedList[FreeBlock] = SortedList(key=lambda x: x.start)
         self._explicit_list.add(FreeBlock(start=0, size=size))
 
+        # thread safe lock
+        self._lock = threading.Lock()
+
         # For debugging purposes
         self.total_allocated_size = 0
 
@@ -931,6 +954,8 @@ class AddressManager:
 
         return merge_prev or merge_succ
 
+    @_lmcache_nvtx_annotate
+    @synchronized("_lock")
     def allocate(self, size: int) -> tuple[int, int]:
         """
         Allocate a block of memory from the virtual address space of a given
@@ -978,6 +1003,8 @@ class AddressManager:
 
         return block.start, aligned_size
 
+    @_lmcache_nvtx_annotate
+    @synchronized("_lock")
     def free(self, address: int, size: int):
         """
         Free a previously allocated block of memory.
@@ -1000,6 +1027,7 @@ class AddressManager:
         # For debug
         self.total_allocated_size -= size
 
+    @synchronized("_lock")
     def sbrk(self, size: int):
         """
         Expand the virtual address space by a given size.
@@ -1023,7 +1051,7 @@ class AddressManager:
         Returns:
             The total free size in bytes.
         """
-        return sum(block.size for block in self._explicit_list)
+        return self._size - self.total_allocated_size
 
     def check_consistency(self) -> bool:
         """
@@ -1038,6 +1066,12 @@ class AddressManager:
         ):
             if prev.can_be_coalesced(succ):
                 return False
+
+        # Check if total size matches
+        total_free_size = sum(block.size for block in self._explicit_list)
+        if total_free_size + self.total_allocated_size != self._size:
+            return False
+
         return True
 
 
