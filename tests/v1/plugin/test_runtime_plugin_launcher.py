@@ -186,7 +186,7 @@ def test_launch_plugins_role_filtering(
 @patch("lmcache.v1.plugin.runtime_plugin_launcher.shutil.which")
 @patch("lmcache.v1.plugin.runtime_plugin_launcher.subprocess.Popen")
 def test_launch_plugins_worker_id_filtering(
-    mock_popen, mock_which, temp_plugin_dir, worker_role, config_with_location
+    mock_popen, mock_which, temp_plugin_dir, config_with_location
 ):
     """Test plugin filtering based on worker ID."""
     # Create plugins for specific worker IDs
