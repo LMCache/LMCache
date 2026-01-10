@@ -66,7 +66,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
 
          python -m sglang.launch_server \
-           --model-path Qwen/Qwen3-14B-Instruct \
+           --model-path Qwen/Qwen3-14B \
            --host 0.0.0.0 \
            --port 30000 \
            --enable-lmcache
@@ -118,7 +118,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-14B-Instruct",
+             "model": "Qwen/Qwen3-14B",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
              "max_tokens": 100,
              "temperature": 0.7
@@ -131,7 +131,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-14B-Instruct",
+             "model": "Qwen/Qwen3-14B",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
              "max_tokens": 100,
              "temperature": 0.7
