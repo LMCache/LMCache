@@ -4,15 +4,6 @@ from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
-        LMCacheAsyncLookupServer,
-    )
-    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-
-# First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -25,6 +16,13 @@ from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
     LMCacheBypassLookupClient,
 )
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+        LMCacheAsyncLookupServer,
+    )
+    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
 
 logger = init_logger(__name__)
 

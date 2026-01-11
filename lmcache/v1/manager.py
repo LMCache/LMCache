@@ -129,7 +129,6 @@ class LMCacheManager:
 
         # Create lookup client
         self._lookup_client = LookupClientFactory.create_lookup_client(
-            self._vllm_config,
             self._config,
             self._lmcache_engine_metadata,
             self._lmcache_engine,
@@ -151,13 +150,12 @@ class LMCacheManager:
 
         # Create lookup server
         self._lookup_server = LookupClientFactory.create_lookup_server(
-            self._lmcache_engine, self._vllm_config
+            self._lmcache_engine, self._lmcache_engine_metadata
         )
 
         # Create offload server
         self._offload_server = ZMQOffloadServer(
             self._lmcache_engine,
-            self._vllm_config,
             get_tensor_model_parallel_rank(),
         )
 
