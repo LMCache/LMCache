@@ -593,9 +593,7 @@ class LMCacheEngine:
 
             # Calculate total KV size for logging
             tot_kv_size = sum(
-                mo.get_size()
-                for layer_objs in memory_objs
-                for mo in layer_objs
+                mo.get_size() for layer_objs in memory_objs for mo in layer_objs
             )
 
             assert isinstance(
