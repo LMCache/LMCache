@@ -35,6 +35,7 @@ sortedcontainers
 torch
 transformers >= 4.51.1
 uvicorn
+xxhash
 httptools
 # Right now we are using cuda 12.x to align with serving engines
 cupy-cuda12x

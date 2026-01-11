@@ -42,6 +42,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
 )
+from lmcache.v1.storage_backend.checksum_validation import ChecksumValidator
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
@@ -257,6 +258,7 @@ class StorageManager:
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
+        self.checksum_validator = ChecksumValidator(config)
 
         self.event_manager = event_manager
 
@@ -414,6 +416,8 @@ class StorageManager:
             ks, objs = obj_dict[cname]
             backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
 
+        self.checksum_validator.record_checksums(keys, memory_objs)
+
         for cname, (ks, objs) in obj_dict.items():
             for memory_obj in objs:
                 memory_obj.ref_count_down()
@@ -495,6 +499,7 @@ class StorageManager:
                     #  policy module
                     memory_objs_no_none = cast(List[MemoryObj], memory_objs)
                     local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
+                self.checksum_validator.validate_checksums(keys, memory_objs)
                 return memory_objs
         return None
 
