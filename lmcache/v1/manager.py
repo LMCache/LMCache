@@ -249,7 +249,20 @@ class LMCacheManager:
         # Determine device
         device, torch_dev, dev_name = self._get_device_info(current_platform)
 
+        # Extract kv_connector_extra_config from vllm_config if available
+        kv_connector_extra_config = None
+        if hasattr(self._vllm_config, "kv_transfer_config"):
+            kv_transfer_config = self._vllm_config.kv_transfer_config
+            if kv_transfer_config is not None:
+                kv_connector_extra_config = getattr(
+                    kv_transfer_config, "kv_connector_extra_config", None
+                )
+
         # Create metadata
+        num_ranks = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.pipeline_parallel_size
+        )
         metadata = LMCacheEngineMetadata(
             model_config.model,
             parallel_config.world_size,
@@ -261,6 +274,8 @@ class LMCacheManager:
             role,
             served_model_name=model_config.served_model_name,
             chunk_size=self._config.chunk_size,
+            num_ranks=num_ranks,
+            kv_connector_extra_config=kv_connector_extra_config,
         )
 
         # Create GPU connector

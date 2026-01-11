@@ -623,6 +623,7 @@ def main():
             kv_shape=kv_shape,
             use_mla=args.use_mla,
             role="worker",
+            num_ranks=args.world_size,
         )
 
         starter = LMCacheStandaloneStarter(config, metadata, layer_groups, args.device)
