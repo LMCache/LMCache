@@ -249,11 +249,13 @@ class LMCacheManager:
         # Determine device
         device, torch_dev, dev_name = self._get_device_info(current_platform)
 
-        # Extract kv_connector_extra_config from vllm_config if available
+        # Extract engine_id and kv_connector_extra_config from vllm_config
+        engine_id = None
         kv_connector_extra_config = None
         if hasattr(self._vllm_config, "kv_transfer_config"):
             kv_transfer_config = self._vllm_config.kv_transfer_config
             if kv_transfer_config is not None:
+                engine_id = getattr(kv_transfer_config, "engine_id", None)
                 kv_connector_extra_config = getattr(
                     kv_transfer_config, "kv_connector_extra_config", None
                 )
@@ -274,6 +276,7 @@ class LMCacheManager:
             role,
             served_model_name=model_config.served_model_name,
             chunk_size=self._config.chunk_size,
+            engine_id=engine_id,
             num_ranks=num_ranks,
             kv_connector_extra_config=kv_connector_extra_config,
         )
