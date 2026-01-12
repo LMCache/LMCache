@@ -81,3 +81,57 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
 }
+
+uintptr_t mmap_host_ptr(size_t size) {
+  void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (ptr == MAP_FAILED)
+    throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+uintptr_t mmap_host_numa_ptr(size_t size, int node) {
+  void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (ptr == MAP_FAILED)
+    throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+
+  // Maximum of 64 numa nodes
+  unsigned long mask = 1UL << node;
+  long maxnode = 8 * sizeof(mask);
+  if (mbind_sys(ptr, size, MPOL_BIND, &mask, maxnode,
+                MPOL_MF_MOVE | MPOL_MF_STRICT) != 0) {
+    int err = errno;
+    munmap(ptr, size);
+    throw std::runtime_error(std::string("mbind failed: ") + strerror(err));
+  }
+
+  // NOTE: Do NOT first-touch here. This is a "reserve only" call meant to
+  // allow progressive pinning and/or progressive page population.
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void munmap_host_ptr(uintptr_t ptr, size_t size) {
+  void* p = reinterpret_cast<void*>(ptr);
+  if (munmap(p, size) != 0) {
+    throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
+  }
+}
+
+void cuda_host_register(uintptr_t ptr, size_t size, unsigned int flags) {
+  void* p = reinterpret_cast<void*>(ptr);
+  cudaError_t st = cudaHostRegister(p, size, flags);
+  if (st != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
+                             cudaGetErrorString(st));
+  }
+}
+
+void cuda_host_unregister(uintptr_t ptr) {
+  void* p = reinterpret_cast<void*>(ptr);
+  cudaError_t st = cudaHostUnregister(p);
+  if (st != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
+                             cudaGetErrorString(st));
+  }
+}

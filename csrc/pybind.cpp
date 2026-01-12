@@ -28,5 +28,10 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("free_pinned_ptr", &free_pinned_ptr);
   m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr);
   m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
+  m.def("mmap_host_ptr", &mmap_host_ptr);
+  m.def("mmap_host_numa_ptr", &mmap_host_numa_ptr);
+  m.def("munmap_host_ptr", &munmap_host_ptr);
+  m.def("cuda_host_register", &cuda_host_register);
+  m.def("cuda_host_unregister", &cuda_host_unregister);
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
 }

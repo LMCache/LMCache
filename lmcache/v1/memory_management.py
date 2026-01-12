@@ -9,6 +9,7 @@ import abc
 import ctypes
 import os
 import threading
+import time
 
 # Third Party
 import sortedcontainers
@@ -1837,6 +1838,222 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def __str__(self):
         return "MixedMemoryAllocator"
+
+
+class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
+    """A contiguous host-memory allocator that progressively pins memory.
+
+    Motivation:
+    - Large upfront pinned allocations (cudaHostAlloc/cudaHostRegister) can be slow.
+    - We want a single contiguous region (avoid multi-segment fragmentation), but
+      register/pin it in smaller chunks in the background to reduce startup time.
+
+    High-level design:
+    - Reserve a single contiguous host mapping (mmap), optionally NUMA-bound.
+    - Pin/register only an initial prefix [0, registered_size).
+    - Allocate only from the registered prefix (via TensorMemoryAllocator).
+    - When usage crosses a threshold, asynchronously register more contiguous
+      bytes and expand the allocator's free list.
+
+    Notes:
+    - This is expansion-only: it never unregisters subranges until close().
+    - BINARY_BUFFER allocations are delegated to BufferAllocator (not pinned).
+    """
+
+    def __init__(
+        self,
+        size: int,
+        initial_ratio: float = 0.2,
+        expand_trigger_ratio: float = 0.7,
+        step_ratio: float = 0.1,
+        numa_mapping: Optional[NUMAMapping] = None,
+    ):
+        if size <= 0:
+            raise ValueError(f"size must be > 0, got {size}")
+        if not (0 < initial_ratio <= 1.0):
+            raise ValueError(f"initial_ratio must be in (0, 1], got {initial_ratio}")
+        if not (0 < expand_trigger_ratio <= 1.0):
+            raise ValueError(
+                f"expand_trigger_ratio must be in (0, 1], got {expand_trigger_ratio}"
+            )
+        if not (0 < step_ratio <= 1.0):
+            raise ValueError(f"step_ratio must be in (0, 1], got {step_ratio}")
+
+        self.total_size = size
+        self.initial_ratio = initial_ratio
+        self.expand_trigger_ratio = expand_trigger_ratio
+        self.step_ratio = step_ratio
+        self.numa_mapping = numa_mapping
+
+        # Reserve a single contiguous mapping up-front (not pinned yet).
+        if self.numa_mapping:
+            if torch.cuda.is_available():
+                current_device_id = torch.cuda.current_device()
+            else:
+                current_device_id = 0
+            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
+            assert current_device_id in gpu_to_numa_mapping, (
+                f"Current device {current_device_id} is not in the GPU NUMA mapping."
+            )
+            numa_id = gpu_to_numa_mapping[current_device_id]
+            self._base_ptr = lmc_ops.mmap_host_numa_ptr(size, numa_id)
+        else:
+            self._base_ptr = lmc_ops.mmap_host_ptr(size)
+
+        # Wrap mapping as a uint8 tensor (zero-copy).
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_address(self._base_ptr)
+        self._full_buffer = torch.frombuffer(buf, dtype=torch.uint8)
+
+        # Register/pin only an initial prefix.
+        page_size = os.sysconf("SC_PAGESIZE")
+        initial_size = int(size * initial_ratio)
+        initial_size = (initial_size // page_size) * page_size
+        initial_size = max(page_size, min(initial_size, size))
+
+        self._registered_ranges: list[tuple[int, int]] = []
+        self._registered_size = 0
+        self._register_more_locked(0, initial_size)
+
+        # Underlying allocator only sees the registered prefix.
+        self._tensor_allocator = TensorMemoryAllocator(self._full_buffer[:initial_size])
+        self.buffer_allocator = BufferAllocator("cpu")
+
+        self._lock = threading.Lock()
+        self._expansion_triggered = False
+        self._stop = threading.Event()
+        self._expander: Optional[threading.Thread] = None
+
+    def _register_more_locked(self, start: int, size: int) -> None:
+        """Register a subrange [base+start, base+start+size). Caller holds lock."""
+        if size <= 0:
+            return
+        lmc_ops.cuda_host_register(self._base_ptr + start, size, 0)
+        self._registered_ranges.append((start, size))
+        self._registered_size = max(self._registered_size, start + size)
+
+    def _check_and_trigger_expansion(self) -> None:
+        if self._expansion_triggered:
+            return
+        # Avoid div by zero; also BINARY_BUFFER doesn't use this allocator.
+        if self._registered_size <= 0:
+            return
+        usage_ratio = (
+            self._tensor_allocator.total_allocated_size / self._registered_size
+        )
+        if usage_ratio >= self.expand_trigger_ratio:
+            self._start_expander()
+            self._expansion_triggered = True
+
+    def _start_expander(self) -> None:
+        if self._expander and self._expander.is_alive():
+            return
+        self._stop.clear()
+        self._expander = threading.Thread(
+            target=self._expansion_worker, daemon=True, name="ProgressivePinExpander"
+        )
+        self._expander.start()
+
+    def _expansion_worker(self) -> None:
+        page_size = os.sysconf("SC_PAGESIZE")
+        while not self._stop.is_set():
+            with self._lock:
+                curr = self._registered_size
+                if curr >= self.total_size:
+                    return
+
+                step = int(self.total_size * self.step_ratio)
+                step = max(page_size, (step // page_size) * page_size)
+                step = min(step, self.total_size - curr)
+
+                # Register next contiguous chunk.
+                self._register_more_locked(curr, step)
+
+                # Expand allocator's visible buffer and free list.
+                new_size = curr + step
+                self._tensor_allocator.buffer = (
+                    self._full_buffer[:new_size].view(torch.uint8).flatten()
+                )
+                self._tensor_allocator.explicit_list.add(
+                    FreeBlock(start=curr, size=step)
+                )
+
+            # Throttle to avoid monopolizing CPU if the target is large.
+            time.sleep(0.01)
+
+    @_lmcache_nvtx_annotate
+    def allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[MemoryObj]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.allocate(shapes, dtypes, fmt)
+
+        with self._lock:
+            mem_obj = self._tensor_allocator.allocate(shapes, dtypes, fmt, str(self))
+
+        if mem_obj is not None:
+            self._check_and_trigger_expansion()
+        return mem_obj
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[List[MemoryObj]]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt
+            )
+
+        with self._lock:
+            mem_objs = self._tensor_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt, str(self)
+            )
+
+        if mem_objs is not None:
+            self._check_and_trigger_expansion()
+        return mem_objs
+
+    @_lmcache_nvtx_annotate
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+        if memory_obj.meta.fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.free(memory_obj)
+        with self._lock:
+            self._tensor_allocator.free(memory_obj)
+
+    @_lmcache_nvtx_annotate
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
+        if memory_objs and memory_objs[0].meta.fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.batched_free(memory_objs)
+        with self._lock:
+            self._tensor_allocator.batched_free(memory_objs, update_stats=update_stats)
+
+    def close(self):
+        self._stop.set()
+        if self._expander and self._expander.is_alive():
+            self._expander.join(timeout=5.0)
+
+        # Unregister all registered ranges, then unmap the whole region.
+        # (We registered disjoint subranges; unregister them individually.)
+        for start, _sz in reversed(self._registered_ranges):
+            lmc_ops.cuda_host_unregister(self._base_ptr + start)
+        lmc_ops.munmap_host_ptr(self._base_ptr, self.total_size)
+
+    def __str__(self):
+        return "ProgressivePinnedMemoryAllocator"
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
