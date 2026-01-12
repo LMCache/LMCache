@@ -10,8 +10,11 @@ import torch
 import torch.distributed as dist
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
+from lmcache.integration.sglang.utils import (
+    ENGINE_NAME,
+    SGLangMetadataBuilder,
+    lmcache_get_config,
+)
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
@@ -72,29 +75,21 @@ def init_lmcache_engine(
         "LMCache v1 configuration is should be passed."
     )
 
-    # construct kv shape (for mem pool)
-    num_layer = model_config.num_hidden_layers
-    chunk_size = config.chunk_size
-    num_kv_head = model_config.get_num_kv_heads(tp_size)
-    head_dim = model_config.head_dim
-
-    kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
+    metadata = SGLangMetadataBuilder.from_sglang_config(
+        model_config, tp_size, global_rank, kv_dtype, config
+    )
 
     # Change current device using local GPU index
     torch.cuda.device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
-    # Use global rank for metadata (tensor parallel rank)
-    metadata = LMCacheEngineMetadata(
-        model_config.model_path,
-        tp_size,
-        global_rank,
-        "sgl",
-        kv_dtype,
-        kv_shape,
-    )
 
     use_gpu = need_gpu_interm_buffer(config)
 
+    # Extract values from metadata kv_shape:
+    # (num_layer, 2, chunk_size, num_kv_head, head_dim)
+    num_layer = metadata.kv_shape[0]
+    num_kv_head = metadata.kv_shape[3]
+    head_dim = metadata.kv_shape[4]
     hidden_dim_size = num_kv_head * head_dim
 
     gpu_connector: GPUConnectorInterface
@@ -104,7 +99,7 @@ def init_lmcache_engine(
             hidden_dim_size,
             num_layer,
             use_gpu=use_gpu,
-            chunk_size=chunk_size,
+            chunk_size=config.chunk_size,
             dtype=kv_dtype,
             device=device,
         )
@@ -113,7 +108,7 @@ def init_lmcache_engine(
             hidden_dim_size,
             num_layer,
             use_gpu=use_gpu,
-            chunk_size=chunk_size,
+            chunk_size=config.chunk_size,
             dtype=kv_dtype,
             device=device,
         )

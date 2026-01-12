@@ -12,9 +12,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, Union
 import time
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -109,7 +106,7 @@ class LMCacheManager:
     def _init_scheduler_components(self) -> None:
         """Initialize components for scheduler role."""
         # First Party
-        from lmcache.integration.vllm.utils import create_lmcache_metadata
+        from lmcache.integration.vllm.utils import VLLMMetadataBuilder
         from lmcache.observability import PrometheusLogger
         from lmcache.v1.lookup_client.factory import LookupClientFactory
 
@@ -121,9 +118,9 @@ class LMCacheManager:
             self._lmcache_engine_metadata = self._lmcache_engine.metadata
         else:
             self._lmcache_engine = None
-            # Create a dummy metadata for prometheus logger
-            self._lmcache_engine_metadata, _ = create_lmcache_metadata(
-                self._vllm_config, role="scheduler"
+            # Create metadata for prometheus logger
+            self._lmcache_engine_metadata = VLLMMetadataBuilder.from_vllm_config(
+                self._vllm_config, self._config, role="scheduler"
             )
             PrometheusLogger.GetOrCreate(self._lmcache_engine_metadata)
 
@@ -190,10 +187,7 @@ class LMCacheManager:
             LMCacheEngine instance
         """
         # First Party
-        from lmcache.integration.vllm.utils import (
-            ENGINE_NAME,
-            mla_enabled,
-        )
+        from lmcache.integration.vllm.utils import ENGINE_NAME, VLLMMetadataBuilder
 
         if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
             return curr_engine
@@ -201,89 +195,19 @@ class LMCacheManager:
         assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
         # Third Party
+        from vllm.distributed.parallel_state import get_tp_group
         from vllm.platforms import current_platform
 
-        try:
-            # Third Party
-            from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-        except ImportError:
-            # Third Party
-            from vllm.utils import get_kv_cache_torch_dtype
-        # Third Party
-        from vllm.distributed.parallel_state import get_tp_group
-
-        model_config = self._vllm_config.model_config
-        parallel_config = self._vllm_config.parallel_config
-        cache_config = self._vllm_config.cache_config
-
-        kv_dtype = get_kv_cache_torch_dtype(
-            cache_config.cache_dtype, model_config.dtype
+        # Create metadata using builder
+        metadata = VLLMMetadataBuilder.from_vllm_config(
+            self._vllm_config, self._config, role
         )
 
-        use_mla = mla_enabled(model_config)
-        self._validate_mla_config(use_mla)
-
-        # Construct kv shape
-        num_layer = model_config.get_num_layers(parallel_config)
-        num_draft_layers = self._calculate_draft_layers()
-        num_layer += num_draft_layers
-        chunk_size = self._config.chunk_size
-        num_kv_head = model_config.get_num_kv_heads(parallel_config)
-        head_size = model_config.get_head_size()
-        kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-
-        logger.info(
-            "num_layer: %d, chunk_size: %d, num_kv_head (per gpu): %d, "
-            "head_size: %d, hidden_dim (D) for KV (per gpu): %d, "
-            "use mla: %s, kv shape: %s, num_draft_layers: %d",
-            num_layer,
-            chunk_size,
-            num_kv_head,
-            head_size,
-            num_kv_head * head_size,
-            use_mla,
-            kv_shape,
-            num_draft_layers,
-        )
-
-        # Determine device
-        device, torch_dev, dev_name = self._get_device_info(current_platform)
-
-        # Extract engine_id and kv_connector_extra_config from vllm_config
-        engine_id = None
-        kv_connector_extra_config = None
-        if hasattr(self._vllm_config, "kv_transfer_config"):
-            kv_transfer_config = self._vllm_config.kv_transfer_config
-            if kv_transfer_config is not None:
-                engine_id = getattr(kv_transfer_config, "engine_id", None)
-                kv_connector_extra_config = getattr(
-                    kv_transfer_config, "kv_connector_extra_config", None
-                )
-
-        # Create metadata
-        num_ranks = (
-            parallel_config.tensor_parallel_size
-            * parallel_config.pipeline_parallel_size
-        )
-        metadata = LMCacheEngineMetadata(
-            model_config.model,
-            parallel_config.world_size,
-            parallel_config.rank,
-            "vllm",
-            kv_dtype,
-            kv_shape,
-            use_mla,
-            role,
-            served_model_name=model_config.served_model_name,
-            chunk_size=self._config.chunk_size,
-            engine_id=engine_id,
-            num_ranks=num_ranks,
-            kv_connector_extra_config=kv_connector_extra_config,
-        )
+        self._validate_mla_config(metadata.use_mla)
 
         # Create GPU connector
         vllm_gpu_connector = self._create_gpu_connector(
-            role, use_mla, metadata, device, current_platform
+            role, metadata.use_mla, metadata, metadata.device, current_platform
         )
 
         # Get tensor parallel group
@@ -325,61 +249,6 @@ class LMCacheManager:
             raise ValueError(
                 "We haven't supported MLA with Cacheblend yet. Please disable blending."
             )
-
-    def _calculate_draft_layers(self) -> int:
-        """Calculate the number of draft layers for speculative decoding."""
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        num_draft_layers = 0
-        vllm_config = self._vllm_config
-        model_config = vllm_config.model_config
-
-        if vllm_config.speculative_config is not None:
-            logger.info(
-                "vllm_config.speculative_config: %s", vllm_config.speculative_config
-            )
-            if vllm_config.speculative_config.method == "deepseek_mtp":
-                num_draft_layers = getattr(
-                    model_config.hf_config, "num_nextn_predict_layers", 0
-                )
-            elif vllm_config.speculative_config.use_eagle():
-                try:
-                    draft_model_config = (
-                        vllm_config.speculative_config.draft_model_config
-                    )
-                    num_draft_layers = draft_model_config.get_num_layers(
-                        vllm_config.parallel_config
-                    )
-                    logger.info("EAGLE detected %d extra layer(s)", num_draft_layers)
-                except Exception:
-                    logger.info(
-                        "EAGLE detected, but failed to get the number of extra layers"
-                        "falling back to 1"
-                    )
-                    num_draft_layers = 1
-        return num_draft_layers
-
-    def _get_device_info(self, current_platform):
-        """Get device information based on platform."""
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        if current_platform.is_cuda_alike():
-            logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-            torch_dev = torch.cuda
-            dev_name = "cuda"
-        elif current_platform.is_xpu():
-            logger.info("XPU device is available. Using XPU for LMCache engine.")
-            torch_dev = torch.xpu
-            dev_name = "xpu"
-        else:
-            raise RuntimeError("Unsupported device platform for LMCache engine.")
-
-        num_gpus = torch_dev.device_count()
-        local_rank = self._vllm_config.parallel_config.rank % num_gpus
-        torch_dev.set_device(local_rank)
-        device = torch.device(f"{dev_name}:{local_rank}")
-
-        return device, torch_dev, dev_name
 
     def _create_gpu_connector(self, role, use_mla, metadata, device, current_platform):
         """Create the GPU connector based on configuration."""
