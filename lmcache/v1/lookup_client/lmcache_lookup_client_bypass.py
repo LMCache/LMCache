@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 # Third Party
 import torch
@@ -11,10 +11,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -28,7 +24,6 @@ class LMCacheBypassLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         lmcache_engine: LMCacheEngine,
@@ -37,7 +32,6 @@ class LMCacheBypassLookupClient(LookupClientInterface):
         Initialize the bypass lookup client.
 
         Args:
-            vllm_config: The vLLM configuration
             config: The LMCacheEngine configuration
             metadata: The LMCacheEngine metadata
             lmcache_engine: The LMCacheEngine instance to use for lookups

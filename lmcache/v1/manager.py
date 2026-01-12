@@ -129,7 +129,6 @@ class LMCacheManager:
 
         # Create lookup client
         self._lookup_client = LookupClientFactory.create_lookup_client(
-            self._vllm_config,
             self._config,
             self._lmcache_engine_metadata,
             self._lmcache_engine,
@@ -151,13 +150,12 @@ class LMCacheManager:
 
         # Create lookup server
         self._lookup_server = LookupClientFactory.create_lookup_server(
-            self._lmcache_engine, self._vllm_config
+            self._lmcache_engine, self._lmcache_engine_metadata
         )
 
         # Create offload server
         self._offload_server = ZMQOffloadServer(
             self._lmcache_engine,
-            self._vllm_config,
             get_tensor_model_parallel_rank(),
         )
 
@@ -251,7 +249,22 @@ class LMCacheManager:
         # Determine device
         device, torch_dev, dev_name = self._get_device_info(current_platform)
 
+        # Extract engine_id and kv_connector_extra_config from vllm_config
+        engine_id = None
+        kv_connector_extra_config = None
+        if hasattr(self._vllm_config, "kv_transfer_config"):
+            kv_transfer_config = self._vllm_config.kv_transfer_config
+            if kv_transfer_config is not None:
+                engine_id = getattr(kv_transfer_config, "engine_id", None)
+                kv_connector_extra_config = getattr(
+                    kv_transfer_config, "kv_connector_extra_config", None
+                )
+
         # Create metadata
+        num_ranks = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.pipeline_parallel_size
+        )
         metadata = LMCacheEngineMetadata(
             model_config.model,
             parallel_config.world_size,
@@ -263,6 +276,9 @@ class LMCacheManager:
             role,
             served_model_name=model_config.served_model_name,
             chunk_size=self._config.chunk_size,
+            engine_id=engine_id,
+            num_ranks=num_ranks,
+            kv_connector_extra_config=kv_connector_extra_config,
         )
 
         # Create GPU connector
