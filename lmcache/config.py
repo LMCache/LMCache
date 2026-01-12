@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 # Third Party
 import torch
@@ -51,6 +51,29 @@ class LMCacheEngineMetadata:
     num_ranks: int = 1
     """ extra config from kv_connector (e.g., lmcache_rpc_port) """
     kv_connector_extra_config: Optional[dict] = None
+
+    """ device for tensor operations (e.g., cuda:0, xpu:0) """
+    device: Optional[torch.device] = None
+    """ torch device module for device operations (torch.cuda or torch.xpu) """
+    torch_device_module: Optional[Any] = None
+    """ device platform name (e.g., 'cuda', 'xpu') """
+    device_name: Optional[str] = None
+    """ block size for paged attention in serving engine """
+    block_size: Optional[int] = None
+    """ number of layers in the model (extracted from kv_shape[0]) """
+    num_layers: Optional[int] = None
+    """ number of KV heads per GPU (extracted from kv_shape[3]) """
+    num_kv_heads: Optional[int] = None
+    """ head size dimension (extracted from kv_shape[4]) """
+    head_size: Optional[int] = None
+    """ tensor parallel size """
+    tensor_parallel_size: Optional[int] = None
+    """ pipeline parallel size """
+    pipeline_parallel_size: Optional[int] = None
+    """ data parallel local rank (for multi-instance serving) """
+    data_parallel_rank_local: Optional[int] = None
+    """ KV transfer role (e.g., 'kv_producer', 'kv_consumer', None) """
+    kv_role: Optional[str] = None
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
