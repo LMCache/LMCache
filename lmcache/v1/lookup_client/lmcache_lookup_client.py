@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import namedtuple
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import json
 import threading
 
@@ -21,10 +21,6 @@ from lmcache.v1.rpc_utils import (
     get_zmq_rpc_path_lmcache,
     get_zmq_socket,
 )
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -46,19 +42,17 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ):
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
-        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        engine_id = metadata.engine_id
+        assert engine_id is not None, "engine_id is required for RPC communication"
+        self.num_ranks = metadata.num_ranks
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -75,7 +69,7 @@ class LMCacheLookupClient(LookupClientInterface):
         self.socket_params = [
             SocketParams(
                 socket_path=get_zmq_rpc_path_lmcache(
-                    vllm_config, "lookup", rpc_port, rank
+                    engine_id, "lookup", rpc_port, rank
                 ),
                 rank=rank,
             )
@@ -294,14 +288,20 @@ class LMCacheLookupClient(LookupClientInterface):
 class LMCacheLookupServer:
     """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
 
-    def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
+    def __init__(
+        self,
+        lmcache_engine: LMCacheEngine,
+        metadata: LMCacheEngineMetadata,
+    ):
         self.decoder = msgspec.msgpack.Decoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
         )
         socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup", rpc_port, vllm_config.parallel_config.rank
+            metadata.engine_id, "lookup", rpc_port, metadata.worker_id
         )
         self.socket = get_zmq_socket(
             self.ctx,

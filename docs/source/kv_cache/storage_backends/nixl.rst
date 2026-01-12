@@ -51,7 +51,7 @@ Key settings:
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
-  .. note::
+.. note::
 
     Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ"].
 
@@ -74,6 +74,26 @@ Example ``lmcache-config.yaml`` for OBJ backend using S3 API:
         secret_key: <your_secret_key>
         bucket: <your_bucket>
         region: <your_region>
+
+Example ``lmcache-config.yaml`` for POSIX backend using liburing:
+
+.. note::
+
+    using POSIX backend with liburing requires NIXL to be built with liburing support.
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    nixl_buffer_size: 1073741824 # 1GB
+    nixl_buffer_device: cpu
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: POSIX
+      nixl_pool_size: 64
+      nixl_path: /mnt/nixl/cache/
+      use_direct_io: True
+      nixl_backend_params:
+        use_uring: "true"
 
 Dynamic Mode
 ~~~~~~~~~~~~~

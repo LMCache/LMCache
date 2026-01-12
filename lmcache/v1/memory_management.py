@@ -559,7 +559,18 @@ class TensorMemoryObj(MemoryObj):
         )
 
     @property
-    def byte_array(self) -> bytes:
+    def byte_array(self) -> memoryview:
+        # TODO: consider using one of the alternatives
+
+        # Alternative 1:
+        # # PyTorch tensors support buffer protocol directly for CPU tensors
+        # return memoryview(self.raw_data)
+
+        # Alternative 2:
+        # assert self.raw_data.device.type == 'cpu',
+        #   "byte_array only works with CPU tensors"
+        # return memoryview(self.raw_data.contiguous().numpy())
+
         num_bytes = self.raw_data.numel() * self.raw_data.element_size()
         ptr = self.raw_data.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
@@ -731,7 +742,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
@@ -753,7 +764,7 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
@@ -823,13 +834,11 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     # TODO(chunxiaozheng): remove if after all params replaced by shapes/dtypes
     def _adapt_shapes_and_dtypes(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
     ) -> Tuple[list[torch.Size], list[torch.dtype]]:
         if isinstance(shapes, torch.Size):
             shapes = [shapes]
-        elif isinstance(shapes, tuple):
-            shapes = [torch.Size(shapes)]
 
         if isinstance(dtypes, torch.dtype):
             dtypes = [dtypes]
@@ -918,7 +927,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -988,7 +997,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -1272,7 +1281,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -1316,7 +1325,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -1468,7 +1477,7 @@ class BufferAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
         allocator_type: Optional[str] = None,
@@ -1483,7 +1492,7 @@ class BufferAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
@@ -1547,7 +1556,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -1558,7 +1567,7 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -1636,7 +1645,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -1647,7 +1656,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -1736,7 +1745,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -1757,7 +1766,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -1884,7 +1893,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -1895,7 +1904,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -1945,7 +1954,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
@@ -1978,7 +1987,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
@@ -2090,7 +2099,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
 
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = "cpu",
@@ -2104,7 +2113,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
 
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
