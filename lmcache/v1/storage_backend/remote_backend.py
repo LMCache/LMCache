@@ -86,6 +86,8 @@ class RemoteBackend(StorageBackendInterface):
 
         self._setup_metrics()
 
+        self._interval_get_blocking_failed_count = 0
+
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
@@ -290,6 +292,7 @@ class RemoteBackend(StorageBackendInterface):
         try:
             memory_obj = future.result(self.blocking_timeout_secs)
         except Exception as e:
+            self._interval_get_blocking_failed_count += 1
             if isinstance(e, TimeoutError):
                 logger.warning("get blocking timeout, trigger cancel the future task")
                 future.cancel()
@@ -308,6 +311,11 @@ class RemoteBackend(StorageBackendInterface):
             f"deserialization takes {(t3 - t2) * 1000:.6f} msec"
         )
         return decompressed_memory_obj
+
+    def get_and_clear_interval_get_blocking_failed_count(self):
+        count = self._interval_get_blocking_failed_count
+        self._interval_get_blocking_failed_count = 0
+        return count
 
     def batched_get_blocking(
         self,
@@ -338,6 +346,7 @@ class RemoteBackend(StorageBackendInterface):
             try:
                 memory_objs = future.result(self.blocking_timeout_secs)
             except Exception as e:
+                self._interval_get_blocking_failed_count += 1
                 if isinstance(e, TimeoutError):
                     logger.warning(
                         "batched get blocking timeout, trigger cancel the future task"
@@ -362,6 +371,7 @@ class RemoteBackend(StorageBackendInterface):
                         memory_obj = fut.result(self.blocking_timeout_secs)
                     except Exception as e:
                         failed = True
+                        self._interval_get_blocking_failed_count += 1
                         if isinstance(e, TimeoutError):
                             logger.warning(
                                 "get blocking timeout, trigger cancel the future task"

@@ -14,12 +14,16 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.health_monitor.base import HealthCheck
 from lmcache.v1.health_monitor.constants import (
     DEFAULT_FALLBACK_POLICY,
+    DEFAULT_GET_BLOCKING_FAILED_THRESHOLD,
     DEFAULT_PING_TIMEOUT,
+    DEFAULT_WAITING_TIME_FOR_RECOVERY,
     FALLBACK_POLICY_CONFIG_KEY,
+    GET_BLOCKING_FAILED_THRESHOLD,
     PING_GENERIC_ERROR_CODE,
     PING_TIMEOUT_CONFIG_KEY,
     PING_TIMEOUT_ERROR_CODE,
     FallbackPolicy,
+    WAITING_TIME_FOR_RECOVERY,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +73,16 @@ class RemoteBackendHealthCheck(HealthCheck):
                 self._fallback_policy = DEFAULT_FALLBACK_POLICY
         elif isinstance(fallback_policy_str, FallbackPolicy):
             self._fallback_policy = fallback_policy_str
+        # Get get_blocking failed threshold from backend config
+        self.get_blocking_failed_threshold = backend.config.get_extra_config_value(
+            GET_BLOCKING_FAILED_THRESHOLD,
+            DEFAULT_GET_BLOCKING_FAILED_THRESHOLD,
+        )
+        # Get waiting time for recovery from backend config
+        self.waiting_time_for_recovery = backend.config.get_extra_config_value(
+            WAITING_TIME_FOR_RECOVERY, DEFAULT_WAITING_TIME_FOR_RECOVERY
+        )
+        self.failure_time: Optional[float] = None
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         self._backend_name: Optional[str] = None
 
@@ -155,11 +169,50 @@ class RemoteBackendHealthCheck(HealthCheck):
 
     def check(self) -> bool:
         """
-        Perform a ping check on the remote backend.
+        Perform a health check on remote backend, which includes the following checks:
+
+        - get_blocking/batched_get_blocking, if failed count >= threshold,
+        which means check failed, update failure_time and return False.
+        If failure_time is not None, wait for more than`waiting_time_for_recovery`
+        seconds before resuming the check.
+
+        - ping, if connector supports ping, send a ping request to remote connector.
 
         Returns:
-            bool: True if ping succeeds, False otherwise
+            bool: True if all checks succeeds, False otherwise
         """
+        if self.failure_time is not None:
+            if time.time() - self.failure_time > self.waiting_time_for_recovery:
+                # recover from get blocking timeout
+                logger.info(
+                    "Failure time: %s, current time: %s, "
+                    "recover from get blocking timeout",
+                    self.failure_time,
+                    time.time(),
+                )
+                self.failure_time = None
+            else:
+                logger.info(
+                    "Failure time: %s, current time: %s, "
+                    "still in get blocking timeout recovery window",
+                    self.failure_time,
+                    time.time(),
+                )
+                return False
+
+        # Check read failed
+        get_blocking_failed_count = (
+            self.backend.get_and_clear_interval_get_blocking_failed_count()
+        )
+        if get_blocking_failed_count >= self.get_blocking_failed_threshold:
+            logger.warning(
+                "Detected %s get blocking failed in interval, threshold: %s",
+                get_blocking_failed_count,
+                self.get_blocking_failed_threshold,
+            )
+            self.failure_time = time.time()
+            return False
+
         # Try to reinitialize connection if needed
         if not self._try_reinitialize_connection():
             return False
@@ -172,6 +225,7 @@ class RemoteBackendHealthCheck(HealthCheck):
         if not connector.support_ping():
             return True
 
+        # Check ping
         try:
             start_time = time.perf_counter()
             future = asyncio.run_coroutine_threadsafe(
