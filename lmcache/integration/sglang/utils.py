@@ -1,10 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import TYPE_CHECKING
 import os
+
+# Third Party
+import torch
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+
+if TYPE_CHECKING:
+    from sglang.srt.configs.model_config import ModelConfig
+
+# First Party
+from lmcache.config import LMCacheEngineMetadata
 
 logger = init_logger(__name__)
 ENGINE_NAME = "sglang-instance"
@@ -37,3 +47,47 @@ def lmcache_get_config() -> LMCacheEngineConfig:
         config = LMCacheEngineConfig.from_file(config_file)
 
     return config
+
+
+class SGLangMetadataBuilder:
+    """Builder for creating LMCacheEngineMetadata from SGLang configuration."""
+
+    @staticmethod
+    def from_sglang_config(
+        model_config: "ModelConfig",
+        tp_size: int,
+        global_rank: int,
+        kv_dtype: torch.dtype,
+        lmcache_config: LMCacheEngineConfig,
+    ) -> LMCacheEngineMetadata:
+        """
+        Create LMCacheEngineMetadata from SGLang configuration.
+
+        Args:
+            model_config: SGLang model configuration
+            tp_size: Tensor parallel size
+            global_rank: Global tensor parallel rank
+            kv_dtype: Data type for KV cache tensors
+            lmcache_config: LMCache engine configuration
+
+        Returns:
+            LMCacheEngineMetadata
+        """
+        # First Party
+        from lmcache.config import LMCacheEngineMetadata
+
+        num_layer = model_config.num_hidden_layers
+        chunk_size = lmcache_config.chunk_size
+        num_kv_head = model_config.get_num_kv_heads(tp_size)
+        head_dim = model_config.head_dim
+
+        kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
+
+        return LMCacheEngineMetadata(
+            model_config.model_path,
+            tp_size,
+            global_rank,
+            "sgl",
+            kv_dtype,
+            kv_shape,
+        )

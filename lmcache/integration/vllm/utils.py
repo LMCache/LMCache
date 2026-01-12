@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 import torch
 
 # First Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
@@ -177,8 +178,6 @@ def create_lmcache_metadata(
     except ImportError:
         # Third Party
         from vllm.utils import get_kv_cache_torch_dtype
-    # First Party
-    from lmcache.config import LMCacheEngineMetadata
 
     config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters
@@ -289,3 +288,173 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
         shape.numel() * kv_dtype.itemsize
         for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
     )
+
+
+class VLLMMetadataBuilder:
+    """Builder for creating LMCacheEngineMetadata from vLLM configuration."""
+
+    @staticmethod
+    def from_vllm_config(
+        vllm_config,
+        lmcache_config: LMCacheEngineConfig,
+        role: str,
+    ) -> LMCacheEngineMetadata:
+        """
+        Create fully populated LMCacheEngineMetadata from vLLM configuration.
+
+        Args:
+            vllm_config: vLLM configuration object
+            lmcache_config: LMCache engine configuration
+            role: The role string ("scheduler" or "worker")
+
+        Returns:
+            LMCacheEngineMetadata: Fully populated metadata
+        """
+        # Third Party
+        from vllm.platforms import current_platform
+
+        try:
+            # Third Party
+            from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+        except ImportError:
+            # Third Party
+            from vllm.utils import get_kv_cache_torch_dtype
+
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
+
+        # Extract KV dtype
+        kv_dtype = get_kv_cache_torch_dtype(
+            cache_config.cache_dtype, model_config.dtype
+        )
+
+        # Check if MLA is enabled
+        use_mla = mla_enabled(model_config)
+
+        # Calculate num_layers including draft layers for speculative decoding
+        num_layer = model_config.get_num_layers(parallel_config)
+        num_draft_layers = VLLMMetadataBuilder._calculate_draft_layers(vllm_config)
+        num_layer += num_draft_layers
+
+        # Extract KV shape components
+        chunk_size = lmcache_config.chunk_size
+        num_kv_head = model_config.get_num_kv_heads(parallel_config)
+        head_size = model_config.get_head_size()
+        kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
+
+        logger.info(
+            "VLLMMetadataBuilder: num_layer=%d (draft=%d), chunk_size=%d, "
+            "num_kv_head=%d, head_size=%d, use_mla=%s",
+            num_layer,
+            num_draft_layers,
+            chunk_size,
+            num_kv_head,
+            head_size,
+            use_mla,
+        )
+
+        # Determine device info
+        device, torch_dev, dev_name = VLLMMetadataBuilder._get_device_info(
+            vllm_config, current_platform
+        )
+
+        # Extract engine_id and kv_connector_extra_config
+        engine_id = None
+        kv_connector_extra_config = None
+        kv_role = None
+        if hasattr(vllm_config, "kv_transfer_config"):
+            kv_transfer_config = vllm_config.kv_transfer_config
+            if kv_transfer_config is not None:
+                engine_id = getattr(kv_transfer_config, "engine_id", None)
+                kv_connector_extra_config = getattr(
+                    kv_transfer_config, "kv_connector_extra_config", None
+                )
+                kv_role = getattr(kv_transfer_config, "kv_role", None)
+
+        # Calculate num_ranks
+        num_ranks = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.pipeline_parallel_size
+        )
+
+        metadata = LMCacheEngineMetadata(
+            model_name=model_config.model,
+            world_size=parallel_config.world_size,
+            worker_id=parallel_config.rank,
+            fmt="vllm",
+            kv_dtype=kv_dtype,
+            kv_shape=kv_shape,
+            use_mla=use_mla,
+            role=role,
+            served_model_name=model_config.served_model_name,
+            chunk_size=chunk_size,
+            engine_id=engine_id,
+            num_ranks=num_ranks,
+            kv_connector_extra_config=kv_connector_extra_config,
+            device=device,
+            torch_device_module=torch_dev,
+            device_name=dev_name,
+            block_size=cache_config.block_size,
+            num_layers=num_layer,
+            num_kv_heads=num_kv_head,
+            head_size=head_size,
+            tensor_parallel_size=parallel_config.tensor_parallel_size,
+            pipeline_parallel_size=parallel_config.pipeline_parallel_size,
+            data_parallel_rank_local=parallel_config.data_parallel_rank_local,
+            kv_role=kv_role,
+        )
+
+        return metadata
+
+    @staticmethod
+    def _calculate_draft_layers(vllm_config) -> int:
+        """Calculate the number of draft layers for speculative decoding."""
+        num_draft_layers = 0
+        model_config = vllm_config.model_config
+
+        if vllm_config.speculative_config is not None:
+            logger.info(
+                "vllm_config.speculative_config: %s", vllm_config.speculative_config
+            )
+            if vllm_config.speculative_config.method == "deepseek_mtp":
+                num_draft_layers = getattr(
+                    model_config.hf_config, "num_nextn_predict_layers", 0
+                )
+            elif vllm_config.speculative_config.use_eagle():
+                try:
+                    draft_model_config = (
+                        vllm_config.speculative_config.draft_model_config
+                    )
+                    num_draft_layers = draft_model_config.get_num_layers(
+                        vllm_config.parallel_config
+                    )
+                    logger.info("EAGLE detected %d extra layer(s)", num_draft_layers)
+                except Exception:
+                    logger.info(
+                        "EAGLE detected, but failed to get the number of extra layers, "
+                        "falling back to 1"
+                    )
+                    num_draft_layers = 1
+        return num_draft_layers
+
+    @staticmethod
+    def _get_device_info(vllm_config, current_platform):
+        """Get device information based on platform."""
+        if current_platform.is_cuda_alike():
+            logger.info("CUDA device is available. Using CUDA for LMCache engine.")
+            torch_dev = torch.cuda
+            dev_name = "cuda"
+        elif current_platform.is_xpu():
+            logger.info("XPU device is available. Using XPU for LMCache engine.")
+            torch_dev = torch.xpu
+            dev_name = "xpu"
+        else:
+            raise RuntimeError("Unsupported device platform for LMCache engine.")
+
+        num_gpus = torch_dev.device_count()
+        local_rank = vllm_config.parallel_config.rank % num_gpus
+        torch_dev.set_device(local_rank)
+        device = torch.device(f"{dev_name}:{local_rank}")
+
+        return device, torch_dev, dev_name

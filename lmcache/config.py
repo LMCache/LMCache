@@ -15,8 +15,11 @@ logger = init_logger(__name__)
 
 @dataclass
 class LMCacheEngineMetadata:
-    """name of the LLM model"""
+    """
+    Metadata extracted from the northbound serving engine
+    """
 
+    """name of the LLM model"""
     model_name: str
     """ world size when running under a distributed setting """
     world_size: int
@@ -69,9 +72,9 @@ class LMCacheEngineMetadata:
     """ tensor parallel size """
     tensor_parallel_size: Optional[int] = None
     """ pipeline parallel size """
-    pipeline_parallel_size: Optional[int] = None
+    pipeline_parallel_size: int = 1  # Default to 1 (no pipeline parallelism)
     """ data parallel local rank (for multi-instance serving) """
-    data_parallel_rank_local: Optional[int] = None
+    data_parallel_rank_local: int = 0  # Default to 0 (first DP rank)
     """ KV transfer role (e.g., 'kv_producer', 'kv_consumer', None) """
     kv_role: Optional[str] = None
 
