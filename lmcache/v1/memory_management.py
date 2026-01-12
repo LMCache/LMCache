@@ -870,6 +870,19 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
 class AddressManager:
     """
     Manages a virtual address space starting from 0 for memory allocation.
+
+    Key interfaces:
+    - allocate(size): Allocate a block of memory of the given size. The starting
+      address and the actual allocated size will be aligned.
+
+    - free(address, size): Free a previously allocated region. Note that if the
+      region is not "allocated" before, it may have internal errors.
+
+    - sbrk(size): Expand the virtual address space by the given size. The size
+      will be aligned internally.
+
+    Core assumptions:
+    - The allocated size should be aligned with ALIGN_BYTES.
     """
 
     ALIGN_BYTES = 4096
@@ -1033,8 +1046,10 @@ class AddressManager:
         Expand the virtual address space by a given size.
 
         Args:
-            size: The size to expand the address space.
+            size: The size to expand the address space. Will be aligned internally
+                with the ALIGN_BYTES
         """
+        size = self.compute_aligned_size(size)
         new_block = FreeBlock(start=self._size, size=size)
         prev_block = self._explicit_list[-1] if len(self._explicit_list) > 0 else None
         succ_block = None
