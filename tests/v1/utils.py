@@ -486,6 +486,9 @@ def create_test_metadata(
     worker_id: int = 0,
     world_size: int = 1,
     kv_shape: tuple = (4, 2, 256, 8, 128),
+    engine_id: Optional[str] = "test_engine",
+    num_ranks: int = 1,
+    kv_connector_extra_config: Optional[dict] = None,
 ) -> LMCacheEngineMetadata:
     """Create test metadata for LMCacheEngine."""
     return LMCacheEngineMetadata(
@@ -495,6 +498,9 @@ def create_test_metadata(
         fmt="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
+        engine_id=engine_id,
+        num_ranks=num_ranks,
+        kv_connector_extra_config=kv_connector_extra_config,
     )
 
 

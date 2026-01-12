@@ -555,7 +555,18 @@ class TensorMemoryObj(MemoryObj):
         )
 
     @property
-    def byte_array(self) -> bytes:
+    def byte_array(self) -> memoryview:
+        # TODO: consider using one of the alternatives
+
+        # Alternative 1:
+        # # PyTorch tensors support buffer protocol directly for CPU tensors
+        # return memoryview(self.raw_data)
+
+        # Alternative 2:
+        # assert self.raw_data.device.type == 'cpu',
+        #   "byte_array only works with CPU tensors"
+        # return memoryview(self.raw_data.contiguous().numpy())
+
         num_bytes = self.raw_data.numel() * self.raw_data.element_size()
         ptr = self.raw_data.data_ptr()
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))

@@ -45,6 +45,12 @@ class LMCacheEngineMetadata:
     kv_layer_groups_manager: KVLayerGroupsManager = field(
         default_factory=KVLayerGroupsManager
     )
+    """ engine_id for RPC path (used by lookup client/server) """
+    engine_id: Optional[str] = None
+    """ total number of ranks (tensor_parallel_size * pipeline_parallel_size) """
+    num_ranks: int = 1
+    """ extra config from kv_connector (e.g., lmcache_rpc_port) """
+    kv_connector_extra_config: Optional[dict] = None
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
