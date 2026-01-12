@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Any, List, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence
 import time
 
 # First Party
@@ -111,11 +111,14 @@ class AuditBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         sizes = [len(obj.byte_array) for obj in memory_objs]
         start_time = time.perf_counter()
         try:
-            self.real_backend.batched_submit_put_task(keys, memory_objs, transfer_spec)
+            self.real_backend.batched_submit_put_task(
+                keys, memory_objs, transfer_spec, on_complete_callback
+            )
             self._log_operation(
                 "BATCHED_SUBMIT_PUT_TASK", start_time, None, True, size=sum(sizes)
             )
