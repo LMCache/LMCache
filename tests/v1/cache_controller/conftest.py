@@ -389,6 +389,12 @@ def mock_kv_controller():
     controller.deregister = AsyncMock()
     controller.kv_pool = {}
     controller.seq_tracker = {}
+
+    # Mock full_sync_tracker
+    mock_tracker = Mock()
+    mock_tracker.should_request_full_sync = Mock(return_value=(False, None))
+    controller.full_sync_tracker = mock_tracker
+
     return controller
 
 
