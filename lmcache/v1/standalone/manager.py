@@ -53,15 +53,16 @@ class StandaloneLMCacheManager(LMCacheManager):
         """
         # Store standalone-specific parameters before parent __init__
         # (needed by _init_components which is called in parent __init__)
-        self._metadata = metadata
         self._gpu_connector = gpu_connector
-        self._broadcast_fn = broadcast_fn
-        self._broadcast_object_fn = broadcast_object_fn
 
-        # Call parent __init__ (vllm_config=None for standalone mode)
+        # Add broadcast functions to metadata
+        metadata.broadcast_fn = broadcast_fn
+        metadata.broadcast_object_fn = broadcast_object_fn
+
+        # Call parent __init__
         super().__init__(
             config=config,
-            vllm_config=None,
+            metadata=metadata,
             role="worker",
             connector=connector,
         )
@@ -81,8 +82,8 @@ class StandaloneLMCacheManager(LMCacheManager):
             config=self._config,
             metadata=self._metadata,
             gpu_connector=self._gpu_connector,
-            broadcast_fn=self._broadcast_fn,
-            broadcast_object_fn=self._broadcast_object_fn,
+            broadcast_fn=self._metadata.broadcast_fn,
+            broadcast_object_fn=self._metadata.broadcast_object_fn,
         )
         self._lmcache_engine_metadata = self._lmcache_engine.metadata
 
