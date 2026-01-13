@@ -26,7 +26,6 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector import GPUConnectorInterface
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
-
 logger = init_logger(__name__)
 
 
@@ -157,10 +156,10 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             n, b, h, d = self.kvcaches[0][0].shape
             hd_shape = h * d
             for i in range(len(self.kvcaches)):
-                self.kvcaches[i][0].view(n*b, hd_shape).index_copy_(
+                self.kvcaches[i][0].view(n * b, hd_shape).index_copy_(
                     0, slot_mapping[start:end], tmp_gpu_buffer[0][i]
                 )
-                self.kvcaches[i][1].view(n*b, hd_shape).index_copy_(
+                self.kvcaches[i][1].view(n * b, hd_shape).index_copy_(
                     0, slot_mapping[start:end], tmp_gpu_buffer[1][i]
                 )
 
@@ -198,7 +197,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             tmp_gpu_buffer[0] = torch.stack(
                 tuple(
                     self.kvcaches[i][0]
-                    .view(n*b, hd_shape)
+                    .view(n * b, hd_shape)
                     .index_select(0, slot_mapping[start:end])
                     for i in layers
                 ),
@@ -207,7 +206,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             tmp_gpu_buffer[1] = torch.stack(
                 tuple(
                     self.kvcaches[i][1]
-                    .view(n*b, hd_shape)
+                    .view(n * b, hd_shape)
                     .index_select(0, slot_mapping[start:end])
                     for i in layers
                 ),

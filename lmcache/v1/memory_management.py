@@ -25,6 +25,7 @@ from lmcache.v1.system_detection import NUMAMapping
 
 if not is_hpu_available():
     if torch.cuda.is_available():
+        # First Party
         import lmcache.c_ops as lmc_ops
     else:
         # First Party
@@ -406,6 +407,7 @@ def _free_cpu_memory(
             lmc_ops.free_pinned_numa_ptr(buffer.data_ptr(), size)
         else:
             lmc_ops.free_pinned_ptr(buffer.data_ptr())
+
 
 def _allocate_gpu_memory(
     size: int,

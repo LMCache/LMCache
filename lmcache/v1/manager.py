@@ -396,7 +396,9 @@ class LMCacheManager:
             VLLMPagedMemLayerwiseGPUConnector,
         )
         from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
+
         if is_hpu_available():
+            # First Party
             from lmcache.v1.hpu_connector import VLLMPagedMemHPUConnectorV2
 
         use_gpu = self._need_gpu_interm_buffer()
@@ -415,7 +417,7 @@ class LMCacheManager:
                 )
 
         if is_hpu_available():
-            return  VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
+            return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
         elif current_platform.is_cuda_alike():
             if self._config.use_gpu_connector_v3:
                 return VLLMPagedMemGPUConnectorV3.from_metadata(

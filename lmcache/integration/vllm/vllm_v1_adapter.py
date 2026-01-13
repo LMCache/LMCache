@@ -415,6 +415,7 @@ class ReqMeta:
             request_configs=tracker.request_configs,
         )
 
+
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
@@ -978,7 +979,6 @@ class LMCacheConnectorV1Impl:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        import remote_pdb;remote_pdb.set_trace()
         assert self.lmcache_engine is not None
         if not self.use_layerwise:
             return

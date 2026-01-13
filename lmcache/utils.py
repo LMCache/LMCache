@@ -40,9 +40,11 @@ logger = init_logger(__name__)
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
+
 # check hpu platform
 def is_hpu_available() -> bool:
     return hasattr(torch, "hpu") and torch.hpu.is_available()
+
 
 # Math utility functions
 def cdiv(a: int, b: int) -> int:
