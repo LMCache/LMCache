@@ -23,7 +23,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
+from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor, PrometheusLogger
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
@@ -39,6 +39,11 @@ from lmcache.v1.gpu_connector import (
     SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
+)
+from lmcache.v1.health_monitor.base import HealthMonitor
+from lmcache.v1.health_monitor.constants import (
+    DEFAULT_PING_INTERVAL,
+    PING_INTERVAL_CONFIG_KEY,
 )
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
@@ -212,6 +217,10 @@ class LMCacheEngine:
         # Flag to control KVCache Check logging (can be toggled via API)
         self.kvcache_check_log_enabled = False
 
+        # Health monitor for the entire LMCache engine
+        # Will be initialized in post_init when storage_manager is created
+        self.health_monitor: Optional[HealthMonitor] = None
+
         gc.collect()
         if not config.py_enable_gc:
             gc.disable()
@@ -243,6 +252,8 @@ class LMCacheEngine:
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
                 )
+                # Initialize health monitor at engine level
+                self._init_health_monitor()
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
@@ -271,6 +282,56 @@ class LMCacheEngine:
         if self.storage_manager is not None:
             return self.storage_manager.is_frozen()
         return False
+
+    def _init_health_monitor(self) -> None:
+        """
+        Initialize the health monitor for the entire LMCache engine.
+
+        This is called during post_init after storage_manager is created.
+        The HealthMonitor automatically discovers and instantiates all
+        HealthCheck subclasses.
+        """
+        # Get ping interval from config
+        ping_interval = self.config.get_extra_config_value(
+            PING_INTERVAL_CONFIG_KEY, DEFAULT_PING_INTERVAL
+        )
+
+        # Create health monitor with cache engine - it will auto-discover health checks
+        self.health_monitor = HealthMonitor(
+            cache_engine=self,
+            ping_interval=ping_interval,
+        )
+
+        # Start the health monitor
+        self.health_monitor.start()
+        logger.info("Health monitor initialized and started at engine level")
+
+        # Setup metrics callback for health status
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.lmcache_is_healthy.set_function(
+                lambda: 1 if self.is_healthy() else 0
+            )
+
+    def is_healthy(self) -> bool:
+        """
+        Check if the LMCache engine is healthy.
+
+        Returns:
+            bool: True if healthy, False otherwise
+        """
+        if self.health_monitor is None:
+            return True
+        return self.health_monitor.is_healthy()
+
+    def get_health_monitor(self) -> Optional[HealthMonitor]:
+        """
+        Get the health monitor instance.
+
+        Returns:
+            Optional[HealthMonitor]: The health monitor, or None if not initialized
+        """
+        return self.health_monitor
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -301,6 +362,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping store operation")
+            return
+
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store operation"
         )
@@ -485,6 +551,11 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping store_layer operation")
+            return
+
         assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
@@ -649,6 +720,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping retrieve operation")
+            return torch.zeros(len(tokens), dtype=torch.bool)
+
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve operation"
         )
@@ -782,6 +858,12 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping retrieve_layer operation")
+            yield torch.zeros(len(tokens), dtype=torch.bool)
+            return
+
         assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
@@ -929,6 +1011,11 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens exist inside LMCache.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping lookup operation")
+            return 0
+
         assert self.storage_manager is not None
 
         if tokens is not None:
@@ -1341,6 +1428,15 @@ class LMCacheEngine:
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
         logger.info("Closing LMCacheEngine...")
+
+        # Stop health monitor first
+        if self.health_monitor is not None:
+            try:
+                logger.info("Stopping health monitor...")
+                self.health_monitor.stop()
+                logger.info("Health monitor stopped successfully")
+            except Exception as e:
+                logger.error(f"Error stopping health monitor: {e}")
 
         if self.lmcache_worker is not None:
             try:
