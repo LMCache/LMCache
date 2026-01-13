@@ -7,7 +7,7 @@ removing vLLM dependencies and simplifying the initialization logic.
 """
 
 # Standard
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
@@ -36,8 +36,6 @@ class StandaloneLMCacheManager(LMCacheManager):
         config: Any,
         metadata: LMCacheEngineMetadata,
         gpu_connector: Any,
-        broadcast_fn: Callable,
-        broadcast_object_fn: Callable,
         connector: Optional[Any] = None,
     ):
         """
@@ -45,19 +43,13 @@ class StandaloneLMCacheManager(LMCacheManager):
 
         Args:
             config: LMCache engine configuration
-            metadata: Pre-constructed LMCacheEngineMetadata
+            metadata: Pre-constructed LMCacheEngineMetadata (with broadcast functions)
             gpu_connector: GPU connector instance
-            broadcast_fn: Broadcast function for tensor parallel
-            broadcast_object_fn: Broadcast function for objects
             connector: Reference to LMCacheConnectorV1Impl for internal API server
         """
         # Store standalone-specific parameters before parent __init__
         # (needed by _init_components which is called in parent __init__)
         self._gpu_connector = gpu_connector
-
-        # Add broadcast functions to metadata
-        metadata.broadcast_fn = broadcast_fn
-        metadata.broadcast_object_fn = broadcast_object_fn
 
         # Call parent __init__
         super().__init__(

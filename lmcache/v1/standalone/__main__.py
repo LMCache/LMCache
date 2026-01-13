@@ -27,7 +27,6 @@ import torch
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes, lmcache_get_or_create_config
 from lmcache.logging import init_logger
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
@@ -45,6 +44,46 @@ except ImportError:
     current_platform = None
 
 logger = init_logger(__name__)
+
+
+class StandaloneMetadataBuilder:
+    """Builder for creating LMCacheEngineMetadata from CLI arguments."""
+
+    @staticmethod
+    def from_args(
+        args, kv_dtype: torch.dtype, kv_shape: tuple
+    ) -> LMCacheEngineMetadata:
+        """
+        Create LMCacheEngineMetadata from standalone CLI arguments.
+
+        Args:
+            args: Parsed command-line arguments
+            kv_dtype: KV cache data type
+            kv_shape: KV cache shape tuple
+
+        Returns:
+            LMCacheEngineMetadata
+        """
+        # Parse device info
+        device_name = args.device.split(":")[0] if ":" in args.device else args.device
+        device = (
+            torch.device(args.device) if args.device != "cpu" else torch.device("cpu")
+        )
+
+        return LMCacheEngineMetadata(
+            model_name=args.model_name,
+            world_size=args.world_size,
+            worker_id=args.worker_id,
+            fmt=args.fmt,
+            kv_dtype=kv_dtype,
+            kv_shape=kv_shape,
+            use_mla=args.use_mla,
+            role="worker",
+            num_ranks=args.world_size,
+            device=device,
+            device_name=device_name,
+        )
+
 
 dtype_map = {
     "float16": torch.float16,
@@ -200,12 +239,10 @@ class LMCacheStandaloneStarter:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
         layer_groups: List[LayerGroupSpec],
-        device: str = "cpu",
     ):
         self.config = config
         self.metadata = metadata
         self.layer_groups = layer_groups
-        self.device = device
 
         # Construct GPU connector based on platform detection
         gpu_connector = self._construct_gpu_connector()
@@ -215,8 +252,6 @@ class LMCacheStandaloneStarter:
             config=config,
             metadata=metadata,
             gpu_connector=gpu_connector,
-            broadcast_fn=mock_up_broadcast_fn,
-            broadcast_object_fn=mock_up_broadcast_object_fn,
             connector=self,
         )
 
@@ -243,49 +278,31 @@ class LMCacheStandaloneStarter:
             logger.info("vLLM platform detection not available, using MockGPUConnector")
             return MockGPUConnector(kv_shape=self.metadata.kv_shape)
 
-        # Extract parameters from metadata and config
-        kv_shape = self.metadata.kv_shape
-        num_layer = kv_shape[0]  # number of layers
-        num_kv_head = kv_shape[3]  # number of KV heads
-        head_size = kv_shape[4]  # head size
-        hidden_dim_size = num_kv_head * head_size
-
-        chunk_size = self.config.chunk_size
-        kv_dtype = self.metadata.kv_dtype
-        use_mla = self.metadata.use_mla
-
-        # Determine device based on platform
-        if self.device == "cpu":
+        # Check device from metadata
+        device_str = str(self.metadata.device)
+        if device_str == "cpu":
             logger.info("CPU device specified, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=kv_shape)
-        if current_platform.is_cuda_alike():
+            return MockGPUConnector(kv_shape=self.metadata.kv_shape)
+
+        # Use metadata methods for platform detection
+        if self.metadata.is_cuda_alike():
             connector_cls = VLLMPagedMemGPUConnectorV2
             logger.info("CUDA device detected, using VLLMPagedMemGPUConnectorV2")
-        elif current_platform.is_xpu():
+        elif self.metadata.is_xpu():
             connector_cls = VLLMPagedMemXPUConnectorV2
             logger.info("XPU device detected, using VLLMPagedMemXPUConnectorV2")
         else:
             logger.info("No GPU device detected, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=kv_shape)
+            return MockGPUConnector(kv_shape=self.metadata.kv_shape)
 
-        # Construct the GPU connector
-        gpu_connector = connector_cls(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=False if self.device == "cpu" else True,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=self.device,
-            use_mla=use_mla,
-        )
+        # Construct GPU connector using from_metadata
+        use_gpu = device_str != "cpu"
+        gpu_connector = connector_cls.from_metadata(self.metadata, use_gpu=use_gpu)
 
         logger.info(
-            "Constructed GPU connector: hidden_dim_size=%d, num_layer=%d, "
-            "chunk_size=%d, dtype=%s",
-            hidden_dim_size,
-            num_layer,
-            chunk_size,
-            kv_dtype,
+            "Constructed GPU connector from metadata: device=%s, use_gpu=%s",
+            self.metadata.device,
+            use_gpu,
         )
 
         return gpu_connector
@@ -372,7 +389,7 @@ class LMCacheStandaloneStarter:
         logger.info("Starting LMCache engine with instance ID: %s", instance_id)
 
         # Generate fixed pattern kvcaches for testing
-        kv_caches = self._generate_fixed_kvcaches(device=self.device)
+        kv_caches = self._generate_fixed_kvcaches(device=str(self.metadata.device))
         self.kv_caches = kv_caches
 
         # Post-initialize with kvcaches and start API server
@@ -614,19 +631,10 @@ def main():
             kv_shape[4],
         )
 
-        metadata = LMCacheEngineMetadata(
-            model_name=args.model_name,
-            world_size=args.world_size,
-            worker_id=args.worker_id,
-            fmt=args.fmt,
-            kv_dtype=kv_dtype,
-            kv_shape=kv_shape,
-            use_mla=args.use_mla,
-            role="worker",
-            num_ranks=args.world_size,
-        )
+        # Create metadata using builder
+        metadata = StandaloneMetadataBuilder.from_args(args, kv_dtype, kv_shape)
 
-        starter = LMCacheStandaloneStarter(config, metadata, layer_groups, args.device)
+        starter = LMCacheStandaloneStarter(config, metadata, layer_groups)
         setup_signal_handlers(starter)
 
         starter.start()
