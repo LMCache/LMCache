@@ -4,6 +4,7 @@ workload:
   repeat-count: 1
   completion: true
   num-documents: 20
+  document-length: 19966
 
 feature:
   type: pd
