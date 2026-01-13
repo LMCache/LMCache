@@ -15,16 +15,6 @@ import pytest
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 
-class MockRole:
-    """Mock role object with name attribute."""
-
-    def __init__(self, name):
-        self.name = name
-
-    def __str__(self):
-        return self.name
-
-
 class MockConfig:
     """Mock configuration object."""
 
@@ -43,18 +33,6 @@ def temp_plugin_dir():
 
 
 @pytest.fixture
-def worker_role():
-    """Create a WORKER role."""
-    return MockRole("WORKER")
-
-
-@pytest.fixture
-def scheduler_role():
-    """Create a SCHEDULER role."""
-    return MockRole("SCHEDULER")
-
-
-@pytest.fixture
 def config_with_location(temp_plugin_dir):
     """Create a config with plugin location."""
     return MockConfig([temp_plugin_dir])
@@ -69,23 +47,23 @@ def config_without_location():
 def test_init():
     """Test RuntimePluginLauncher initialization."""
     config = MockConfig()
-    role = MockRole("WORKER")
+    role = "WORKER"
     worker_count = 4
     worker_id = 1
 
     launcher = RuntimePluginLauncher(config, role, worker_count, worker_id)
 
     assert launcher.config == config
-    assert launcher.role == role
+    assert launcher.role == "WORKER"
     assert launcher.worker_count == worker_count
     assert launcher.worker_id == worker_id
     assert launcher.plugin_processes == []
 
 
-def test_launch_plugins_no_locations(config_without_location, worker_role):
+def test_launch_plugins_no_locations(config_without_location):
     """Test launch_plugins when no locations are configured."""
     launcher = RuntimePluginLauncher(
-        config_without_location, worker_role, worker_count=4, worker_id=1
+        config_without_location, "WORKER", worker_count=4, worker_id=1
     )
 
     # Should not raise any exceptions
@@ -93,10 +71,10 @@ def test_launch_plugins_no_locations(config_without_location, worker_role):
     assert len(launcher.plugin_processes) == 0
 
 
-def test_launch_plugins_location_does_not_exist(worker_role):
+def test_launch_plugins_location_does_not_exist():
     """Test launch_plugins when location does not exist."""
     config = MockConfig(["/non/existent/path"])
-    launcher = RuntimePluginLauncher(config, worker_role, worker_count=4, worker_id=1)
+    launcher = RuntimePluginLauncher(config, "WORKER", worker_count=4, worker_id=1)
 
     with patch("lmcache.v1.plugin.runtime_plugin_launcher.logger") as mock_logger:
         launcher.launch_plugins()
@@ -112,7 +90,7 @@ def test_launch_plugins_location_does_not_exist(worker_role):
 @patch("lmcache.v1.plugin.runtime_plugin_launcher.shutil.which")
 @patch("lmcache.v1.plugin.runtime_plugin_launcher.subprocess.Popen")
 def test_launch_plugins_python_file(
-    mock_popen, mock_which, temp_plugin_dir, worker_role, config_with_location
+    mock_popen, mock_which, temp_plugin_dir, config_with_location
 ):
     """Test launching a Python plugin file."""
     # Create a Python plugin file
@@ -132,7 +110,7 @@ def test_launch_plugins_python_file(
     mock_which.return_value = "/usr/bin/python3"
 
     launcher = RuntimePluginLauncher(
-        config_with_location, worker_role, worker_count=4, worker_id=1
+        config_with_location, "WORKER", worker_count=4, worker_id=1
     )
 
     with patch("threading.Thread") as mock_thread:
@@ -158,8 +136,6 @@ def test_launch_plugins_role_filtering(
     mock_popen,
     mock_which,
     temp_plugin_dir,
-    worker_role,
-    scheduler_role,
     config_with_location,
 ):
     """Test plugin filtering based on role."""
@@ -183,7 +159,7 @@ def test_launch_plugins_role_filtering(
 
     # Test with worker role - should launch worker_plugin and all_plugin
     launcher = RuntimePluginLauncher(
-        config_with_location, worker_role, worker_count=4, worker_id=1
+        config_with_location, "WORKER", worker_count=4, worker_id=1
     )
 
     with (
@@ -193,9 +169,13 @@ def test_launch_plugins_role_filtering(
         launcher.launch_plugins()
 
         # Should log info about skipping scheduler plugin
-        info_calls = [call[0][0] for call in mock_logger.info.call_args_list]
+        # New format: logger.info("Skipping %s: requires role %s", file, role)
+        info_calls = [call[0] for call in mock_logger.info.call_args_list]
         scheduler_skipped = any(
-            "requires role SCHEDULER" in str(call) for call in info_calls
+            len(call) >= 3
+            and "requires role" in call[0]
+            and "SCHEDULER" in str(call[2])
+            for call in info_calls
         )
         assert scheduler_skipped
 
@@ -206,7 +186,7 @@ def test_launch_plugins_role_filtering(
 @patch("lmcache.v1.plugin.runtime_plugin_launcher.shutil.which")
 @patch("lmcache.v1.plugin.runtime_plugin_launcher.subprocess.Popen")
 def test_launch_plugins_worker_id_filtering(
-    mock_popen, mock_which, temp_plugin_dir, worker_role, config_with_location
+    mock_popen, mock_which, temp_plugin_dir, config_with_location
 ):
     """Test plugin filtering based on worker ID."""
     # Create plugins for specific worker IDs
@@ -229,7 +209,7 @@ def test_launch_plugins_worker_id_filtering(
 
     # Test with worker_id=1 - should launch worker1_plugin and generic_worker_plugin
     launcher = RuntimePluginLauncher(
-        config_with_location, worker_role, worker_count=4, worker_id=1
+        config_with_location, "WORKER", worker_count=4, worker_id=1
     )
 
     with (
@@ -257,7 +237,7 @@ def test_get_interpreter_python(temp_plugin_dir):
     python_file.write_text("#!/usr/bin/env python3\nprint('test')")
 
     config = MockConfig()
-    launcher = RuntimePluginLauncher(config, MockRole("WORKER"), 4, 1)
+    launcher = RuntimePluginLauncher(config, "WORKER", 4, 1)
 
     with patch("lmcache.v1.plugin.runtime_plugin_launcher.shutil.which") as mock_which:
         # Mock which to return the interpreter for shebang
@@ -277,7 +257,7 @@ def test_get_interpreter_bash(temp_plugin_dir):
     bash_file.write_text("#!/bin/bash\necho 'test'")
 
     config = MockConfig()
-    launcher = RuntimePluginLauncher(config, MockRole("WORKER"), 4, 1)
+    launcher = RuntimePluginLauncher(config, "WORKER", 4, 1)
 
     with patch("lmcache.v1.plugin.runtime_plugin_launcher.shutil.which") as mock_which:
         # Mock which to return the interpreter for shebang
@@ -297,7 +277,7 @@ def test_get_interpreter_no_shebang(temp_plugin_dir):
     python_file.write_text("print('test')")
 
     config = MockConfig()
-    launcher = RuntimePluginLauncher(config, MockRole("WORKER"), 4, 1)
+    launcher = RuntimePluginLauncher(config, "WORKER", 4, 1)
 
     with patch("lmcache.v1.plugin.runtime_plugin_launcher.shutil.which") as mock_which:
         # Mock which to return interpreter for python
@@ -320,7 +300,7 @@ def test_get_interpreter_unsupported_type(temp_plugin_dir):
     unsupported_file.write_text("test content")
 
     config = MockConfig()
-    launcher = RuntimePluginLauncher(config, MockRole("WORKER"), 4, 1)
+    launcher = RuntimePluginLauncher(config, "WORKER", 4, 1)
 
     with pytest.raises(ValueError) as exc_info:
         launcher._get_interpreter(unsupported_file)
@@ -343,7 +323,7 @@ def test_get_interpreter_unsupported_type(temp_plugin_dir):
 def test_should_skip_plugin(role_name, worker_id, filename_parts, should_skip):
     """Test plugin skipping logic."""
     config = MockConfig()
-    launcher = RuntimePluginLauncher(config, MockRole(role_name), 4, worker_id)
+    launcher = RuntimePluginLauncher(config, role_name, 4, worker_id)
 
     assert launcher._should_skip_plugin(Path("test.py"), filename_parts) is should_skip
 
@@ -351,7 +331,7 @@ def test_should_skip_plugin(role_name, worker_id, filename_parts, should_skip):
 def test_stop_plugins():
     """Test stopping plugin processes."""
     config = MockConfig()
-    launcher = RuntimePluginLauncher(config, MockRole("WORKER"), 4, 1)
+    launcher = RuntimePluginLauncher(config, "WORKER", 4, 1)
 
     # Create mock processes
     mock_proc1 = Mock()
@@ -377,9 +357,8 @@ def test_stop_plugins():
 def test_atexit_registration(mock_register):
     """Test that cleanup handler is registered at initialization."""
     config = MockConfig()
-    role = MockRole("WORKER")
 
-    launcher = RuntimePluginLauncher(config, role, worker_count=4, worker_id=1)
+    launcher = RuntimePluginLauncher(config, "WORKER", worker_count=4, worker_id=1)
 
     # Should register stop_plugins with atexit
     mock_register.assert_called_once_with(launcher.stop_plugins)

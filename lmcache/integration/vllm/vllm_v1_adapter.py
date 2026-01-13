@@ -2,7 +2,6 @@
 # Standard
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import os
 
@@ -17,64 +16,31 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tp_group,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.v1.request import RequestStatus
-
-# First Party
-# Use LMCache's own math utilities instead of vllm's
-# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
-from lmcache.utils import cdiv
-
-# Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
-try:
-    # Third Party
-    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-except ImportError:
-    # Third Party
-    from vllm.utils import get_kv_cache_torch_dtype
-
-# Third Party
-from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.request import RequestStatus
 from vllm.version import __version__ as VLLM_VERSION
 import torch
 
 # First Party
+# Use LMCache's own math utilities instead of vllm's
+# (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
-    create_lmcache_metadata,
     extract_mm_features,
     lmcache_get_or_create_config,
-    mla_enabled,
 )
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
+from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
-from lmcache.v1.gpu_connector import (
-    GPUConnectorInterface,
-    VLLMBufferLayerwiseGPUConnector,
-    VLLMPagedMemGPUConnectorV2,
-    VLLMPagedMemGPUConnectorV3,
-    VLLMPagedMemLayerwiseGPUConnector,
-)
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-from lmcache.v1.lookup_client import LookupClientFactory
-from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
-    LMCacheAsyncLookupServer,
-)
-from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
-from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
+from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
     # Third Party
@@ -84,6 +50,9 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
+
+    # First Party
+    from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 
 logger = init_logger(__name__)
 
@@ -447,183 +416,6 @@ class ReqMeta:
         )
 
 
-def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.enable_pd:
-        return False
-    else:
-        return True
-
-
-def _calculate_draft_layers(vllm_config, model_config):
-    num_draft_layers = 0
-    if vllm_config is not None and vllm_config.speculative_config is not None:
-        logger.info(f"vllm_config.speculative_config: {vllm_config.speculative_config}")
-        # TODO(baoloongmao): Support other MTP/draft methods
-        if vllm_config.speculative_config.method == "deepseek_mtp":
-            num_draft_layers = getattr(
-                model_config.hf_config, "num_nextn_predict_layers", 0
-            )
-        elif vllm_config.speculative_config.use_eagle():
-            try:
-                draft_model_config = vllm_config.speculative_config.draft_model_config
-                num_draft_layers = draft_model_config.get_num_layers(
-                    vllm_config.parallel_config
-                )
-                logger.info(f"EAGLE detected {num_draft_layers} extra layer(s)")
-            except Exception:
-                logger.info(
-                    "EAGLE detected, but failed to get the number of extra layers"
-                    "falling back to 1"
-                )
-                num_draft_layers = 1
-    return num_draft_layers
-
-
-def _init_lmcache_engine(
-    lmcache_config: LMCacheEngineConfig,
-    vllm_config: "VllmConfig",
-    role: str,
-) -> LMCacheEngine:
-    """Initialize the LMCache engine by the given model config and parallel
-    config. This function will check the environment variable
-    `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
-    variable is not set, this function will return None.
-
-    :param lmcache_config: The LMCache configuration.
-    :type lmcache_config: LMCacheEngineConfig
-    :param vllm_config: The vLLM configuration.
-    :type vllm_config: VllmConfig
-
-    :return: The initialized LMCache engine
-    :rtype: LMCacheEngine
-    """
-    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
-        return curr_engine
-
-    model_config = vllm_config.model_config
-    parallel_config = vllm_config.parallel_config
-    cache_config = vllm_config.cache_config
-
-    assert isinstance(lmcache_config, LMCacheEngineConfig), (
-        "LMCache v1 configuration is should be passed."
-    )
-
-    kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
-
-    use_mla = mla_enabled(model_config)
-    if use_mla and (
-        lmcache_config.remote_serde != "naive"
-        and lmcache_config.remote_serde is not None
-    ):
-        raise ValueError("MLA only works with naive serde mode..")
-
-    # construct kv shape (for mem pool)
-    num_layer = model_config.get_num_layers(parallel_config)
-    num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
-    num_layer += num_draft_layers
-    chunk_size = lmcache_config.chunk_size
-    # this is per gpu
-    num_kv_head = model_config.get_num_kv_heads(parallel_config)
-    head_size = model_config.get_head_size()
-    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-    logger.info(
-        f"num_layer: {num_layer}, chunk_size: {chunk_size}, "
-        f"num_kv_head (per gpu): {num_kv_head}, head_size: {head_size}, "
-        f"hidden_dim (D) for KV (per gpu): {num_kv_head * head_size}, "
-        f"use mla: {use_mla}, kv shape: {kv_shape}, num_draft_layers:{num_draft_layers}"
-    )
-
-    # Change current device.
-    if current_platform.is_cuda_alike():
-        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-        torch_dev = torch.cuda
-        dev_name = "cuda"
-    elif current_platform.is_xpu():
-        logger.info("XPU device is available. Using XPU for LMCache engine.")
-        torch_dev = torch.xpu
-        dev_name = "xpu"
-    else:
-        raise RuntimeError("Unsupported device platform for LMCache engine.")
-
-    num_gpus = torch_dev.device_count()
-    local_rank = parallel_config.rank % num_gpus
-    torch_dev.set_device(local_rank)
-    device = torch.device(f"{dev_name}:{local_rank}")
-    metadata = LMCacheEngineMetadata(
-        model_config.model,
-        parallel_config.world_size,
-        parallel_config.rank,
-        "vllm",
-        kv_dtype,
-        kv_shape,
-        use_mla,
-        role,
-        served_model_name=model_config.served_model_name,
-        chunk_size=lmcache_config.chunk_size,
-    )
-
-    use_gpu = need_gpu_interm_buffer(lmcache_config)
-    vllm_gpu_connector: Optional[GPUConnectorInterface]
-
-    # Validate MLA with layerwise configurations
-    if use_mla and lmcache_config.use_layerwise and lmcache_config.enable_blending:
-        raise ValueError(
-            "We haven't supported MLA with Cacheblend yet. Please disable blending."
-        )
-
-    if role == "scheduler":
-        vllm_gpu_connector = None
-        # Create a dummy tpg object with broadcast and broadcast_object methods
-        tpg = SimpleNamespace()
-        tpg.broadcast = lambda tensor, src: tensor
-        tpg.broadcast_object = lambda obj, src: obj
-    elif lmcache_config.use_layerwise:
-        if lmcache_config.enable_blending:
-            # Use layerwise connector for blending
-            vllm_gpu_connector = VLLMBufferLayerwiseGPUConnector.from_metadata(
-                metadata, use_gpu, device
-            )
-        else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                metadata, use_gpu, device
-            )
-        tpg = get_tp_group()
-    else:
-        if current_platform.is_cuda_alike():
-            # TODO(chunxiaozheng): unify use VLLMPagedMemGPUConnectorV3 after stable
-            if lmcache_config.use_gpu_connector_v3:
-                vllm_gpu_connector = VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                vllm_gpu_connector = VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
-                )
-        elif current_platform.is_xpu():
-            vllm_gpu_connector = VLLMPagedMemXPUConnectorV2.from_metadata(
-                metadata, use_gpu, device
-            )
-        else:
-            raise RuntimeError("No supported connector found for the current platform.")
-        tpg = get_tp_group()
-    engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME,
-        lmcache_config,
-        metadata,
-        vllm_gpu_connector,
-        tpg.broadcast,
-        tpg.broadcast_object,
-    )
-    if role == "scheduler" and lmcache_config.enable_scheduler_bypass_lookup:
-        assert engine.save_only_first_rank or lmcache_config.get_extra_config_value(
-            "remote_enable_mla_worker_id_as0", metadata.use_mla
-        ), (
-            "enable_scheduler_bypass_lookup is only supported with "
-            "save_only_first_rank or remote_enable_mla_worker_id_as0"
-        )
-    return engine
-
-
 @dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
@@ -647,15 +439,49 @@ class LMCacheConnectorV1Impl:
     ):
         self._parent = parent
         self._vllm_config = vllm_config
+        self._role = role
         self.device = vllm_config.device_config.device
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
+
+        # Load and configure LMCache config
         config = lmcache_get_or_create_config()
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
-        # Put the leading with "lmcache." and matched configs from
-        # vllm extra_config to the config
+        self._apply_extra_config(config, vllm_config)
+        self.config = config
+
+        # Initialize LMCacheManager to handle internal components
+        self._manager = LMCacheManager(
+            config=config,
+            vllm_config=vllm_config,
+            role=role.name.lower(),
+            connector=self,
+        )
+
+        # Start services managed by LMCacheManager
+        self._manager.start_services()
+
+        # Initialize connector-specific state
+        self._init_connector_state(role, vllm_config, config)
+
+        # Setup metrics for monitoring data structures
+        self._setup_metrics()
+
+        logger.info(
+            "LMCache initialized for role %s with version %s, "
+            "vllm version %s, lmcache cache_engine metadata: %s",
+            role,
+            utils.get_version(),
+            VLLM_VERSION,
+            getattr(self.lmcache_engine, "metadata", None),
+        )
+
+    def _apply_extra_config(
+        self, config: LMCacheEngineConfig, vllm_config: "VllmConfig"
+    ) -> None:
+        """Apply extra config from vLLM to LMCache config."""
         kv_connector_extra_config = (
             vllm_config.kv_transfer_config.kv_connector_extra_config
         )
@@ -665,55 +491,34 @@ class LMCacheConnectorV1Impl:
                     config_key = key[8:]  # Remove "lmcache." prefix
                     if validate_and_set_config_value(config, config_key, value):
                         logger.info(
-                            f"Updated config {config_key} from vLLM "
-                            f"extra config: {value}"
+                            "Updated config %s from vLLM extra config: %s",
+                            config_key,
+                            value,
                         )
 
-        self.config = config
-
+    def _init_connector_state(
+        self,
+        role: KVConnectorRole,
+        vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+    ) -> None:
+        """Initialize connector-specific state variables."""
         self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
         self.layerwise_storers: list[Generator[Optional[torch.Tensor], None, None]] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
-        self.lmcache_engine_metadata: LMCacheEngineMetadata
-        if role == KVConnectorRole.SCHEDULER:
-            self.lmcache_engine: Optional[LMCacheEngine] = None
-            # Check if bypass lookup is enabled for scheduler
-            if config.enable_scheduler_bypass_lookup:
-                # Create LMCacheEngine for scheduler when bypass is enabled
-                self.lmcache_engine = _init_lmcache_engine(
-                    config,
-                    vllm_config,
-                    role="scheduler",
-                )
-                self.lmcache_engine_metadata = self.lmcache_engine.metadata
-            else:
-                self.lmcache_engine = None
-                # Create a dummy metadata for create prometheus logger
-                # kv_dtype kv_shape and use_mla are dummy data
-                self.lmcache_engine_metadata, _ = create_lmcache_metadata(
-                    vllm_config, role="scheduler"
-                )
-                PrometheusLogger.GetOrCreate(self.lmcache_engine_metadata)
-            # Create lookup client using factory
-            self.lookup_server = None
-            self.lookup_client = LookupClientFactory.create_lookup_client(
-                vllm_config, config, self.lmcache_engine_metadata, self.lmcache_engine
-            )
-            self._unfinished_requests: dict[str, Request] = {}
-        else:
-            self.lmcache_engine = _init_lmcache_engine(
-                config,
-                vllm_config,
-                role="worker",
-            )
 
+        # Role-specific initialization
+        if role == KVConnectorRole.SCHEDULER:
+            self._unfinished_requests: dict[str, "Request"] = {}
+        else:
             self.use_layerwise = config.use_layerwise
             self.enable_blending = config.enable_blending
 
             if self.enable_blending:
+                assert self.lmcache_engine is not None
                 assert self.lmcache_engine.gpu_connector is not None, (
                     "GPU connector must be available for blending"
                 )
@@ -724,55 +529,15 @@ class LMCacheConnectorV1Impl:
                     config,
                 )
 
-            # Create lookup server using factory
-            assert self.lmcache_engine is not None
-            self.lookup_server = LookupClientFactory.create_lookup_server(
-                self.lmcache_engine, vllm_config
-            )
-
-            self.offload_server = ZMQOffloadServer(
-                self.lmcache_engine,
-                vllm_config,
-                get_tensor_model_parallel_rank(),
-            )
-
-        # TODO(chunxiaozheng): use `register_kv_caches` replace, remove later
-        # if the connector implements `register_kv_caches`, we do not need to
-        # post init the lmcache engine here, do it in `register_kv_caches`.
-        def implements_register_kv_caches():
-            child_class = self._parent.__class__
-            parent_class = KVConnectorBase_V1
-            child_method = getattr(child_class, "register_kv_caches", None)
-            parent_method = getattr(parent_class, "register_kv_caches", None)
-            if child_method is None or parent_method is None:
-                return False
-            return child_method is not parent_method
-
-        if self.lmcache_engine is not None and not implements_register_kv_caches():
-            logger.warning(
-                "Please use the latest lmcache connector, otherwise some "
-                "features may not work, such as DSA"
-            )
-            # In case of MLA, the lookup server is only created on worker 0
-            async_lookup_server = None
-            if self.async_loading and self.lookup_server is not None:
-                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
-                async_lookup_server = self.lookup_server
-            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
+        # Legacy compatibility check
+        self._check_legacy_register_kv_caches()
 
         self.kv_caches: dict[str, torch.Tensor] = {}
-
         self._block_size = vllm_config.cache_config.block_size
-
-        # request_id -> (vllm cached tokens, lmcache cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
-
-        self.kv_cache_manager: Optional[KVCacheManager] = None
-
-        # request_id -> full_token_ids
+        self.kv_cache_manager: Optional["KVCacheManager"] = None
         self._request_trackers: dict[str, RequestTracker] = {}
 
-        # Whether to discard partial chunks
         self._discard_partial_chunks = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "discard_partial_chunks", False
@@ -793,41 +558,52 @@ class LMCacheConnectorV1Impl:
         self.current_layer = 0
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
-
         self._requests_priority: dict[str, int] = {}
-
-        # Track block IDs associated with failed load attempts.
         self._invalid_block_ids: set[int] = set()
 
-        # TODO(baoloongmao): Internal api server & plugin framework support dp > 1
-        if vllm_config.parallel_config.data_parallel_rank_local == 0:
-            # Start internal API server if enabled
-            # The enabled check is in the InternalAPIServer constructor
-            self.api_server = InternalAPIServer(self)
-            self.api_server.start()
-            # Launch plugins
-            self.runtime_plugin_launcher = RuntimePluginLauncher(
-                self.config,
-                role,
-                self.worker_count,
-                -1
-                if self.lmcache_engine is None  # scheduler side
-                else self.lmcache_engine.metadata.worker_id,
-            )
-            self.runtime_plugin_launcher.launch_plugins()
+    def _check_legacy_register_kv_caches(self) -> None:
+        """Check for legacy connector without register_kv_caches implementation."""
+        if self.lmcache_engine is None:
+            return
+
+        child_class = self._parent.__class__
+        parent_class = KVConnectorBase_V1
+        child_method = getattr(child_class, "register_kv_caches", None)
+        parent_method = getattr(parent_class, "register_kv_caches", None)
+
+        if child_method is None or parent_method is None:
+            implements = False
         else:
-            self.api_server = None  # type: ignore[assignment]
-            self.runtime_plugin_launcher = None  # type: ignore[assignment]
+            implements = child_method is not parent_method
 
-        # Setup metrics for monitoring data structures
-        self._setup_metrics()
+        if not implements:
+            logger.warning(
+                "Please use the latest lmcache connector, otherwise some "
+                "features may not work, such as DSA"
+            )
+            self._manager.post_init()
 
-        logger.info(
-            f"LMCache initialized for role {role} with version {utils.get_version()}, "
-            f"vllm version {VLLM_VERSION}, "
-            "lmcache cache_engine metadata: "
-            f"{getattr(self.lmcache_engine, 'metadata', None)}"
-        )
+    # ==================== Property Accessors ====================
+
+    @property
+    def lmcache_engine(self) -> Optional[LMCacheEngine]:
+        """Get the LMCache engine instance from manager."""
+        return self._manager.lmcache_engine
+
+    @property
+    def lmcache_engine_metadata(self):
+        """Get the LMCache engine metadata from manager."""
+        return self._manager.lmcache_engine_metadata
+
+    @property
+    def lookup_client(self) -> Optional["LookupClientInterface"]:
+        """Get the lookup client from manager."""
+        return self._manager.lookup_client
+
+    @property
+    def lookup_server(self):
+        """Get the lookup server from manager."""
+        return self._manager.lookup_server
 
     def _setup_metrics(self):
         """Setup metrics for monitoring data structures in the connector."""
@@ -955,12 +731,7 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
         self._build_kv_layer_groups()
-        if self.lmcache_engine is not None:
-            async_lookup_server = None
-            if self.async_loading and self.lookup_server is not None:
-                assert isinstance(self.lookup_server, LMCacheAsyncLookupServer)
-                async_lookup_server = self.lookup_server
-            self.lmcache_engine.post_init(async_lookup_server=async_lookup_server)
+        self._manager.post_init()
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -1411,86 +1182,9 @@ class LMCacheConnectorV1Impl:
 
     @_lmcache_nvtx_annotate
     def shutdown(self):
-        # Standard
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
-        import time
-
+        """Shutdown the connector by delegating to LMCacheManager."""
         logger.info("Starting LMCacheConnector shutdown...")
-        start_time = time.time()
-
-        errors = []
-
-        def _safe_close(name: str, close_fn, timeout: float = 10.0):
-            """Helper to close a resource with timeout protection"""
-            try:
-                logger.info(f"Closing {name}...")
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(close_fn)
-                    try:
-                        future.result(timeout=timeout)
-                        logger.info(f"{name} closed successfully")
-                    except TimeoutError:
-                        logger.error(
-                            f"{name} close operation timed out after {timeout}s. "
-                            "Continuing with shutdown..."
-                        )
-                        errors.append((name, "Timeout"))
-            except Exception as e:
-                logger.error(f"Error closing {name}: {e}")
-                errors.append((name, e))
-
-        # Close offload server
-        if hasattr(self, "offload_server") and self.offload_server:
-            _safe_close("offload_server", self.offload_server.close, timeout=10.0)
-
-        # Stop plugins
-        if hasattr(self, "runtime_plugin_launcher") and self.runtime_plugin_launcher:
-            _safe_close(
-                "runtime_plugin_launcher",
-                self.runtime_plugin_launcher.stop_plugins,
-                timeout=10.0,
-            )
-
-        # Stop API server
-        if hasattr(self, "api_server") and self.api_server:
-            _safe_close("api_server", self.api_server.stop, timeout=10.0)
-
-        # Close lookup server
-        if hasattr(self, "lookup_server") and self.lookup_server:
-            _safe_close("lookup_server", self.lookup_server.close, timeout=10.0)
-
-        # Close lookup client
-        if hasattr(self, "lookup_client") and self.lookup_client:
-            _safe_close("lookup_client", self.lookup_client.close, timeout=10.0)
-
-        # Destroy cache engine
-        try:
-            logger.info(f"Destroying LMCache engine: {ENGINE_NAME}")
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(LMCacheEngineBuilder.destroy, ENGINE_NAME)
-                try:
-                    future.result(timeout=15.0)
-                    logger.info("LMCache engine destroyed successfully")
-                except TimeoutError:
-                    logger.error(
-                        "Cache engine destroy timed out after 15s. "
-                        "Continuing with shutdown..."
-                    )
-                    errors.append(("cache_engine", "Timeout"))
-        except Exception as e:
-            logger.error(f"Error destroying cache engine: {e}")
-            errors.append(("cache_engine", e))
-
-        elapsed = time.time() - start_time
-        if errors:
-            logger.warning(
-                f"Shutdown completed with {len(errors)} errors "
-                f"in {elapsed:.2f}s: {errors}"
-            )
-        else:
-            logger.info(
-                f"LMCacheConnector shutdown completed successfully in {elapsed:.2f}s"
-            )
+        self._manager.stop_services()
 
     ###################
     # Scheduler side APIs
@@ -1530,6 +1224,9 @@ class LMCacheConnectorV1Impl:
             return 0
 
         req_id = request.request_id
+
+        # lookup_client is always initialized for scheduler role
+        assert self.lookup_client is not None
 
         if (
             num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
@@ -1618,6 +1315,7 @@ class LMCacheConnectorV1Impl:
 
         # Clear local status in lookup client when a new request is
         # successfully scheduled.
+        assert self.lookup_client is not None
         self.lookup_client.clear_lookup_status(request.request_id)
 
         kv_transfer_params = (
@@ -1882,6 +1580,7 @@ class LMCacheConnectorV1Impl:
         if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
             # Cancel any ongoing async lookup and prefetch tasks on workers
             lookup_id = request.request_id
+            assert self.lookup_client is not None
             self.lookup_client.cancel_lookup(  # type: ignore[attr-defined]
                 lookup_id
             )
