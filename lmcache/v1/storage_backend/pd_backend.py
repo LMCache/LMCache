@@ -418,7 +418,7 @@ class PDBackend(AllocatorBackendInterface):
                 transfer_spec=channel_transfer_spec,
             )
             end = time.time()
-            print(f"Sending {len(mem_objs_to_send)} memory objects costs {end - start}s.")
+            logger.info(f"Sending {len(mem_objs_to_send)} memory objects costs {end - start}s.")
 
             # TODO(Jiayi): consider moving this to the transfer channel
             # since we might want the transfer to be async.
