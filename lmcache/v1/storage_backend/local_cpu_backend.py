@@ -16,7 +16,6 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -385,22 +384,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
             if use_lazy:
-                logger.info(
-                    f"Using LazyMixedMemoryAllocator with "
-                    f"initial_ratio={config.lazy_memory_initial_ratio}, "
-                    f"expand_trigger_ratio="
-                    f"{config.lazy_memory_expand_trigger_ratio}, "
-                    f"step_ratio={config.lazy_memory_step_ratio}"
-                )
-                return LazyMixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
-                    config=config,
-                    numa_mapping=numa_mapping,
-                    memory_limit_callback=lambda: int(
-                        self._calculate_effective_cpu_size(cpu_size, config, metadata)
-                        * 1024**3
-                    ),
-                )
+                raise RuntimeError("LazyMixedMemoryAllocator being refactored.")
             else:
                 if config.enable_lazy_memory_allocator:
                     logger.info(
