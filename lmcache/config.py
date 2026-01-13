@@ -70,9 +70,9 @@ class LMCacheEngineMetadata:
     """ head size dimension (extracted from kv_shape[4]) """
     head_size: Optional[int] = None
     """ tensor parallel size """
-    tensor_parallel_size: Optional[int] = None
+    tensor_parallel_size: int = 1
     """ pipeline parallel size """
-    pipeline_parallel_size: int = 1  # Default to 1 (no pipeline parallelism)
+    pipeline_parallel_size: int = 1
     """ data parallel local rank (for multi-instance serving) """
     data_parallel_rank_local: int = 0  # Default to 0 (first DP rank)
     """ KV transfer role (e.g., 'kv_producer', 'kv_consumer', None) """

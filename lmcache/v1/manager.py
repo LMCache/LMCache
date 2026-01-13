@@ -52,7 +52,7 @@ class LMCacheManager:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: LMCacheEngineMetadata,
         role: str = "worker",
         connector: Optional[Any] = None,
     ):
@@ -62,7 +62,6 @@ class LMCacheManager:
         Args:
             config: LMCache engine configuration
             metadata: Engine metadata extracted from serving engine
-            (optional, created by scheduler when bypass enabled)
             role: The role string ("scheduler" or "worker")
             connector: Reference to adapter for internal API server
         """
@@ -92,7 +91,7 @@ class LMCacheManager:
         else:
             self._init_worker_components()
         # Initialize API server and plugin launcher only on DP rank 0
-        if self._metadata and self._metadata.data_parallel_rank_local == 0:
+        if self._metadata.data_parallel_rank_local == 0:
             self._init_dp_rank0_components()
 
     def _init_scheduler_components(self) -> None:
@@ -103,13 +102,11 @@ class LMCacheManager:
 
         if self._config.enable_scheduler_bypass_lookup:
             # Create LMCacheEngine for scheduler when bypass is enabled
-            assert self._metadata is not None, "metadata required for scheduler bypass"
             self._lmcache_engine = self._create_lmcache_engine(self._metadata)
             self._lmcache_engine_metadata = self._lmcache_engine.metadata
         else:
             self._lmcache_engine = None
             # Use provided metadata for prometheus logger
-            assert self._metadata is not None, "metadata required for scheduler"
             self._lmcache_engine_metadata = self._metadata
             PrometheusLogger.GetOrCreate(self._lmcache_engine_metadata)
 
@@ -124,8 +121,6 @@ class LMCacheManager:
         """Initialize components for worker role."""
         # First Party
         from lmcache.v1.lookup_client.factory import LookupClientFactory
-
-        assert self._metadata is not None, "metadata required for worker"
 
         # Create LMCacheEngine
         self._lmcache_engine = self._create_lmcache_engine(self._metadata)
@@ -148,17 +143,15 @@ class LMCacheManager:
         self._api_server = InternalAPIServer(self)
 
         # Create plugin launcher
-        assert self._metadata is not None
         worker_id = (
             -1
             if self._lmcache_engine is None
             else self._lmcache_engine.metadata.worker_id
         )
-        tp_size = self._metadata.tensor_parallel_size or 1
         self._runtime_plugin_launcher = RuntimePluginLauncher(
             self._config,
             self._role,
-            tp_size,
+            self._metadata.tensor_parallel_size,
             worker_id,
         )
 
