@@ -1,6 +1,6 @@
 workload:
   type: long_doc_qa
-  max-inflight-requests: 2
+  max-inflight-requests: 1
   repeat-count: 1
   completion: true
   num-documents: 20
