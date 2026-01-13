@@ -77,10 +77,24 @@ class LMCacheEngineMetadata:
     data_parallel_rank_local: int = 0  # Default to 0 (first DP rank)
     """ KV transfer role (e.g., 'kv_producer', 'kv_consumer', None) """
     kv_role: Optional[str] = None
+    """ broadcast function for tensors (from serving engine's distributed backend) """
+    broadcast_fn: Any = field(default_factory=lambda: lambda tensor, src: tensor)
+    """ broadcast function for objects (from serving engine's distributed backend) """
+    broadcast_object_fn: Any = field(default_factory=lambda: lambda obj, src: obj)
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
         return self.worker_id == self.first_rank
+
+    def is_cuda_alike(self) -> bool:
+        """Check if device is CUDA or CUDA-like"""
+        if self.device_name is None:
+            return True  # Default to CUDA for backward compatibility
+        return self.device_name == "cuda" or self.device_name.startswith("cuda")
+
+    def is_xpu(self) -> bool:
+        """Check if device is XPU"""
+        return self.device_name == "xpu"
 
     # TODO(chunxiaozheng): some uts do not `build_kv_layer_groups`
     def get_dtypes(self) -> list[torch.dtype]:

@@ -29,6 +29,7 @@ import torch
 from lmcache import utils
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
+    VLLMMetadataBuilder,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
     lmcache_get_or_create_config,
@@ -452,10 +453,15 @@ class LMCacheConnectorV1Impl:
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
+        # Create metadata for this engine (includes broadcast functions)
+        metadata = VLLMMetadataBuilder.from_vllm_config(
+            vllm_config, config, role=role.name.lower()
+        )
+
         # Initialize LMCacheManager to handle internal components
         self._manager = LMCacheManager(
             config=config,
-            vllm_config=vllm_config,
+            metadata=metadata,
             role=role.name.lower(),
             connector=self,
         )

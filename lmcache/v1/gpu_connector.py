@@ -168,14 +168,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         cls,
         metadata: LMCacheEngineMetadata,
         use_gpu: bool = False,
-        device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV2":
         """Create a connector from LMCacheEngineMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
-            device: The device to use for the connector.
 
         Returns:
             A new instance of VLLMPagedMemGPUConnectorV2.
@@ -194,7 +192,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             use_gpu=use_gpu,
             chunk_size=chunk_size,
             dtype=metadata.kv_dtype,
-            device=device,
+            device=metadata.device,
             use_mla=metadata.use_mla,
         )
 
@@ -389,10 +387,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         cls,
         metadata: LMCacheEngineMetadata,
         use_gpu: bool = False,
-        device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV3":
-        assert device is not None
-        return cls(metadata, device, use_gpu)
+        assert metadata.device is not None
+        return cls(metadata, metadata.device, use_gpu)
 
     def _initialize_kv_cache_pointers(self):
         if self.init:
@@ -581,14 +578,12 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         cls,
         metadata: LMCacheEngineMetadata,
         use_gpu: bool = False,
-        device: Optional[torch.device] = None,
     ) -> "VLLMBufferLayerwiseGPUConnector":
         """Create a connector from LMCacheEngineMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
-            device: The device to use for the connector.
 
         Returns:
             A new instance of VLLMBufferLayerwiseGPUConnector.
@@ -605,7 +600,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             num_layers=num_layers,
             use_gpu=use_gpu,
             dtype=metadata.kv_dtype,
-            device=device,
+            device=metadata.device,
         )
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -985,14 +980,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         cls,
         metadata: LMCacheEngineMetadata,
         use_gpu: bool = False,
-        device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemLayerwiseGPUConnector":
         """Create a connector from LMCacheEngineMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
-            device: The device to use for the connector.
 
         Returns:
             A new instance of VLLMPagedMemLayerwiseGPUConnector.
@@ -1011,7 +1004,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             use_gpu=use_gpu,
             chunk_size=chunk_size,
             dtype=metadata.kv_dtype,
-            device=device,
+            device=metadata.device,
             use_mla=metadata.use_mla,
         )
 

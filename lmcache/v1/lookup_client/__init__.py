@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
+
+"""
+Lookup clients and servers are used for bifurcated LMCache adapters
+to communicate KV Cache metadata for northbound serving engines with
+process-disaggregated scheduler-worker architectures (e.g. vLLM).
+"""
+
+# First Party
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
     ChunkStatisticsLookupClient,

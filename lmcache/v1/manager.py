@@ -3,12 +3,11 @@
 LMCacheManager: A unified manager for LMCache internal components.
 
 This module provides a clean interface to manage LMCache components lifecycle,
-decoupling the vLLM adapter from internal LMCache implementation details.
+decoupling adapters from internal LMCache implementation details.
 """
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, Union
 import time
 
@@ -23,11 +22,7 @@ from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
-
     # First Party
-    from lmcache.config import LMCacheEngineMetadata
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
@@ -50,29 +45,29 @@ class LMCacheManager:
     - InternalAPIServer
     - RuntimePluginLauncher
 
-    This manager supports two main modes:
-    - vLLM integration mode (requires vllm_config)
-    - Standalone mode (requires metadata and GPU connector)
+    The manager is serving-engine-agnostic and relies on metadata
+    provided by the integration adapter.
     """
 
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        vllm_config: Optional["VllmConfig"] = None,
+        metadata: Optional[LMCacheEngineMetadata] = None,
         role: str = "worker",
         connector: Optional[Any] = None,
     ):
         """
-        Initialize LMCacheManager for vLLM integration mode.
+        Initialize LMCacheManager.
 
         Args:
             config: LMCache engine configuration
-            vllm_config: vLLM configuration (required for vLLM integration mode)
+            metadata: Engine metadata extracted from serving engine
+            (optional, created by scheduler when bypass enabled)
             role: The role string ("scheduler" or "worker")
-            connector: Reference to LMCacheConnectorV1Impl for internal API server
+            connector: Reference to adapter for internal API server
         """
         self._config = config
-        self._vllm_config: Optional["VllmConfig"] = vllm_config
+        self._metadata = metadata
         self._role = role
         self._connector: Any = connector
 
@@ -91,37 +86,31 @@ class LMCacheManager:
         self._init_components()
 
     def _init_components(self) -> None:
-        """Initialize components based on the role for vLLM mode."""
+        """Initialize components based on the role."""
         if self._role == "scheduler":
-            # Initialize vLLM scheduler components
             self._init_scheduler_components()
         else:
-            # Initialize vLLM worker components
             self._init_worker_components()
         # Initialize API server and plugin launcher only on DP rank 0
-        assert self._vllm_config is not None
-        if self._vllm_config.parallel_config.data_parallel_rank_local == 0:
+        if self._metadata and self._metadata.data_parallel_rank_local == 0:
             self._init_dp_rank0_components()
 
     def _init_scheduler_components(self) -> None:
         """Initialize components for scheduler role."""
         # First Party
-        from lmcache.integration.vllm.utils import VLLMMetadataBuilder
         from lmcache.observability import PrometheusLogger
         from lmcache.v1.lookup_client.factory import LookupClientFactory
 
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
         if self._config.enable_scheduler_bypass_lookup:
             # Create LMCacheEngine for scheduler when bypass is enabled
-            self._lmcache_engine = self._create_lmcache_engine(role="scheduler")
+            assert self._metadata is not None, "metadata required for scheduler bypass"
+            self._lmcache_engine = self._create_lmcache_engine(self._metadata)
             self._lmcache_engine_metadata = self._lmcache_engine.metadata
         else:
             self._lmcache_engine = None
-            # Create metadata for prometheus logger
-            self._lmcache_engine_metadata = VLLMMetadataBuilder.from_vllm_config(
-                self._vllm_config, self._config, role="scheduler"
-            )
+            # Use provided metadata for prometheus logger
+            assert self._metadata is not None, "metadata required for scheduler"
+            self._lmcache_engine_metadata = self._metadata
             PrometheusLogger.GetOrCreate(self._lmcache_engine_metadata)
 
         # Create lookup client
@@ -133,16 +122,13 @@ class LMCacheManager:
 
     def _init_worker_components(self) -> None:
         """Initialize components for worker role."""
-        # Third Party
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-
         # First Party
         from lmcache.v1.lookup_client.factory import LookupClientFactory
 
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
+        assert self._metadata is not None, "metadata required for worker"
 
         # Create LMCacheEngine
-        self._lmcache_engine = self._create_lmcache_engine(role="worker")
+        self._lmcache_engine = self._create_lmcache_engine(self._metadata)
         self._lmcache_engine_metadata = self._lmcache_engine.metadata
 
         # Create lookup server
@@ -153,81 +139,57 @@ class LMCacheManager:
         # Create offload server
         self._offload_server = ZMQOffloadServer(
             self._lmcache_engine,
-            get_tensor_model_parallel_rank(),
+            self._metadata.worker_id,
         )
 
     def _init_dp_rank0_components(self) -> None:
         """Initialize components that only run on DP rank 0."""
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
         # Start internal API server
         self._api_server = InternalAPIServer(self)
 
         # Create plugin launcher
+        assert self._metadata is not None
         worker_id = (
             -1
             if self._lmcache_engine is None
             else self._lmcache_engine.metadata.worker_id
         )
+        tp_size = self._metadata.tensor_parallel_size or 1
         self._runtime_plugin_launcher = RuntimePluginLauncher(
             self._config,
             self._role,
-            self._vllm_config.parallel_config.tensor_parallel_size,
+            tp_size,
             worker_id,
         )
 
-    def _create_lmcache_engine(self, role: str) -> LMCacheEngine:
+    def _create_lmcache_engine(self, metadata: LMCacheEngineMetadata) -> LMCacheEngine:
         """
         Create and return an LMCacheEngine instance.
 
         Args:
-            role: The role string ("scheduler" or "worker")
+            metadata: Engine metadata
 
         Returns:
             LMCacheEngine instance
         """
-        # First Party
-        from lmcache.integration.vllm.utils import ENGINE_NAME, VLLMMetadataBuilder
-
         if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
             return curr_engine
-
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        # Third Party
-        from vllm.distributed.parallel_state import get_tp_group
-        from vllm.platforms import current_platform
-
-        # Create metadata using builder
-        metadata = VLLMMetadataBuilder.from_vllm_config(
-            self._vllm_config, self._config, role
-        )
 
         self._validate_mla_config(metadata.use_mla)
 
         # Create GPU connector
-        vllm_gpu_connector = self._create_gpu_connector(
-            role, metadata.use_mla, metadata, metadata.device, current_platform
-        )
-
-        # Get tensor parallel group
-        if role == "scheduler":
-            tpg = SimpleNamespace()
-            tpg.broadcast = lambda tensor, src: tensor
-            tpg.broadcast_object = lambda obj, src: obj
-        else:
-            tpg = get_tp_group()
+        gpu_connector = self._create_gpu_connector(metadata)
 
         engine = LMCacheEngineBuilder.get_or_create(
             ENGINE_NAME,
             self._config,
             metadata,
-            vllm_gpu_connector,
-            tpg.broadcast,
-            tpg.broadcast_object,
+            gpu_connector,
+            metadata.broadcast_fn,
+            metadata.broadcast_object_fn,
         )
 
-        if role == "scheduler" and self._config.enable_scheduler_bypass_lookup:
+        if metadata.role == "scheduler" and self._config.enable_scheduler_bypass_lookup:
             assert engine.save_only_first_rank or self._config.get_extra_config_value(
                 "remote_enable_mla_worker_id_as0", metadata.use_mla
             ), (
@@ -250,8 +212,8 @@ class LMCacheManager:
                 "We haven't supported MLA with Cacheblend yet. Please disable blending."
             )
 
-    def _create_gpu_connector(self, role, use_mla, metadata, device, current_platform):
-        """Create the GPU connector based on configuration."""
+    def _create_gpu_connector(self, metadata: LMCacheEngineMetadata):
+        """Create the GPU connector based on configuration and metadata."""
         # First Party
         from lmcache.v1.gpu_connector import (
             VLLMBufferLayerwiseGPUConnector,
@@ -263,32 +225,28 @@ class LMCacheManager:
 
         use_gpu = self._need_gpu_interm_buffer()
 
-        if role == "scheduler":
+        if metadata.role == "scheduler":
             return None
 
         if self._config.use_layerwise:
             if self._config.enable_blending:
-                return VLLMBufferLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
+                return VLLMBufferLayerwiseGPUConnector.from_metadata(metadata, use_gpu)
             else:
                 return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
+                    metadata, use_gpu
                 )
 
-        if current_platform.is_cuda_alike():
+        if metadata.is_cuda_alike():
             if self._config.use_gpu_connector_v3:
-                return VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
-                )
+                return VLLMPagedMemGPUConnectorV3.from_metadata(metadata, use_gpu)
             else:
-                return VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
-                )
-        elif current_platform.is_xpu():
-            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
+                return VLLMPagedMemGPUConnectorV2.from_metadata(metadata, use_gpu)
+        elif metadata.is_xpu():
+            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu)
         else:
-            raise RuntimeError("No supported connector found for the current platform.")
+            raise RuntimeError(
+                f"No supported connector found for platform: {metadata.device_name}"
+            )
 
     def _need_gpu_interm_buffer(self) -> bool:
         """Check if GPU intermediate buffer is needed."""
@@ -317,7 +275,7 @@ class LMCacheManager:
         if self._lmcache_engine is None:
             return
 
-        # vLLM mode post-init
+        # Post-init for engines with async loading
         # First Party
         from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
             LMCacheAsyncLookupServer,
@@ -383,7 +341,6 @@ class LMCacheManager:
 
         # Destroy cache engine
         try:
-            # In vLLM mode, use ENGINE_NAME constant
             logger.info("Destroying LMCache engine: %s", ENGINE_NAME)
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(LMCacheEngineBuilder.destroy, ENGINE_NAME)

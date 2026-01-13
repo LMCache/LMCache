@@ -1002,7 +1002,6 @@ class LMCacheEngine:
             return res
         finally:
             self.stats_monitor.on_lookup_finished(lookup_request_id, res)
-            # vllm lookup sets pin to True
             if pin:
                 # touch_cache is tightly coupled with batched_contains
                 self.storage_manager.touch_cache()

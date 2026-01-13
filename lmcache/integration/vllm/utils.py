@@ -405,6 +405,15 @@ class VLLMMetadataBuilder:
             kv_role=kv_role,
         )
 
+        # Add broadcast functions for workers (scheduler uses defaults)
+        if role == "worker":
+            # Third Party
+            from vllm.distributed.parallel_state import get_tp_group
+
+            tpg = get_tp_group()
+            metadata.broadcast_fn = tpg.broadcast
+            metadata.broadcast_object_fn = tpg.broadcast_object
+
         return metadata
 
     @staticmethod

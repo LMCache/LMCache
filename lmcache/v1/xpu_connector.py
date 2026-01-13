@@ -82,14 +82,12 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         cls,
         metadata: LMCacheEngineMetadata,
         use_gpu: bool = False,
-        device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemXPUConnectorV2":
         """Create a connector from LMCacheEngineMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
             use_gpu: Whether to use GPU intermediate buffer.
-            device: The device to use for the connector.
 
         Returns:
             A new instance of VLLMPagedMemXPUConnectorV2.
@@ -108,7 +106,7 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             use_gpu=use_gpu,
             chunk_size=chunk_size,
             dtype=metadata.kv_dtype,
-            device=device,
+            device=metadata.device,
             use_mla=metadata.use_mla,
         )
 
