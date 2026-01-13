@@ -236,13 +236,13 @@ class TestLMCacheManagerPostInit:
         """Test post_init calls engine.post_init with async_lookup_server."""
         config = LMCacheEngineConfig.from_defaults()
         config.enable_async_loading = True
-        vllm_config = MagicMock()
+        metadata = create_mock_metadata()
         connector = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
+                metadata=metadata,
                 role="worker",
                 connector=connector,
             )
@@ -266,13 +266,13 @@ class TestLMCacheManagerPostInit:
 
         config = LMCacheEngineConfig.from_defaults()
         config.enable_async_loading = True
-        vllm_config = MagicMock()
+        metadata = create_mock_metadata()
         connector = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
+                metadata=metadata,
                 role="worker",
                 connector=connector,
             )
@@ -394,13 +394,13 @@ class TestLMCacheManagerHelpers:
         """Test _need_gpu_interm_buffer returns opposite of enable_pd."""
         config = LMCacheEngineConfig.from_defaults()
         config.enable_pd = False
-        vllm_config = MagicMock()
+        metadata = create_mock_metadata()
         connector = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
+                metadata=metadata,
                 role="scheduler",
                 connector=connector,
             )
@@ -418,13 +418,13 @@ class TestLMCacheManagerValidation:
         """Test _validate_mla_config raises error for non-naive serde with MLA."""
         config = LMCacheEngineConfig.from_defaults()
         config.remote_serde = "cachegen"
-        vllm_config = MagicMock()
+        metadata = create_mock_metadata()
         connector = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
+                metadata=metadata,
                 role="scheduler",
                 connector=connector,
             )
