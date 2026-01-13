@@ -14,12 +14,10 @@ from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenGPUEncoderOutput,
 )
 from lmcache.storage_backend.serde.serde import Serializer
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, is_hpu_available
 from lmcache.v1.config import LMCacheEngineConfig
 
-if hasattr(torch, "hpu") and torch.hpu.is_available():
-    lmc_ops = None
-elif torch.cuda.is_available():
+if not is_hpu_available() and torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops
 
 # First Party

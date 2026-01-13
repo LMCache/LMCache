@@ -18,6 +18,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.utils import is_hpu_available
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
@@ -363,7 +364,7 @@ class LMCacheManager:
         """Get device information based on platform."""
         assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
-        if hasattr(torch, "hpu") and torch.hpu.is_available():
+        if is_hpu_available():
             logger.info("HPU device is available. Using HPU for LMCache engine.")
             torch_dev = torch.hpu
             dev_name = "hpu"
@@ -395,7 +396,7 @@ class LMCacheManager:
             VLLMPagedMemLayerwiseGPUConnector,
         )
         from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
-        if hasattr(torch, "hpu") and torch.hpu.is_available():
+        if is_hpu_available():
             from lmcache.v1.hpu_connector import VLLMPagedMemHPUConnectorV2
 
         use_gpu = self._need_gpu_interm_buffer()
@@ -413,7 +414,7 @@ class LMCacheManager:
                     metadata, use_gpu, device
                 )
 
-        if hasattr(torch, "hpu") and torch.hpu.is_available():
+        if is_hpu_available():
             return  VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
         elif current_platform.is_cuda_alike():
             if self._config.use_gpu_connector_v3:

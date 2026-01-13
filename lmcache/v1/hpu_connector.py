@@ -154,13 +154,13 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
             tmp_gpu_buffer[0] = memory_obj.tensor[0].to(slot_mapping.device)
             tmp_gpu_buffer[1] = memory_obj.tensor[1].to(slot_mapping.device)
-            b, h, d = self.kvcaches[0][0].shape
+            n, b, h, d = self.kvcaches[0][0].shape
             hd_shape = h * d
             for i in range(len(self.kvcaches)):
-                self.kvcaches[i][0].view(b, hd_shape).index_copy_(
+                self.kvcaches[i][0].view(n*b, hd_shape).index_copy_(
                     0, slot_mapping[start:end], tmp_gpu_buffer[0][i]
                 )
-                self.kvcaches[i][1].view(b, hd_shape).index_copy_(
+                self.kvcaches[i][1].view(n*b, hd_shape).index_copy_(
                     0, slot_mapping[start:end], tmp_gpu_buffer[1][i]
                 )
 
@@ -192,13 +192,13 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         if self.gpu_buffer is not None:
             assert self.gpu_buffer.device == self.kvcaches[0][0].device
             tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-            b, h, d = self.kvcaches[0][0].shape
+            n, b, h, d = self.kvcaches[0][0].shape
             hd_shape = h * d
             layers = range(len(self.kvcaches))
             tmp_gpu_buffer[0] = torch.stack(
                 tuple(
                     self.kvcaches[i][0]
-                    .view(b, hd_shape)
+                    .view(n*b, hd_shape)
                     .index_select(0, slot_mapping[start:end])
                     for i in layers
                 ),
@@ -207,7 +207,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
             tmp_gpu_buffer[1] = torch.stack(
                 tuple(
                     self.kvcaches[i][1]
-                    .view(b, hd_shape)
+                    .view(n*b, hd_shape)
                     .index_select(0, slot_mapping[start:end])
                     for i in layers
                 ),

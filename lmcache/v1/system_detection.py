@@ -8,10 +8,9 @@ import platform
 import psutil
 import torch
 
-if hasattr(torch, "hpu") and torch.hpu.is_available():
-    lmc_ops = None
-    get_gpu_pci_bus_id = None
-elif torch.cuda.is_available():
+from lmcache.utils import is_hpu_available
+
+if not is_hpu_available() and torch.cuda.is_available():
     try:
         # First Party
         from lmcache.c_ops import get_gpu_pci_bus_id

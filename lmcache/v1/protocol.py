@@ -16,7 +16,7 @@ from lmcache.v1.memory_management import MemoryFormat
 logger = init_logger(__name__)
 
 
-MAX_KEY_LENGTH = 250
+MAX_KEY_LENGTH = 150
 REMOTE_METADATA_FMT: Optional[str] = None
 REMOTE_METADATA_BYTES: Optional[int] = None
 

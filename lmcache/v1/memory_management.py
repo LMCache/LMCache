@@ -18,17 +18,16 @@ import torch
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, is_hpu_available
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.system_detection import NUMAMapping
 
-if hasattr(torch, "hpu") and torch.hpu.is_available():
-    lmc_ops = None
-elif torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
+if not is_hpu_available():
+    if torch.cuda.is_available():
+        import lmcache.c_ops as lmc_ops
+    else:
+        # First Party
+        import lmcache.non_cuda_equivalents as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -350,7 +349,11 @@ def _allocate_cpu_memory(
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
-    if lmc_ops:
+    if is_hpu_available():
+        # TODO currently we are not supporting numa for HPU,
+        # we will revisit the code later to add numa mapping
+        buffer = torch.empty(size, dtype=torch.uint8)
+    else:
         if numa_mapping:
             if torch.cuda.is_available():
                 current_device_id = torch.cuda.current_device()
@@ -367,10 +370,6 @@ def _allocate_cpu_memory(
         array_type = ctypes.c_uint8 * size
         buf = array_type.from_address(ptr)
         buffer = torch.frombuffer(buf, dtype=torch.uint8)
-    else:
-        # TODO currently we are not supporting numa for HPU,
-        # we will revisit the code later to add numa mapping.
-        buffer = torch.empty(size, dtype=torch.uint8)
 
     return buffer
 
@@ -380,13 +379,13 @@ def _free_cpu_memory(
     size: int | None = None,
     numa_mapping: Optional[NUMAMapping] = None,
 ) -> torch.Tensor:
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    if numa_mapping:
-        lmc_ops.free_pinned_numa_ptr(buffer.data_ptr(), size)
-    else:
-        lmc_ops.free_pinned_ptr(buffer.data_ptr())
-
+    if not is_hpu_available():
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        if numa_mapping:
+            lmc_ops.free_pinned_numa_ptr(buffer.data_ptr(), size)
+        else:
+            lmc_ops.free_pinned_ptr(buffer.data_ptr())
 
 def _allocate_gpu_memory(
     size: int,
@@ -1611,14 +1610,13 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
         if size == 0:
             self.buffer = torch.empty(0, dtype=torch.uint8)
+        if is_hpu_available():
+            self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
         else:
-            if lmc_ops:
-                ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-                array_type = ctypes.c_uint8 * size
-                buf = array_type.from_address(ptr)
-                self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
-            else:
-                self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+            array_type = ctypes.c_uint8 * size
+            buf = array_type.from_address(ptr)
+            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
 
         self._unregistered = False
 
@@ -1687,7 +1685,7 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
             return self.allocator.memcheck()
 
     def close(self):
-        if lmc_ops and not self._unregistered:
+        if not is_hpu_available() and not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             if self.buffer.numel() == 0:
@@ -1832,7 +1830,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.memcheck()
 
     def close(self):
-        if lmc_ops and not self._unregistered:
+        if not is_hpu_available() and not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             if self.buffer.numel() == 0:

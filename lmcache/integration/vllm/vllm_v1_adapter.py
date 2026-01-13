@@ -223,20 +223,8 @@ class RequestTracker:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list) and all(
-            isinstance(elem, int) for elem in new_block_ids
-        ):
+        elif isinstance(new_block_ids, list):
             pass
-        elif isinstance(new_block_ids, list) and any(
-            isinstance(elem, list) for elem in new_block_ids
-        ):
-            flattened: list[int] = []
-            for elem in new_block_ids:
-                if isinstance(elem, list):
-                    flattened.extend(elem)
-                else:
-                    flattened.append(elem)
-            new_block_ids = flattened
         else:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
 
@@ -427,7 +415,7 @@ class ReqMeta:
             request_configs=tracker.request_configs,
         )
 
-
+@dataclass
 class LMCacheConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
 
@@ -990,6 +978,7 @@ class LMCacheConnectorV1Impl:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        import remote_pdb;remote_pdb.set_trace()
         assert self.lmcache_engine is not None
         if not self.use_layerwise:
             return

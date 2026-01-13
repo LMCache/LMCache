@@ -12,7 +12,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, is_hpu_available
 from lmcache.v1.memory_management import (
     BufferAllocator,
     FreeBlock,
@@ -28,13 +28,12 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.config import LMCacheEngineConfig
 
-if hasattr(torch, "hpu") and torch.hpu.is_available():
-    lmc_ops = None
-elif torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
+if not is_hpu_available():
+    if torch.cuda.is_available():
+        import lmcache.c_ops as lmc_ops
+    else:
+        # First Party
+        import lmcache.non_cuda_equivalents as lmc_ops
 
 logger = init_logger(__name__)
 

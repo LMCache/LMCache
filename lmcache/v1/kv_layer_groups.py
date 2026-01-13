@@ -64,6 +64,9 @@ class KVLayerGroupInfo:
         if len(self.shape) == 5:
             # MHA
             return self.shape[3] * self.shape[4]
+        elif len(self.shape) == 4:
+            # MHA
+            return self.shape[2] * self.shape[3]
         elif len(self.shape) == 3:
             # MLA
             return self.shape[2]
@@ -173,16 +176,12 @@ class KVLayerGroupsManager:
         )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            # Extract shape and dtype from first valid tensor in kv_cache
-            shape, dtype = None, None
-
             if isinstance(kv_cache, (tuple, list)):
                 # HPU has a tuple list (K,V) with same shape and dtype
                 for tensor in kv_cache:
-                    if tensor is not None:
-                        shape = tensor.shape
-                        dtype = tensor.dtype
-                        break
+                    shape = tensor.shape
+                    dtype = tensor.dtype
+                    break
             else:
                 # Handle single tensor
                 shape = kv_cache.shape
