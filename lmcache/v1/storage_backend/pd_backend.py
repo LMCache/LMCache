@@ -373,6 +373,8 @@ class PDBackend(AllocatorBackendInterface):
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
     ) -> None:
+        logger.info(f"Calling batched_submit_put_task in pd_backend")
+
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 

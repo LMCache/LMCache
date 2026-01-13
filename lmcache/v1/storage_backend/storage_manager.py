@@ -384,6 +384,9 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
+
+        logger.info(f"Calling batched_put in storage_manager")
+
         # The dictionary from backend cname to objects and keys
         obj_dict: dict[
             str,
