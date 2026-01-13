@@ -187,7 +187,8 @@ if __name__ == "__main__":
     # Create the VLLMPagedMemGPUConnectorV2
     hidden_dim = 1024
     num_layers = 32
-    gpu_connector = VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+    gpu_connector = VLLMPagedMemGPUConnectorV2(8, 128, hidden_dim,
+                                               num_layers, block_size=block_size)
 
     # Calculate the expected total size of data
     kv_shape = gpu_connector.get_shape(config.chunk_size)

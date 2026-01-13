@@ -133,7 +133,7 @@ def generate_kv_cache_paged_list_tensors(
     shape = (
         [num_blocks, block_size, head_size]
         if use_mla
-        else [2, num_blocks, block_size, num_heads, head_size]
+        else [2, num_blocks, num_heads, block_size, head_size]
     )
 
     for i in range(num_layers):
@@ -142,6 +142,8 @@ def generate_kv_cache_paged_list_tensors(
             kv = torch.randint(0, 256, shape, dtype=dtype, device=device)
         else:
             kv = torch.rand(shape, dtype=dtype, device=device)
+        if not use_mla:
+            kv = kv.transpose(2, 3)
         ret.append(kv)
 
     return ret
@@ -273,30 +275,33 @@ def check_mem_obj_equal(left, right, use_mla: bool = False):
             assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
-def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size=128):
+def check_paged_kv_cache_equal(
+    left, right, slot_mapping, num_heads=8, head_size=128, block_size=16
+):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
-    token_dim = 0
+    block_dim = 0
+    token_dim = 1
     num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
-        left_k = left_kv[0].reshape(-1, num_heads, head_size)
-        left_v = left_kv[1].reshape(-1, num_heads, head_size)
-        right_k = right_kv[0].reshape(-1, num_heads, head_size)
-        right_v = right_kv[1].reshape(-1, num_heads, head_size)
+        assert len(left_kv[0].shape) == 4
+        assert len(left_kv[1].shape) == 4
+        assert len(right_kv[0].shape) == 4
+        assert len(right_kv[1].shape) == 4
 
-        assert len(left_k.shape) == 3
-        assert len(left_v.shape) == 3
-        assert len(right_k.shape) == 3
-        assert len(right_v.shape) == 3
+        assert left_kv[0].shape[block_dim] * left_kv[0].shape[token_dim] >= num_tokens
+        assert left_kv[1].shape[block_dim] * left_kv[1].shape[token_dim] >= num_tokens
+        assert right_kv[0].shape[block_dim] * right_kv[0].shape[token_dim] >= num_tokens
+        assert right_kv[1].shape[block_dim] * right_kv[1].shape[token_dim] >= num_tokens
 
-        assert left_k.shape[token_dim] >= num_tokens
-        assert left_v.shape[token_dim] >= num_tokens
-        assert right_k.shape[token_dim] >= num_tokens
-        assert right_v.shape[token_dim] >= num_tokens
+        block_ids = (slot_mapping // block_size).to(torch.long)
+        token_ids = (slot_mapping % block_size).to(torch.long)
 
-        assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
-        assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+        assert (left_kv[0][block_ids, token_ids, :, :] ==
+                right_kv[0][block_ids, token_ids, :, :]).all()
+        assert (left_kv[1][block_ids, token_ids, :, :] ==
+                right_kv[1][block_ids, token_ids, :, :]).all()
 
 
 def check_sglang_paged_kv_cache_equal(
@@ -346,8 +351,9 @@ def check_kv_cache_device(kvs, device):
         assert v.device == torch.device(device)
 
 
-def create_gpu_connector(hidden_dim, num_layers):
-    return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)
+def create_gpu_connector(num_heads, head_dim, hidden_dim, num_layers, block_size):
+    return VLLMPagedMemGPUConnectorV2(num_heads, head_dim, hidden_dim,
+                                      num_layers, block_size=block_size)
 
 
 def get_all_methods_from_base(base_class):
