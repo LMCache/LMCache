@@ -411,12 +411,13 @@ class KVController:
         :return: A BatchedP2PLookupRetMsg containing the lookup results.
         """
         hashes = msg.hashes
+        worker_id = msg.worker_id
         if not hashes:
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])
 
         # Single lookup to get all needed info (optimized path)
         result = self.registry.find_kv_with_worker_info(
-            hashes[0], exclude_instance_id=msg.instance_id
+            hashes[0], exclude_instance_id=msg.instance_id, target_worker_id=worker_id
         )
         if result is None:
             return BatchedP2PLookupRetMsg(layout_info=[("", "", 0, "")])

@@ -310,6 +310,24 @@ class InstanceNode:
                 )
         return None
 
+    def find_worker_key(
+        self, key: int, target_worker_id: int
+    ) -> Optional[tuple[KVChunkInfo, Optional[str], set[int]]]:
+        """
+        Find a key in the given worker within this instance.
+        Returns: (KVChunkInfo, peer_init_url, keys) if found, None otherwise.
+        """
+        worker_node = self.get_worker(target_worker_id)
+        if worker_node and (result := worker_node.find_key(key)):
+            # Fill in the instance_id in KVChunkInfo
+            kv_info, peer_init_url, keys = result
+            return (
+                KVChunkInfo(self.instance_id, target_worker_id, kv_info.location),
+                peer_init_url,
+                keys,
+            )
+        return None
+
     def find_key_simple(self, key: int) -> Optional[KVChunkInfo]:
         """
         Find a key in any worker within this instance, returning only KVChunkInfo.
@@ -608,6 +626,7 @@ class RegistryTree:
     def find_kv_with_worker_info(
         self,
         key: int,
+        target_worker_id: int,
         exclude_instance_id: Optional[str] = None,
     ) -> Optional[tuple[KVChunkInfo, Optional[str], set[int]]]:
         """
@@ -620,7 +639,9 @@ class RegistryTree:
         for instance_id, instance_node in list(self.instances.items()):
             if exclude_instance_id is not None and instance_id == exclude_instance_id:
                 continue
-            result = instance_node.find_key(key)
+            result = instance_node.find_worker_key(
+                key, target_worker_id=target_worker_id
+            )
             if result is not None:
                 return result
         return None
