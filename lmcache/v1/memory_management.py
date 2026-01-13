@@ -1100,7 +1100,20 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self,
         tensor: torch.Tensor,
         align_bytes: int = AddressManager.ALIGN_BYTES,
+        init_address_space: int | None = None,
     ):
+        """
+        Args:
+            tensor: The pre-allocated flat tensor to use as the memory pool.
+            align_bytes: The alignment requirement for allocations.
+            init_address_space: Initial size of the address space. If None,
+                use the size of the provided tensor.
+
+        Note:
+            The `init_address_space` is used for lazy memory allocation.
+            We probably want to have a better way to make sure that the
+            LazyMemoryAllocator can be decoupled from TensorMemoryAllocator.
+        """
         self.buffer = tensor.view(torch.uint8).flatten()
 
         # Use AddressManager for address space management
