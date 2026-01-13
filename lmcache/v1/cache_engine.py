@@ -3,6 +3,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -12,6 +13,12 @@ from typing import (
     Tuple,
     Union,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.health_monitor.base import HealthMonitor
+
+# Standard
 import asyncio
 import gc
 import multiprocessing
@@ -23,7 +30,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor, PrometheusLogger
+from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
@@ -39,11 +46,6 @@ from lmcache.v1.gpu_connector import (
     SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
-)
-from lmcache.v1.health_monitor.base import HealthMonitor
-from lmcache.v1.health_monitor.constants import (
-    DEFAULT_PING_INTERVAL,
-    PING_INTERVAL_CONFIG_KEY,
 )
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
@@ -217,13 +219,38 @@ class LMCacheEngine:
         # Flag to control KVCache Check logging (can be toggled via API)
         self.kvcache_check_log_enabled = False
 
-        # Health monitor for the entire LMCache engine
-        # Will be initialized in post_init when storage_manager is created
-        self.health_monitor: Optional[HealthMonitor] = None
-
         gc.collect()
         if not config.py_enable_gc:
             gc.disable()
+
+        # Health monitor reference (injected by LMCacheManager)
+        self._health_monitor: Optional["HealthMonitor"] = None
+
+    def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
+        """
+        Set the health monitor reference.
+
+        This is called by LMCacheManager after creating the HealthMonitor
+        to inject the reference into the engine.
+
+        Args:
+            health_monitor: The HealthMonitor instance from LMCacheManager
+        """
+        self._health_monitor = health_monitor
+
+    def is_healthy(self) -> bool:
+        """
+        Check if the LMCache system is healthy.
+
+        This method delegates to the HealthMonitor if one is set.
+        If no health monitor is set, it returns True (assume healthy).
+
+        Returns:
+            bool: True if healthy, False otherwise
+        """
+        if self._health_monitor is not None:
+            return self._health_monitor.is_healthy()
+        return True
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
@@ -252,8 +279,6 @@ class LMCacheEngine:
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
                 )
-                # Initialize health monitor at engine level
-                self._init_health_monitor()
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
@@ -282,56 +307,6 @@ class LMCacheEngine:
         if self.storage_manager is not None:
             return self.storage_manager.is_frozen()
         return False
-
-    def _init_health_monitor(self) -> None:
-        """
-        Initialize the health monitor for the entire LMCache engine.
-
-        This is called during post_init after storage_manager is created.
-        The HealthMonitor automatically discovers and instantiates all
-        HealthCheck subclasses.
-        """
-        # Get ping interval from config
-        ping_interval = self.config.get_extra_config_value(
-            PING_INTERVAL_CONFIG_KEY, DEFAULT_PING_INTERVAL
-        )
-
-        # Create health monitor with cache engine - it will auto-discover health checks
-        self.health_monitor = HealthMonitor(
-            cache_engine=self,
-            ping_interval=ping_interval,
-        )
-
-        # Start the health monitor
-        self.health_monitor.start()
-        logger.info("Health monitor initialized and started at engine level")
-
-        # Setup metrics callback for health status
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.lmcache_is_healthy.set_function(
-                lambda: 1 if self.is_healthy() else 0
-            )
-
-    def is_healthy(self) -> bool:
-        """
-        Check if the LMCache engine is healthy.
-
-        Returns:
-            bool: True if healthy, False otherwise
-        """
-        if self.health_monitor is None:
-            return True
-        return self.health_monitor.is_healthy()
-
-    def get_health_monitor(self) -> Optional[HealthMonitor]:
-        """
-        Get the health monitor instance.
-
-        Returns:
-            Optional[HealthMonitor]: The health monitor, or None if not initialized
-        """
-        return self.health_monitor
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -1428,15 +1403,6 @@ class LMCacheEngine:
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
         logger.info("Closing LMCacheEngine...")
-
-        # Stop health monitor first
-        if self.health_monitor is not None:
-            try:
-                logger.info("Stopping health monitor...")
-                self.health_monitor.stop()
-                logger.info("Health monitor stopped successfully")
-            except Exception as e:
-                logger.error(f"Error stopping health monitor: {e}")
 
         if self.lmcache_worker is not None:
             try:

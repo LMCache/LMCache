@@ -21,7 +21,7 @@ from lmcache.v1.health_monitor.constants import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.manager import LMCacheManager
     from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
 logger = init_logger(__name__)
@@ -47,15 +47,15 @@ class RemoteBackendHealthCheck(HealthCheck):
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
 
     @classmethod
-    def create_from_engine(cls, engine: "LMCacheEngine") -> List[HealthCheck]:
+    def create(cls, manager: "LMCacheManager") -> List[HealthCheck]:
         """
-        Create RemoteBackendHealthCheck instances from a CacheEngine.
+        Create RemoteBackendHealthCheck instances from a LMCacheManager.
 
         This method finds all RemoteBackend instances in the storage manager
         and creates a health check for each one.
 
         Args:
-            engine: The LMCacheEngine instance
+            manager: The LMCacheManager instance
 
         Returns:
             List of RemoteBackendHealthCheck instances
@@ -66,7 +66,9 @@ class RemoteBackendHealthCheck(HealthCheck):
 
         instances: List[HealthCheck] = []
 
-        if engine.storage_manager is None:
+        # Get engine from manager
+        engine = manager.lmcache_engine
+        if engine is None or engine.storage_manager is None:
             return instances
 
         for backend_name, backend in engine.storage_manager.storage_backends.items():

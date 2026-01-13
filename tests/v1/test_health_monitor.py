@@ -46,7 +46,7 @@ class SimpleHealthCheck(HealthCheck):
         self._healthy = healthy
 
     @classmethod
-    def create_from_engine(cls, engine) -> List[HealthCheck]:
+    def create(cls, manager) -> List[HealthCheck]:
         return [cls()]
 
 
@@ -58,7 +58,7 @@ class ExceptionHealthCheck(HealthCheck):
         raise RuntimeError("Simulated failure")
 
     @classmethod
-    def create_from_engine(cls, engine) -> List[HealthCheck]:
+    def create(cls, manager) -> List[HealthCheck]:
         return [cls()]
 
 
@@ -72,7 +72,7 @@ class IrrecoverableHealthCheck(HealthCheck):
         raise IrrecoverableException("Simulated irrecoverable failure")
 
     @classmethod
-    def create_from_engine(cls, engine) -> List[HealthCheck]:
+    def create(cls, manager) -> List[HealthCheck]:
         return [cls()]
 
 
@@ -82,16 +82,17 @@ class IrrecoverableHealthCheck(HealthCheck):
 
 
 @pytest.fixture
-def mock_engine():
-    engine = MagicMock()
-    engine.config.extra_config = None
-    engine.storage_manager = None
-    return engine
+def mock_manager():
+    manager = MagicMock()
+    manager.lmcache_engine = MagicMock()
+    manager.lmcache_engine.config.extra_config = None
+    manager.lmcache_engine.storage_manager = None
+    return manager
 
 
 @pytest.fixture
-def monitor(mock_engine):
-    return HealthMonitor(cache_engine=mock_engine, ping_interval=0.1)
+def monitor(mock_manager):
+    return HealthMonitor(manager=mock_manager, ping_interval=0.1)
 
 
 @pytest.fixture
@@ -138,8 +139,8 @@ class TestHealthCheckBase:
 
 
 class TestHealthMonitor:
-    def test_initialization(self, mock_engine):
-        monitor = HealthMonitor(cache_engine=mock_engine, ping_interval=10.0)
+    def test_initialization(self, mock_manager):
+        monitor = HealthMonitor(manager=mock_manager, ping_interval=10.0)
         assert monitor.is_healthy() is True
         assert monitor._ping_interval == 10.0
 
@@ -247,7 +248,7 @@ class TestRemoteBackendHealthCheck:
     def test_name_includes_url(self, mock_backend):
         assert "localhost:1234" in RemoteBackendHealthCheck(mock_backend).name()
 
-    def test_create_from_engine_with_remote_backend(self):
+    def test_create_with_remote_backend(self):
         # First Party
         from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
@@ -257,18 +258,22 @@ class TestRemoteBackendHealthCheck:
         mock_backend.config = MagicMock()
         mock_backend.config.extra_config = None
 
-        mock_engine = MagicMock()
-        mock_engine.storage_manager = MagicMock()
-        mock_engine.storage_manager.storage_backends = {"RemoteBackend": mock_backend}
+        mock_manager = MagicMock()
+        mock_manager.lmcache_engine = MagicMock()
+        mock_manager.lmcache_engine.storage_manager = MagicMock()
+        mock_manager.lmcache_engine.storage_manager.storage_backends = {
+            "RemoteBackend": mock_backend
+        }
 
-        checks = RemoteBackendHealthCheck.create_from_engine(mock_engine)
+        checks = RemoteBackendHealthCheck.create(mock_manager)
         assert len(checks) == 1 and "localhost:1234" in checks[0].name()
 
-    def test_create_from_engine_no_remote_backend(self):
-        mock_engine = MagicMock()
-        mock_engine.storage_manager = MagicMock()
-        mock_engine.storage_manager.storage_backends = {}
-        assert len(RemoteBackendHealthCheck.create_from_engine(mock_engine)) == 0
+    def test_create_no_remote_backend(self):
+        mock_manager = MagicMock()
+        mock_manager.lmcache_engine = MagicMock()
+        mock_manager.lmcache_engine.storage_manager = MagicMock()
+        mock_manager.lmcache_engine.storage_manager.storage_backends = {}
+        assert len(RemoteBackendHealthCheck.create(mock_manager)) == 0
 
 
 # ============================================================================
@@ -325,7 +330,7 @@ class TestIrrecoverableException:
                 raise IrrecoverableException("Stop now")
 
             @classmethod
-            def create_from_engine(cls, engine) -> List[HealthCheck]:
+            def create(cls, manager) -> List[HealthCheck]:
                 return [cls()]
 
         monitor._health_checks = [CountingIrrecoverableCheck()]

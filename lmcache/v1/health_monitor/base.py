@@ -15,7 +15,7 @@ from lmcache.v1.health_monitor.constants import DEFAULT_PING_INTERVAL
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.manager import LMCacheManager
 
 logger = init_logger(__name__)
 
@@ -27,8 +27,8 @@ class HealthCheck(ABC):
     Subclasses should implement the check() method to perform specific
     health checks. Each health check represents one aspect of system health.
 
-    Subclasses must also implement the create_from_engine() classmethod
-    to create instances from a CacheEngine.
+    Subclasses must also implement the create() classmethod
+    to create instances from a LMCacheManager.
 
     Example:
         class DatabaseHealthCheck(HealthCheck):
@@ -42,9 +42,11 @@ class HealthCheck(ABC):
                 return self.db.ping()
 
             @classmethod
-            def create_from_engine(cls, engine: "LMCacheEngine") -> List["HealthCheck"]:
-                # Create instances from engine's components
-                return [cls(engine.db_connection)]
+            def create(
+                cls, manager: "LMCacheManager"
+            ) -> List["HealthCheck"]:
+                # Create instances from manager's components
+                return [cls(manager.lmcache_engine.db_connection)]
     """
 
     @abstractmethod
@@ -76,15 +78,15 @@ class HealthCheck(ABC):
 
     @classmethod
     @abstractmethod
-    def create_from_engine(cls, engine: "LMCacheEngine") -> List["HealthCheck"]:
+    def create(cls, manager: "LMCacheManager") -> List["HealthCheck"]:
         """
-        Create health check instance(s) from a CacheEngine.
+        Create health check instance(s) from a LMCacheManager.
 
-        This method should extract the necessary components from the engine
+        This method should extract the necessary components from the manager
         and create one or more health check instances.
 
         Args:
-            engine: The LMCacheEngine instance
+            manager: The LMCacheManager instance
 
         Returns:
             List[HealthCheck]: List of health check instances.
@@ -95,23 +97,23 @@ class HealthCheck(ABC):
 
 class HealthMonitor:
     """
-    Health monitor for the entire LMCache Engine.
+    Health monitor for the entire LMCache system.
 
     This is the unified health monitor for the entire LMCache system.
     It supports extensible health checks and provides a centralized way
-    to check the health status of the cache engine.
+    to check the health status of the LMCacheManager.
 
     The monitor automatically discovers and instantiates all HealthCheck
-    subclasses using their create_from_engine() method.
+    subclasses using their create() method.
 
     The monitor runs in a background thread and periodically executes
     all registered health checks. If any check fails, the system is
     marked as unhealthy.
 
     Usage:
-        # Create a health monitor with cache engine
+        # Create a health monitor with manager
         health_monitor = HealthMonitor(
-            cache_engine=engine,
+            manager=manager,
             ping_interval=30.0
         )
 
@@ -129,10 +131,10 @@ class HealthMonitor:
 
     def __init__(
         self,
-        cache_engine: "LMCacheEngine",
+        manager: "LMCacheManager",
         ping_interval: float = DEFAULT_PING_INTERVAL,
     ):
-        self._cache_engine = cache_engine
+        self._manager = manager
         self._health_checks: List[HealthCheck] = []
 
         # Health status
@@ -154,8 +156,8 @@ class HealthMonitor:
         Discover all HealthCheck subclasses and instantiate them.
 
         This method dynamically scans all modules in the checks package,
-        finds all HealthCheck subclasses, calls their create_from_engine()
-        method to create instances, and adds them to the health checks list.
+        finds all HealthCheck subclasses and calls their `create()`
+        method to create instances.
         """
         # Standard
         import importlib
@@ -183,7 +185,7 @@ class HealthMonitor:
                         and obj != HealthCheck
                     ):
                         try:
-                            instances = obj.create_from_engine(self._cache_engine)
+                            instances = obj.create(self._manager)
                             for instance in instances:
                                 self._health_checks.append(instance)
                                 logger.info(
