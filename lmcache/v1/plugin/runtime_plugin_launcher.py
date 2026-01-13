@@ -14,12 +14,12 @@ logger = init_logger(__name__)
 
 
 class RuntimePluginLauncher:
-    def __init__(self, config, role, worker_count, worker_id):
+    def __init__(self, config, role: str, worker_count: int, worker_id: int):
         self.config = config
         self.role = role
         self.worker_count = worker_count
         self.worker_id = worker_id
-        self.plugin_processes = []
+        self.plugin_processes: list[subprocess.Popen] = []
         # Register cleanup handler
         atexit.register(self.stop_plugins)
 
@@ -56,8 +56,8 @@ class RuntimePluginLauncher:
 
         # Check role match
         plugin_role = parts[0].upper()
-        if plugin_role != "ALL" and plugin_role != self.role.name:
-            logger.info(f"Skipping {file}: requires role {plugin_role}")
+        if plugin_role != "ALL" and plugin_role != self.role.upper():
+            logger.info("Skipping %s: requires role %s", file, plugin_role)
             return True
 
         # Check worker ID match
