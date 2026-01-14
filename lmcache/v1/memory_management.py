@@ -1117,7 +1117,10 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self.buffer = tensor.view(torch.uint8).flatten()
 
         # Use AddressManager for address space management
-        self.address_manager = AddressManager(self.buffer.numel(), align_bytes)
+        self.address_manager = AddressManager(
+            self.buffer.numel() if init_address_space is None else init_address_space,
+            align_bytes,
+        )
 
         # For debugging purposes
         self.num_active_allocations = 0
