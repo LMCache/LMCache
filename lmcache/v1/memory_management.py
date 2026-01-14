@@ -2056,6 +2056,338 @@ class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
         return "ProgressivePinnedMemoryAllocator"
 
 
+class ProgressivePinnedPagedMemoryAllocator(MemoryAllocatorInterface):
+    """A paged allocator over a single contiguous host mapping with progressive pinning.
+
+    This is the paged analogue of ProgressivePinnedMemoryAllocator:
+    - Reserve one contiguous host mapping (mmap), optionally NUMA-bound.
+    - Pin/register only an initial prefix.
+    - Expose the registered prefix as a growing set of fixed-size "pages"
+      (page_size_bytes = get_size_bytes(shapes, dtypes)).
+    - When usage crosses a threshold, asynchronously register more contiguous
+      bytes and append new pages into the free deque.
+
+    Compared to lazy_memory_allocator.py:
+    - Still "lazy" in registration work, but keeps a single contiguous address
+      space (no multi-segment composite buffer).
+    """
+
+    def __init__(
+        self,
+        size: int,
+        shapes: list[torch.Size],
+        dtypes: list[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        initial_ratio: float = 0.2,
+        expand_trigger_ratio: float = 0.7,
+        step_ratio: float = 0.1,
+        numa_mapping: Optional[NUMAMapping] = None,
+    ):
+        if size <= 0:
+            raise ValueError(f"size must be > 0, got {size}")
+        if not (0 < initial_ratio <= 1.0):
+            raise ValueError(f"initial_ratio must be in (0, 1], got {initial_ratio}")
+        if not (0 < expand_trigger_ratio <= 1.0):
+            raise ValueError(
+                f"expand_trigger_ratio must be in (0, 1], got {expand_trigger_ratio}"
+            )
+        if not (0 < step_ratio <= 1.0):
+            raise ValueError(f"step_ratio must be in (0, 1], got {step_ratio}")
+
+        self.total_size = size
+        self.shapes = shapes
+        self.dtypes = dtypes
+        self.fmt = fmt
+        self.initial_ratio = initial_ratio
+        self.expand_trigger_ratio = expand_trigger_ratio
+        self.step_ratio = step_ratio
+        self.numa_mapping = numa_mapping
+
+        # Fixed page size for the paged allocator (bytes).
+        self.align_bytes = get_size_bytes(shapes, dtypes)
+        if self.align_bytes <= 0:
+            raise ValueError(f"Invalid page size (align_bytes={self.align_bytes})")
+        if self.total_size % self.align_bytes != 0:
+            raise ValueError(
+                f"total_size ({self.total_size}) must be a multiple of "
+                f"page_size_bytes ({self.align_bytes}) for paged allocator."
+            )
+
+        # Reserve a single contiguous mapping up-front (not pinned yet).
+        if self.numa_mapping:
+            if torch.cuda.is_available():
+                current_device_id = torch.cuda.current_device()
+            else:
+                current_device_id = 0
+            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
+            assert current_device_id in gpu_to_numa_mapping, (
+                f"Current device {current_device_id} is not in the GPU NUMA mapping."
+            )
+            numa_id = gpu_to_numa_mapping[current_device_id]
+            self._base_ptr = lmc_ops.mmap_host_numa_ptr(size, numa_id)
+        else:
+            self._base_ptr = lmc_ops.mmap_host_ptr(size)
+
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_address(self._base_ptr)
+        self._full_buffer = torch.frombuffer(buf, dtype=torch.uint8).view(torch.uint8)
+
+        # Register/pin only an initial prefix, aligned to whole pages.
+        initial_size = int(size * initial_ratio)
+        initial_size = (initial_size // self.align_bytes) * self.align_bytes
+        initial_size = max(self.align_bytes, min(initial_size, size))
+
+        self._registered_ranges: list[tuple[int, int]] = []
+        self._registered_size = 0
+
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._expander: Optional[threading.Thread] = None
+        self._expansion_triggered = False
+
+        self.buffer_allocator = BufferAllocator("cpu")
+        self.free_blocks: deque[TensorMemoryObj] = deque()
+
+        # Debug/stats (similar spirit to PagedTensorMemoryAllocator).
+        self.num_active_allocations = 0
+        self.total_allocated_size = 0
+        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+
+        with self._lock:
+            self._register_more_locked(0, initial_size)
+            self._append_pages_locked(old_size=0, new_size=initial_size)
+
+    def _register_more_locked(self, start: int, size: int) -> None:
+        if size <= 0:
+            return
+        lmc_ops.cuda_host_register(self._base_ptr + start, size, 0)
+        self._registered_ranges.append((start, size))
+        self._registered_size = max(self._registered_size, start + size)
+
+    def _append_pages_locked(self, old_size: int, new_size: int) -> None:
+        """Append pages corresponding to [old_size, new_size) into free_blocks."""
+        old_pages = old_size // self.align_bytes
+        new_pages = new_size // self.align_bytes
+        for page_idx in range(old_pages, new_pages):
+            start = page_idx * self.align_bytes
+            page = self._full_buffer[start : start + self.align_bytes]
+            metadata = MemoryObjMetadata(
+                self.shapes[0],
+                self.dtypes[0],
+                page_idx,  # address is page index (paged semantics)
+                self.align_bytes,  # 1 page
+                1,  # ref_count=1
+                0,  # pin_count=0
+                self.fmt,
+                shapes=self.shapes,
+                dtypes=self.dtypes,
+            )
+            self.free_blocks.append(
+                TensorMemoryObj(raw_data=page, metadata=metadata, parent_allocator=self)
+            )
+
+    def _maybe_trigger_expansion(self) -> None:
+        if self._expansion_triggered:
+            return
+        if self._registered_size <= 0:
+            return
+        usage_ratio = self.total_allocated_size / self._registered_size
+        if usage_ratio >= self.expand_trigger_ratio:
+            self._start_expander()
+            self._expansion_triggered = True
+
+    def _start_expander(self) -> None:
+        if self._expander and self._expander.is_alive():
+            return
+        self._stop.clear()
+        self._expander = threading.Thread(
+            target=self._expansion_worker,
+            daemon=True,
+            name="ProgressivePinnedPagedExpander",
+        )
+        self._expander.start()
+
+    def _expansion_worker(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                curr = self._registered_size
+                if curr >= self.total_size:
+                    return
+
+                step = int(self.total_size * self.step_ratio)
+                step = (step // self.align_bytes) * self.align_bytes
+                step = max(self.align_bytes, step)
+                step = min(step, self.total_size - curr)
+
+                old = curr
+                self._register_more_locked(curr, step)
+                new = old + step
+                self._append_pages_locked(old_size=old, new_size=new)
+
+            time.sleep(0.01)
+
+    @_lmcache_nvtx_annotate
+    def allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[TensorMemoryObj]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.allocate(shapes, dtypes, fmt)  # type: ignore
+
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
+        with self._lock:
+            try:
+                free_block = self.free_blocks.popleft()
+            except IndexError:
+                return None
+
+            # Update metadata.
+            free_block.meta.shape = shapes[0]
+            free_block.meta.dtype = dtypes[0]
+            free_block.meta.shapes = shapes
+            free_block.meta.dtypes = dtypes
+            free_block.meta.fmt = fmt
+            free_block.meta.ref_count = 1
+
+            if shapes != self.shapes:
+                size_in_bytes = get_size_bytes(shapes, dtypes)
+                free_block.raw_data = free_block.raw_data[:size_in_bytes]
+
+            # Stats.
+            self.num_active_allocations += 1
+            self.total_allocated_size += self.align_bytes
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+            self.stats_monitor.update_active_memory_objs_count(
+                self.num_active_allocations
+            )
+
+        self._maybe_trigger_expansion()
+        return free_block
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[List[TensorMemoryObj]]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt
+            )  # type: ignore
+
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
+        allocated: list[TensorMemoryObj] = []
+        with self._lock:
+            for _ in range(batch_size):
+                try:
+                    free_block = self.free_blocks.popleft()
+                except IndexError:
+                    # Roll back any pages we popped.
+                    for m in allocated:
+                        self.free_blocks.appendleft(m)
+                    return None
+
+                free_block.meta.shape = shapes[0]
+                free_block.meta.dtype = dtypes[0]
+                free_block.meta.shapes = shapes
+                free_block.meta.dtypes = dtypes
+                free_block.meta.fmt = fmt
+                free_block.meta.ref_count = 1
+
+                if shapes != self.shapes:
+                    size_in_bytes = get_size_bytes(shapes, dtypes)
+                    free_block.raw_data = free_block.raw_data[:size_in_bytes]
+
+                allocated.append(free_block)
+
+            self.num_active_allocations += batch_size
+            self.total_allocated_size += self.align_bytes * batch_size
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+            self.stats_monitor.update_active_memory_objs_count(
+                self.num_active_allocations
+            )
+
+        self._maybe_trigger_expansion()
+        return allocated
+
+    @_lmcache_nvtx_annotate
+    def free(self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None):
+        if not memory_obj.is_valid():
+            return
+        if memory_obj.meta.fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.free(memory_obj)
+
+        with self._lock:
+            # Restore full-page raw_data view if it was sliced for smaller shapes.
+            if memory_obj.meta.shapes != self.shapes:
+                page_idx = memory_obj.meta.address
+                start = page_idx * self.align_bytes
+                memory_obj.raw_data = self._full_buffer[
+                    start : start + self.align_bytes
+                ]
+
+            self.free_blocks.append(memory_obj)
+
+            self.total_allocated_size -= self.align_bytes
+            self.num_active_allocations -= 1
+            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+            self.stats_monitor.update_active_memory_objs_count(
+                self.num_active_allocations
+            )
+
+    @_lmcache_nvtx_annotate
+    def batched_free(
+        self,
+        memory_objs: List[TensorMemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
+        if not memory_objs:
+            return
+        if memory_objs[0].meta.fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.batched_free(memory_objs)
+
+        with self._lock:
+            valid = 0
+            for memory_obj in memory_objs:
+                if not memory_obj.is_valid():
+                    continue
+                if memory_obj.meta.shapes != self.shapes:
+                    page_idx = memory_obj.meta.address
+                    start = page_idx * self.align_bytes
+                    memory_obj.raw_data = self._full_buffer[
+                        start : start + self.align_bytes
+                    ]
+                self.free_blocks.append(memory_obj)
+                valid += 1
+
+            if update_stats and valid:
+                self.total_allocated_size -= self.align_bytes * valid
+                self.num_active_allocations -= valid
+                self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+                self.stats_monitor.update_active_memory_objs_count(
+                    self.num_active_allocations
+                )
+
+    def close(self):
+        self._stop.set()
+        if self._expander and self._expander.is_alive():
+            self._expander.join(timeout=5.0)
+
+        for start, _sz in reversed(self._registered_ranges):
+            lmc_ops.cuda_host_unregister(self._base_ptr + start)
+        lmc_ops.munmap_host_ptr(self._base_ptr, self.total_size)
+
+    def __str__(self):
+        return "ProgressivePinnedPagedMemoryAllocator"
+
+
 class GPUMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated GPU memory."""
 
