@@ -8,9 +8,13 @@ from typing import TYPE_CHECKING, List, Optional
 import asyncio
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.health_monitor.base import HealthCheck
 from lmcache.v1.health_monitor.constants import (
     DEFAULT_FALLBACK_POLICY,
@@ -181,12 +185,23 @@ class RemoteBackendHealthCheck(HealthCheck):
         Returns:
             bool: True if all checks succeeds, False otherwise
         """
+        # Try to reinitialize connection if needed
+        if not self._try_reinitialize_connection():
+            return False
+
+        # At this point, connector is guaranteed to be not None
+        connector = self.backend.connection
+        assert connector is not None
+
         if self.failure_time is not None:
-            if time.time() - self.failure_time > self.waiting_time_for_recovery:
-                # recover from get blocking timeout
+            if (
+                time.time() - self.failure_time > self.waiting_time_for_recovery
+                and self._put_and_get_check()
+            ):
+                # recover from get blocking failed
                 logger.info(
                     "Failure time: %s, current time: %s, "
-                    "recover from get blocking timeout",
+                    "recover from get blocking failed",
                     self.failure_time,
                     time.time(),
                 )
@@ -194,7 +209,7 @@ class RemoteBackendHealthCheck(HealthCheck):
             else:
                 logger.info(
                     "Failure time: %s, current time: %s, "
-                    "still in get blocking timeout recovery window",
+                    "still in get blocking failed recovery window",
                     self.failure_time,
                     time.time(),
                 )
@@ -212,14 +227,6 @@ class RemoteBackendHealthCheck(HealthCheck):
             )
             self.failure_time = time.time()
             return False
-
-        # Try to reinitialize connection if needed
-        if not self._try_reinitialize_connection():
-            return False
-
-        # At this point, connector is guaranteed to be not None
-        connector = self.backend.connection
-        assert connector is not None
 
         # If connector doesn't support ping, assume it's healthy
         if not connector.support_ping():
@@ -253,3 +260,47 @@ class RemoteBackendHealthCheck(HealthCheck):
             logger.error(f"Ping error: {e}")
             self._stats_monitor.update_remote_ping_error_code(PING_GENERIC_ERROR_CODE)
             return False
+
+    def _put_and_get_check(self) -> bool:
+        if self.backend.local_cpu_backend is None or self.backend.connection is None:
+            return False
+
+        key = CacheEngineKey(
+            fmt="vllm",
+            model_name="test",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=0,
+            dtype=torch.bfloat16,
+        )
+        # put
+        put_obj = self.backend.local_cpu_backend.allocate(
+            self.backend.connection.meta_shapes,
+            self.backend.connection.meta_dtypes,
+            self.backend.connection.meta_fmt,
+        )
+        future = self.backend.submit_put_task(key, put_obj)
+        try:
+            future.result(timeout=self.ping_timeout)
+        except asyncio.TimeoutError:
+            put_obj.ref_count_down()
+            logger.warning("Put timeout, check failed.")
+            return False
+        except Exception as e:
+            put_obj.ref_count_down()
+            logger.error("Put error, check failed.", e)
+            return False
+
+        # get
+        get_obj = self.backend.get_blocking(key)
+
+        # check the tensor of get_obj and put_obj is equal
+        if get_obj is None:
+            put_obj.ref_count_down()
+            logger.warning("Get failed, the return value is None, check failed.")
+            return False
+        else:
+            check_result = torch.equal(get_obj.raw_tensor, put_obj.raw_tensor)
+            put_obj.ref_count_down()
+            get_obj.ref_count_down()
+            return check_result
