@@ -299,7 +299,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             self.lmcache_engine.lookup_unpin(lookup_id)
             logger.info(
                 f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
-                f"offset={offset}, no new tokens to load"
+                f"offset={offset}, no new tokens to retrieve"
             )
             return 0
 
