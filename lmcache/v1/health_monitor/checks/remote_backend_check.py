@@ -4,7 +4,7 @@ Health check for RemoteBackend.
 """
 
 # Standard
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 import asyncio
 import time
 
@@ -13,10 +13,13 @@ from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.health_monitor.base import HealthCheck
 from lmcache.v1.health_monitor.constants import (
+    DEFAULT_FALLBACK_POLICY,
     DEFAULT_PING_TIMEOUT,
+    FALLBACK_POLICY_CONFIG_KEY,
     PING_GENERIC_ERROR_CODE,
     PING_TIMEOUT_CONFIG_KEY,
     PING_TIMEOUT_ERROR_CODE,
+    FallbackPolicy,
 )
 
 if TYPE_CHECKING:
@@ -33,6 +36,11 @@ class RemoteBackendHealthCheck(HealthCheck):
 
     This check verifies that the remote backend is reachable and responsive
     by sending periodic ping requests.
+
+    Fallback Policies:
+        - RECOMPUTE (default): Skip all cache operations when
+          remote backend is unhealthy
+        - LOCAL_CPU: Bypass remote backend and use local CPU with hot_cache enabled
     """
 
     def __init__(
@@ -44,7 +52,25 @@ class RemoteBackendHealthCheck(HealthCheck):
         self.ping_timeout = backend.config.get_extra_config_value(
             PING_TIMEOUT_CONFIG_KEY, DEFAULT_PING_TIMEOUT
         )
+        # Get fallback policy from config
+        fallback_policy_str = backend.config.get_extra_config_value(
+            FALLBACK_POLICY_CONFIG_KEY, DEFAULT_FALLBACK_POLICY.value
+        )
+        # Convert string to FallbackPolicy enum
+        if isinstance(fallback_policy_str, str):
+            try:
+                self._fallback_policy = FallbackPolicy(fallback_policy_str)
+            except ValueError:
+                logger.warning(
+                    f"Invalid fallback_policy '{fallback_policy_str}' "
+                    f"for {backend}, using default: "
+                    f"{DEFAULT_FALLBACK_POLICY}"
+                )
+                self._fallback_policy = DEFAULT_FALLBACK_POLICY
+        elif isinstance(fallback_policy_str, FallbackPolicy):
+            self._fallback_policy = fallback_policy_str
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
+        self._backend_name: Optional[str] = None
 
     @classmethod
     def create(cls, manager: "LMCacheManager") -> List[HealthCheck]:
@@ -74,13 +100,28 @@ class RemoteBackendHealthCheck(HealthCheck):
         for backend_name, backend in engine.storage_manager.storage_backends.items():
             if isinstance(backend, RemoteBackend):
                 check = cls(backend)
+                check._backend_name = backend_name
                 instances.append(check)
-                logger.info(f"Created RemoteBackendHealthCheck for {backend_name}")
+                logger.info(f"Created {check} for {backend_name}")
 
         return instances
 
     def name(self) -> str:
         return f"RemoteBackendHealthCheck({self.backend.remote_url})"
+
+    @property
+    def fallback_policy(self) -> FallbackPolicy:
+        """Return the fallback policy for this health check."""
+        return self._fallback_policy
+
+    def get_bypass_backend_name(self) -> Optional[str]:
+        """
+        Return the backend name to bypass when this health check fails.
+
+        Returns:
+            Optional[str]: The backend name (e.g., "RemoteBackend")
+        """
+        return self._backend_name
 
     def should_skip(self) -> bool:
         """Check if we should skip ping for this connector"""

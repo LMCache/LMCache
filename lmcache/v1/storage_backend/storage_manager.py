@@ -275,6 +275,11 @@ class StorageManager:
         self._freeze = False
         self._freeze_lock = threading.RLock()
 
+        # Backend bypass mode: skip specific backends during health check failures
+        # Key: backend_name, Value: True if bypassed
+        self._bypassed_backends: Dict[str, bool] = {}
+        self._bypass_lock = threading.RLock()
+
         if not self.enable_pd and self.config.enable_async_loading:
             assert self.allocator_backend is not None
             self.async_serializer = AsyncSingleSerializer(self.loop)
@@ -400,6 +405,10 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
                 continue
+            # Skip bypassed backends
+            with self._bypass_lock:
+                if self._bypassed_backends.get(backend_name, False):
+                    continue
 
             allocator_backend = backend.get_allocator_backend()
             cname = get_backend_cname(allocator_backend)
@@ -779,6 +788,43 @@ class StorageManager:
         with self._freeze_lock:
             return self._freeze
 
+    def set_backend_bypass(self, backend_name: str, bypassed: bool) -> None:
+        """
+        Set bypass mode for a specific backend.
+
+        When a backend is bypassed:
+        - It will be skipped during contains/put/get operations
+        - This is typically used when a health check fails with LOCAL_CPU fallback
+
+        Args:
+            backend_name: The name of the backend to bypass (e.g., "RemoteBackend")
+            bypassed: True to bypass, False to restore normal operation
+        """
+        with self._bypass_lock:
+            if bypassed:
+                self._bypassed_backends[backend_name] = True
+                logger.info(f"StorageManager: Backend {backend_name} is now bypassed")
+            else:
+                if backend_name in self._bypassed_backends:
+                    del self._bypassed_backends[backend_name]
+                    logger.info(
+                        f"StorageManager: Backend {backend_name} bypass removed, "
+                        "restored to normal operation"
+                    )
+
+    def is_backend_bypassed(self, backend_name: str) -> bool:
+        """
+        Check if a backend is currently bypassed.
+
+        Args:
+            backend_name: The name of the backend to check
+
+        Returns:
+            bool: True if the backend is bypassed, False otherwise
+        """
+        with self._bypass_lock:
+            return self._bypassed_backends.get(backend_name, False)
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -1011,7 +1057,7 @@ class StorageManager:
         search_range: Optional[List[str]] = None,
     ) -> Generator[Tuple[str, StorageBackendInterface], None, None]:
         """
-        Get the active storage backends based on freeze mode and filters.
+        Get the active storage backends based on freeze mode, bypass mode, and filters.
 
         :param Optional[str] location: If specified, only yield backends
             matching this exact name.
@@ -1024,6 +1070,10 @@ class StorageManager:
             # In freeze mode, only use local_cpu backend
             with self._freeze_lock:
                 if self._freeze and backend_name != "LocalCPUBackend":
+                    continue
+            # Skip bypassed backends
+            with self._bypass_lock:
+                if self._bypassed_backends.get(backend_name, False):
                     continue
             if location and backend_name != location:
                 continue
