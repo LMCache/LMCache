@@ -429,6 +429,7 @@ class NixlChannel(BaseTransferChannel):
         """
         assert transfer_spec is not None
 
+        start1 = time.time()
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             self.nixl_wrapper.xfer_handler,
@@ -436,7 +437,9 @@ class NixlChannel(BaseTransferChannel):
             self.remote_xfer_handlers_dict[transfer_spec["receiver_id"]],
             transfer_spec["remote_indexes"],
         )
+        end1 = time.time()
 
+        start2 = time.time()
         self.nixl_agent.transfer(handle)
 
         # TODO(Jiayi) tune hyperparameters
@@ -454,6 +457,10 @@ class NixlChannel(BaseTransferChannel):
             assert status == "DONE", f"Transfer status is {status}, expected DONE"
             # self._proxy_side_channel.send(notif_msg_bytes)
             break
+        end2 = time.time()
+
+        logger.info(f"NIXL Write Prep Time: {end1 - start1}s.")
+        logger.info(f"NIXL Write Transfer Time: {end2 - start2}s.")
 
         return len(objects)
 
