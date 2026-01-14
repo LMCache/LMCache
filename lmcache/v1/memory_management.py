@@ -1978,7 +1978,178 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         return "MixedMemoryAllocator"
 
 
-class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
+class _ProgressivePinnedBase(MemoryAllocatorInterface):
+    """Shared base for progressive pinned allocators.
+
+    Responsibilities:
+    - Reserve a single contiguous host mapping (mmap), optionally NUMA-bound.
+    - Register/pin an initial prefix aligned to `align_unit`.
+    - Start a background expansion thread once usage crosses a threshold.
+    - In the expander: register more contiguous bytes (aligned), then call
+      subclass hook `_on_grow(old_size, new_size)`.
+    - Unregister all registered subranges and unmap on close().
+
+    Subclasses must implement:
+    - `_usage_ratio()` (0..1-ish) used to decide when to trigger expansion
+    - `_on_init(initial_size)` to build their allocation structures
+    - `_on_grow(old_size, new_size)` to incorporate newly-registered capacity
+    """
+
+    def __init__(
+        self,
+        *,
+        mapped_size: int,
+        managed_size: int,
+        align_unit: int,
+        initial_ratio: float,
+        expand_trigger_ratio: float,
+        step_ratio: float,
+        numa_mapping: Optional[NUMAMapping],
+        thread_name: str,
+    ):
+        if mapped_size <= 0:
+            raise ValueError(f"mapped_size must be > 0, got {mapped_size}")
+        if managed_size <= 0:
+            raise ValueError(f"managed_size must be > 0, got {managed_size}")
+        if managed_size > mapped_size:
+            raise ValueError(
+                f"managed_size ({managed_size}) must be <= mapped_size ({mapped_size})"
+            )
+        if align_unit <= 0:
+            raise ValueError(f"align_unit must be > 0, got {align_unit}")
+        if managed_size % align_unit != 0:
+            raise ValueError(
+                f"managed_size ({managed_size}) must be a multiple of align_unit "
+                f"({align_unit})"
+            )
+        if not (0 < initial_ratio <= 1.0):
+            raise ValueError(f"initial_ratio must be in (0, 1], got {initial_ratio}")
+        if not (0 < expand_trigger_ratio <= 1.0):
+            raise ValueError(
+                f"expand_trigger_ratio must be in (0, 1], got {expand_trigger_ratio}"
+            )
+        if not (0 < step_ratio <= 1.0):
+            raise ValueError(f"step_ratio must be in (0, 1], got {step_ratio}")
+
+        self._mapped_size = mapped_size
+        self.total_size = managed_size
+        self._align_unit = align_unit
+        self.initial_ratio = initial_ratio
+        self.expand_trigger_ratio = expand_trigger_ratio
+        self.step_ratio = step_ratio
+        self.numa_mapping = numa_mapping
+
+        # Reserve a single contiguous mapping up-front (not pinned yet).
+        if self.numa_mapping:
+            if torch.cuda.is_available():
+                current_device_id = torch.cuda.current_device()
+            else:
+                current_device_id = 0
+            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
+            assert current_device_id in gpu_to_numa_mapping, (
+                f"Current device {current_device_id} is not in the GPU NUMA mapping."
+            )
+            numa_id = gpu_to_numa_mapping[current_device_id]
+            self._base_ptr = lmc_ops.mmap_host_numa_ptr(mapped_size, numa_id)
+        else:
+            self._base_ptr = lmc_ops.mmap_host_ptr(mapped_size)
+
+        # Wrap mapping as a uint8 tensor (zero-copy).
+        array_type = ctypes.c_uint8 * mapped_size
+        buf = array_type.from_address(self._base_ptr)
+        self._full_buffer = torch.frombuffer(buf, dtype=torch.uint8)
+
+        # Register/pin only an initial prefix, aligned to align_unit.
+        initial_size = int(managed_size * initial_ratio)
+        initial_size = (initial_size // align_unit) * align_unit
+        initial_size = max(align_unit, min(initial_size, managed_size))
+
+        self._registered_ranges: list[tuple[int, int]] = []
+        self._registered_size = 0
+
+        self.buffer_allocator = BufferAllocator("cpu")
+
+        self._lock = threading.Lock()
+        self._expansion_triggered = False
+        self._stop = threading.Event()
+        self._expander: Optional[threading.Thread] = None
+        self._thread_name = thread_name
+
+        with self._lock:
+            self._register_more_locked(0, initial_size)
+            self._on_init(initial_size)
+
+    def _register_more_locked(self, start: int, size: int) -> None:
+        """Register a subrange [base+start, base+start+size). Caller holds lock."""
+        if size <= 0:
+            return
+        lmc_ops.cuda_host_register(self._base_ptr + start, size, 0)
+        self._registered_ranges.append((start, size))
+        self._registered_size = max(self._registered_size, start + size)
+
+    def _check_and_trigger_expansion(self) -> None:
+        if self._expansion_triggered:
+            return
+        if self._registered_size <= 0:
+            return
+        if self._usage_ratio() >= self.expand_trigger_ratio:
+            self._start_expander()
+            self._expansion_triggered = True
+
+    def _start_expander(self) -> None:
+        if self._expander and self._expander.is_alive():
+            return
+        self._stop.clear()
+        self._expander = threading.Thread(
+            target=self._expansion_worker, daemon=True, name=self._thread_name
+        )
+        self._expander.start()
+
+    def _expansion_worker(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                curr = self._registered_size
+                if curr >= self.total_size:
+                    return
+
+                step = int(self.total_size * self.step_ratio)
+                step = max(
+                    self._align_unit,
+                    (step // self._align_unit) * self._align_unit,
+                )
+                step = min(step, self.total_size - curr)
+                # total_size is a multiple of align_unit, so remaining is aligned too.
+                if step <= 0:
+                    return
+
+                old = curr
+                self._register_more_locked(curr, step)
+                new = old + step
+                self._on_grow(old, new)
+
+            time.sleep(0.01)
+
+    def close(self):
+        self._stop.set()
+        if self._expander and self._expander.is_alive():
+            self._expander.join(timeout=5.0)
+
+        for start, _sz in reversed(self._registered_ranges):
+            lmc_ops.cuda_host_unregister(self._base_ptr + start)
+        lmc_ops.munmap_host_ptr(self._base_ptr, self._mapped_size)
+
+    # --- subclass hooks ---
+    def _usage_ratio(self) -> float:
+        raise NotImplementedError
+
+    def _on_init(self, initial_size: int) -> None:
+        raise NotImplementedError
+
+    def _on_grow(self, old_size: int, new_size: int) -> None:
+        raise NotImplementedError
+
+
+class ProgressivePinnedMemoryAllocator(_ProgressivePinnedBase):
     """A contiguous host-memory allocator that progressively pins memory.
 
     Motivation:
@@ -2006,120 +2177,42 @@ class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
         step_ratio: float = 0.1,
         numa_mapping: Optional[NUMAMapping] = None,
     ):
-        if size <= 0:
-            raise ValueError(f"size must be > 0, got {size}")
-        if not (0 < initial_ratio <= 1.0):
-            raise ValueError(f"initial_ratio must be in (0, 1], got {initial_ratio}")
-        if not (0 < expand_trigger_ratio <= 1.0):
+        # To avoid AddressManager.sbrk() growing beyond what we've registered,
+        # only manage an aligned prefix of the mapped range.
+        managed = (size // AddressManager.ALIGN_BYTES) * AddressManager.ALIGN_BYTES
+        if managed <= 0:
             raise ValueError(
-                f"expand_trigger_ratio must be in (0, 1], got {expand_trigger_ratio}"
+                f"size ({size}) is too small; must be >= {AddressManager.ALIGN_BYTES}"
             )
-        if not (0 < step_ratio <= 1.0):
-            raise ValueError(f"step_ratio must be in (0, 1], got {step_ratio}")
 
-        self.total_size = size
-        self.initial_ratio = initial_ratio
-        self.expand_trigger_ratio = expand_trigger_ratio
-        self.step_ratio = step_ratio
-        self.numa_mapping = numa_mapping
+        self._tensor_allocator: TensorMemoryAllocator
+        super().__init__(
+            mapped_size=size,
+            managed_size=managed,
+            align_unit=AddressManager.ALIGN_BYTES,
+            initial_ratio=initial_ratio,
+            expand_trigger_ratio=expand_trigger_ratio,
+            step_ratio=step_ratio,
+            numa_mapping=numa_mapping,
+            thread_name="ProgressivePinExpander",
+        )
 
-        # Reserve a single contiguous mapping up-front (not pinned yet).
-        if self.numa_mapping:
-            if torch.cuda.is_available():
-                current_device_id = torch.cuda.current_device()
-            else:
-                current_device_id = 0
-            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
-            assert current_device_id in gpu_to_numa_mapping, (
-                f"Current device {current_device_id} is not in the GPU NUMA mapping."
-            )
-            numa_id = gpu_to_numa_mapping[current_device_id]
-            self._base_ptr = lmc_ops.mmap_host_numa_ptr(size, numa_id)
-        else:
-            self._base_ptr = lmc_ops.mmap_host_ptr(size)
-
-        # Wrap mapping as a uint8 tensor (zero-copy).
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(self._base_ptr)
-        self._full_buffer = torch.frombuffer(buf, dtype=torch.uint8)
-
-        # Register/pin only an initial prefix.
-        # Keep aligned with AddressManager.ALIGN_BYTES (currently 4096) to avoid
-        # exposing address space that isn't actually registered.
-        page_size = AddressManager.ALIGN_BYTES
-        initial_size = int(size * initial_ratio)
-        initial_size = (initial_size // page_size) * page_size
-        initial_size = max(page_size, min(initial_size, size))
-
-        self._registered_ranges: list[tuple[int, int]] = []
-        self._registered_size = 0
-        self._register_more_locked(0, initial_size)
-
+    def _on_init(self, initial_size: int) -> None:
         # Underlying allocator only sees the registered prefix.
         self._tensor_allocator = TensorMemoryAllocator(self._full_buffer[:initial_size])
-        self.buffer_allocator = BufferAllocator("cpu")
 
-        self._lock = threading.Lock()
-        self._expansion_triggered = False
-        self._stop = threading.Event()
-        self._expander: Optional[threading.Thread] = None
-
-    def _register_more_locked(self, start: int, size: int) -> None:
-        """Register a subrange [base+start, base+start+size). Caller holds lock."""
-        if size <= 0:
-            return
-        lmc_ops.cuda_host_register(self._base_ptr + start, size, 0)
-        self._registered_ranges.append((start, size))
-        self._registered_size = max(self._registered_size, start + size)
-
-    def _check_and_trigger_expansion(self) -> None:
-        if self._expansion_triggered:
-            return
-        # Avoid div by zero; also BINARY_BUFFER doesn't use this allocator.
-        if self._registered_size <= 0:
-            return
-        usage_ratio = (
-            self._tensor_allocator.total_allocated_size / self._registered_size
+    def _usage_ratio(self) -> float:
+        # BINARY_BUFFER doesn't use this allocator; callers gate on successful alloc.
+        return self._tensor_allocator.total_allocated_size / max(
+            1, self._registered_size
         )
-        if usage_ratio >= self.expand_trigger_ratio:
-            self._start_expander()
-            self._expansion_triggered = True
 
-    def _start_expander(self) -> None:
-        if self._expander and self._expander.is_alive():
-            return
-        self._stop.clear()
-        self._expander = threading.Thread(
-            target=self._expansion_worker, daemon=True, name="ProgressivePinExpander"
+    def _on_grow(self, old_size: int, new_size: int) -> None:
+        # Expand allocator's visible buffer and free list via AddressManager.sbrk().
+        self._tensor_allocator.buffer = (
+            self._full_buffer[:new_size].view(torch.uint8).flatten()
         )
-        self._expander.start()
-
-    def _expansion_worker(self) -> None:
-        # Must align with AddressManager.ALIGN_BYTES for correct sbrk() behavior.
-        page_size = AddressManager.ALIGN_BYTES
-        while not self._stop.is_set():
-            with self._lock:
-                curr = self._registered_size
-                if curr >= self.total_size:
-                    return
-
-                step = int(self.total_size * self.step_ratio)
-                step = max(page_size, (step // page_size) * page_size)
-                step = min(step, self.total_size - curr)
-
-                # Register next contiguous chunk.
-                self._register_more_locked(curr, step)
-
-                # Expand allocator's visible buffer and free list.
-                new_size = curr + step
-                self._tensor_allocator.buffer = (
-                    self._full_buffer[:new_size].view(torch.uint8).flatten()
-                )
-                # TensorMemoryAllocator now uses AddressManager internally.
-                self._tensor_allocator.address_manager.sbrk(step)
-
-            # Throttle to avoid monopolizing CPU if the target is large.
-            time.sleep(0.01)
+        self._tensor_allocator.address_manager.sbrk(new_size - old_size)
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -2181,22 +2274,11 @@ class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
         with self._lock:
             self._tensor_allocator.batched_free(memory_objs, update_stats=update_stats)
 
-    def close(self):
-        self._stop.set()
-        if self._expander and self._expander.is_alive():
-            self._expander.join(timeout=5.0)
-
-        # Unregister all registered ranges, then unmap the whole region.
-        # (We registered disjoint subranges; unregister them individually.)
-        for start, _sz in reversed(self._registered_ranges):
-            lmc_ops.cuda_host_unregister(self._base_ptr + start)
-        lmc_ops.munmap_host_ptr(self._base_ptr, self.total_size)
-
     def __str__(self):
         return "ProgressivePinnedMemoryAllocator"
 
 
-class ProgressivePinnedPagedMemoryAllocator(MemoryAllocatorInterface):
+class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
     """A paged allocator over a single contiguous host mapping with progressive pinning.
 
     This is the paged analogue of ProgressivePinnedMemoryAllocator:
@@ -2223,86 +2305,36 @@ class ProgressivePinnedPagedMemoryAllocator(MemoryAllocatorInterface):
         step_ratio: float = 0.1,
         numa_mapping: Optional[NUMAMapping] = None,
     ):
-        if size <= 0:
-            raise ValueError(f"size must be > 0, got {size}")
-        if not (0 < initial_ratio <= 1.0):
-            raise ValueError(f"initial_ratio must be in (0, 1], got {initial_ratio}")
-        if not (0 < expand_trigger_ratio <= 1.0):
-            raise ValueError(
-                f"expand_trigger_ratio must be in (0, 1], got {expand_trigger_ratio}"
-            )
-        if not (0 < step_ratio <= 1.0):
-            raise ValueError(f"step_ratio must be in (0, 1], got {step_ratio}")
-
-        self.total_size = size
         self.shapes = shapes
         self.dtypes = dtypes
         self.fmt = fmt
-        self.initial_ratio = initial_ratio
-        self.expand_trigger_ratio = expand_trigger_ratio
-        self.step_ratio = step_ratio
-        self.numa_mapping = numa_mapping
 
         # Fixed page size for the paged allocator (bytes).
         self.align_bytes = get_size_bytes(shapes, dtypes)
         if self.align_bytes <= 0:
             raise ValueError(f"Invalid page size (align_bytes={self.align_bytes})")
-        if self.total_size % self.align_bytes != 0:
+        if size % self.align_bytes != 0:
             raise ValueError(
-                f"total_size ({self.total_size}) must be a multiple of "
+                f"total_size ({size}) must be a multiple of "
                 f"page_size_bytes ({self.align_bytes}) for paged allocator."
             )
 
-        # Reserve a single contiguous mapping up-front (not pinned yet).
-        if self.numa_mapping:
-            if torch.cuda.is_available():
-                current_device_id = torch.cuda.current_device()
-            else:
-                current_device_id = 0
-            gpu_to_numa_mapping = self.numa_mapping.gpu_to_numa_mapping
-            assert current_device_id in gpu_to_numa_mapping, (
-                f"Current device {current_device_id} is not in the GPU NUMA mapping."
-            )
-            numa_id = gpu_to_numa_mapping[current_device_id]
-            self._base_ptr = lmc_ops.mmap_host_numa_ptr(size, numa_id)
-        else:
-            self._base_ptr = lmc_ops.mmap_host_ptr(size)
-
-        array_type = ctypes.c_uint8 * size
-        buf = array_type.from_address(self._base_ptr)
-        self._full_buffer = torch.frombuffer(buf, dtype=torch.uint8).view(torch.uint8)
-
-        # Register/pin only an initial prefix, aligned to whole pages.
-        initial_size = int(size * initial_ratio)
-        initial_size = (initial_size // self.align_bytes) * self.align_bytes
-        initial_size = max(self.align_bytes, min(initial_size, size))
-
-        self._registered_ranges: list[tuple[int, int]] = []
-        self._registered_size = 0
-
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._expander: Optional[threading.Thread] = None
-        self._expansion_triggered = False
-
-        self.buffer_allocator = BufferAllocator("cpu")
         self.free_blocks: deque[TensorMemoryObj] = deque()
 
         # Debug/stats (similar spirit to PagedTensorMemoryAllocator).
         self.num_active_allocations = 0
         self.total_allocated_size = 0
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-
-        with self._lock:
-            self._register_more_locked(0, initial_size)
-            self._append_pages_locked(old_size=0, new_size=initial_size)
-
-    def _register_more_locked(self, start: int, size: int) -> None:
-        if size <= 0:
-            return
-        lmc_ops.cuda_host_register(self._base_ptr + start, size, 0)
-        self._registered_ranges.append((start, size))
-        self._registered_size = max(self._registered_size, start + size)
+        super().__init__(
+            mapped_size=size,
+            managed_size=size,
+            align_unit=self.align_bytes,
+            initial_ratio=initial_ratio,
+            expand_trigger_ratio=expand_trigger_ratio,
+            step_ratio=step_ratio,
+            numa_mapping=numa_mapping,
+            thread_name="ProgressivePinnedPagedExpander",
+        )
 
     def _append_pages_locked(self, old_size: int, new_size: int) -> None:
         """Append pages corresponding to [old_size, new_size) into free_blocks."""
@@ -2326,45 +2358,14 @@ class ProgressivePinnedPagedMemoryAllocator(MemoryAllocatorInterface):
                 TensorMemoryObj(raw_data=page, metadata=metadata, parent_allocator=self)
             )
 
-    def _maybe_trigger_expansion(self) -> None:
-        if self._expansion_triggered:
-            return
-        if self._registered_size <= 0:
-            return
-        usage_ratio = self.total_allocated_size / self._registered_size
-        if usage_ratio >= self.expand_trigger_ratio:
-            self._start_expander()
-            self._expansion_triggered = True
+    def _on_init(self, initial_size: int) -> None:
+        self._append_pages_locked(old_size=0, new_size=initial_size)
 
-    def _start_expander(self) -> None:
-        if self._expander and self._expander.is_alive():
-            return
-        self._stop.clear()
-        self._expander = threading.Thread(
-            target=self._expansion_worker,
-            daemon=True,
-            name="ProgressivePinnedPagedExpander",
-        )
-        self._expander.start()
+    def _usage_ratio(self) -> float:
+        return self.total_allocated_size / max(1, self._registered_size)
 
-    def _expansion_worker(self) -> None:
-        while not self._stop.is_set():
-            with self._lock:
-                curr = self._registered_size
-                if curr >= self.total_size:
-                    return
-
-                step = int(self.total_size * self.step_ratio)
-                step = (step // self.align_bytes) * self.align_bytes
-                step = max(self.align_bytes, step)
-                step = min(step, self.total_size - curr)
-
-                old = curr
-                self._register_more_locked(curr, step)
-                new = old + step
-                self._append_pages_locked(old_size=old, new_size=new)
-
-            time.sleep(0.01)
+    def _on_grow(self, old_size: int, new_size: int) -> None:
+        self._append_pages_locked(old_size=old_size, new_size=new_size)
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -2404,7 +2405,7 @@ class ProgressivePinnedPagedMemoryAllocator(MemoryAllocatorInterface):
                 self.num_active_allocations
             )
 
-        self._maybe_trigger_expansion()
+        self._check_and_trigger_expansion()
         return free_block
 
     @_lmcache_nvtx_annotate
@@ -2453,7 +2454,7 @@ class ProgressivePinnedPagedMemoryAllocator(MemoryAllocatorInterface):
                 self.num_active_allocations
             )
 
-        self._maybe_trigger_expansion()
+        self._check_and_trigger_expansion()
         return allocated
 
     @_lmcache_nvtx_annotate
@@ -2514,15 +2515,6 @@ class ProgressivePinnedPagedMemoryAllocator(MemoryAllocatorInterface):
                 self.stats_monitor.update_active_memory_objs_count(
                     self.num_active_allocations
                 )
-
-    def close(self):
-        self._stop.set()
-        if self._expander and self._expander.is_alive():
-            self._expander.join(timeout=5.0)
-
-        for start, _sz in reversed(self._registered_ranges):
-            lmc_ops.cuda_host_unregister(self._base_ptr + start)
-        lmc_ops.munmap_host_ptr(self._base_ptr, self.total_size)
 
     def __str__(self):
         return "ProgressivePinnedPagedMemoryAllocator"
