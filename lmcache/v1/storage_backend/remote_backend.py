@@ -298,7 +298,7 @@ class RemoteBackend(StorageBackendInterface):
             if isinstance(e, TimeoutError):
                 logger.warning("get blocking timeout, trigger cancel the future task")
                 future.cancel()
-            logger.warning("Error occurred in get_blocking, return None", e)
+            logger.warning("Error occurred in get_blocking: %s, return None", e)
             memory_obj = None
 
         t2 = time.perf_counter()
@@ -309,8 +309,9 @@ class RemoteBackend(StorageBackendInterface):
         decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
         t3 = time.perf_counter()
         logger.debug(
-            f"Get takes {(t2 - t1) * 1000:.6f} msec, "
-            f"deserialization takes {(t3 - t2) * 1000:.6f} msec"
+            "Get takes %.6f msec, deserialization takes %.6f msec",
+            (t2 - t1) * 1000,
+            (t3 - t2) * 1000,
         )
         return decompressed_memory_obj
 
