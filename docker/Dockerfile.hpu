@@ -1,8 +1,6 @@
 # Prepare habana docker
-FROM vault.habana.ai/gaudi-docker/1.22.2/ubuntu22.04/habanalabs/pytorch-installer-2.7.1:latest AS base
+FROM docker pull vault.habana.ai/gaudi-docker/1.23.0/ubuntu24.04/habanalabs/pytorch-installer-2.9.0:latest AS base
 
-ARG PYTHON_VERSION=3.12
-ENV DEBIAN_FRONTEND=noninteractive
 ENV NO_CUDA_EXT=1
 ENV BUILD_WITH_HPU=1
 
