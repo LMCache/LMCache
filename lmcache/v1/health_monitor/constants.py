@@ -22,8 +22,8 @@ PING_GENERIC_ERROR_CODE = -2
 PING_TIMEOUT_CONFIG_KEY = "ping_timeout"
 PING_INTERVAL_CONFIG_KEY = "ping_interval"
 FALLBACK_POLICY_CONFIG_KEY = "fallback_policy"
-GET_BLOCKING_FAILED_THRESHOLD = "get_blocking_failed_threshold"
-WAITING_TIME_FOR_RECOVERY = "waiting_time_for_recovery"
+GET_BLOCKING_FAILED_THRESHOLD_CONFIG_KEY = "get_blocking_failed_threshold"
+WAITING_TIME_FOR_RECOVERY_CONFIG_KEY = "waiting_time_for_recovery"
 
 # Default values
 DEFAULT_PING_TIMEOUT = 5.0

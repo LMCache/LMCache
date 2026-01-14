@@ -22,12 +22,12 @@ from lmcache.v1.health_monitor.constants import (
     DEFAULT_PING_TIMEOUT,
     DEFAULT_WAITING_TIME_FOR_RECOVERY,
     FALLBACK_POLICY_CONFIG_KEY,
-    GET_BLOCKING_FAILED_THRESHOLD,
+    GET_BLOCKING_FAILED_THRESHOLD_CONFIG_KEY,
     PING_GENERIC_ERROR_CODE,
     PING_TIMEOUT_CONFIG_KEY,
     PING_TIMEOUT_ERROR_CODE,
     FallbackPolicy,
-    WAITING_TIME_FOR_RECOVERY,
+    WAITING_TIME_FOR_RECOVERY_CONFIG_KEY,
 )
 
 if TYPE_CHECKING:
@@ -79,12 +79,12 @@ class RemoteBackendHealthCheck(HealthCheck):
             self._fallback_policy = fallback_policy_str
         # Get get_blocking failed threshold from backend config
         self.get_blocking_failed_threshold = backend.config.get_extra_config_value(
-            GET_BLOCKING_FAILED_THRESHOLD,
+            GET_BLOCKING_FAILED_THRESHOLD_CONFIG_KEY,
             DEFAULT_GET_BLOCKING_FAILED_THRESHOLD,
         )
         # Get waiting time for recovery from backend config
         self.waiting_time_for_recovery = backend.config.get_extra_config_value(
-            WAITING_TIME_FOR_RECOVERY, DEFAULT_WAITING_TIME_FOR_RECOVERY
+            WAITING_TIME_FOR_RECOVERY_CONFIG_KEY, DEFAULT_WAITING_TIME_FOR_RECOVERY
         )
         self.failure_time: Optional[float] = None
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
