@@ -292,17 +292,16 @@ class RemoteBackend(StorageBackendInterface):
         try:
             memory_obj = future.result(self.blocking_timeout_secs)
         except Exception as e:
-            self._interval_get_blocking_failed_count += 1
             if isinstance(e, TimeoutError):
                 logger.warning("get blocking timeout, trigger cancel the future task")
                 future.cancel()
-            logger.warning(f"Error occurred in get_blocking: {e}")
-            logger.warning("Returning None")
-            return None
+            logger.warning("Error occurred in get_blocking, return None", e)
+            memory_obj = None
 
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
         if memory_obj is None:
+            self._interval_get_blocking_failed_count += 1
             return None
         decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
         t3 = time.perf_counter()
@@ -346,7 +345,6 @@ class RemoteBackend(StorageBackendInterface):
             try:
                 memory_objs = future.result(self.blocking_timeout_secs)
             except Exception as e:
-                self._interval_get_blocking_failed_count += 1
                 if isinstance(e, TimeoutError):
                     logger.warning(
                         "batched get blocking timeout, trigger cancel the future task"
@@ -357,7 +355,7 @@ class RemoteBackend(StorageBackendInterface):
                         f"Error occurred in batched_get_blocking: {e}, "
                         f"returning None list"
                     )
-                return [None] * len(keys)
+                memory_objs = [None] * len(keys)
         else:
             futures = [
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
@@ -371,7 +369,6 @@ class RemoteBackend(StorageBackendInterface):
                         memory_obj = fut.result(self.blocking_timeout_secs)
                     except Exception as e:
                         failed = True
-                        self._interval_get_blocking_failed_count += 1
                         if isinstance(e, TimeoutError):
                             logger.warning(
                                 "get blocking timeout, trigger cancel the future task"
@@ -389,14 +386,19 @@ class RemoteBackend(StorageBackendInterface):
 
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
+
         decompressed_memory_objs: list[Optional[MemoryObj]] = []
+        error_happens = False
         for memory_obj in memory_objs:
             if memory_obj is None:
+                error_happens = True
                 decompressed_memory_objs.append(None)
             else:
                 decompressed_memory_objs.append(
                     self.deserializer.deserialize(memory_obj)
                 )
+        if error_happens:
+            self._interval_get_blocking_failed_count += 1
 
         assert len(decompressed_memory_objs) == len(keys), (
             f"keys length: {len(keys)}, "
