@@ -195,9 +195,14 @@ class HealthMonitor:
         self._ping_interval = ping_interval
 
         # Track which backends are currently bypassed due to health check failures
-        # Key: backend_name, Value: (original_hot_cache_setting, check_name)
-        self._bypassed_backends: Dict[str, tuple] = {}
+        # Key: backend_name, Value: check_name that caused the bypass
+        self._bypassed_backends: Dict[str, str] = {}
         self._bypass_lock = threading.RLock()
+
+        # Track original hot_cache setting before any LOCAL_CPU fallback
+        # This is a global setting, not per-backend
+        # None means no fallback is active, otherwise stores the original use_hot value
+        self._original_hot_cache: Optional[bool] = None
 
         # Track previous health status per check for detecting recovery
         self._previous_check_status: Dict[str, bool] = {}
@@ -317,7 +322,7 @@ class HealthMonitor:
 
         This will:
         1. Enable bypass for the specified backend in StorageManager
-        2. Enable hot_cache for LocalCPUBackend
+        2. Enable hot_cache for LocalCPUBackend (only on first fallback)
 
         Args:
             check: The health check that failed
@@ -340,11 +345,15 @@ class HealthMonitor:
                 # Already bypassed
                 return
 
-            # Get original hot_cache setting
-            original_hot_cache = None
             local_cpu = self._get_local_cpu_backend(storage_manager)
-            if local_cpu is not None:
-                original_hot_cache = local_cpu.use_hot
+
+            # Save original hot_cache setting only on the first fallback
+            # (when no backends are bypassed yet)
+            if len(self._bypassed_backends) == 0:
+                if local_cpu is not None:
+                    self._original_hot_cache = local_cpu.use_hot
+                else:
+                    self._original_hot_cache = None
 
             # Enable bypass for the backend
             storage_manager.set_backend_bypass(backend_name, True)
@@ -357,11 +366,8 @@ class HealthMonitor:
                     f"{check.name()} failure"
                 )
 
-            # Store the original setting for recovery
-            self._bypassed_backends[backend_name] = (
-                original_hot_cache,
-                check.name(),
-            )
+            # Record this backend as bypassed
+            self._bypassed_backends[backend_name] = check.name()
 
             logger.info(
                 f"Applied LOCAL_CPU fallback for {check.name()}: "
@@ -374,8 +380,9 @@ class HealthMonitor:
 
         This will:
         1. Disable bypass for the specified backend in StorageManager
-        2. Restore original hot_cache setting for LocalCPUBackend
-        3. Clear hot_cache if it was originally disabled
+        2. Only when ALL backends have recovered:
+           - Restore original hot_cache setting for LocalCPUBackend
+           - Clear hot_cache if it was originally disabled
 
         Args:
             check: The health check that recovered
@@ -393,7 +400,7 @@ class HealthMonitor:
                 # Not in bypassed state
                 return
 
-            original_hot_cache, check_name = self._bypassed_backends[backend_name]
+            check_name = self._bypassed_backends[backend_name]
 
             # Verify this is the same check that caused the bypass
             if check_name != check.name():
@@ -402,23 +409,6 @@ class HealthMonitor:
             # Disable bypass for the backend
             storage_manager.set_backend_bypass(backend_name, False)
 
-            # Restore original hot_cache setting
-            local_cpu = self._get_local_cpu_backend(storage_manager)
-            if local_cpu is not None:
-                if original_hot_cache is not None:
-                    if not original_hot_cache:
-                        # Original was disabled, clear hot_cache and disable it
-                        local_cpu.clear()
-                        logger.info(
-                            f"Cleared hot_cache for LocalCPUBackend during recovery "
-                            f"from {check.name()}"
-                        )
-                    local_cpu.use_hot = original_hot_cache
-                    logger.info(
-                        f"Restored hot_cache setting to {original_hot_cache} "
-                        f"for LocalCPUBackend"
-                    )
-
             # Remove from bypassed backends
             del self._bypassed_backends[backend_name]
 
@@ -426,6 +416,30 @@ class HealthMonitor:
                 f"Recovered from LOCAL_CPU fallback for {check.name()}: "
                 f"restored {backend_name}"
             )
+
+            # Only restore hot_cache when ALL backends have recovered
+            if len(self._bypassed_backends) == 0:
+                local_cpu = self._get_local_cpu_backend(storage_manager)
+                if local_cpu is not None and self._original_hot_cache is not None:
+                    # First, restore the original hot_cache setting
+                    # This prevents new data from being written during clear()
+                    local_cpu.use_hot = self._original_hot_cache
+                    logger.info(
+                        f"Restored hot_cache setting to {self._original_hot_cache} "
+                        f"for LocalCPUBackend (all backends restored)"
+                    )
+
+                    # Then, clear hot_cache if it was originally disabled
+                    # At this point, use_hot is already False, so no new data
+                    # will be written during the potentially long clear() operation
+                    if not self._original_hot_cache:
+                        local_cpu.clear()
+                        logger.info(
+                            "Cleared hot_cache for LocalCPUBackend during recovery "
+                            "(all backends restored)"
+                        )
+                # Reset original_hot_cache tracker
+                self._original_hot_cache = None
 
     def _run_all_checks(self) -> bool:
         """

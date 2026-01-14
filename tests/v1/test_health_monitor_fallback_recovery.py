@@ -310,6 +310,124 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         monitor._run_all_checks()
         assert mock_storage_manager.set_backend_bypass.call_count == first_call_count
 
+    def test_multiple_backends_fallback_and_partial_recovery(
+        self,
+        mock_local_cpu_backend,
+        mock_storage_manager,
+        event_loop_thread,
+        test_config,
+    ):
+        """
+        Test that original_hot_cache is preserved correctly when multiple backends
+        fail and only some recover.
+
+        Scenario:
+        1. Initial state: use_hot = False
+        2. Backend A fails -> use_hot = True, original saved as False
+        3. Backend B fails -> use_hot = True, original should still be False
+        4. Backend A recovers -> use_hot should STAY True (B still down)
+        5. Backend B recovers -> use_hot should be restored to False
+        """
+        # Create two controllable connectors for two backends
+        connector_a = ControllablePingConnector()
+        connector_b = ControllablePingConnector()
+
+        # Create two mock remote backends
+        backend_a = MagicMock(spec=RemoteBackend)
+        backend_a.remote_url = "controllable://test_a:1234"
+        backend_a.loop = event_loop_thread.loop
+        backend_a.connection = connector_a
+        backend_a.config = test_config
+        backend_a.init_connection = MagicMock()
+
+        backend_b = MagicMock(spec=RemoteBackend)
+        backend_b.remote_url = "controllable://test_b:1234"
+        backend_b.loop = event_loop_thread.loop
+        backend_b.connection = connector_b
+        backend_b.config = test_config
+        backend_b.init_connection = MagicMock()
+
+        # Update storage manager to have two remote backends
+        mock_storage_manager.storage_backends = {
+            "RemoteBackend_A": backend_a,
+            "RemoteBackend_B": backend_b,
+            "LocalCPUBackend": mock_local_cpu_backend,
+        }
+
+        # Create mock manager
+        engine = MagicMock()
+        engine.storage_manager = mock_storage_manager
+        manager = MagicMock()
+        manager.lmcache_engine = engine
+        manager._config = test_config
+
+        # Create two health checks manually
+        check_a = RemoteBackendHealthCheck(backend=backend_a)
+        check_a._backend_name = "RemoteBackend_A"
+
+        check_b = RemoteBackendHealthCheck(backend=backend_b)
+        check_b._backend_name = "RemoteBackend_B"
+
+        # Create monitor and manually set health checks
+        monitor = HealthMonitor(manager=manager, ping_interval=0.1)
+        monitor._health_checks = [check_a, check_b]
+        monitor._previous_check_status = {
+            check_a.name(): True,
+            check_b.name(): True,
+        }
+
+        # Initial state: use_hot = False
+        mock_local_cpu_backend.use_hot = False
+
+        # Step 1: Both backends healthy
+        connector_a.set_ping_error_code(0)
+        connector_b.set_ping_error_code(0)
+        monitor._run_all_checks()
+        assert mock_local_cpu_backend.use_hot is False
+        assert len(monitor._bypassed_backends) == 0
+        assert monitor._original_hot_cache is None
+
+        # Step 2: Backend A fails
+        connector_a.set_ping_error_code(1)
+        monitor._run_all_checks()
+        assert mock_local_cpu_backend.use_hot is True
+        assert "RemoteBackend_A" in monitor._bypassed_backends
+        assert monitor._original_hot_cache is False  # Saved original value
+
+        # Step 3: Backend B also fails
+        connector_b.set_ping_error_code(1)
+        monitor._run_all_checks()
+        assert mock_local_cpu_backend.use_hot is True
+        assert "RemoteBackend_A" in monitor._bypassed_backends
+        assert "RemoteBackend_B" in monitor._bypassed_backends
+        # CRITICAL: original_hot_cache should STILL be False, not True
+        assert monitor._original_hot_cache is False
+
+        mock_local_cpu_backend.clear.reset_mock()
+
+        # Step 4: Backend A recovers
+        connector_a.set_ping_error_code(0)
+        monitor._run_all_checks()
+        assert "RemoteBackend_A" not in monitor._bypassed_backends
+        assert "RemoteBackend_B" in monitor._bypassed_backends
+        # CRITICAL: use_hot should STAY True because B is still down
+        assert mock_local_cpu_backend.use_hot is True
+        # clear() should NOT have been called yet
+        mock_local_cpu_backend.clear.assert_not_called()
+        # original_hot_cache should still be preserved
+        assert monitor._original_hot_cache is False
+
+        # Step 5: Backend B recovers
+        connector_b.set_ping_error_code(0)
+        monitor._run_all_checks()
+        assert len(monitor._bypassed_backends) == 0
+        # CRITICAL: Now use_hot should be restored to False
+        assert mock_local_cpu_backend.use_hot is False
+        # clear() should have been called now
+        mock_local_cpu_backend.clear.assert_called_once()
+        # original_hot_cache should be reset
+        assert monitor._original_hot_cache is None
+
 
 class TestRemoteBackendHealthCheckEdgeCases:
     """Test edge cases for RemoteBackendHealthCheck."""
