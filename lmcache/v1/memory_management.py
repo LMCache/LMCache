@@ -1059,6 +1059,15 @@ class AddressManager:
 
         self._size += size
 
+    def get_heap_size(self) -> int:
+        """
+        Get the total size of the address space.
+
+        Returns:
+            The total size in bytes.
+        """
+        return self._size
+
     def get_free_size(self) -> int:
         """
         Get the total free size in the address space.
@@ -1341,7 +1350,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Check if the numbers are consistent
         if (
             total_free_size + self.address_manager.total_allocated_size
-            != self.buffer.numel()
+            != self.address_manager.get_heap_size()
         ):
             logger.error("Memory allocator size is inconsistent")
             logger.error("This implies a bug in the memory allocator")
