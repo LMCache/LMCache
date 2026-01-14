@@ -34,7 +34,7 @@ def get_numa_id(numa_mapping: NUMAMapping) -> int:
         int: The NUMA ID for the current GPU.
 
     Raises:
-        ValueError: If GPU id is not detected in the numa mapping.
+        KeyError: If GPU id is not detected in the numa mapping.
     """
     gpu_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
     return numa_mapping.gpu_to_numa_mapping[gpu_id]
