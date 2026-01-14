@@ -7,7 +7,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
     GPUMemoryAllocator,
@@ -582,9 +581,19 @@ class TestLazyMemoryAllocator:
     INIT_SIZE = 1 << 25  # 32 MB
     FINAL_SIZE = 1 << 27  # 128 MB
 
-    def test_allocate_basic(self):
+    @pytest.fixture
+    def lazy_allocator_cls(self):
+        """Lazily import LazyMemoryAllocator to avoid import errors
+        on CPU-only builds.
+        """
+        # First Party
+        from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+
+        return LazyMemoryAllocator
+
+    def test_allocate_basic(self, lazy_allocator_cls):
         """Test basic allocation returns a valid MemoryObj."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -601,9 +610,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_allocate_with_format(self):
+    def test_allocate_with_format(self, lazy_allocator_cls):
         """Test allocation with explicit memory format."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -620,9 +629,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_allocate_multiple_shapes_and_dtypes(self):
+    def test_allocate_multiple_shapes_and_dtypes(self, lazy_allocator_cls):
         """Test allocation with multiple shapes and dtypes."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -637,9 +646,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_allocate_returns_none_when_out_of_memory(self):
+    def test_allocate_returns_none_when_out_of_memory(self, lazy_allocator_cls):
         """Test that allocation returns None when memory is exhausted."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.INIT_SIZE,  # Same as init to prevent expansion
         )
@@ -652,9 +661,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_free_basic(self):
+    def test_free_basic(self, lazy_allocator_cls):
         """Test that free invalidates the MemoryObj."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -670,9 +679,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_free_idempotent(self):
+    def test_free_idempotent(self, lazy_allocator_cls):
         """Test that freeing an already freed object does not crash."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -688,9 +697,9 @@ class TestLazyMemoryAllocator:
         assert allocator.memcheck()
         allocator.close()
 
-    def test_batched_allocate_basic(self):
+    def test_batched_allocate_basic(self, lazy_allocator_cls):
         """Test batched allocation returns correct number of MemoryObjs."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -712,9 +721,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_batched_allocate_with_format(self):
+    def test_batched_allocate_with_format(self, lazy_allocator_cls):
         """Test batched allocation with explicit memory format."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -732,9 +741,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_batched_allocate_returns_none_when_out_of_memory(self):
+    def test_batched_allocate_returns_none_when_out_of_memory(self, lazy_allocator_cls):
         """Test that batched allocation returns None when memory is exhausted."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.INIT_SIZE,
         )
@@ -749,9 +758,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_batched_free_basic(self):
+    def test_batched_free_basic(self, lazy_allocator_cls):
         """Test batched free invalidates all MemoryObjs."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -771,9 +780,9 @@ class TestLazyMemoryAllocator:
         assert allocator.memcheck()
         allocator.close()
 
-    def test_memcheck_returns_true_after_operations(self):
+    def test_memcheck_returns_true_after_operations(self, lazy_allocator_cls):
         """Test that memcheck returns True after valid operations."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -799,9 +808,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_inplace_tensor_modification(self):
+    def test_inplace_tensor_modification(self, lazy_allocator_cls):
         """Test that allocated tensor data can be modified in place."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -819,7 +828,7 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_lazy_expansion_allows_larger_allocations(self):
+    def test_lazy_expansion_allows_larger_allocations(self, lazy_allocator_cls):
         """
         Test that lazy expansion allows allocations beyond init_size.
 
@@ -830,7 +839,7 @@ class TestLazyMemoryAllocator:
         init_size = 1 << 25  # 32 MB
         final_size = 1 << 27  # 128 MB
 
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=init_size,
             final_size=final_size,
         )
@@ -849,9 +858,9 @@ class TestLazyMemoryAllocator:
 
         allocator.close()
 
-    def test_allocate_various_dtypes(self):
+    def test_allocate_various_dtypes(self, lazy_allocator_cls):
         """Test allocation with various data types."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
@@ -878,9 +887,9 @@ class TestLazyMemoryAllocator:
         assert allocator.memcheck()
         allocator.close()
 
-    def test_allocation_and_free_interleaved(self):
+    def test_allocation_and_free_interleaved(self, lazy_allocator_cls):
         """Test interleaved allocation and free operations."""
-        allocator = LazyMemoryAllocator(
+        allocator = lazy_allocator_cls(
             init_size=self.INIT_SIZE,
             final_size=self.FINAL_SIZE,
         )
