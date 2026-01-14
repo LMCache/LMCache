@@ -2044,7 +2044,9 @@ class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
         self._full_buffer = torch.frombuffer(buf, dtype=torch.uint8)
 
         # Register/pin only an initial prefix.
-        page_size = os.sysconf("SC_PAGESIZE")
+        # Keep aligned with AddressManager.ALIGN_BYTES (currently 4096) to avoid
+        # exposing address space that isn't actually registered.
+        page_size = AddressManager.ALIGN_BYTES
         initial_size = int(size * initial_ratio)
         initial_size = (initial_size // page_size) * page_size
         initial_size = max(page_size, min(initial_size, size))
@@ -2093,7 +2095,8 @@ class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
         self._expander.start()
 
     def _expansion_worker(self) -> None:
-        page_size = os.sysconf("SC_PAGESIZE")
+        # Must align with AddressManager.ALIGN_BYTES for correct sbrk() behavior.
+        page_size = AddressManager.ALIGN_BYTES
         while not self._stop.is_set():
             with self._lock:
                 curr = self._registered_size
@@ -2112,9 +2115,8 @@ class ProgressivePinnedMemoryAllocator(MemoryAllocatorInterface):
                 self._tensor_allocator.buffer = (
                     self._full_buffer[:new_size].view(torch.uint8).flatten()
                 )
-                self._tensor_allocator.explicit_list.add(
-                    FreeBlock(start=curr, size=step)
-                )
+                # TensorMemoryAllocator now uses AddressManager internally.
+                self._tensor_allocator.address_manager.sbrk(step)
 
             # Throttle to avoid monopolizing CPU if the target is large.
             time.sleep(0.01)
