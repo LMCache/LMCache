@@ -141,21 +141,6 @@ class RemoteBackendHealthCheck(HealthCheck):
         """
         return self._backend_name
 
-    def should_skip(self) -> bool:
-        """Check if we should skip ping for this connector"""
-        connector = self.backend.connection
-        if connector is None:
-            logger.warning("Connector is None, should retry.")
-            return False
-
-        if not connector.support_ping():
-            logger.info(
-                f"Connector {connector} does not support ping, skipping ping loop"
-            )
-            return True
-
-        return False
-
     def _try_reinitialize_connection(self) -> bool:
         """
         Try to reinitialize the connection if connector is None.
