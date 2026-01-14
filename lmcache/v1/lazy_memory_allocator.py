@@ -17,7 +17,13 @@ from lmcache.v1.memory_management import (
     TensorMemoryAllocator,
 )
 from lmcache.v1.system_detection import NUMAMapping
-import lmcache.c_ops as lmc_ops
+
+if torch.cuda.is_available():
+    # First Party
+    import lmcache.c_ops as lmc_ops
+else:
+    # First Party
+    import lmcache.non_cuda_equivalents as lmc_ops
 
 logger = init_logger(__name__)
 
