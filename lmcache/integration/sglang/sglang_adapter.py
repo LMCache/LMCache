@@ -323,7 +323,7 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         num_new_tokens = retrieve_token_num - offset
         logger.info(
             f"LMCache retrieve started: lookup={retrieve_token_num}, "
-            f"offset={offset}, new_tokens={num_new_tokens}"
+            f"offset={offset}, retrieve {num_new_tokens} new tokens"
         )
 
         return num_new_tokens
