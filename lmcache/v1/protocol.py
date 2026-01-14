@@ -104,7 +104,21 @@ class RemoteMetadata:
     fmt: MemoryFormat
 
     def _prepare_params(self):
+        # vLLM might return fewer dtypes than shapes (or empty dtypes).
+        # We auto-fill the missing dtypes with the first available one or a default.
+        if len(self.dtypes) < len(self.shapes):
+            missing_count = len(self.shapes) - len(self.dtypes)
+
+            # Use the first dtype if available, otherwise default to bfloat16 (common in vLLM)
+            if self.dtypes:
+                fill_dtype = self.dtypes[0]
+            else:
+                fill_dtype = torch.bfloat16
+
+            self.dtypes.extend([fill_dtype] * missing_count)
+
         params = [self.length, int(self.fmt.value)]
+
         for shape, dtype in zip(self.shapes, self.dtypes, strict=True):
             assert len(shape) == 4, "Shape dimension should be 4"
             params.append(DTYPE_TO_INT[dtype])
