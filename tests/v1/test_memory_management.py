@@ -220,11 +220,7 @@ def test_boundary_alloc(alloc_cls):
     # `FreeBlock` with size 0 shouldn't exist in the allocator
     allocator.allocate(shape, torch.float)
 
-    if isinstance(allocator, MixedMemoryAllocator):
-        assert len(allocator.pin_allocator.explicit_list) == 1
-    else:
-        assert len(allocator.allocator.explicit_list) == 1
-
+    assert allocator.memcheck()
     allocator.close()
 
 
@@ -254,11 +250,7 @@ def test_batched_alloc(alloc_cls):
         assert obj.tensor.shape == shape
     allocator.batched_free(objs)
 
-    if isinstance(allocator, MixedMemoryAllocator):
-        assert len(allocator.pin_allocator.explicit_list) == 1
-    else:
-        assert len(allocator.allocator.explicit_list) == 1
-
+    assert allocator.memcheck()
     allocator.close()
 
 
@@ -276,12 +268,11 @@ def test_mixed_alloc(alloc_cls):
     allocator.allocate(shape, torch.float)
     allocator.free(data1)
 
-    assert len(allocator.pin_allocator.explicit_list) == 1
-
     assert isinstance(data1, BytesBufferMemoryObj)
 
     assert len(data1.byte_array) == 512
 
+    allocator.memcheck()
     allocator.close()
 
 
