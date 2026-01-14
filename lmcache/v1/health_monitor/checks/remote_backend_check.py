@@ -4,6 +4,7 @@ Health check for RemoteBackend.
 """
 
 # Standard
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Optional
 import asyncio
 import time
@@ -252,6 +253,16 @@ class RemoteBackendHealthCheck(HealthCheck):
         if self.backend.local_cpu_backend is None or self.backend.connection is None:
             return False
 
+        with self._resource_manager() as (put_obj, get_obj):
+            if put_obj is None:
+                return False
+            if get_obj is None:
+                logger.warning("Get failed, the return value is None, check failed.")
+                return False
+            return torch.equal(put_obj.raw_tensor, get_obj.raw_tensor)
+
+    @contextmanager
+    def _resource_manager(self):
         key = CacheEngineKey(
             fmt="vllm",
             model_name="test",
@@ -260,7 +271,6 @@ class RemoteBackendHealthCheck(HealthCheck):
             chunk_hash=0,
             dtype=torch.bfloat16,
         )
-        # put
         connector = self.backend.connection
         if isinstance(connector, InstrumentedRemoteConnector):
             connector = connector.getWrappedConnector()
@@ -269,29 +279,23 @@ class RemoteBackendHealthCheck(HealthCheck):
         shapes = connector.meta_shapes
         dtypes = connector.meta_dtypes
         fmt = connector.meta_fmt
-        put_obj = self.backend.local_cpu_backend.allocate(shapes, dtypes, fmt)
-        future = self.backend.submit_put_task(key, put_obj)
+        put_obj, get_obj = None, None
         try:
+            # put
+            put_obj = self.backend.local_cpu_backend.allocate(shapes, dtypes, fmt)
+            future = self.backend.submit_put_task(key, put_obj)
             future.result(timeout=self.ping_timeout)
+            # get
+            get_obj = self.backend.get_blocking(key)
+            yield put_obj, get_obj
         except asyncio.TimeoutError:
-            put_obj.ref_count_down()
             logger.warning("Put timeout, check failed.")
-            return False
+            yield None, None
         except Exception as e:
-            put_obj.ref_count_down()
-            logger.error("Put error, check failed.", e)
-            return False
-
-        # get
-        get_obj = self.backend.get_blocking(key)
-
-        # check the tensor of get_obj and put_obj is equal
-        if get_obj is None:
-            put_obj.ref_count_down()
-            logger.warning("Get failed, the return value is None, check failed.")
-            return False
-        else:
-            check_result = torch.equal(get_obj.raw_tensor, put_obj.raw_tensor)
-            put_obj.ref_count_down()
-            get_obj.ref_count_down()
-            return check_result
+            logger.error(f"Put error, check failed: {e}")
+            yield None, None
+        finally:
+            if put_obj is not None:
+                put_obj.ref_count_down()
+            if get_obj is not None:
+                get_obj.ref_count_down()

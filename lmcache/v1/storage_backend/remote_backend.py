@@ -94,6 +94,9 @@ class RemoteBackend(StorageBackendInterface):
             prometheus_logger.remote_put_task_num.set_function(
                 lambda: len(self.put_tasks)
             )
+            prometheus_logger.interval_get_blocking_failed_count.set_function(
+                lambda: self._interval_get_blocking_failed_count
+            )
 
     def __str__(self):
         return self.__class__.__name__
