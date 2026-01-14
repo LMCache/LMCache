@@ -29,6 +29,8 @@ from lmcache.v1.health_monitor.constants import (
     FallbackPolicy,
     WAITING_TIME_FOR_RECOVERY_CONFIG_KEY,
 )
+from lmcache.v1.storage_backend.connector import InstrumentedRemoteConnector
+from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
 
 if TYPE_CHECKING:
     # First Party
@@ -259,11 +261,15 @@ class RemoteBackendHealthCheck(HealthCheck):
             dtype=torch.bfloat16,
         )
         # put
-        put_obj = self.backend.local_cpu_backend.allocate(
-            self.backend.connection.meta_shapes,
-            self.backend.connection.meta_dtypes,
-            self.backend.connection.meta_fmt,
-        )
+        connector = self.backend.connection
+        if isinstance(connector, InstrumentedRemoteConnector):
+            connector = connector.getWrappedConnector()
+            if isinstance(connector, AuditConnector):
+                connector = connector.real_connector
+        shapes = connector.meta_shapes
+        dtypes = connector.meta_dtypes
+        fmt = connector.meta_fmt
+        put_obj = self.backend.local_cpu_backend.allocate(shapes, dtypes, fmt)
         future = self.backend.submit_put_task(key, put_obj)
         try:
             future.result(timeout=self.ping_timeout)
