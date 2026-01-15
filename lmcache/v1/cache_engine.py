@@ -3,6 +3,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -12,6 +13,12 @@ from typing import (
     Tuple,
     Union,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.health_monitor.base import HealthMonitor
+
+# Standard
 import asyncio
 import gc
 import multiprocessing
@@ -216,6 +223,35 @@ class LMCacheEngine:
         if not config.py_enable_gc:
             gc.disable()
 
+        # Health monitor reference (injected by LMCacheManager)
+        self._health_monitor: Optional["HealthMonitor"] = None
+
+    def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
+        """
+        Set the health monitor reference.
+
+        This is called by LMCacheManager after creating the HealthMonitor
+        to inject the reference into the engine.
+
+        Args:
+            health_monitor: The HealthMonitor instance from LMCacheManager
+        """
+        self._health_monitor = health_monitor
+
+    def is_healthy(self) -> bool:
+        """
+        Check if the LMCache system is healthy.
+
+        This method delegates to the HealthMonitor if one is set.
+        If no health monitor is set, it returns True (assume healthy).
+
+        Returns:
+            bool: True if healthy, False otherwise
+        """
+        if self._health_monitor is not None:
+            return self._health_monitor.is_healthy()
+        return True
+
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
             logger.info("Post initializing LMCacheEngine")
@@ -301,6 +337,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping store operation")
+            return
+
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store operation"
         )
@@ -485,6 +526,11 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping store_layer operation")
+            return
+
         assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
@@ -649,6 +695,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping retrieve operation")
+            return torch.zeros(len(tokens), dtype=torch.bool)
+
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve operation"
         )
@@ -739,17 +790,18 @@ class LMCacheEngine:
         # Skip chunk 1, retrieve chunk 2, overwrite [256..287] (32-token overlap)
         # need_to_load: 512 - 288 = 224 tokens
         # retrieved: 256 tokens
-        logger.info(
-            "Retrieved %d out of %d required tokens (from %d total tokens)."
-            " size: %.4f gb,"
-            " cost %.4f ms, throughput: %.4f GB/s;",
-            retrieved_tokens,
-            num_required_tokens,
-            len(tokens),
-            tot_kv_size / 1024**3,
-            onload_time * 1000,
-            tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
-        )
+        if not self._is_passive():
+            logger.info(
+                "Retrieved %d out of %d required tokens (from %d total tokens)."
+                " size: %.4f gb,"
+                " cost %.4f ms, throughput: %.4f GB/s;",
+                retrieved_tokens,
+                num_required_tokens,
+                len(tokens),
+                tot_kv_size / 1024**3,
+                onload_time * 1000,
+                tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
+            )
         return ret_mask
 
     @_lmcache_nvtx_annotate
@@ -782,6 +834,12 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping retrieve_layer operation")
+            yield torch.zeros(len(tokens), dtype=torch.bool)
+            return
+
         assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
@@ -885,11 +943,12 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.info(
-            f"Retrieved {retrieved_tokens} "
-            f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
-        )
+        if not self._is_passive():
+            logger.info(
+                f"Retrieved {retrieved_tokens} "
+                f"out of {num_required_tokens} "
+                f"out of total {len(tokens)} tokens"
+            )
 
         yield ret_mask
 
@@ -929,6 +988,11 @@ class LMCacheEngine:
 
         :return: An int indicating how many prefix tokens exist inside LMCache.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping lookup operation")
+            return 0
+
         assert self.storage_manager is not None
 
         if tokens is not None:

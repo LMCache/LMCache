@@ -117,14 +117,22 @@ class PinMonitor:
                 logger.error(
                     "Error forcing unpin for timeout object %s: %s", id(memory_obj), e
                 )
-
-        logger.info(
-            "PinMonitor check: pinned_objects=%d, timeout_objects=%d, "
-            "force_unpin_success=%d",
-            pinned_count,
-            len(timeout_objects),
-            force_unpin_success_count,
-        )
+        if force_unpin_success_count > 0:
+            logger.warning(
+                "Force unpinned %d timeout objects in %d pinned_objects "
+                "within %d seconds",
+                force_unpin_success_count,
+                pinned_count,
+                self._pin_timeout_sec,
+            )
+        else:
+            logger.debug(
+                "PinMonitor check: pinned_objects=%d, timeout_objects=%d, "
+                "force_unpin_success=%d",
+                pinned_count,
+                len(timeout_objects),
+                force_unpin_success_count,
+            )
 
     def _force_unpin_timeout_object(self, memory_obj: "MemoryObj", elapsed_time: float):
         """Force unpin a timeout object and log the event."""

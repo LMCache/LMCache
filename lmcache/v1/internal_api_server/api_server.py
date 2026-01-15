@@ -17,7 +17,7 @@ from .api_registry import APIRegistry
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from lmcache.v1.manager import LMCacheManager
 
 logger = init_logger(__name__)
 
@@ -29,11 +29,19 @@ registry.register_all_apis(categories=["common", "vllm", "controller"])
 
 
 class InternalAPIServer:
-    def __init__(self, lmcache_adapter: "LMCacheConnectorV1Impl"):
-        config = lmcache_adapter.config
-        lmcache_engine = lmcache_adapter.lmcache_engine
-        # 0 for scheduler, 1 for worker 0, 2 for worker 1, ...
-        port_offset = 0 if not lmcache_engine else 1 + lmcache_engine.metadata.worker_id
+    def __init__(self, lmcache_manager: "LMCacheManager"):
+        lmcache_engine = lmcache_manager.lmcache_engine
+
+        # Check if lmcache_engine is None and handle accordingly
+        if lmcache_engine is None:
+            # Use manager's config directly when engine is not available
+            config = lmcache_manager.config
+            port_offset = 0  # Default for scheduler mode
+        else:
+            config = lmcache_engine.config
+            # 0 for scheduler, 1 for worker 0, 2 for worker 1, ...
+            port_offset = 1 + lmcache_engine.metadata.worker_id
+
         self.port = config.internal_api_server_port_start + port_offset
         self.socket_path_prefix = config.internal_api_server_socket_path_prefix
         self.socket_path = (
@@ -84,7 +92,7 @@ class InternalAPIServer:
             uvicorn_config["port"] = self.port
 
         self.server = uvicorn.Server(uvicorn.Config(**uvicorn_config))
-        app.state.lmcache_adapter = lmcache_adapter
+        app.state.lmcache_adapter = lmcache_manager
 
     async def run(self):
         logger.info(f"Running LMCache internal API server on {self.server_log_info}")

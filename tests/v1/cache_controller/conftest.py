@@ -2,10 +2,11 @@
 """Shared test fixtures and utilities for cache controller tests."""
 
 # Standard
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import time
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -23,7 +24,7 @@ from lmcache.v1.cache_controller.message import (
     KVOpEvent,
     RegisterMsg,
 )
-from lmcache.v1.cache_controller.utils import RegistryTree
+from lmcache.v1.cache_controller.utils import RegistryTree, WorkerInfo
 from lmcache.v1.config import LMCacheEngineConfig
 
 # Constants
@@ -202,3 +203,260 @@ class H:
             global_progress=progress,
             can_exit_freeze=can_exit,
         )
+
+
+# ============= Pytest Fixtures =============
+
+
+@pytest.fixture
+def mock_reg_controller():
+    """Create a mock RegistrationController."""
+    controller = Mock()
+    controller.get_workers = Mock(return_value=[0, 1])
+    controller.get_socket = Mock()
+    controller.get_peer_init_url = Mock(return_value="tcp://localhost:5000")
+
+    # Create a mock registry with all required methods
+    mock_registry = Mock()
+    mock_registry.seq_tracker = {}
+    mock_registry.kv_pool = {}
+
+    def mock_get_seq_num(instance_id, worker_id, location):
+        key = (instance_id, worker_id, location)
+        return mock_registry.seq_tracker.get(key)
+
+    def mock_update_seq_num(instance_id, worker_id, location, seq_num):
+        key = (instance_id, worker_id, location)
+        mock_registry.seq_tracker[key] = seq_num
+        return True
+
+    def mock_admit_kv(instance_id, worker_id, location, key):
+        report_id = (instance_id, worker_id)
+        if report_id not in mock_registry.kv_pool:
+            mock_registry.kv_pool[report_id] = {}
+        if location not in mock_registry.kv_pool[report_id]:
+            mock_registry.kv_pool[report_id][location] = set()
+        mock_registry.kv_pool[report_id][location].add(key)
+        return True
+
+    def mock_evict_kv(instance_id, worker_id, location, key):
+        report_id = (instance_id, worker_id)
+        if report_id in mock_registry.kv_pool:
+            if location in mock_registry.kv_pool[report_id]:
+                if key in mock_registry.kv_pool[report_id][location]:
+                    mock_registry.kv_pool[report_id][location].remove(key)
+                    if not mock_registry.kv_pool[report_id][location]:
+                        del mock_registry.kv_pool[report_id][location]
+                    if not mock_registry.kv_pool[report_id]:
+                        del mock_registry.kv_pool[report_id]
+                    return True
+        return False
+
+    def mock_find_kv(key, exclude_instance_id=None):
+        for report_id, locations in mock_registry.kv_pool.items():
+            instance_id, worker_id = report_id
+            if exclude_instance_id and instance_id == exclude_instance_id:
+                continue
+            for location, keys in locations.items():
+                if key in keys:
+                    # Return a mock KVChunkInfo
+                    # First Party
+                    from lmcache.v1.cache_controller.utils import KVChunkInfo
+
+                    return KVChunkInfo(instance_id, worker_id, location)
+        return None
+
+    def mock_get_worker_kv_keys(instance_id, worker_id, location):
+        report_id = (instance_id, worker_id)
+        if report_id in mock_registry.kv_pool:
+            return mock_registry.kv_pool[report_id].get(location, set())
+        return set()
+
+    def mock_get_total_kv_count():
+        count = 0
+        for locations in mock_registry.kv_pool.values():
+            for keys in locations.values():
+                count += len(keys)
+        return count
+
+    def mock_get_seq_discontinuity_count():
+        # Simple implementation for testing
+        return getattr(mock_registry, "_seq_discontinuity_count", 0)
+
+    def mock_deregister_worker(instance_id, worker_id):
+        report_id = (instance_id, worker_id)
+        if report_id in mock_registry.kv_pool:
+            del mock_registry.kv_pool[report_id]
+        # Also clean up seq_tracker
+        keys_to_remove = [
+            k
+            for k in mock_registry.seq_tracker.keys()
+            if k[0] == instance_id and k[1] == worker_id
+        ]
+        for key in keys_to_remove:
+            del mock_registry.seq_tracker[key]
+        return True
+
+    def mock_find_kv_with_worker_info(key, exclude_instance_id=None):
+        """Find KV and return (kv_info, peer_init_url, current_keys)"""
+        for report_id, locations in mock_registry.kv_pool.items():
+            instance_id, worker_id = report_id
+            if exclude_instance_id and instance_id == exclude_instance_id:
+                continue
+            for location, keys in locations.items():
+                if key in keys:
+                    # First Party
+                    from lmcache.v1.cache_controller.utils import KVChunkInfo
+
+                    kv_info = KVChunkInfo(instance_id, worker_id, location)
+                    # Get peer_init_url from controller
+                    peer_init_url = controller.get_peer_init_url(instance_id, worker_id)
+                    return (kv_info, peer_init_url, keys)
+        return None
+
+    def mock_handle_batched_kv_operations(msg):
+        """Handle batched KV operations"""
+        # First Party
+        from lmcache.v1.cache_controller.message import OpType
+
+        report_id = (msg.instance_id, msg.worker_id)
+
+        for op in msg.operations:
+            # Check for sequence discontinuity
+            key = (msg.instance_id, msg.worker_id, msg.location)
+            last_seq_num = mock_registry.seq_tracker.get(key)
+            if last_seq_num is not None:
+                expected_seq = last_seq_num + 1
+                if op.seq_num != expected_seq:
+                    # Increment discontinuity counter
+                    mock_registry._seq_discontinuity_count += 1
+
+            # Update sequence number
+            mock_registry.seq_tracker[key] = op.seq_num
+
+            # Handle operation
+            if op.op_type == OpType.ADMIT:
+                if report_id not in mock_registry.kv_pool:
+                    mock_registry.kv_pool[report_id] = {}
+                if msg.location not in mock_registry.kv_pool[report_id]:
+                    mock_registry.kv_pool[report_id][msg.location] = set()
+                mock_registry.kv_pool[report_id][msg.location].add(op.key)
+            elif op.op_type == OpType.EVICT:
+                if report_id in mock_registry.kv_pool:
+                    if msg.location in mock_registry.kv_pool[report_id]:
+                        mock_registry.kv_pool[report_id][msg.location].discard(op.key)
+                        if not mock_registry.kv_pool[report_id][msg.location]:
+                            del mock_registry.kv_pool[report_id][msg.location]
+                        if not mock_registry.kv_pool[report_id]:
+                            del mock_registry.kv_pool[report_id]
+        return True
+
+    mock_registry.get_seq_num = Mock(side_effect=mock_get_seq_num)
+    mock_registry.update_seq_num = Mock(side_effect=mock_update_seq_num)
+    mock_registry.admit_kv = Mock(side_effect=mock_admit_kv)
+    mock_registry.evict_kv = Mock(side_effect=mock_evict_kv)
+    mock_registry.find_kv = Mock(side_effect=mock_find_kv)
+    mock_registry.get_worker_kv_keys = Mock(side_effect=mock_get_worker_kv_keys)
+    mock_registry.get_total_kv_count = Mock(side_effect=mock_get_total_kv_count)
+    mock_registry.get_seq_discontinuity_count = Mock(
+        side_effect=mock_get_seq_discontinuity_count
+    )
+    mock_registry.deregister_worker = Mock(side_effect=mock_deregister_worker)
+    mock_registry.find_kv_with_worker_info = Mock(
+        side_effect=mock_find_kv_with_worker_info
+    )
+    mock_registry.handle_batched_kv_operations = Mock(
+        side_effect=mock_handle_batched_kv_operations
+    )
+    mock_registry._seq_discontinuity_count = 0
+
+    controller.registry = mock_registry
+    return controller
+
+
+@pytest.fixture
+def mock_kv_controller():
+    """Create a mock KVController."""
+    controller = Mock()
+    controller.admit = AsyncMock()
+    controller.evict = AsyncMock()
+    controller.lookup = AsyncMock()
+    controller.clear = AsyncMock()
+    controller.pin = AsyncMock()
+    controller.compress = AsyncMock()
+    controller.decompress = AsyncMock()
+    controller.move = AsyncMock()
+    controller.deregister = AsyncMock()
+    controller.kv_pool = {}
+    controller.seq_tracker = {}
+
+    # Mock full_sync_tracker
+    mock_tracker = Mock()
+    mock_tracker.should_request_full_sync = Mock(return_value=(False, None))
+    controller.full_sync_tracker = mock_tracker
+
+    return controller
+
+
+@pytest.fixture
+def mock_cluster_executor():
+    """Create a mock LMCacheClusterExecutor."""
+    executor = Mock()
+    executor.execute = AsyncMock()
+    executor.clear = AsyncMock()
+    executor.pin = AsyncMock()
+    executor.compress = AsyncMock()
+    executor.decompress = AsyncMock()
+    executor.move = AsyncMock()
+    executor.health = AsyncMock()
+    executor.check_finish = AsyncMock()
+    return executor
+
+
+@pytest.fixture
+def mock_zmq_socket():
+    """Create a mock ZMQ socket."""
+    socket = AsyncMock()
+    socket.send = AsyncMock()
+    socket.recv = AsyncMock()
+    socket.send_multipart = AsyncMock()
+    socket.recv_multipart = AsyncMock()
+    socket.close = Mock()
+    socket.get = Mock(return_value=0)
+    return socket
+
+
+@pytest.fixture
+def mock_zmq_context():
+    """Create a mock ZMQ context."""
+    context = Mock()
+    context.socket = Mock()
+    context.term = Mock()
+    return context
+
+
+@pytest.fixture
+def sample_worker_info():
+    """Create sample worker info for testing."""
+    return WorkerInfo(
+        instance_id="test_instance",
+        worker_id=0,
+        ip="127.0.0.1",
+        port=5000,
+        peer_init_url="tcp://127.0.0.1:6000",
+        registration_time=time.time(),
+        last_heartbeat_time=time.time(),
+    )
+
+
+@pytest.fixture
+def mock_lmcache_engine():
+    """Create a mock LMCacheEngine."""
+    engine = Mock()
+    engine.move = Mock(return_value=100)
+    engine.compress = Mock(return_value=100)
+    engine.decompress = Mock(return_value=100)
+    engine.lookup = Mock(return_value=100)
+    engine.clear = Mock(return_value=100)
+    engine.health = Mock(return_value=0)
+    return engine

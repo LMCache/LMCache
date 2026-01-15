@@ -1110,6 +1110,18 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
+        self.lmcache_is_healthy = self._gauge_cls(
+            name="lmcache:lmcache_is_healthy",
+            documentation="The health status of LMCache (1=healthy, 0=unhealthy)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.interval_get_blocking_failed_count = self._gauge_cls(
+            name="lmcache:interval_get_blocking_failed_count",
+            documentation="The number of interval get blocking failed",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
         event_statuses = ["ongoing", "done", "not_found"]
         for status in event_statuses:
