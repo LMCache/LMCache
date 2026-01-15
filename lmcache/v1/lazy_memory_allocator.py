@@ -108,10 +108,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             )
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)
-        for i in range(self._curr_size // self.PIN_CHUNK_SIZE):
-            offset = i * self.PIN_CHUNK_SIZE
-            self._pin_memory_chunk(offset, self.PIN_CHUNK_SIZE)
-            # self._pin_memory_chunk(0, self._curr_size)
+        self._pin_memory_chunk(0, self._curr_size)
 
         # Create the tensor memory allocator
         self._allocator = TensorMemoryAllocator(
