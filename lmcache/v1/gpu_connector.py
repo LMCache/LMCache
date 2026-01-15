@@ -38,7 +38,7 @@ def lmcache_memcpy_async_h2d(
     """
     assert memory_obj.tensor is not None
     assert memory_obj.tensor.numel() == gpu_buffer.numel()
-    if isinstance(memory_obj.parent, LazyMemoryAllocator):
+    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
         lmc_ops.lmcache_memcpy_async(
             gpu_buffer.data_ptr(),
             memory_obj.tensor.data_ptr(),
@@ -65,7 +65,7 @@ def lmcache_memcpy_async_d2h(
     """
     assert memory_obj.tensor is not None
     assert memory_obj.tensor.numel() == gpu_buffer.numel()
-    if isinstance(memory_obj.parent, LazyMemoryAllocator):
+    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
         lmc_ops.lmcache_memcpy_async(
             memory_obj.tensor.data_ptr(),
             gpu_buffer.data_ptr(),

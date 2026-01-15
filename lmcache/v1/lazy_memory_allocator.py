@@ -65,7 +65,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
     - Once everything is registered, the background thread stops
     """
 
-    PIN_CHUNK_SIZE = 1 << 24  # 16 MB pin chunk
+    PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
     COMMIT_SIZE = 1 << 30  # Do a commit every 1 GB
 
     def __init__(
@@ -108,7 +108,10 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             )
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)
-        self._pin_memory_chunk(0, self._curr_size)
+        for i in range(self._curr_size // self.PIN_CHUNK_SIZE):
+            offset = i * self.PIN_CHUNK_SIZE
+            self._pin_memory_chunk(offset, self.PIN_CHUNK_SIZE)
+            # self._pin_memory_chunk(0, self._curr_size)
 
         # Create the tensor memory allocator
         self._allocator = TensorMemoryAllocator(
@@ -137,7 +140,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
-        return self._allocator.allocate(shapes, dtypes, fmt, allocator_type)
+        obj = self._allocator.allocate(shapes, dtypes, fmt, allocator_type)
+        # HACK(ApostaC): reset the parent allocator to this lazy allocator
+        # There should be a cleaner way to decouple lazy allocator and
+        # tensor memory allocator
+        obj.parent_allocator = self
+        return obj
 
     def batched_allocate(
         self,
@@ -147,9 +155,15 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
-        return self._allocator.batched_allocate(
+        # HACK(ApostaC): reset the parent allocator to this lazy allocator
+        # There should be a cleaner way to decouple lazy allocator and
+        # tensor memory allocator
+        ret = self._allocator.batched_allocate(
             shapes, dtypes, batch_size, fmt, allocator_type
         )
+        for obj in ret:
+            obj.parent_allocator = self
+        return ret
 
     def free(
         self,
@@ -201,7 +215,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         assert offset + size <= self._final_size, "Pinning exceeds buffer size"
 
         ptr = self._buffer.data_ptr() + offset
-        self._cudart.cudaHostRegister(ptr, size, 0)
+        # Use flag: cudaHostRegisterMapped (0x02)
+        self._cudart.cudaHostRegister(ptr, size, 2)
         self._pin_record.append((ptr, size))
 
     def _commit_expansion(self, expand_size: int):
