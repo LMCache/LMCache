@@ -2278,6 +2278,73 @@ class ProgressivePinnedMemoryAllocator(_ProgressivePinnedBase):
         return "ProgressivePinnedMemoryAllocator"
 
 
+class ProgressivePagedTensorMemoryAllocator(PagedTensorMemoryAllocator):
+    """PagedTensorMemoryAllocator with progressive page exposure.
+
+    This keeps the public API of PagedTensorMemoryAllocator unchanged by
+    implementing progressive behavior in a separate subclass.
+
+    Mechanism:
+    - Construct the base allocator normally (it creates all page MemoryObjs).
+    - Move pages beyond `initial_pages` out of `free_blocks` into a hidden deque.
+    - `grow_to_pages(n)` moves more pages from hidden -> free_blocks.
+
+    Note: This does *not* avoid the cost of creating TensorMemoryObj wrappers
+    up-front. The goal of progressive pinning is to avoid the expensive
+    cudaHostRegister/cudaHostAlloc cost at startup; wrapper creation is cheap.
+    """
+
+    def __init__(
+        self,
+        tensor: torch.Tensor,
+        shapes: list[torch.Size],
+        dtypes: list[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        *,
+        initial_pages: int,
+    ):
+        super().__init__(tensor=tensor, shapes=shapes, dtypes=dtypes, fmt=fmt)
+
+        self._total_pages = len(self.paged_buffers)
+        if not (0 <= initial_pages <= self._total_pages):
+            raise ValueError(
+                f"initial_pages must be in [0, {self._total_pages}], "
+                f"got {initial_pages}"
+            )
+        self._visible_pages = initial_pages
+
+        # Base ctor puts all pages into free_blocks. Hide the tail pages.
+        # NOTE: We preserve page order: hidden_pages starts with the next page
+        # to be revealed.
+        self._hidden_pages: deque[TensorMemoryObj] = deque()
+        while len(self.free_blocks) > self._visible_pages:
+            self._hidden_pages.appendleft(self.free_blocks.pop())
+
+    def grow_to_pages(self, num_pages: int) -> None:
+        if num_pages < self._visible_pages:
+            raise ValueError(
+                f"num_pages must be >= visible pages ({self._visible_pages}), "
+                f"got {num_pages}"
+            )
+        if num_pages > self._total_pages:
+            raise ValueError(
+                f"num_pages must be <= total pages ({self._total_pages}), "
+                f"got {num_pages}"
+            )
+        to_add = num_pages - self._visible_pages
+        for _ in range(to_add):
+            try:
+                self.free_blocks.append(self._hidden_pages.popleft())
+            except IndexError as e:
+                raise RuntimeError(
+                    "Internal error: ran out of hidden pages while growing."
+                ) from e
+        self._visible_pages = num_pages
+
+    def __str__(self):
+        return "ProgressivePagedTensorMemoryAllocator"
+
+
 class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
     """A paged allocator over a single contiguous host mapping with progressive pinning.
 
@@ -2319,12 +2386,10 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
                 f"page_size_bytes ({self.align_bytes}) for paged allocator."
             )
 
-        self.free_blocks: deque[TensorMemoryObj] = deque()
+        self._paged_allocator: PagedTensorMemoryAllocator
+        # Expose free_blocks for tests/observability (delegates to paged allocator).
+        self.free_blocks: deque[TensorMemoryObj]
 
-        # Debug/stats (similar spirit to PagedTensorMemoryAllocator).
-        self.num_active_allocations = 0
-        self.total_allocated_size = 0
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         super().__init__(
             mapped_size=size,
             managed_size=size,
@@ -2336,36 +2401,24 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
             thread_name="ProgressivePinnedPagedExpander",
         )
 
-    def _append_pages_locked(self, old_size: int, new_size: int) -> None:
-        """Append pages corresponding to [old_size, new_size) into free_blocks."""
-        old_pages = old_size // self.align_bytes
-        new_pages = new_size // self.align_bytes
-        for page_idx in range(old_pages, new_pages):
-            start = page_idx * self.align_bytes
-            page = self._full_buffer[start : start + self.align_bytes]
-            metadata = MemoryObjMetadata(
-                self.shapes[0],
-                self.dtypes[0],
-                page_idx,  # address is page index (paged semantics)
-                self.align_bytes,  # 1 page
-                1,  # ref_count=1
-                0,  # pin_count=0
-                self.fmt,
-                shapes=self.shapes,
-                dtypes=self.dtypes,
-            )
-            self.free_blocks.append(
-                TensorMemoryObj(raw_data=page, metadata=metadata, parent_allocator=self)
-            )
-
     def _on_init(self, initial_size: int) -> None:
-        self._append_pages_locked(old_size=0, new_size=initial_size)
+        initial_pages = initial_size // self.align_bytes
+        self._paged_allocator = ProgressivePagedTensorMemoryAllocator(
+            tensor=self._full_buffer[: self.total_size],
+            shapes=self.shapes,
+            dtypes=self.dtypes,
+            fmt=self.fmt,
+            initial_pages=initial_pages,
+        )
+        self.free_blocks = self._paged_allocator.free_blocks
 
     def _usage_ratio(self) -> float:
-        return self.total_allocated_size / max(1, self._registered_size)
+        return self._paged_allocator.total_allocated_size / max(
+            1, self._registered_size
+        )
 
     def _on_grow(self, old_size: int, new_size: int) -> None:
-        self._append_pages_locked(old_size=old_size, new_size=new_size)
+        self._paged_allocator.grow_to_pages(new_size // self.align_bytes)
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -2378,35 +2431,11 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shapes, dtypes, fmt)  # type: ignore
 
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
         with self._lock:
-            try:
-                free_block = self.free_blocks.popleft()
-            except IndexError:
-                return None
-
-            # Update metadata.
-            free_block.meta.shape = shapes[0]
-            free_block.meta.dtype = dtypes[0]
-            free_block.meta.shapes = shapes
-            free_block.meta.dtypes = dtypes
-            free_block.meta.fmt = fmt
-            free_block.meta.ref_count = 1
-
-            if shapes != self.shapes:
-                size_in_bytes = get_size_bytes(shapes, dtypes)
-                free_block.raw_data = free_block.raw_data[:size_in_bytes]
-
-            # Stats.
-            self.num_active_allocations += 1
-            self.total_allocated_size += self.align_bytes
-            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-            self.stats_monitor.update_active_memory_objs_count(
-                self.num_active_allocations
-            )
-
-        self._check_and_trigger_expansion()
-        return free_block
+            mem_obj = self._paged_allocator.allocate(shapes, dtypes, fmt, str(self))
+        if mem_obj is not None:
+            self._check_and_trigger_expansion()
+        return mem_obj
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
@@ -2421,66 +2450,20 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
             return self.buffer_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
             )  # type: ignore
-
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-        allocated: list[TensorMemoryObj] = []
         with self._lock:
-            for _ in range(batch_size):
-                try:
-                    free_block = self.free_blocks.popleft()
-                except IndexError:
-                    # Roll back any pages we popped.
-                    for m in allocated:
-                        self.free_blocks.appendleft(m)
-                    return None
-
-                free_block.meta.shape = shapes[0]
-                free_block.meta.dtype = dtypes[0]
-                free_block.meta.shapes = shapes
-                free_block.meta.dtypes = dtypes
-                free_block.meta.fmt = fmt
-                free_block.meta.ref_count = 1
-
-                if shapes != self.shapes:
-                    size_in_bytes = get_size_bytes(shapes, dtypes)
-                    free_block.raw_data = free_block.raw_data[:size_in_bytes]
-
-                allocated.append(free_block)
-
-            self.num_active_allocations += batch_size
-            self.total_allocated_size += self.align_bytes * batch_size
-            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-            self.stats_monitor.update_active_memory_objs_count(
-                self.num_active_allocations
+            mem_objs = self._paged_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt, str(self)
             )
-
-        self._check_and_trigger_expansion()
-        return allocated
+        if mem_objs is not None:
+            self._check_and_trigger_expansion()
+        return mem_objs
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None):
-        if not memory_obj.is_valid():
-            return
         if memory_obj.meta.fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.free(memory_obj)
-
         with self._lock:
-            # Restore full-page raw_data view if it was sliced for smaller shapes.
-            if memory_obj.meta.shapes != self.shapes:
-                page_idx = memory_obj.meta.address
-                start = page_idx * self.align_bytes
-                memory_obj.raw_data = self._full_buffer[
-                    start : start + self.align_bytes
-                ]
-
-            self.free_blocks.append(memory_obj)
-
-            self.total_allocated_size -= self.align_bytes
-            self.num_active_allocations -= 1
-            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-            self.stats_monitor.update_active_memory_objs_count(
-                self.num_active_allocations
-            )
+            self._paged_allocator.free(memory_obj)
 
     @_lmcache_nvtx_annotate
     def batched_free(
@@ -2493,28 +2476,8 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
             return
         if memory_objs[0].meta.fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.batched_free(memory_objs)
-
         with self._lock:
-            valid = 0
-            for memory_obj in memory_objs:
-                if not memory_obj.is_valid():
-                    continue
-                if memory_obj.meta.shapes != self.shapes:
-                    page_idx = memory_obj.meta.address
-                    start = page_idx * self.align_bytes
-                    memory_obj.raw_data = self._full_buffer[
-                        start : start + self.align_bytes
-                    ]
-                self.free_blocks.append(memory_obj)
-                valid += 1
-
-            if update_stats and valid:
-                self.total_allocated_size -= self.align_bytes * valid
-                self.num_active_allocations -= valid
-                self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-                self.stats_monitor.update_active_memory_objs_count(
-                    self.num_active_allocations
-                )
+            self._paged_allocator.batched_free(memory_objs, update_stats=update_stats)
 
     def __str__(self):
         return "ProgressivePinnedPagedMemoryAllocator"
