@@ -392,16 +392,16 @@ class RemoteBackend(StorageBackendInterface):
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
 
         decompressed_memory_objs: list[Optional[MemoryObj]] = []
-        error_happens = False
+        error_happened = False
         for memory_obj in memory_objs:
             if memory_obj is None:
-                error_happens = True
+                error_happened = True
                 decompressed_memory_objs.append(None)
             else:
                 decompressed_memory_objs.append(
                     self.deserializer.deserialize(memory_obj)
                 )
-        if error_happens:
+        if error_happened:
             self._interval_get_blocking_failed_count += 1
 
         assert len(decompressed_memory_objs) == len(keys), (
