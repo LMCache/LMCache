@@ -491,6 +491,69 @@ class MPCacheEngine:
             self.storage_manager.clear()
             self.storage_manager.memcheck()
 
+    def search_keys_by_hash(
+        self,
+        chunk_hash: bytes,
+        model_name: str | None = None,
+        world_size: int | None = None,
+        worker_id: int | None = None,
+    ) -> list[IPCCacheEngineKey]:
+        """
+        Search for keys matching the given hash and optional filters.
+        
+        Args:
+            chunk_hash: The chunk hash to search for
+            model_name: Optional model name filter
+            world_size: Optional world size filter
+            worker_id: Optional worker ID filter
+        Returns:
+            List of matching IPCCacheEngineKey objects
+        """
+        matching_keys = []
+        with self.lock:
+            # Access the storage manager's committed objects to search
+            # We need to access _commited_memory_objects through a method
+            all_keys = self.storage_manager.get_all_keys()
+            
+            for key in all_keys:
+                if key.chunk_hash != chunk_hash:
+                    continue
+                if model_name is not None and key.model_name != model_name:
+                    continue
+                if world_size is not None and key.world_size != world_size:
+                    continue
+                if worker_id is not None and key.worker_id != worker_id:
+                    continue
+                matching_keys.append(key)
+        
+        return matching_keys
+
+    def get_memory_objects(self, keys: list[IPCCacheEngineKey]) -> list[MemoryObj]:
+        """
+        Get memory objects for the given keys without locking/unlocking.
+        This is used for HTTP retrieval where we don't need the full retrieve
+        context manager flow.
+        
+        Args:
+            keys: List of keys to retrieve
+            
+        Returns:
+            List of MemoryObj objects (filtered to only include found objects)
+        """
+        memory_objs = []
+        # Use storage manager's buffer lock for thread safety
+        with self.storage_manager._buffer_lock:
+            for key in keys:
+                if self.storage_manager._has_key(key):
+                    obj = self.storage_manager._commited_memory_objects[key]
+                    # Touch the cache policy to update LRU
+                    self.storage_manager._cache_policy.update_on_hit(
+                        key, self.storage_manager._commited_memory_objects
+                    )
+                    memory_objs.append(obj)
+        
+        return memory_objs
+
 
 def add_handler_helper(
     server: MessageQueueServer, request_type: RequestType, handler_function
@@ -511,7 +574,21 @@ def run_cache_server(
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
+    http_host: str | None = None,
+    http_port: int | None = None,
 ):
+    """
+    Run the LMCache cache server with ZMQ message queue and optional HTTP server.
+    
+    Args:
+        host: ZMQ server host
+        port: ZMQ server port
+        chunk_size: Chunk size for KV cache operations
+        cpu_buffer_size: CPU buffer size in GB
+        max_workers: Maximum number of worker threads for ZMQ server
+        http_host: HTTP server host (None to disable HTTP server)
+        http_port: HTTP server port (required if http_host is set)
+    """
     # Initialize the engine
     engine = MPCacheEngine(chunk_size, cpu_buffer_size)
 
@@ -533,10 +610,24 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
-    # Start the server
+    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
+    # Start the ZMQ server
     torch.cuda.init()
     server.start()
     logger.info("LMCache cache server is running...")
+
+    # Start HTTP server if configured (import here to avoid circular dependency)
+    http_thread = None
+    if http_host is not None and http_port is not None:
+        from lmcache.v1.multiprocess.http_server import start_http_server_thread
+        
+        http_thread = start_http_server_thread(
+            host=http_host,
+            port=http_port,
+            engine=engine,
+        )
+        logger.info("LMCache HTTP server is running on http://%s:%d", http_host, http_port)
+
 
     # Dummy loop to keep the server running
     try:
@@ -545,15 +636,18 @@ def run_cache_server(
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         server.close()
+        if http_thread is not None:
+            logger.info("HTTP server thread will terminate automatically")
+
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LMCache Cache Server")
     parser.add_argument(
-        "--host", type=str, default="localhost", help="Host to bind the server"
+        "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
     )
     parser.add_argument(
-        "--port", type=int, default=5555, help="Port to bind the server"
+        "--port", type=int, default=5555, help="Port to bind the ZMQ server"
     )
     parser.add_argument(
         "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
@@ -563,6 +657,12 @@ def parse_args():
     )
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
+    )
+    parser.add_argument(
+        "--http-host", type=str, default=None, help="Host to bind the HTTP server (None to disable)"
+    )
+    parser.add_argument(
+        "--http-port", type=int, default=None, help="Port to bind the HTTP server"
     )
     return parser.parse_args()
 
@@ -575,4 +675,6 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
+        http_host=args.http_host,
+        http_port=args.http_port,
     )

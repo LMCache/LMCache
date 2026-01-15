@@ -467,6 +467,8 @@ class MPStorageManager:
                 raise RuntimeError(f"Key not found: {e.args[0]}") from e
 
         try:
+            for obj in objs:
+                print(f"[First five elements of the tensor]: {obj.tensor[0,0,0,0:5]}")
             yield objs
         finally:
             # NOTE: unlock is being separated to another function because
@@ -513,6 +515,18 @@ class MPStorageManager:
         """
         with self._allocator_lock:
             return self._memory_allocator.memcheck()
+
+    def get_all_keys(self) -> list[IPCCacheEngineKey]:
+        """
+        Get all committed keys in the storage manager.
+        Thread-safe.
+        
+        Returns:
+            List of all committed IPCCacheEngineKey objects
+        """
+        with self._buffer_lock:
+            return list(self._commited_memory_objects.keys())
+
 
     def clear(self):
         """
