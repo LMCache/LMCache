@@ -581,3 +581,8 @@ def test_lmcache_memcpy_async():
             big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
             big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
         )
+
+    # Unregister the cpu memory
+    ptr = big_cpu_tensor.data_ptr()
+    for i in range(num_chunks):
+        rt.cudaHostUnregister(ptr + i * chunk_size)
