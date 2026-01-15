@@ -147,6 +147,7 @@ def mock_remote_backend(event_loop_thread, test_config, controllable_connector):
     backend.connection = controllable_connector
     backend.config = test_config
     backend.init_connection = MagicMock()
+    backend.get_and_clear_interval_get_blocking_failed_count.return_value = 0
     return backend
 
 
@@ -339,6 +340,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         backend_a.connection = connector_a
         backend_a.config = test_config
         backend_a.init_connection = MagicMock()
+        backend_a.get_and_clear_interval_get_blocking_failed_count.return_value = 0
 
         backend_b = MagicMock(spec=RemoteBackend)
         backend_b.remote_url = "controllable://test_b:1234"
@@ -346,6 +348,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         backend_b.connection = connector_b
         backend_b.config = test_config
         backend_b.init_connection = MagicMock()
+        backend_b.get_and_clear_interval_get_blocking_failed_count.return_value = 0
 
         # Update storage manager to have two remote backends
         mock_storage_manager.storage_backends = {
@@ -441,6 +444,7 @@ class TestRemoteBackendHealthCheckEdgeCases:
         backend.connection = connector
         backend.init_connection = MagicMock()
         backend.config = test_config
+        backend.get_and_clear_interval_get_blocking_failed_count.return_value = 0
 
         check = RemoteBackendHealthCheck(backend=backend)
         check._backend_name = "RemoteBackend"
@@ -483,6 +487,7 @@ class TestRemoteBackendHealthCheckEdgeCases:
         backend.connection = SlowPingConnector()
         backend.init_connection = MagicMock()
         backend.config = config
+        backend.get_and_clear_interval_get_blocking_failed_count.return_value = 0
 
         check = RemoteBackendHealthCheck(backend=backend)
         check._backend_name = "RemoteBackend"
