@@ -16,7 +16,6 @@ steps:
         mkdir -p "\$MY_CACHE_PATH"
         
         export UV_CACHE_DIR="\$MY_CACHE_PATH"
-        export XDG_CACHE_HOME="\$MY_CACHE_PATH"
 
         # 3. Cleanup logic
         cleanup() {
@@ -29,10 +28,15 @@ steps:
         uv venv .venv
         source .venv/bin/activate
 
-        # 5. Install dependencies
+        # 5. Install dependencies (nightly vllm and LMCache from the PR)
+        # the vllm-correctness.sh script will activate this ven
         uv pip install --upgrade pip
-        uv pip install vllm
+        uv pip install -U vllm \
+          --torch-backend=auto \
+          --extra-index-url https://wheels.vllm.ai/nightly
         uv pip install -e .
+        # additional dependencies
+        uv pip install aiohttp tqdm pandas huggingface_hub
 
         # 6. Run test
         chmod +x .buildkite/scripts/vllm-correctness.sh

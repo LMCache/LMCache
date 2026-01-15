@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This script requires some pre-configuration on the CI machine: 
+# 1. the model weights already exists on the CI machine
+# 2. the sharegpt dataset already exists on the CI machine
 
 # This script runs two tests: 
 # 1. a single request test for APC + LMCache hybrid KV Cache Retrieval
@@ -22,14 +25,57 @@ CORRECTNESS_DIR=".buildkite/correctness"
 REQUEST_NUMBER=100
 MAX_CONCURRENCY=40
 
+# print out the HOME
+echo "[INFO] HOME: $HOME"
+echo "[INFO] PWD: $PWD"
+# Prerequisite for this script: 
+# 1. the model weights already exist on the CI machine
+export HF_HUB_OFFLINE=1 # this forces the model weights to be local
+unset HF_HOME
+unset HF_HUB_CACHE
+unset HF_ASSETS_CACHE
+unset HF_XET_CACHE
+unset XDG_CACHE_HOME
+echo "[INFO] Verifying model weights exist in global cache on the CI machine..."
+if ! huggingface-cli download "$MODEL" --quiet; then
+    echo "[ERROR] Model weights for '$MODEL' not found in ~/.cache/huggingface"
+    echo "[FIX] Please manually download the model weights on the CI machine"
+    exit 1
+fi
+
+# 2. the sharegpt dataset already exists on the CI machine
+# wget -q \
+#   https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json \
+#   -O "$HOME/.ShareGPT_V3_unfiltered_cleaned_split.json"
+
+# ShareGPT dataset must already exist on the CI machine
+SHAREGPT_PATH="$HOME/.ShareGPT_V3_unfiltered_cleaned_split.json"
+
+echo "[INFO] Verifying ShareGPT dataset exists on the CI machine..."
+
+if [[ ! -f "$SHAREGPT_PATH" ]]; then
+    echo "[ERROR] ShareGPT dataset not found at: $SHAREGPT_PATH"
+    echo "[FIX] Pre-download it on the CI machine, e.g.:"
+    echo "      wget -q https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json -O '$SHAREGPT_PATH'"
+    exit 1
+fi
+
+if [[ ! -s "$SHAREGPT_PATH" ]]; then
+    echo "[ERROR] ShareGPT dataset file is empty: $SHAREGPT_PATH"
+    exit 1
+fi
+
+
 # 1. Setup local writable sandbox
 CI_CACHE_DIR="$PWD/.vllm_cache_${BUILD_ID}"
 mkdir -p "$CI_CACHE_DIR"
 
-export HF_HOME="$CI_CACHE_DIR/huggingface"
-export XDG_CACHE_HOME="$CI_CACHE_DIR/xdg"
+# not sure if this is needed on H100 (it was on L40s)
 export FLASHINFER_WORKSPACE_DIR="$CI_CACHE_DIR/flashinfer"
 
+# the venv should be created by the pipeline calling this script
+# since it will live in the job's directory
+# /var/lib/buildkite-agent/builds/<agent-name>/<org-slug>/<pipeline-slug>
 if [[ -f ".venv/bin/activate" ]]; then
     echo "[INFO] Activating found venv in .venv"
     source .venv/bin/activate
@@ -66,23 +112,11 @@ trap 'rc=$?; stop_vllm; collect_artifact; exit $rc' EXIT INT TERM
 
 exec > >(tee -a "${WORK_LOG}") 2>&1
 
-echo "=== DIAGNOSTICS: GPU STATE ==="
+echo "=== DIAGNOSTICS: GPU STATE before CI ==="
 nvidia-smi
 
-#######################################
-# Phase 0: Setup Data & Weights
-#######################################
-echo "[INFO] Installing benchmark dependencies..."
-uv pip install aiohttp tqdm pandas huggingface_hub
-
-echo "[INFO] Downloading ShareGPT dataset..."
-wget -q https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json -O ShareGPT.json
-
-echo "[INFO] Converting dataset to OpenAI format..."
+echo "[INFO] Converting ShareGPT dataset to OpenAI format..."
 python "${CORRECTNESS_DIR}/sharegpt2openai.py" -i "./ShareGPT.json" -o "./shareGPT_dataset.json"
-
-echo "[INFO] Pre-downloading model weights to $HF_HOME"
-huggingface-cli download "${MODEL}" --cache-dir "$HF_HOME" --quiet
 
 #######################################
 # Phase 1: Base Server (Baseline)
