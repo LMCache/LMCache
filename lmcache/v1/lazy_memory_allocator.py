@@ -17,7 +17,13 @@ from lmcache.v1.memory_management import (
     TensorMemoryAllocator,
 )
 from lmcache.v1.system_detection import NUMAMapping
-import lmcache.c_ops as lmc_ops
+
+if torch.cuda.is_available():
+    # First Party
+    import lmcache.c_ops as lmc_ops
+else:
+    # First Party
+    import lmcache.non_cuda_equivalents as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -141,7 +147,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
         # There should be a cleaner way to decouple lazy allocator and
         # tensor memory allocator
-        obj.parent_allocator = self
+        if obj is not None:
+            obj.parent_allocator = self
         return obj
 
     def batched_allocate(
