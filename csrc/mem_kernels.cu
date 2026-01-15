@@ -11,15 +11,19 @@
   #include <cuda_fp8.h>
 #endif
 
-#define CHECK_CUDA_CALL(call)                                                 \
-  do {                                                                        \
-    cudaError_t err = call;                                                   \
-    if (err != cudaSuccess) {                                                 \
-      fprintf(stderr, "CUDA error in file '%s' in line %i : %s.\n", __FILE__, \
-              __LINE__, cudaGetErrorString(err));                             \
-      exit(EXIT_FAILURE);                                                     \
-    }                                                                         \
-  } while (0)
+#ifndef CHECK_CUDA_CALL
+  #define CHECK_CUDA_CALL(call)                                             \
+    do {                                                                    \
+      cudaError_t err = call;                                               \
+      if (err != cudaSuccess) {                                             \
+        fprintf(stderr, "CUDA error in file '%s' in line %i : %s.\n",       \
+                __FILE__, __LINE__, cudaGetErrorString(err));               \
+        throw std::runtime_error(                                           \
+            std::string("CUDA error in file '") + __FILE__ + "' in line " + \
+            std::to_string(__LINE__) + " : " + cudaGetErrorString(err));    \
+      }                                                                     \
+    } while (0)
+#endif
 
 namespace lmc {
 
