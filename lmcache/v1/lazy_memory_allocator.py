@@ -165,6 +165,10 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         ret = self._allocator.batched_allocate(
             shapes, dtypes, batch_size, fmt, allocator_type
         )
+
+        if ret is None:
+            return ret
+
         for obj in ret:
             obj.parent_allocator = self
         return ret
