@@ -37,8 +37,10 @@ class InstrumentedRemoteConnector(RemoteConnector):
         self._stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
         self._stats_monitor.update_interval_remote_write_metrics(obj_size)
         logger.debug(
-            f"[{self.name}]Bytes offloaded: {obj_size / 1e6:.3f} MBytes "
-            f"in {(end - begin) * 1000:.3f}ms"
+            "[%s]Bytes offloaded: %.3f MBytes in %.3f ms",
+            self.name,
+            obj_size / 1e6,
+            (end - begin) * 1000,
         )
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -50,8 +52,10 @@ class InstrumentedRemoteConnector(RemoteConnector):
             obj_size = memory_obj.get_size()
             self._stats_monitor.update_interval_remote_read_metrics(obj_size)
             logger.debug(
-                f"[{self.name}]Bytes loaded: {obj_size / 1e6:.3f} MBytes "
-                f"in {(end - begin) * 1000:.3f}ms"
+                "[%s]Bytes loaded: %.3f MBytes in %.3f ms",
+                self.name,
+                obj_size / 1e6,
+                (end - begin) * 1000,
             )
         return memory_obj
 
@@ -102,16 +106,56 @@ class InstrumentedRemoteConnector(RemoteConnector):
         lookup_id: str,
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
-        return await self._connector.batched_get_non_blocking(lookup_id, keys)
+        begin = time.perf_counter()
+        memory_objs = await self._connector.batched_get_non_blocking(lookup_id, keys)
+        end = time.perf_counter()
+        self._stats_monitor.update_interval_remote_time_to_get((end - begin) * 1000)
+        total_size = sum(
+            memory_obj.get_size()
+            for memory_obj in memory_objs
+            if memory_obj is not None
+        )
+        if total_size > 0:
+            self._stats_monitor.update_interval_remote_read_metrics(total_size)
+            logger.debug(
+                "[%s]Bytes loaded: %.3f MBytes in %.3f ms",
+                self.name,
+                total_size / 1e6,
+                (end - begin) * 1000,
+            )
+        return memory_objs
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
-        return await self._connector.batched_get(keys)
+        begin = time.perf_counter()
+        memory_objs = await self._connector.batched_get(keys)
+        end = time.perf_counter()
+        self._stats_monitor.update_interval_remote_time_to_get((end - begin) * 1000)
+        total_size = sum(
+            memory_obj.get_size()
+            for memory_obj in memory_objs
+            if memory_obj is not None
+        )
+        if total_size > 0:
+            self._stats_monitor.update_interval_remote_read_metrics(total_size)
+            logger.debug(
+                "[%s]Bytes loaded: %.3f MBytes in %.3f ms",
+                self.name,
+                total_size / 1e6,
+                (end - begin) * 1000,
+            )
+        return memory_objs
 
     async def batched_put(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
     ):
+        total_size = sum(
+            memory_obj.get_size()
+            for memory_obj in memory_objs
+            if memory_obj is not None
+        )
+        begin = time.perf_counter()
         try:
             await self._connector.batched_put(keys, memory_objs)
         except Exception as e:
@@ -119,6 +163,16 @@ class InstrumentedRemoteConnector(RemoteConnector):
         finally:
             for memory_obj in memory_objs:
                 memory_obj.ref_count_down()
+
+        end = time.perf_counter()
+        self._stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
+        self._stats_monitor.update_interval_remote_write_metrics(total_size)
+        logger.debug(
+            "[%s]Bytes offloaded: %.3f MBytes in %.3f ms",
+            self.name,
+            total_size / 1e6,
+            (end - begin) * 1000,
+        )
 
     def remove_sync(self, key: CacheEngineKey) -> bool:
         return self._connector.remove_sync(key)
