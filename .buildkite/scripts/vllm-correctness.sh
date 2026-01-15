@@ -13,7 +13,7 @@ set -euo pipefail
 #######################################
 # Configuration
 #######################################
-MODEL="meta-llama/Llama-3.2-1B-Instruct"
+MODEL="Qwen/Qwen2.5-14B-Instruct"
 WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
