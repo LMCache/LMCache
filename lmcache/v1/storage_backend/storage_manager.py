@@ -276,8 +276,7 @@ class StorageManager:
         self._freeze_lock = threading.RLock()
 
         # Backend bypass mode: skip specific backends during health check failures
-        # Key: backend_name, Value: True if bypassed
-        self._bypassed_backends: Dict[str, bool] = {}
+        self._bypassed_backends: set[str] = set()
         self._bypass_lock = threading.RLock()
 
         if not self.enable_pd and self.config.enable_async_loading:
@@ -407,7 +406,7 @@ class StorageManager:
                 continue
             # Skip bypassed backends
             with self._bypass_lock:
-                if self._bypassed_backends.get(backend_name, False):
+                if backend_name in self._bypassed_backends:
                     continue
 
             allocator_backend = backend.get_allocator_backend()
@@ -802,15 +801,14 @@ class StorageManager:
         """
         with self._bypass_lock:
             if bypassed:
-                self._bypassed_backends[backend_name] = True
+                self._bypassed_backends.add(backend_name)
                 logger.info(f"StorageManager: Backend {backend_name} is now bypassed")
             else:
-                if backend_name in self._bypassed_backends:
-                    del self._bypassed_backends[backend_name]
-                    logger.info(
-                        f"StorageManager: Backend {backend_name} bypass removed, "
-                        "restored to normal operation"
-                    )
+                self._bypassed_backends.discard(backend_name)
+                logger.info(
+                    f"StorageManager: Backend {backend_name} bypass removed, "
+                    "restored to normal operation"
+                )
 
     def is_backend_bypassed(self, backend_name: str) -> bool:
         """
@@ -823,7 +821,7 @@ class StorageManager:
             bool: True if the backend is bypassed, False otherwise
         """
         with self._bypass_lock:
-            return self._bypassed_backends.get(backend_name, False)
+            return backend_name in self._bypassed_backends
 
     def contains(
         self,
@@ -1073,7 +1071,7 @@ class StorageManager:
                     continue
             # Skip bypassed backends
             with self._bypass_lock:
-                if self._bypassed_backends.get(backend_name, False):
+                if backend_name in self._bypassed_backends:
                     continue
             if location and backend_name != location:
                 continue
