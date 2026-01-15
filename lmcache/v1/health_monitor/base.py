@@ -314,6 +314,9 @@ class HealthMonitor:
             backend = storage_manager.local_cpu_backend
             if isinstance(backend, LocalCPUBackend):
                 return backend
+        for backend in storage_manager.storage_backends.values():
+            if isinstance(backend, LocalCPUBackend):
+                return backend
         return None
 
     def _apply_local_cpu_fallback(self, check: HealthCheck) -> None:
