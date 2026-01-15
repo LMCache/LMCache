@@ -23,7 +23,7 @@ steps:
           echo "[INFO] Cleaning up .venv and cache"
           rm -rf .venv "\$MY_CACHE_PATH"
         }
-        trap cleanup EXIT INT TERM
+        trap 'test_exit_code=$?; cleanup; exit $test_exit_code' EXIT INT TERM
 
         # 4. Create isolated env
         uv venv .venv
@@ -37,6 +37,9 @@ steps:
         # 6. Run test
         chmod +x .buildkite/scripts/vllm-correctness.sh
         BUILD_ID="${BUILDKITE_BUILD_ID}" .buildkite/scripts/vllm-correctness.sh
+        test_exit_code=$?
+        cleanup
+        exit $test_exit_code
 
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
