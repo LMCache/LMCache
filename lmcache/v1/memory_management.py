@@ -2427,7 +2427,7 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
         dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
-    ) -> Optional[TensorMemoryObj]:
+    ) -> Optional[MemoryObj]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shapes, dtypes, fmt)  # type: ignore
 
@@ -2445,7 +2445,7 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
-    ) -> Optional[List[TensorMemoryObj]]:
+    ) -> Optional[List[MemoryObj]]:
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
@@ -2459,7 +2459,7 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
         return mem_objs
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         if memory_obj.meta.fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.free(memory_obj)
         with self._lock:
@@ -2468,7 +2468,7 @@ class ProgressivePinnedPagedMemoryAllocator(_ProgressivePinnedBase):
     @_lmcache_nvtx_annotate
     def batched_free(
         self,
-        memory_objs: List[TensorMemoryObj],
+        memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ):
