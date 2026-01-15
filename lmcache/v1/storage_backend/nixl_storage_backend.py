@@ -856,11 +856,15 @@ class NixlStaticStorageBackend(NixlStorageBackend):
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
+        lookup_id: Optional[str] = None,
+        transfer_spec: Any = None,
     ) -> List[Optional[MemoryObj]]:
         """
         A blocking function to get the kv cache from the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+        :param Optional[str] lookup_id: The lookup id of the request.
+        :param Any transfer_spec: The transfer spec of the request.
 
         :return: a list of memory objects.
         """
@@ -1312,10 +1316,14 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
+        lookup_id: Optional[str] = None,
+        transfer_spec: Any = None,
     ) -> List[Optional[MemoryObj]]:
         """
         A blocking function to get the kv cache from the storage backend.
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
+        :param Optional[str] lookup_id: The lookup id of the request.
+        :param Any transfer_spec: The transfer spec of the request.
         :return: a list of memory objects.
         """
         if not keys:
