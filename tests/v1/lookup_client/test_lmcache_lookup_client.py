@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+Tests for LMCacheLookupClient and LMCacheLookupServer communication.
+
+IMPORTANT: These tests require PYTHONHASHSEED to be set for consistent hashing.
+In production, LMCacheLookupClient and LMCacheLookupServer run in separate
+processes (scheduler vs worker), and PYTHONHASHSEED must be set consistently
+across all processes to ensure hash consistency for cache lookups.
+
+Run with: PYTHONHASHSEED=0 pytest tests/v1/lookup_client/test_lmcache_lookup_client.py
+"""
+
 # Standard
+import os
 import random
 import tempfile
 import time
@@ -24,6 +36,18 @@ from tests.v1.utils import (
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
     recover_engine_states,
+)
+
+# Skip all tests in this module if PYTHONHASHSEED is not set.
+# This reflects production requirements where consistent hashing across
+# processes (scheduler/worker) requires PYTHONHASHSEED to be set.
+pytestmark = pytest.mark.skipif(
+    os.environ.get("PYTHONHASHSEED") is None,
+    reason=(
+        "PYTHONHASHSEED must be set for consistent hashing between "
+        "LMCacheLookupClient and LMCacheLookupServer. "
+        "Run with: PYTHONHASHSEED=0 pytest ..."
+    ),
 )
 
 

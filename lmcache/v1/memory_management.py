@@ -1059,6 +1059,15 @@ class AddressManager:
 
         self._size += size
 
+    def get_heap_size(self) -> int:
+        """
+        Get the total size of the address space.
+
+        Returns:
+            The total size in bytes.
+        """
+        return self._size
+
     def get_free_size(self) -> int:
         """
         Get the total free size in the address space.
@@ -1100,11 +1109,27 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         self,
         tensor: torch.Tensor,
         align_bytes: int = AddressManager.ALIGN_BYTES,
+        init_address_space: int | None = None,
     ):
+        """
+        Args:
+            tensor: The pre-allocated flat tensor to use as the memory pool.
+            align_bytes: The alignment requirement for allocations.
+            init_address_space: Initial size of the address space. If None,
+                use the size of the provided tensor.
+
+        Note:
+            The `init_address_space` is used for lazy memory allocation.
+            We probably want to have a better way to make sure that the
+            LazyMemoryAllocator can be decoupled from TensorMemoryAllocator.
+        """
         self.buffer = tensor.view(torch.uint8).flatten()
 
         # Use AddressManager for address space management
-        self.address_manager = AddressManager(self.buffer.numel(), align_bytes)
+        self.address_manager = AddressManager(
+            self.buffer.numel() if init_address_space is None else init_address_space,
+            align_bytes,
+        )
 
         # For debugging purposes
         self.num_active_allocations = 0
@@ -1325,7 +1350,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # Check if the numbers are consistent
         if (
             total_free_size + self.address_manager.total_allocated_size
-            != self.buffer.numel()
+            != self.address_manager.get_heap_size()
         ):
             logger.error("Memory allocator size is inconsistent")
             logger.error("This implies a bug in the memory allocator")
