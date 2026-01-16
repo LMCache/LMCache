@@ -99,7 +99,7 @@ If the NIC does not support RDMA:
 
 .. code-block:: bash
 
-    export UCX_TLS=TCP
+    export UCX_TLS=tcp
 
 Start vLLM engine 1 at port 8010:
 
