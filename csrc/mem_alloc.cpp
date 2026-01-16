@@ -40,7 +40,7 @@ static inline int mbind_sys(void* addr, unsigned long len, int mode,
   return (rc == -1) ? -errno : 0;
 }
 
-uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
+uintptr_t alloc_numa_ptr(size_t size, int node) {
   void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (ptr == MAP_FAILED)
@@ -57,6 +57,19 @@ uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
   }
 
   first_touch(ptr, size);
+
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void free_numa_ptr(uintptr_t ptr, size_t size) {
+  void* p = reinterpret_cast<void*>(ptr);
+  if (munmap(p, size) != 0) {
+    throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
+  }
+}
+
+uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
+  void* ptr = reinterpret_cast<void*>(alloc_numa_ptr(size, node));
 
   cudaError_t st = cudaHostRegister(ptr, size, 0);
   if (st != cudaSuccess) {

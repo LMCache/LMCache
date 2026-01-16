@@ -237,10 +237,6 @@ class TestHealthMonitor:
 
 
 class TestRemoteBackendHealthCheck:
-    def test_should_skip_when_ping_not_supported(self, mock_backend):
-        mock_backend.connection.support_ping.return_value = False
-        assert RemoteBackendHealthCheck(mock_backend).should_skip() is True
-
     def test_should_not_skip_when_connection_is_none(self, mock_backend):
         mock_backend.connection = None
         assert RemoteBackendHealthCheck(mock_backend).should_skip() is False

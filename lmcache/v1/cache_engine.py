@@ -790,17 +790,18 @@ class LMCacheEngine:
         # Skip chunk 1, retrieve chunk 2, overwrite [256..287] (32-token overlap)
         # need_to_load: 512 - 288 = 224 tokens
         # retrieved: 256 tokens
-        logger.info(
-            "Retrieved %d out of %d required tokens (from %d total tokens)."
-            " size: %.4f gb,"
-            " cost %.4f ms, throughput: %.4f GB/s;",
-            retrieved_tokens,
-            num_required_tokens,
-            len(tokens),
-            tot_kv_size / 1024**3,
-            onload_time * 1000,
-            tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
-        )
+        if not self._is_passive():
+            logger.info(
+                "Retrieved %d out of %d required tokens (from %d total tokens)."
+                " size: %.4f gb,"
+                " cost %.4f ms, throughput: %.4f GB/s;",
+                retrieved_tokens,
+                num_required_tokens,
+                len(tokens),
+                tot_kv_size / 1024**3,
+                onload_time * 1000,
+                tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
+            )
         return ret_mask
 
     @_lmcache_nvtx_annotate
@@ -942,11 +943,12 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.info(
-            f"Retrieved {retrieved_tokens} "
-            f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
-        )
+        if not self._is_passive():
+            logger.info(
+                f"Retrieved {retrieved_tokens} "
+                f"out of {num_required_tokens} "
+                f"out of total {len(tokens)} tokens"
+            )
 
         yield ret_mask
 
