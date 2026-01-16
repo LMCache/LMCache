@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # This script requires some pre-configuration on the CI machine: 
-# 1. the model weights already exists on the CI machine
-# 2. the sharegpt dataset already exists on the CI machine
+# 1. already has a virtual environment activated
+# 2. the model weights already exists on the CI machine
+# 3. the sharegpt dataset already exists on the CI machine
 
 # This script runs two tests: 
 # 1. a single request test for APC + LMCache hybrid KV Cache Retrieval
@@ -25,11 +26,36 @@ CORRECTNESS_DIR=".buildkite/correctness"
 REQUEST_NUMBER=100
 MAX_CONCURRENCY=40
 
-# print out the HOME
-echo "[INFO] HOME: $HOME"
-echo "[INFO] PWD: $PWD"
+#######################################
 # Prerequisite for this script: 
-# 1. the model weights already exist on the CI machine
+# Requires manual configuration on CI machines
+#######################################
+
+# 1. uv environment already exists
+
+# persist uv’s cache somewhere stable:
+export UV_CACHE_DIR="$HOME/.cache/uv"
+
+# we will try to reuse as much uv cache as possible across jobs
+# while pulling latest changes from vllm, LMCache, and other wheel dependencies
+source "$HOME/correctness/.venv/bin/activate"
+
+# update dependencies (nightly vllm and LMCache from the PR)
+# --refresh-package tells uv to revalidate cached data for that dependency.
+# --reinstall would reinstall all dependencies
+uv pip install -U vllm \
+  --extra-index-url https://wheels.vllm.ai/nightly \
+  --refresh-package vllm
+
+# override previous lmcache from previous jobs
+# the source installation is from this PR
+uv pip install -e . --reinstall-package lmcache
+
+# additional dependencies (please update manually if needed)
+# these packages are pretty stable so should not need to
+uv pip install aiohttp tqdm pandas huggingface_hub
+
+# 2. the model weights already exist on the CI machine
 export HF_HUB_OFFLINE=1 # this forces the model weights to be local
 unset HF_HOME
 unset HF_HUB_CACHE
@@ -37,19 +63,19 @@ unset HF_ASSETS_CACHE
 unset HF_XET_CACHE
 unset XDG_CACHE_HOME
 echo "[INFO] Verifying model weights exist in global cache on the CI machine..."
-if ! huggingface-cli download "$MODEL" --quiet; then
+if ! hf download "$MODEL" --quiet; then
     echo "[ERROR] Model weights for '$MODEL' not found in ~/.cache/huggingface"
     echo "[FIX] Please manually download the model weights on the CI machine"
     exit 1
 fi
 
-# 2. the sharegpt dataset already exists on the CI machine
+# 3. the sharegpt dataset already exists on the CI machine
 # wget -q \
 #   https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json \
 #   -O "$HOME/.ShareGPT_V3_unfiltered_cleaned_split.json"
 
 # ShareGPT dataset must already exist on the CI machine
-SHAREGPT_PATH="$HOME/.ShareGPT_V3_unfiltered_cleaned_split.json"
+SHAREGPT_PATH="$HOME/correctness/.ShareGPT_V3_unfiltered_cleaned_split.json"
 
 echo "[INFO] Verifying ShareGPT dataset exists on the CI machine..."
 
@@ -72,14 +98,6 @@ mkdir -p "$CI_CACHE_DIR"
 
 # not sure if this is needed on H100 (it was on L40s)
 export FLASHINFER_WORKSPACE_DIR="$CI_CACHE_DIR/flashinfer"
-
-# the venv should be created by the pipeline calling this script
-# since it will live in the job's directory
-# /var/lib/buildkite-agent/builds/<agent-name>/<org-slug>/<pipeline-slug>
-if [[ -f ".venv/bin/activate" ]]; then
-    echo "[INFO] Activating found venv in .venv"
-    source .venv/bin/activate
-fi
 
 #######################################
 # Helpers
@@ -116,7 +134,7 @@ echo "=== DIAGNOSTICS: GPU STATE before CI ==="
 nvidia-smi
 
 echo "[INFO] Converting ShareGPT dataset to OpenAI format..."
-python "${CORRECTNESS_DIR}/sharegpt2openai.py" -i "./ShareGPT.json" -o "./shareGPT_dataset.json"
+python "${CORRECTNESS_DIR}/sharegpt2openai.py" -i "$SHAREGPT_PATH" -o "./shareGPT_dataset.json"
 
 #######################################
 # Phase 1: Base Server (Baseline)

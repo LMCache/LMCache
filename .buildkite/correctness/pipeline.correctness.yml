@@ -1,49 +1,16 @@
 steps:
-  - label: ":rocket: vLLM correctness (source install)"
+  - label: ":rocket: vLLM correctness"
     key: "correctness"
     timeout_in_minutes: 60
     commands:
       - |
         set -euo pipefail
 
-        # 1. Install uv
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-        export PATH="$HOME/.local/bin:$PATH"
-        uv --version
+        echo "[INFO] HOME: $HOME"
+        echo "[INFO] PWD: $PWD"
 
-        # 2. Setup Cache - Escaped \$ prevents Buildkite from emptying the var
-        MY_CACHE_PATH="\$(pwd)/.uv-cache"
-        mkdir -p "\$MY_CACHE_PATH"
-        
-        export UV_CACHE_DIR="\$MY_CACHE_PATH"
-
-        # 3. Cleanup logic
-        cleanup() {
-          echo "[INFO] Cleaning up .venv and cache"
-          rm -rf .venv "\$MY_CACHE_PATH"
-        }
-        trap 'test_exit_code=$?; cleanup; exit $test_exit_code' EXIT INT TERM
-
-        # 4. Create isolated env
-        uv venv .venv
-        source .venv/bin/activate
-
-        # 5. Install dependencies (nightly vllm and LMCache from the PR)
-        # the vllm-correctness.sh script will activate this ven
-        uv pip install --upgrade pip
-        uv pip install -U vllm \
-          --torch-backend=auto \
-          --extra-index-url https://wheels.vllm.ai/nightly
-        uv pip install -e .
-        # additional dependencies
-        uv pip install aiohttp tqdm pandas huggingface_hub
-
-        # 6. Run test
         chmod +x .buildkite/scripts/vllm-correctness.sh
         BUILD_ID="${BUILDKITE_BUILD_ID}" .buildkite/scripts/vllm-correctness.sh
-        test_exit_code=$?
-        cleanup
-        exit $test_exit_code
 
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
