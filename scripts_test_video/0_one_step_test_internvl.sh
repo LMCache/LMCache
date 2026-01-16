@@ -10,25 +10,22 @@ export LMDEBUG=1
 export LMCACHE_VERBOSE=1
 export LMCACHE_CONFIG_FILE=lmcache_blend.yml
 export LM_CACHE_CONFIG_FILE=lmcache_blend.yml 
-<<<<<<< HEAD
 source /opt/venv/bin/activate
 change_recompute_ratio=False
 if [ "$change_recompute_ratio" = True ] ; then
   sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: [0.15]|g" lmcache_blend.yml
   echo "  blend_recompute_ratio set to 0.15"
 fi  
-model=OpenGVLab/InternVL3-14B
-model_name="InternVL3-14B"
-SERVER_LOG=server.log
-dataset_root=/home/users/ntu/wenyanch/dataset/Anomaly-Detection-Dataset
-=======
+export LM_CACHE_CONFIG_FILE=lmcache_blend.yml 
 
 change_recompute_ratio=False
 model=OpenGVLab/InternVL3-14B
 model_name="InternVL3-14B"
 SERVER_LOG=server.log
+dataset_root=/home/users/ntu/wenyanch/dataset/Anomaly-Detection-Dataset
+dataset_json="datasets/small_dataset.json"
+SERVER_LOG=server.log
 dataset_root=/root/workspace/dataset/Anomaly-Detection-Dataset
->>>>>>> b45bbc8 (use GPU as storage backend)
 dataset_json="datasets/small_dataset.json"
 
 # 1. simple example
@@ -51,11 +48,23 @@ for ratio in "${blend_recompute_ratios[@]}"; do
   # update in lmcache_blend.yml
   sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: ${ratio}|g" lmcache_blend.yml
   echo "  blend_recompute_ratio set to ${ratio}"
-<<<<<<< HEAD
   results_dir=results_analysis/logs/${model_name}/small_dataset
-=======
+  if [ ! -d "$results_dir" ]; then
+    mkdir -p "$results_dir"
+  fi
+
+WIN_SIZES=(40)
+STRIDE_SIZES=(0.2)
+blend_recompute_ratios=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
+
+if [ "$change_recompute_ratio" = False ] ; then
+  blend_recompute_ratios=(0.15)
+fi
+for ratio in "${blend_recompute_ratios[@]}"; do
+  # update in lmcache_blend.yml
+  sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: ${ratio}|g" lmcache_blend.yml
+  echo "  blend_recompute_ratio set to ${ratio}"
   results_dir=results_analysis/logs/${model_name}/small_dataset/test_gpu_backend
->>>>>>> b45bbc8 (use GPU as storage backend)
   if [ ! -d "$results_dir" ]; then
     mkdir -p "$results_dir"
   fi
@@ -63,6 +72,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
   rm -f $SERVER_LOG
   # kill existing vllm serve process
   pkill -f "vllm serve $model"
+  kill -9 $(ps aux | grep "VLLM::EngineCore" | awk '{print $2}')
   kill -9 $(ps aux | grep "VLLM::EngineCore" | awk '{print $2}')
   sleep 15
 
@@ -95,12 +105,17 @@ for ratio in "${blend_recompute_ratios[@]}"; do
         --dataset-root $dataset_root  \
         --dataset-json $dataset_json \
         --output-dir $results_dir \
+        --dataset-root $dataset_root  \
+        --dataset-json $dataset_json \
+        --output-dir $results_dir \
         --csv-name request_times_win${WIN}_stride${STRIDE}.csv \
         --model $model \
+        --sample-fps 2.0 \
         --sample-fps 2.0 \
         --use-sliding-window \
         --window-seconds ${WIN} \
         --stride-ratio ${STRIDE} \
+        --category all \
         --category all \
         --blend-special-str "$BLEND_SPECIAL_STR"
       sleep 5
@@ -108,7 +123,3 @@ for ratio in "${blend_recompute_ratios[@]}"; do
     sleep 5
   done
 done
-<<<<<<< HEAD
-
-=======
->>>>>>> b45bbc8 (use GPU as storage backend)

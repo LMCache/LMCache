@@ -4,6 +4,9 @@
 *.pdf
 *.png
 scripts*/*.csv
+scripts_test_video/results_analysis/csv*
+scripts_test_video/results_analysis/log*
+scripts_test_video/*.sh
 
 
 # Byte-compiled / optimized / DLL files

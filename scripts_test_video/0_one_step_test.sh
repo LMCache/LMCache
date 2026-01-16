@@ -37,15 +37,9 @@ dataset_json="datasets/small_dataset.json"
 
 
 # 2. anomaly detection
-<<<<<<< HEAD
 WIN_SIZES=(40)
-STRIDE_SIZES=(0.2)
-blend_recompute_ratios=(0.1)
-=======
-WIN_SIZES=(30)
 STRIDE_SIZES=(0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
-blend_recompute_ratios=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
->>>>>>> b45bbc8 (use GPU as storage backend)
+blend_recompute_ratios=(0.1)
 
 if [ "$change_recompute_ratio" = False ] ; then
   blend_recompute_ratios=(0.15)
@@ -54,6 +48,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
   # update in lmcache_blend.yml
   sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: ${ratio}|g" lmcache_blend.yml
   echo "  blend_recompute_ratio set to ${ratio}"
+  results_dir=results_analysis/logs/${model_name}/small_dataset
   results_dir=results_analysis/logs/${model_name}/small_dataset
   if [ ! -d "$results_dir" ]; then
     mkdir -p "$results_dir"
@@ -70,13 +65,10 @@ for ratio in "${blend_recompute_ratios[@]}"; do
     --port 8000 \
     --trust-remote-code \
     --disable-log-requests \
-<<<<<<< HEAD
     --max-num-batched-tokens 65536 \
     --max-model-len 8192 \
     --tensor-parallel-size 4 \
-=======
     --max-num-batched-tokens 153600 \
->>>>>>> b45bbc8 (use GPU as storage backend)
     --gpu-memory-utilization 0.9 \
     --enforce-eager \
     --no-enable-prefix-caching \
