@@ -11,7 +11,9 @@ Prerequisites
 -------------
 
 - **Multi-GPU Setup**: Your server should have at least 2 GPUs
+- **NIC**: RDMA is recommended for more performance.
 - **NIXL**: Install from `NIXL <https://github.com/ai-dynamo/nixl>`_
+- **vLLM**: v1 version is required, refer to :ref:`installation_guide` for details.
 - **LMCache**: Install from :ref:`installation_guide`
 
 Configuration
@@ -80,18 +82,30 @@ Setup and Usage
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=123 lmcache_controller --host localhost --port 9000 --monitor-ports '{"pull": 8300, "reply": 8400}'
+    PYTHONHASHSEED=123 lmcache_controller --host localhost --port 9000 --monitor-ports '{"pull": 8300, "reply": 8400, "heartbeat": 8082}'
 
 Make sure that the 8300 and 8400 ports are set up in **controller_pull_url** and **controller_reply_url** in the configuration files.
 Port 9000 is the controller main port, which is arbitrary and can be changed.
 
 **Step 2: Start vLLM Engines with LMCache Workers**
 
+If the NIC supports RDMA:
+
+.. code-block:: bash
+
+    export UCX_TLS=rc
+
+If the NIC does not support RDMA:
+
+.. code-block:: bash
+
+    export UCX_TLS=tcp
+
 Start vLLM engine 1 at port 8010:
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=example1.yaml \
+    PYTHONHASHSEED=123  CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=/path/to/example1.yaml \
     vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8010 \
@@ -101,7 +115,7 @@ Start vLLM engine 2 at port 8011:
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=example2.yaml \
+    PYTHONHASHSEED=123  CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=/path/to/example2.yaml \
     vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8011 \
