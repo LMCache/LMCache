@@ -133,6 +133,10 @@ exec > >(tee -a "${WORK_LOG}") 2>&1
 echo "=== DIAGNOSTICS: GPU STATE before CI ==="
 nvidia-smi
 
+echo "[INFO] Selecting free GPU for this build..."
+source .buildkite/scripts/pick-free-gpu.sh 120000 1
+echo "[INFO] Using GPU(s): ${CUDA_VISIBLE_DEVICES}"
+
 echo "[INFO] Converting ShareGPT dataset to OpenAI format..."
 python "${CORRECTNESS_DIR}/sharegpt2openai.py" -i "$SHAREGPT_PATH" -o "./shareGPT_dataset.json"
 
