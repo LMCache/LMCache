@@ -203,22 +203,20 @@ Benchmark Results
 First instance metrics:
 
 .. code-block:: text
-
-    === BENCHMARK RESULTS ===
-    Query round mean TTFT: 0.466s
-    Query round time: 19.838s
-    Query round prompt count: 50
-    Query round successful prompt count: 50
+ 
+    Warmup round mean TTFT: 0.466s
+    Warmup round time: 19.838s
+    Warmup round prompt count: 50
+    Warmup round successful prompt count: 50
 
 Second instance metrics:
 
 .. code-block:: text
+ 
+    Warmup round mean TTFT: 0.360s
+    Warmup round time: 17.896s
+    Warmup round prompt count: 50
+    Warmup round successful prompt count: 50
 
-    === BENCHMARK RESULTS ===
-    Query round mean TTFT: 0.360s
-    Query round time: 17.896s
-    Query round prompt count: 50
-    Query round successful prompt count: 50
-
-From this example, we can see a 22% reduction in TTFT (0.466s → 0.360s), with LMCache P2P sharing.
+In this example, the warm-up round metric in long_doc_qa is used because no existing KV cache is reused within an instance. With LMCache P2P sharing enabled, the time to first token (TTFT) is reduced by 22%, from 0.466 s to 0.360 s.
 
