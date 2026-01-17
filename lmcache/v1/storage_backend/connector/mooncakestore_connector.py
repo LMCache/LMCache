@@ -179,13 +179,14 @@ class MooncakestoreConnector(RemoteConnector):
                         if numa_id is not None:
                             bind_to_numa_node(numa_id)
                             logger.info(
-                                f"GPU {current_device_id}, NUMA node {numa_id} binding done"
+                                f"GPU {current_device_id}, "
+                                f"NUMA node {numa_id} binding done"
                             )
                         else:
                             logger.info(
                                 f"NUMA mapping not found for GPU {current_device_id}"
                             )
-                    except ImportError as e:
+                    except ImportError:
                         logger.warning(
                             "unable to import bind_to_numa_node from mooncake.store"
                         )
