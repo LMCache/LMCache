@@ -533,9 +533,6 @@ class MooncakestoreConnector(RemoteConnector):
             logger.warning(
                 "Timeout during batch_put_from; some decoders may redo prefill."
             )
-        finally:
-            for obj in memory_objs:
-                obj.ref_count_down()
 
     async def _batched_put_with_metadata(
         self,
@@ -543,10 +540,7 @@ class MooncakestoreConnector(RemoteConnector):
         memory_objs: List[MemoryObj],
     ) -> None:
         for key, obj in zip(keys, memory_objs, strict=False):
-            try:
-                await self._put_with_metadata(key.to_string(), obj)
-            finally:
-                obj.ref_count_down()
+            await self._put_with_metadata(key.to_string(), obj)
 
     async def _put_without_metadata(self, key_str: str, memory_obj: MemoryObj):
         """
