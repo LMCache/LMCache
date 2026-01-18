@@ -485,7 +485,7 @@ class LMCacheEngine:
         tot_time = offload_time + put_time
 
         logger.info(
-            "Stored %d out of total %d tokens. size: %.4f gb, cost %.4f ms, "
+            "Stored %d out of total %d tokens. size: %.4f GB, cost %.4f ms, "
             "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
             tot_token_num,
             num_to_store_tokens,
@@ -637,6 +637,11 @@ class LMCacheEngine:
             memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
             keys = [list(row) for row in zip(*keys, strict=False)]
 
+            # Calculate total KV size for logging
+            tot_kv_size = sum(
+                mo.get_size() for layer_objs in memory_objs for mo in layer_objs
+            )
+
             assert isinstance(
                 self.gpu_connector,
                 (
@@ -646,6 +651,7 @@ class LMCacheEngine:
                 ),
             )
 
+            t_start = time.perf_counter()
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
                 memory_objs, starts, ends, **kwargs
             )
@@ -656,6 +662,17 @@ class LMCacheEngine:
                 yield
                 next(mem_obj_generator)
                 self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+
+            tot_time = time.perf_counter() - t_start
+            logger.info(
+                "Stored %d out of total %d tokens. "
+                "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s",
+                tot_token_num,
+                len(tokens),
+                tot_kv_size / 1024**3,
+                tot_time * 1000,
+                tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
+            )
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -663,7 +680,6 @@ class LMCacheEngine:
                 yield
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
-        logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
         yield
 
     @_lmcache_nvtx_annotate
