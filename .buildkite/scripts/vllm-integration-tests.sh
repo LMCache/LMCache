@@ -416,6 +416,90 @@ usage() {
 # TESTS #
 #########
 
+check_memory_leak() {
+    local port="$1"
+    local use_hot="$2"
+
+    echo "→ Checking memory leak on port $port (use_hot=$use_hot)..."
+
+    # Fetch metrics from the prometheus endpoint
+    local metrics
+    metrics=$(curl -s "http://localhost:${port}/metrics" 2>/dev/null)
+    if [ -z "$metrics" ]; then
+        echo "ERROR: Failed to fetch metrics from port $port"
+        return 1
+    fi
+
+    # Extract metric values
+    local local_cpu_hot_cache_count
+    local active_memory_objs_count
+    local pinned_memory_objs_count
+
+    local_cpu_hot_cache_count=$(echo "$metrics" | grep -E '^lmcache:local_cpu_hot_cache_count\b' | awk '{print $2}' | head -n 1)
+    active_memory_objs_count=$(echo "$metrics" | grep -E '^lmcache:active_memory_objs_count\b' | awk '{print $2}' | head -n 1)
+    pinned_memory_objs_count=$(echo "$metrics" | grep -E '^lmcache:pinned_memory_objs_count\b' | awk '{print $2}' | head -n 1)
+
+    # Default to 0 if not found
+    local_cpu_hot_cache_count=${local_cpu_hot_cache_count:-0}
+    active_memory_objs_count=${active_memory_objs_count:-0}
+    pinned_memory_objs_count=${pinned_memory_objs_count:-0}
+
+    # Convert to integer (remove decimal part if any)
+    local_cpu_hot_cache_count=$(printf "%.0f" "$local_cpu_hot_cache_count")
+    active_memory_objs_count=$(printf "%.0f" "$active_memory_objs_count")
+    pinned_memory_objs_count=$(printf "%.0f" "$pinned_memory_objs_count")
+
+    echo "  local_cpu_hot_cache_count: $local_cpu_hot_cache_count"
+    echo "  active_memory_objs_count: $active_memory_objs_count"
+    echo "  pinned_memory_objs_count: $pinned_memory_objs_count"
+
+    local has_leak=false
+
+    # Check pinned_memory_objs_count must be 0
+    if [ "$pinned_memory_objs_count" -ne 0 ]; then
+        echo "ERROR: Memory leak detected - pinned_memory_objs_count ($pinned_memory_objs_count) should be 0"
+        has_leak=true
+    fi
+
+    # Check based on use_hot setting
+    if [ "$use_hot" = "false" ] || [ "$use_hot" = "False" ]; then
+        # use_hot is False: both local_cpu_hot_cache_count and active_memory_objs_count should be 0
+        if [ "$local_cpu_hot_cache_count" -ne 0 ]; then
+            echo "ERROR: Memory leak detected - local_cpu_hot_cache_count ($local_cpu_hot_cache_count) should be 0 when use_hot=false"
+            has_leak=true
+        fi
+        if [ "$active_memory_objs_count" -ne 0 ]; then
+            echo "ERROR: Memory leak detected - active_memory_objs_count ($active_memory_objs_count) should be 0 when use_hot=false"
+            has_leak=true
+        fi
+    else
+        # use_hot is True: active_memory_objs_count should equal local_cpu_hot_cache_count
+        if [ "$active_memory_objs_count" -ne "$local_cpu_hot_cache_count" ]; then
+            echo "ERROR: Memory leak detected - active_memory_objs_count ($active_memory_objs_count) should equal local_cpu_hot_cache_count ($local_cpu_hot_cache_count) when use_hot=true"
+            has_leak=true
+        fi
+    fi
+
+    if [ "$has_leak" = true ]; then
+        return 1
+    fi
+
+    echo "  Memory leak check passed!"
+    return 0
+}
+
+get_use_hot_from_docker_args() {
+    local docker_args="$1"
+    # Extract LMCACHE_LOCAL_CPU from docker env vars
+    local use_hot
+    use_hot=$(echo "$docker_args" | yq -r '.env[]? | select(test("LMCACHE_LOCAL_CPU"))' 2>/dev/null | sed 's/.*=//')
+    # Default to false if not set
+    if [ -z "$use_hot" ]; then
+        use_hot="false"
+    fi
+    echo "$use_hot"
+}
+
 test_vllmopenai_server_with_lmcache_integrated() {
     local model="$1"
 
@@ -691,6 +775,38 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             run_long_doc_qa "$workload_yaml" "$PORT2" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         else
             run_long_doc_qa "$workload_yaml" "$PORT" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
+        fi
+    fi
+
+    # Check memory leak after test
+    echo "→ Checking for memory leaks..."
+    if [[ "$feature_type" == "pd" ]]; then
+        use_hot1=$(get_use_hot_from_docker_args "$prefiller_docker_args")
+        use_hot2=$(get_use_hot_from_docker_args "$decoder_docker_args")
+        if ! check_memory_leak "$PORT1" "$use_hot1"; then
+            echo "Memory leak check failed for prefiller on port $PORT1"
+            exit 1
+        fi
+        if ! check_memory_leak "$PORT2" "$use_hot2"; then
+            echo "Memory leak check failed for decoder on port $PORT2"
+            exit 1
+        fi
+    elif [[ "$feature_type" == "p2p" ]]; then
+        use_hot1=$(get_use_hot_from_docker_args "$docker1_args")
+        use_hot2=$(get_use_hot_from_docker_args "$docker2_args")
+        if ! check_memory_leak "$PORT1" "$use_hot1"; then
+            echo "Memory leak check failed for instance 1 on port $PORT1"
+            exit 1
+        fi
+        if ! check_memory_leak "$PORT2" "$use_hot2"; then
+            echo "Memory leak check failed for instance 2 on port $PORT2"
+            exit 1
+        fi
+    else
+        use_hot=$(get_use_hot_from_docker_args "$docker_args")
+        if ! check_memory_leak "$PORT" "$use_hot"; then
+            echo "Memory leak check failed on port $PORT"
+            exit 1
         fi
     fi
 
