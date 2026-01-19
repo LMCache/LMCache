@@ -330,11 +330,14 @@ class LMCacheLookupServer:
                 identity = frames[0].bytes
                 # frames[1] is the empty delimiter frame from REQ socket
                 data_frames = frames[2:]
+                if len(data_frames) < 2:
+                    logger.warning("Malformed request received: not enough frames.")
+                    continue
                 lookup_id = data_frames[-2].bytes.decode("utf-8")
                 request_configs_str = data_frames[-1].bytes.decode("utf-8")
-                request_configs = None
-                if request_configs_str != "":
-                    request_configs = json.loads(request_configs_str)
+                request_configs = (
+                    json.loads(request_configs_str) if request_configs_str else None
+                )
                 if not self.enable_blending:
                     hash_frames = data_frames[0]
                     offset_frames = data_frames[1]
