@@ -213,30 +213,41 @@ GPU memory and LMCache is necessary to keep KV caches in non-GPU memory:
 
 **Step 2. Start a vLLM server with Disk offloading enabled:**
 
-*Generally, it is not recommended but we will disable CPU offloading to feel just the disk offloading latency.*
-
-Create a an lmcache configuration file called: ``disk-offload.yaml``
+Create an LMCache configuration file called: ``disk-offload.yaml``
 
 Example ``config.yaml``:
 
 .. code-block:: yaml
 
     chunk_size: 256
-    local_cpu: false
-    max_local_cpu_size: 5.0
-    local_disk: "file:///local/disk_test/local_disk/"
+    local_cpu: true
+    max_local_cpu_size: 0.1
+    local_disk: "file:///tmp/lmcache_disk/"
     max_local_disk_size: 5.0
 
-If you don't want to use a config file, uncomment the first five environment variables
-and then comment out the ``LMCACHE_CONFIG_FILE`` below:
+.. note::
+
+    The disk backend requires CPU backend to be enabled (``local_cpu: true``). To isolate disk performance, set ``max_local_cpu_size`` to a small value (e.g., 0.1 GB) so most KV cache overflows to disk.
+
+If you don't want to use a config file, use environment variables instead:
 
 .. code-block:: bash
 
-    # LMCACHE_CHUNK_SIZE=256 \
-    # LMCACHE_LOCAL_CPU=False \
-    # LMCACHE_MAX_LOCAL_CPU_SIZE=5.0 \
-    # LMCACHE_LOCAL_DISK="file:///local/disk_test/local_disk/" \
-    # LMCACHE_MAX_LOCAL_DISK_SIZE=5.0 \
+    LMCACHE_CHUNK_SIZE=256 \
+    LMCACHE_LOCAL_CPU=True \
+    LMCACHE_MAX_LOCAL_CPU_SIZE=0.1 \
+    LMCACHE_LOCAL_DISK="file:///tmp/lmcache_disk/" \
+    LMCACHE_MAX_LOCAL_DISK_SIZE=5.0 \
+    vllm serve \
+        meta-llama/Llama-3.1-8B-Instruct \
+        --max-model-len 16384 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+
+Or use a config file:
+
+.. code-block:: bash
+
     LMCACHE_CONFIG_FILE="disk-offload.yaml" \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
@@ -328,11 +339,9 @@ Then run:
 Since we're in streaming mode, you'll be able to feel the TTFT differential in
 real time!
 
-Note that if we were to enable ``LMCACHE_LOCAL_CPU=True``, we would just be using
-the same example from :doc:`CPU RAM <./cpu_ram>` since the CPU RAM is checked before
-the disk by LMCache. In practice, the disk will be capable of storing a larger
-quantity of KV caches so the CPU RAM offloading will only be able to store a
-subset of the disk's KV caches.
+.. note::
+
+    The disk backend uses CPU RAM as a staging layer for transfers. By setting a small ``max_local_cpu_size`` (e.g., 0.1 GB), most KV cache will overflow to disk, letting you observe disk offloading performance. In production, you would typically allocate more CPU RAM to act as a fast cache layer in front of the disk.
 
 **Example Output:**
 
@@ -396,3 +405,100 @@ Tips:
 - If you want to run the ``query-twice.py`` script multiple times, you'll need to either restart the vLLM LMCache server or change the prefix of the context you pass in since you've already warmed LMCache.
 
 - The max model length here was decided by running an L4 with only 23GB of GPU memory. If you have more memory, you can increase the max model length and modify ``query-twice.py`` to use more of the long context. LMCache TTFT improvement becomes more pronounced as the context length increases!
+
+
+.. _local-storage-benchmarking:
+
+Benchmarking
+------------
+
+For more rigorous benchmarking of local disk storage, you can use LMCache's **Long Doc QA** workload generator. This tool sends configurable long-context queries to measure TTFT improvements at scale.
+
+**Step 1. Use the Recommender**
+
+The Long Doc QA Recommender helps determine optimal deployment settings based on your hardware:
+
+.. code-block:: bash
+
+    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model meta-llama/Llama-3.1-8B-Instruct
+
+**Step 2. Deploy vLLM with Disk Offloading**
+
+Create a config file ``disk-benchmark.yaml``:
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    local_cpu: true
+    max_local_cpu_size: 0.1
+    local_disk: "file:///tmp/lmcache_disk/"
+    max_local_disk_size: 10.0
+
+.. note::
+
+    The disk backend requires CPU backend to be enabled. Setting ``max_local_cpu_size`` to a small value (e.g., 0.1 GB) ensures most KV cache is stored on disk rather than CPU RAM.
+
+Start the server:
+
+.. code-block:: bash
+
+    PYTHONHASHSEED=0 \
+    LMCACHE_CONFIG_FILE="disk-benchmark.yaml" \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --tensor-parallel-size 1 \
+        --max-model-len 16384 \
+        --kv-transfer-config \
+        '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}'
+
+**Step 3. Run the Benchmark**
+
+.. code-block:: bash
+
+    python benchmarks/long_doc_qa/long_doc_qa.py \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --num-documents 20 \
+        --document-length 10000 \
+        --output-len 100 \
+        --repeat-count 2 \
+        --repeat-mode tile \
+        --max-inflight-requests 4
+
+**Configurable Parameters:**
+
+- ``--num-documents``: Number of unique documents to send (default: 20)
+- ``--document-length``: Tokens per document (default: 10000)
+- ``--output-len``: Output tokens per request (default: 100)
+- ``--repeat-count``: Times to repeat each document for cache hits (default: 1)
+- ``--repeat-mode``: How to repeat (``random``, ``tile``, ``interleave``)
+- ``--max-inflight-requests``: Concurrent requests (default: 4)
+
+**Example Output (Disk Offloading):**
+
+.. code-block:: text
+
+    === BENCHMARK RESULTS ===
+    Query round mean TTFT: 0.185s
+    Query round time: 13.789s
+    Query round prompt count: 46
+
+**Comparing with Baseline vLLM (No LMCache):**
+
+Run vLLM without LMCache to establish a baseline:
+
+.. code-block:: bash
+
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --tensor-parallel-size 1 \
+        --max-model-len 16384
+
+Then run the same benchmark. You should see significantly higher TTFT without disk offloading.
+
+**Clearing the Disk Cache Between Runs:**
+
+To reset the disk cache for fresh benchmarks:
+
+.. code-block:: bash
+
+    rm -rf /tmp/lmcache_disk/*
+
+Or restart the vLLM server to clear both CPU and disk caches.
