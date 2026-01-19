@@ -176,6 +176,7 @@ class MooncakestoreConnector(RemoteConnector):
                     try:
                         # Third Party
                         from mooncake.store import bind_to_numa_node
+
                         if numa_id is not None:
                             bind_to_numa_node(numa_id)
                             logger.info(
