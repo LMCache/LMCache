@@ -218,7 +218,5 @@ Second instance metrics:
     Warmup round prompt count: 50
     Warmup round successful prompt count: 50
 
-In this example, the warm-up round metric in long_doc_qa is used because no existing KV cache is reused within an instance. 
-
-With LMCache P2P sharing enabled, the time to first token (TTFT) is reduced by 22%, from 0.466 s to 0.360 s.
+In this example, the warm-up round metric in long_doc_qa is used because no existing KV cache is reused within an instance. With LMCache P2P sharing enabled, the time to first token (TTFT) is reduced by 22%, from 0.466 s to 0.360 s.
 
