@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, List
+from typing import List
 import os
 import threading
 
@@ -18,22 +18,19 @@ from lmcache.v1.rpc_utils import (
     get_zmq_socket,
 )
 
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
-
 
 class ZMQOffloadServer(OffloadServerInterface):
     def __init__(
         self,
         lmcache_engine: LMCacheEngine,
-        vllm_config: "VllmConfig",
         tp_rank: int,
     ):
+        metadata = lmcache_engine.metadata
         self.ctx = get_zmq_context(use_asyncio=False)
         offload_rpc_port = int(os.environ.get("LMCACHE_OFFLOAD_RPC_PORT", 100))
+        engine_id = metadata.engine_id or "default"
         socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "offload", offload_rpc_port, tp_rank
+            engine_id, "offload", offload_rpc_port, tp_rank
         )
         self.socket = get_zmq_socket(
             self.ctx,

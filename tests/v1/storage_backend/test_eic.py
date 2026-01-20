@@ -4,9 +4,19 @@ import argparse
 import os
 
 # Third Party
-import eic
+import pytest
 import torch
 import yaml
+
+try:
+    # Third Party
+    import eic
+
+    EIC_AVAILABLE = True
+except ImportError:
+    EIC_AVAILABLE = False
+
+pytestmark = pytest.mark.skipif(not EIC_AVAILABLE, reason="eic module not available")
 
 
 def parse_args():

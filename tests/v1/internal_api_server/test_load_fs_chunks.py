@@ -20,13 +20,10 @@ from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.internal_api_server.api_server import app
-from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import AdHocMemoryAllocator
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+from tests.v1.utils import create_test_memory_obj
 
 
 class TestLoadFSChunksAPI:
@@ -131,14 +128,6 @@ class TestLoadFSChunksAPI:
             dtype=torch.bfloat16,
         )
 
-    def _create_test_memory_obj(
-        self, shape=(2, 16, 8, 128), dtype=torch.bfloat16
-    ) -> MemoryObj:
-        """Create a test MemoryObj."""
-        allocator = AdHocMemoryAllocator(device="cpu")
-        memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-        return memory_obj
-
     def _prepare_test_data(
         self,
         temp_fs_path: str,
@@ -164,7 +153,7 @@ class TestLoadFSChunksAPI:
         try:
             for i in range(num_chunks):
                 key = self._create_test_key(i)
-                memory_obj = self._create_test_memory_obj()
+                memory_obj = create_test_memory_obj()
                 future = remote_backend.submit_put_task(key, memory_obj)
                 if future:
                     future.result(timeout=5.0)

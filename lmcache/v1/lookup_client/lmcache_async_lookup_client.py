@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import threading
 import time
 
@@ -26,10 +26,6 @@ from lmcache.v1.rpc_utils import (
     get_zmq_socket,
 )
 
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
-
 logger = init_logger(__name__)
 
 
@@ -52,7 +48,6 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ):
@@ -62,12 +57,11 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self.timeout_ms = config.lookup_timeout_ms
 
         self.ctx = get_zmq_context(use_asyncio=False)
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
-        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        engine_id = metadata.engine_id
+        assert engine_id is not None, "engine_id is required for RPC communication"
+        self.num_ranks = metadata.num_ranks
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -81,11 +75,12 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
         for rank in ranks:
             worker_socket_path = get_zmq_rpc_path_lmcache(
-                vllm_config, "lookup_worker", rpc_port, rank
+                engine_id, "lookup_worker", rpc_port, rank
             )
             logger.info(
-                f"lmcache lookup client connect to rank {rank} "
-                f"with worker socket path {worker_socket_path}"
+                "lmcache lookup client connect to rank %s with worker socket path %s",
+                rank,
+                worker_socket_path,
             )
 
             push_socket = get_zmq_socket(
@@ -99,7 +94,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             self.push_sockets.append(push_socket)
 
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup_scheduler", rpc_port, 0
+            engine_id, "lookup_scheduler", rpc_port, 0
         )
         self.pull_socket = get_zmq_socket(
             self.ctx,
@@ -109,8 +104,8 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             "bind",
         )
         logger.info(
-            f"lmcache lookup client connect to scheduler "
-            f"with socket path {scheduler_socket_path}"
+            "lmcache lookup client connect to scheduler with socket path %s",
+            scheduler_socket_path,
         )
 
         # First Party
@@ -248,7 +243,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                         self.reqs_status[lookup_id] = min(all_res)
 
             except Exception as e:
-                logger.error(f"Error processing response from worker: {e}")
+                logger.error("Error processing response from worker: %s", e)
 
     def clear_lookup_status(self, lookup_id: str) -> None:
         with self.lock:
@@ -299,23 +294,29 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             self.pull_socket.close(linger=0)  # type: ignore[arg-type]
             self.ctx.term()
         except Exception as e:
-            logger.warning(f"Failed to join thread during close: {e}")
+            logger.warning("Failed to join thread during close: %s", e)
 
 
 class LMCacheAsyncLookupServer:
     """ZMQ-based async lookup server that handles lookup and prefetch
     requests using LMCacheEngine."""
 
-    def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
+    def __init__(
+        self,
+        lmcache_engine: LMCacheEngine,
+        metadata: LMCacheEngineMetadata,
+    ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
         )
         worker_socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup_worker", rpc_port, vllm_config.parallel_config.rank
+            metadata.engine_id, "lookup_worker", rpc_port, metadata.worker_id
         )
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup_scheduler", rpc_port, 0
+            metadata.engine_id, "lookup_scheduler", rpc_port, 0
         )
         self.push_socket = get_zmq_socket(
             self.ctx,
@@ -337,8 +338,10 @@ class LMCacheAsyncLookupServer:
 
         logger.info(
             "lmcache lookup server start with"
-            f" scheduler socket path {scheduler_socket_path}, "
-            f"worker socket path {worker_socket_path}"
+            " scheduler socket path %s, "
+            "worker socket path %s",
+            scheduler_socket_path,
+            worker_socket_path,
         )
         self.thread = threading.Thread(
             target=self.process_requests_from_scheduler, daemon=True
@@ -392,9 +395,8 @@ class LMCacheAsyncLookupServer:
         try:
             if self.thread.is_alive():
                 self.thread.join(timeout=1.0)
-            for s in self.push_sockets:
-                s.close(linger=0)  # type: ignore[arg-type]
+            self.push_socket.close(linger=0)  # type: ignore[arg-type]
             self.pull_socket.close(linger=0)  # type: ignore[arg-type]
             self.ctx.term()
         except Exception as e:
-            logger.warning(f"Failed to join thread during close: {e}")
+            logger.warning("Failed to join thread during close: %s", e)

@@ -581,7 +581,7 @@ class TestRegistryTreeFineGrainedLocking:
         def get_infos():
             for _ in range(50):
                 try:
-                    infos = registry.get_all_worker_infos()
+                    infos = registry.get_all_worker_infos_cached()
                     # Just verify it returns a list without error
                     assert isinstance(infos, list)
                 except Exception as e:

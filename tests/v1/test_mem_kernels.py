@@ -471,3 +471,118 @@ def test_single_layer_kernel(num_tokens, token_major):
         kv_cache_new,
         slot_mapping,
     )
+
+
+def test_lmcache_memcpy_async():
+    # Register 4 memory regions and try to launch copy
+    chunk_size = 1 << 26
+    num_chunks = 4
+    dtype = torch.bfloat16
+    elements_per_chunk = chunk_size // dtype.itemsize
+
+    big_cpu_tensor = torch.rand(
+        elements_per_chunk * num_chunks, dtype=dtype, device="cpu"
+    )
+    big_gpu_tensor = torch.rand(
+        elements_per_chunk * num_chunks, dtype=dtype, device="cuda"
+    )
+
+    def check_gpu_and_cpu_equal(
+        gpu_tensor: torch.Tensor,
+        cpu_tensor: torch.Tensor,
+    ):
+        cpu_tensor_from_gpu = gpu_tensor.to("cpu")
+        assert torch.allclose(cpu_tensor_from_gpu, cpu_tensor, atol=1e-5)
+
+    rt = torch.cuda.cudart()
+
+    # Register the cpu memory
+    ptr = big_cpu_tensor.data_ptr()
+    for i in range(num_chunks):
+        rt.cudaHostRegister(ptr + i * chunk_size, chunk_size, 0)
+
+    # Launch default cuda copy
+    with pytest.raises(RuntimeError):
+        big_gpu_tensor.copy_(big_cpu_tensor, non_blocking=True)
+        torch.cuda.synchronize()
+
+    # Launc default cuda copy for a small page
+    big_gpu_tensor[: elements_per_chunk // 2].copy_(
+        big_cpu_tensor[: elements_per_chunk // 2], non_blocking=True
+    )
+    torch.cuda.synchronize()
+
+    check_gpu_and_cpu_equal(
+        big_gpu_tensor[: elements_per_chunk // 2],
+        big_cpu_tensor[: elements_per_chunk // 2],
+    )
+
+    # Positions to copy
+    # - 0.25 chunk -- 0.75 chunk
+    # - 0.75 chunk -- 1.25 chunk
+    # - 1.75 chunk -- 3.25 chunk
+    # - whole 4 chunks
+    starts = [chunk_size // 4, (3 * chunk_size) // 4, (7 * chunk_size) // 4, 0]
+    ends = [
+        (3 * chunk_size) // 4,
+        (5 * chunk_size) // 4,
+        (13 * chunk_size) // 4,
+        chunk_size * num_chunks,
+    ]
+
+    # H2D copy
+    for start, end in zip(starts, ends, strict=False):
+        # should not be equal before copy
+        with pytest.raises(AssertionError):
+            check_gpu_and_cpu_equal(
+                big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            )
+
+        lmc_ops.lmcache_memcpy_async(
+            big_gpu_tensor.data_ptr() + start,
+            big_cpu_tensor.data_ptr() + start,
+            end - start,
+            lmc_ops.TransferDirection.H2D,
+            start,
+            chunk_size,
+        )
+        torch.cuda.synchronize()
+
+        check_gpu_and_cpu_equal(
+            big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+        )
+
+    # Reset the data in gpu
+    big_gpu_tensor = torch.rand(
+        elements_per_chunk * num_chunks, dtype=dtype, device="cuda"
+    )
+    # D2H copy
+    for start, end in zip(starts, ends, strict=False):
+        # copy from gpu to cpu
+        with pytest.raises(AssertionError):
+            check_gpu_and_cpu_equal(
+                big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            )
+
+        lmc_ops.lmcache_memcpy_async(
+            big_cpu_tensor.data_ptr() + start,
+            big_gpu_tensor.data_ptr() + start,
+            end - start,
+            lmc_ops.TransferDirection.D2H,
+            start,
+            chunk_size,
+        )
+        torch.cuda.synchronize()
+
+        check_gpu_and_cpu_equal(
+            big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+        )
+
+    # Unregister the cpu memory
+    ptr = big_cpu_tensor.data_ptr()
+    for i in range(num_chunks):
+        rt.cudaHostUnregister(ptr + i * chunk_size)

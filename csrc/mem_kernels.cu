@@ -11,6 +11,20 @@
   #include <cuda_fp8.h>
 #endif
 
+#ifndef CHECK_CUDA_CALL
+  #define CHECK_CUDA_CALL(call)                                             \
+    do {                                                                    \
+      cudaError_t err = call;                                               \
+      if (err != cudaSuccess) {                                             \
+        fprintf(stderr, "CUDA error in file '%s' in line %i : %s.\n",       \
+                __FILE__, __LINE__, cudaGetErrorString(err));               \
+        throw std::runtime_error(                                           \
+            std::string("CUDA error in file '") + __FILE__ + "' in line " + \
+            std::to_string(__LINE__) + " : " + cudaGetErrorString(err));    \
+      }                                                                     \
+    } while (0)
+#endif
+
 namespace lmc {
 
 template <typename scalar_t>
@@ -830,4 +844,51 @@ void single_layer_kv_transfer_sgl(
       lmc_key_value_cache_ptr, sgl_key_cache_ptr, sgl_value_cache_ptr,
       slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
       num_heads, head_size_in_64bit, block_size, direction);
+}
+
+/**
+ * Perform asynchronous memory copy between lmcache host buffer (memory obj)
+ * and a device buffer.
+ * The copy will be performed asynchronously on the current CUDA stream.
+ * They copy will be split into multiple smaller copies based on the host buffer
+ * offset and host buffer alignment requirements.
+ *
+ * @param dest Destination pointer (device or host)
+ * @param src Source pointer (device or host)
+ * @param nbytes Number of bytes to copy
+ * @param direction H2D or D2H
+ * @param host_buffer_offset the virtual offset in the lmcache memory allocator
+ * @param host_buffer_alignments the alignment (i.e., cudaHostRegister
+ * granularity) requirement of the host buffer. Must be power of two.
+ */
+void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
+                          TransferDirection direction,
+                          size_t host_buffer_offset,
+                          size_t host_buffer_alignments) {
+  // Check that host_buffer_alignments is power of two
+  TORCH_CHECK((host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
+              "host_buffer_alignments must be power of two");
+
+  size_t offset = 0;
+  const size_t mask = host_buffer_alignments - 1;
+  cudaMemcpyKind kind = (direction == TransferDirection::H2D)
+                            ? cudaMemcpyHostToDevice
+                            : cudaMemcpyDeviceToHost;
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  while (offset < nbytes) {
+    size_t current_src = src + offset;
+    size_t current_dest = dest + offset;
+
+    size_t aligned_area_end =
+        ((offset + host_buffer_offset) & ~mask) + host_buffer_alignments;
+    size_t real_end = min(host_buffer_offset + nbytes, aligned_area_end);
+    size_t max_nbytes = real_end - offset - host_buffer_offset;
+
+    CHECK_CUDA_CALL(cudaMemcpyAsync(reinterpret_cast<void*>(current_dest),
+                                    reinterpret_cast<const void*>(current_src),
+                                    max_nbytes, kind, stream));
+
+    offset += max_nbytes;
+  }
 }
