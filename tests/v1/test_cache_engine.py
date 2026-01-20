@@ -13,10 +13,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import (
-    mock_up_broadcast_fn,
-    mock_up_broadcast_object_fn,
-)
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
@@ -25,7 +21,6 @@ from lmcache.v1.event_manager import EventStatus, EventType
 from .utils import (
     DummyLMCacheAsyncLookupServer,
     check_paged_kv_cache_equal,
-    create_gpu_connector,
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
@@ -66,8 +61,6 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
     chunk_size = 256
     kv_shape = (32, 2, chunk_size, 8, 128)
 
-    connector = create_gpu_connector(1024, 32)
-
     tokens = generate_tokens(num_tokens, device)
 
     kv_cache = generate_kv_cache_paged_list_tensors(
@@ -96,9 +89,6 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
     """ test retrieve empty """
@@ -163,7 +153,6 @@ def test_paged_retrieve_prefix(
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged_list_tensors(
@@ -193,9 +182,6 @@ def test_paged_retrieve_prefix(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -278,7 +264,6 @@ def test_paged_store_offset(
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_total_tokens, device)
     kv_cache = generate_kv_cache_paged_list_tensors(
@@ -303,9 +288,6 @@ def test_paged_store_offset(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -387,7 +369,6 @@ def test_paged_mixed_retrieve(
     dtype = torch.bfloat16
 
     kv_shape = (32, 2, chunk_size, 8, 128)
-    connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged_list_tensors(
@@ -415,9 +396,6 @@ def test_paged_mixed_retrieve(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -538,7 +516,6 @@ def test_paged_store_kv_tensors_mask(fmt, save_unfull_chunk, autorelease_v1):
 
     chunk_size = 256
     kv_shape = (32, 2, chunk_size, 8, 128)
-    connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged_list_tensors(
@@ -564,9 +541,6 @@ def test_paged_store_kv_tensors_mask(fmt, save_unfull_chunk, autorelease_v1):
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
     """ Store some tokens with mask """
@@ -726,8 +700,6 @@ def test_paged_hierarchy_retrieve(
     block_size = 16
     dtype = torch.bfloat16
 
-    connector = create_gpu_connector(1024, 32)
-
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype=dtype
@@ -758,9 +730,6 @@ def test_paged_hierarchy_retrieve(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
     """ test store """
@@ -868,7 +837,6 @@ def test_paged_prefetch_retrieve(
     chunk_size = 256
     _ = "vllm"  # use_case unused
     kv_shape = (32, 2, chunk_size, 8, 128)
-    connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged_list_tensors(
@@ -900,9 +868,6 @@ def test_paged_prefetch_retrieve(
             "test",
             cfg,
             dumb_metadata("vllm", kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         ),
         async_lookup_server=async_lookup_server,
     )
@@ -1010,7 +975,6 @@ def test_paged_mem_leak(
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    connector = create_gpu_connector(1024, 32)
 
     tokens = generate_tokens(num_tokens, device)
     kv_cache = generate_kv_cache_paged_list_tensors(
@@ -1031,9 +995,6 @@ def test_paged_mem_leak(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
 
@@ -1104,7 +1065,6 @@ def test_paged_retrieve_after_eviction(
     num_blocks = 1000
     block_size = 16
     dtype = torch.bfloat16
-    connector = create_gpu_connector(1024, 32)
 
     tokens_1 = generate_tokens(num_tokens, device)
     tokens_2 = generate_tokens(num_tokens, device)
@@ -1130,9 +1090,6 @@ def test_paged_retrieve_after_eviction(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
 
@@ -1206,7 +1163,6 @@ def test_builder(autorelease_v1):
     instance_id = "test"
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=256)
     cfg2 = LMCacheEngineConfig.from_legacy(chunk_size=512)
-    connector = None
     should_be_none = LMCacheEngineBuilder.get(instance_id)
     assert should_be_none is None
 
@@ -1224,9 +1180,6 @@ def test_builder(autorelease_v1):
             instance_id,
             cfg2,
             dumb_metadata(),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
 
 
@@ -1245,8 +1198,6 @@ def test_force_store_wait(autorelease_v1):
 
     chunk_size = 256
     kv_shape = (32, 2, chunk_size, 8, 128)
-
-    connector = create_gpu_connector(1024, 32)
 
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
@@ -1281,9 +1232,6 @@ def test_force_store_wait(autorelease_v1):
                 "test",
                 cfg,
                 dumb_metadata("vllm", kv_shape),
-                connector,
-                mock_up_broadcast_fn,
-                mock_up_broadcast_object_fn,
             )
         )
 
@@ -1310,7 +1258,6 @@ def test_builder_destroy(autorelease_v1):
     """Test the destroy method of LMCacheEngineBuilder"""
     instance_id = "test_destroy"
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    connector = create_gpu_connector(1024, 32)
 
     # Verify instance doesn't exist initially
     should_be_none = LMCacheEngineBuilder.get(instance_id)
@@ -1321,9 +1268,6 @@ def test_builder_destroy(autorelease_v1):
         instance_id,
         cfg,
         dumb_metadata(),
-        connector,
-        mock_up_broadcast_fn,
-        mock_up_broadcast_object_fn,
     )
 
     # Verify instance exists
@@ -1363,25 +1307,18 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
     instance_id1 = "test_destroy_1"
     instance_id2 = "test_destroy_2"
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    connector = create_gpu_connector(1024, 32)
 
     # Create two engine instances
     engine1 = LMCacheEngineBuilder.get_or_create(
         instance_id1,
         cfg,
         dumb_metadata(),
-        connector,
-        mock_up_broadcast_fn,
-        mock_up_broadcast_object_fn,
     )
 
     engine2 = LMCacheEngineBuilder.get_or_create(
         instance_id2,
         cfg,
         dumb_metadata(),
-        connector,
-        mock_up_broadcast_fn,
-        mock_up_broadcast_object_fn,
     )
 
     # Verify both instances exist
@@ -1427,7 +1364,6 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
     block_size = 16
     dtype = torch.bfloat16
 
-    connector = create_gpu_connector(1024, 32)
     metadata = dumb_metadata()
     metadata.model_name = "test-model"  # NOTE: Gds does not accept name with '_'
 
@@ -1467,16 +1403,11 @@ def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
             }
         )
 
-        connector = create_gpu_connector(1024, 32)
-
         engine = autorelease_v1(
             LMCacheEngineBuilder.get_or_create(
                 "engine",
                 cfg,
                 metadata,
-                connector,
-                mock_up_broadcast_fn,
-                mock_up_broadcast_object_fn,
             )
         )
 

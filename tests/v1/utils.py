@@ -31,11 +31,10 @@ def recover_gpu_connector_states(gpu_connector):
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     # fmt parameter deprecated, now called use_case
-    # Use "standalone" for tests to avoid vLLM parallel state dependency
-    # unless a specific use_case is requested
-    test_use_case = "standalone" if fmt == "vllm" else fmt
+    # vLLM parallel state is mocked in conftest.py, so we can use use_case="vllm"
+    # without role to get proper GPU connectors and backends
     return LMCacheEngineMetadata(
-        use_case=test_use_case,
+        use_case=fmt,
         model_name="test_model",
         world_size=3,
         worker_id=123,
@@ -48,11 +47,10 @@ def dumb_metadata_with_model_name(
     model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
 ):
     # fmt parameter deprecated, now called use_case
-    # Use "standalone" for tests to avoid vLLM parallel state dependency
-    # unless a specific use_case is requested
-    test_use_case = "standalone" if fmt == "vllm" else fmt
+    # vLLM parallel state is mocked in conftest.py, so we can use use_case="vllm"
+    # without role to get proper GPU connectors and backends
     return LMCacheEngineMetadata(
-        use_case=test_use_case,
+        use_case=fmt,
         model_name=model_name,
         world_size=3,
         worker_id=123,
@@ -513,12 +511,13 @@ def create_test_metadata(
     kv_connector_extra_config: Optional[dict] = None,
 ) -> LMCacheEngineMetadata:
     """Create test metadata for LMCacheEngine."""
-    # Use "standalone" for tests to avoid vLLM parallel state dependency
+    # vLLM parallel state is mocked in conftest.py, so we can use use_case="vllm"
+    # without role to get proper GPU connectors and backends
     return LMCacheEngineMetadata(
         model_name="test_model",
         world_size=world_size,
         worker_id=worker_id,
-        use_case="standalone",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
         engine_id=engine_id,

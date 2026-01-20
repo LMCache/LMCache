@@ -255,6 +255,21 @@ class LMCacheServerProcess:
     server_process: object
 
 
+@pytest.fixture(autouse=True, scope="session")
+def mock_vllm_parallel_state():
+    """Mock vLLM's parallel state to avoid initialization requirements in tests."""
+    # Standard
+    from unittest.mock import MagicMock
+
+    # Create a mock GroupCoordinator with broadcast methods
+    mock_group = MagicMock()
+    mock_group.broadcast = lambda tensor, src: tensor
+    mock_group.broadcast_object = lambda obj, src: obj
+
+    with patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_group):
+        yield
+
+
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis():
     with (

@@ -11,6 +11,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import TYPE_CHECKING, Any, Optional, Union
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -374,8 +377,8 @@ class LMCacheManager:
 
     @property
     def kv_caches(self) -> dict[str, torch.Tensor]:
-        if self._connector is not None and hasattr(self._connector, "kv_caches"):
-            return self._connector.kv_caches
+        if self._northbound is not None and hasattr(self._northbound, "kv_caches"):
+            return self._northbound.kv_caches
         return {}
 
     def is_healthy(self) -> bool:
