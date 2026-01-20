@@ -16,6 +16,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.exceptions import IrrecoverableException
 
 if TYPE_CHECKING:
     # First Party
@@ -296,6 +297,30 @@ class PeriodicThread(ABC):
                     if not summary.success:
                         self._failed_runs += 1
 
+            except IrrecoverableException as e:
+                logger.error(
+                    "IrrecoverableException in PeriodicThread %s: %s",
+                    self._name,
+                    e,
+                    exc_info=True,
+                )
+                summary = ThreadRunSummary(
+                    timestamp=start_time,
+                    duration_ms=(time.time() - start_time) * 1000,
+                    success=False,
+                    message=str(e),
+                )
+                with self._lock:
+                    self._last_run_time = start_time
+                    self._last_summary = summary
+                    self._total_runs += 1
+                    self._failed_runs += 1
+                # Stop the loop on irrecoverable exceptions
+                logger.info(
+                    "PeriodicThread %s stopping due to IrrecoverableException",
+                    self._name,
+                )
+                break
             except Exception as e:
                 logger.error(
                     "Error in PeriodicThread %s: %s", self._name, e, exc_info=True
