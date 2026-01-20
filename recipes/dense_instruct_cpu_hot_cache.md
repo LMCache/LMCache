@@ -312,7 +312,7 @@ P99 ITL (ms):                            14.96
 - `save_unfull_chunk`: important for short or medium prompts.
 - NVMe disk tiering helps when CPU memory is insufficient.
 
-## 8. Troubleshooting / Common Pitfalls
+## 9. Troubleshooting / Common Pitfalls
 |Symptom|Likely cause|Fix|
 |---|---|---|
 |No cache hits|Prompt tokens differ|Ensure identical tokenization|
@@ -322,7 +322,7 @@ P99 ITL (ms):                            14.96
 |`StopIteration` in `wait_for_save`|Known issue|Disable `use_layerwise`|
 |Config mismatch in logs|Wrong config loaded|Check `LMCACHE_CONFIG_FILE`
 
-## 9. Additional Resources
+## 10. Additional Resources
 - LMCache config reference: `docs/source/api_reference/configurations.rst`
 - Layerwise KV transfer: `docs/source/kv_cache_optimizations/layerwise.rst`
 - CPU RAM backend: `docs/source/kv_cache/storage_backends/cpu_ram.rst`
