@@ -61,7 +61,10 @@ class TestLMCacheLookupClientServer:
     @pytest.fixture
     def lmcache_engine_metadata(self):
         """Create test metadata for LMCacheEngine."""
-        return create_test_metadata()
+        # Use standalone mode for CPU-only tests
+        metadata = create_test_metadata()
+        metadata.use_case = "standalone"
+        return metadata
 
     @pytest.fixture
     def lmcache_engine(self, temp_dir, lmcache_engine_metadata):

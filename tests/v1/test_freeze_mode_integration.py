@@ -4,6 +4,7 @@ import random
 import time
 
 # Third Party
+import pytest
 import requests
 import torch
 
@@ -22,6 +23,10 @@ from tests.v1.utils import (
 )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
+)
 def test_freeze_with_real_cache_engine(autorelease_v1):
     """
     Integration test for freeze mode with real cache engine.
@@ -34,7 +39,7 @@ def test_freeze_with_real_cache_engine(autorelease_v1):
     5. Disable freeze mode and verify store works again
     """
     # Setup
-    device = "cpu"
+    device = "cuda"
     instance_id = f"test_freeze_real_{random.getrandbits(64)}"
     chunk_size = 256
     num_tokens = 512
@@ -59,13 +64,14 @@ def test_freeze_with_real_cache_engine(autorelease_v1):
     cfg.internal_api_server_socket_path_prefix = None
 
     # Use explicit metadata with worker_id=0 to control port offset
+    # Use standalone mode for CPU-only test (MockGPUConnector)
     metadata = LMCacheEngineMetadata(
         model_name="test_model",
         world_size=1,
         worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
-        use_case="vllm",
+        use_case="standalone",
     )
 
     # Create engine
@@ -231,6 +237,10 @@ def test_freeze_with_real_cache_engine(autorelease_v1):
         LMCacheEngineBuilder.destroy(instance_id)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
+)
 def test_freeze_direct_api(autorelease_v1):
     """
     Test freeze mode via direct engine API (without HTTP server).
@@ -242,7 +252,7 @@ def test_freeze_direct_api(autorelease_v1):
     4. Only local_cpu backend is used for retrieval in freeze mode
     """
     # Setup
-    device = "cpu"
+    device = "cuda"
     instance_id = "test_freeze_direct"
     chunk_size = 256
     num_tokens = 512
@@ -256,7 +266,8 @@ def test_freeze_direct_api(autorelease_v1):
         local_cpu=True,
     )
 
-    metadata = dumb_metadata("vllm", kv_shape)
+    # Use standalone mode for CPU-only test (MockGPUConnector)
+    metadata = dumb_metadata("standalone", kv_shape)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
