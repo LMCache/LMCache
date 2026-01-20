@@ -134,14 +134,15 @@ class LMCacheEngineMetadata:
                 # database (e.g. redis or S3). No GPU connector or
                 # Local CPU Backend
                 # the backend management is done in storage_backends/__init__.py
-                assert self.save_only_first_rank(
-                    lmcache_config
-                ) or lmcache_config.get_extra_config_value(
-                    "remote_enable_mla_worker_id_as0", self.use_mla
-                ), (
-                    "enable_scheduler_bypass_lookup is only supported with "
-                    "save_only_first_rank or remote_enable_mla_worker_id_as0"
-                )
+                if lmcache_config and lmcache_config.enable_scheduler_bypass_lookup:
+                    assert self.save_only_first_rank(
+                        lmcache_config
+                    ) or lmcache_config.get_extra_config_value(
+                        "remote_enable_mla_worker_id_as0", self.use_mla
+                    ), (
+                        "enable_scheduler_bypass_lookup is only supported with "
+                        "save_only_first_rank or remote_enable_mla_worker_id_as0"
+                    )
                 return (
                     lmcache_config.enable_scheduler_bypass_lookup
                     if lmcache_config
