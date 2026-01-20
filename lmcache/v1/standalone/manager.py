@@ -92,10 +92,16 @@ class StandaloneLMCacheManager(LMCacheManager):
     def post_init(self) -> None:
         """Post-initialization for standalone mode."""
         if self._lmcache_engine is None:
+            # Initialize health monitor even without engine
+            self._init_health_monitor()
             return
 
         # Standalone mode post-init is simpler (no async_lookup_server)
         self._lmcache_engine.post_init()
+
+        # Initialize health monitor after engine post_init completes
+        # This also sets up PeriodicThreadRegistry metrics
+        self._init_health_monitor()
 
     def stop_services(self) -> None:
         """Shutdown for standalone mode with simplified logic."""
