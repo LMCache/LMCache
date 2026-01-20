@@ -422,9 +422,11 @@ check_memory_leak() {
 
     echo "→ Checking memory leak on port $port (use_hot=$use_hot)..."
 
-    # Fetch metrics from the prometheus endpoint
+    # Fetch metrics from the prometheus endpoint via unix socket
+    # Socket path format: /tmp/lmcache_internal_api_server/socket_{port}
+    local socket_path="/tmp/lmcache_internal_api_server/socket_7000"
     local metrics
-    metrics=$(curl -s "http://localhost:${port}/metrics" 2>/dev/null)
+    metrics=$(curl -s --unix-socket "$socket_path" "http://localhost/metrics" 2>/dev/null)
     if [ -z "$metrics" ]; then
         echo "ERROR: Failed to fetch metrics from port $port"
         return 1
@@ -488,13 +490,15 @@ check_memory_leak() {
     return 0
 }
 
-get_use_hot_from_docker_args() {
-    local docker_args="$1"
-    # Extract LMCACHE_LOCAL_CPU from docker env vars
+get_use_hot_from_port() {
+    local port="$1"
+    # Get local_cpu config from /conf endpoint via unix socket
+    # Socket path format: /tmp/lmcache_internal_api_server/socket_{port}
+    local socket_path="/tmp/lmcache_internal_api_server/socket_${port}"
     local use_hot
-    use_hot=$(echo "$docker_args" | yq -r '.env[]? | select(test("LMCACHE_LOCAL_CPU"))' 2>/dev/null | sed 's/.*=//')
-    # Default to false if not set
-    if [ -z "$use_hot" ]; then
+    use_hot=$(curl -s --unix-socket "$socket_path" "http://localhost/conf" 2>/dev/null | jq -r '.local_cpu // false')
+    # Default to false if not set or null
+    if [ -z "$use_hot" ] || [ "$use_hot" = "null" ]; then
         use_hot="false"
     fi
     echo "$use_hot"
@@ -781,8 +785,8 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     # Check memory leak after test
     echo "→ Checking for memory leaks..."
     if [[ "$feature_type" == "pd" ]]; then
-        use_hot1=$(get_use_hot_from_docker_args "$prefiller_docker_args")
-        use_hot2=$(get_use_hot_from_docker_args "$decoder_docker_args")
+        use_hot1=$(get_use_hot_from_port "$PORT1")
+        use_hot2=$(get_use_hot_from_port "$PORT2")
         if ! check_memory_leak "$PORT1" "$use_hot1"; then
             echo "Memory leak check failed for prefiller on port $PORT1"
             exit 1
@@ -792,8 +796,8 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             exit 1
         fi
     elif [[ "$feature_type" == "p2p" ]]; then
-        use_hot1=$(get_use_hot_from_docker_args "$docker1_args")
-        use_hot2=$(get_use_hot_from_docker_args "$docker2_args")
+        use_hot1=$(get_use_hot_from_port "$PORT1")
+        use_hot2=$(get_use_hot_from_port "$PORT2")
         if ! check_memory_leak "$PORT1" "$use_hot1"; then
             echo "Memory leak check failed for instance 1 on port $PORT1"
             exit 1
@@ -803,7 +807,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             exit 1
         fi
     else
-        use_hot=$(get_use_hot_from_docker_args "$docker_args")
+        use_hot=$(get_use_hot_from_port "$PORT")
         if ! check_memory_leak "$PORT" "$use_hot"; then
             echo "Memory leak check failed on port $PORT"
             exit 1
