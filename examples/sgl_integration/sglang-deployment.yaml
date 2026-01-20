@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: sglang
-          image: <YOUR_REGISTRY>/<YOUR_IMAGE_NAME>:<YOUR_TAG>
+          image: 672859161874.dkr.ecr.us-east-1.amazonaws.com/lmcache-sglang:20260119-212547-dev
           command:
             - python
             - -m

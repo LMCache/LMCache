@@ -1,18 +1,30 @@
 # Dockerfile for SGLang with LMCache integration
 # This image uses SGLang as the base and installs LMCache
 
-FROM lmsysorg/sglang:latest
+# SGLang version (default: latest)
+ARG SGLANG_VERSION=latest
+FROM lmsysorg/sglang:${SGLANG_VERSION}
 
-# Copy LMCache source code
-COPY . /tmp/lmcache
+# LMCache version (default: dev = build from local source)
+ARG LMCACHE_VERSION="dev"
 
-# Install LMCache from local source with CUDA extensions
-WORKDIR /tmp/lmcache
 # Set CUDA architectures for compilation (common GPU architectures)
 # 8.0 = A100, 8.6 = A10/A40, 8.9 = L4/L40, 9.0 = H100
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 # Limit parallel jobs to reduce memory usage
 ENV MAX_JOBS=2
-RUN pip install --no-cache-dir . && rm -rf /tmp/lmcache
+
+# Install LMCache - either from PyPI (if version specified) or from local source (if "dev")
+COPY . /tmp/lmcache
+WORKDIR /tmp/lmcache
+RUN if [ "$LMCACHE_VERSION" = "dev" ]; then \
+      echo "Building LMCache from local source" && \
+      pip install --no-cache-dir . && \
+      rm -rf /tmp/lmcache; \
+    else \
+      echo "Installing LMCache ${LMCACHE_VERSION} from PyPI" && \
+      pip install --no-cache-dir lmcache==${LMCACHE_VERSION} && \
+      rm -rf /tmp/lmcache; \
+    fi
 
 WORKDIR /sgl-workspace

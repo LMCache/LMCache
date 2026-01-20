@@ -41,7 +41,12 @@ Set these environment variables before starting:
 export REGISTRY=your-registry.example.com
 export IMAGE_NAME=lmcache-sglang
 export IMAGE_TAG=latest
+# Pin versions for reproducibility
+export SGLANG_VERSION=v0.5.7
+export LMCACHE_VERSION=0.3.12
 ```
+
+**Note:** Use `SGLANG_VERSION=latest` for the latest SGLang version, and `LMCACHE_VERSION=dev` to build from local source. If environment variables are not set, defaults are `latest` and `dev` respectively.
 
 ### Building the Docker Image
 
@@ -61,7 +66,10 @@ aws ecr get-login-password --region us-east-1 | \
 For standard Linux/x86_64 environments:
 
 ```bash
-docker build -f docker/Dockerfile.sglang -t ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} .
+docker build -f docker/Dockerfile.sglang \
+  --build-arg SGLANG_VERSION=${SGLANG_VERSION} \
+  --build-arg LMCACHE_VERSION=${LMCACHE_VERSION} \
+  -t ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} .
 docker push ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
 ```
 
@@ -70,6 +78,8 @@ For ARM64 (e.g., macOS) cross-platform builds:
 ```bash
 docker buildx build --platform linux/amd64 \
   -f docker/Dockerfile.sglang \
+  --build-arg SGLANG_VERSION=${SGLANG_VERSION} \
+  --build-arg LMCACHE_VERSION=${LMCACHE_VERSION} \
   -t ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
   --push .
 ```
