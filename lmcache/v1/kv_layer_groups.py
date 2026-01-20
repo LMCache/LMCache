@@ -65,7 +65,7 @@ class KVLayerGroupInfo:
             # MHA
             return self.shape[3] * self.shape[4]
         elif len(self.shape) == 4:
-            # MHA
+            # This is for HPU support
             return self.shape[2] * self.shape[3]
         elif len(self.shape) == 3:
             # MLA
