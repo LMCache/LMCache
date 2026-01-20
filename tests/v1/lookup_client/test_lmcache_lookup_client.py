@@ -23,13 +23,11 @@ import torch
 import zmq
 
 # First Party
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
 )
-from lmcache.v1.mock_gpu_connector import MockGPUConnector
 from tests.v1.utils import (
     create_test_config,
     create_test_metadata,
@@ -71,16 +69,10 @@ class TestLMCacheLookupClientServer:
         instance_id = f"test_lookup_instance_{uuid.uuid4().hex[:8]}"
         config = create_test_config(instance_id=instance_id)
 
-        # Use mock connector for CPU testing
-        connector = MockGPUConnector(kv_shape=(32, 2, 256, 8, 128))
-
         engine = LMCacheEngineBuilder.get_or_create(
             instance_id=instance_id,
             config=config,
             metadata=lmcache_engine_metadata,
-            gpu_connector=connector,
-            broadcast_fn=mock_up_broadcast_fn,
-            broadcast_object_fn=mock_up_broadcast_object_fn,
         )
         engine.post_init()
 

@@ -103,7 +103,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
 
     # Create key
     key = CacheEngineKey(
-        use_case="vllm",
+        fmt="vllm",
         model_name="test-model",
         world_size=4,
         worker_id=2,

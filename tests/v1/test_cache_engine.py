@@ -1215,9 +1215,6 @@ def test_builder(autorelease_v1):
             instance_id,
             cfg,
             dumb_metadata(),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
     _engine2 = autorelease_v1(LMCacheEngineBuilder.get(instance_id))  # noqa
