@@ -250,15 +250,18 @@ class RemoteBackend(StorageBackendInterface):
             if self._mla_worker_id_as0_mode:
                 return
 
+            # First, increment reference counts for all objects
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_up()
+
             compressed_memory_objs = []
             try:
                 for memory_obj in memory_objs:
-                    memory_obj.ref_count_up()
                     compressed_memory_objs.append(self.serializer.serialize(memory_obj))
             finally:
-                # TODO(baoloongmao): We don't need to release the following memory
-                #  objects in memory_objs since there is a gap when exception raised
-                for memory_obj in memory_objs[: len(compressed_memory_objs)]:
+                # Always decrement reference counts for all objects,
+                # regardless of whether serialization succeeded or failed
+                for memory_obj in memory_objs:
                     memory_obj.ref_count_down()
 
             future = asyncio.run_coroutine_threadsafe(
