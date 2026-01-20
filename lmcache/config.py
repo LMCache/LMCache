@@ -377,11 +377,19 @@ class LMCacheEngineMetadata:
                 return lambda tensor, src: tensor
             else:
                 # Real tensor parallel group for workers
-                # Third Party
-                from vllm.distributed.parallel_state import get_tp_group
+                try:
+                    # Third Party
+                    from vllm.distributed.parallel_state import get_tp_group
 
-                tpg = get_tp_group()
-                return tpg.broadcast
+                    tpg = get_tp_group()
+                    return tpg.broadcast
+                except (ImportError, AssertionError):
+                    # vLLM not available or parallel state not initialized
+                    # Fall back to mock function for tests
+                    # First Party
+                    from lmcache.utils import mock_up_broadcast_fn
+
+                    return mock_up_broadcast_fn
         else:
             # Default no-op for other use cases (sglang, standalone)
             # First Party
@@ -403,11 +411,19 @@ class LMCacheEngineMetadata:
                 return lambda obj, src: obj
             else:
                 # Real tensor parallel group for workers
-                # Third Party
-                from vllm.distributed.parallel_state import get_tp_group
+                try:
+                    # Third Party
+                    from vllm.distributed.parallel_state import get_tp_group
 
-                tpg = get_tp_group()
-                return tpg.broadcast_object
+                    tpg = get_tp_group()
+                    return tpg.broadcast_object
+                except (ImportError, AssertionError):
+                    # vLLM not available or parallel state not initialized
+                    # Fall back to mock function for tests
+                    # First Party
+                    from lmcache.utils import mock_up_broadcast_object_fn
+
+                    return mock_up_broadcast_object_fn
         else:
             # Default no-op for other use cases
             # First Party
