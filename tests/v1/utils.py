@@ -30,13 +30,29 @@ def recover_gpu_connector_states(gpu_connector):
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
+    # fmt parameter deprecated, now called use_case
+    return LMCacheEngineMetadata(
+        use_case=fmt,
+        model_name="test_model",
+        world_size=3,
+        worker_id=123,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
 def dumb_metadata_with_model_name(
     model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
 ):
-    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
+    # fmt parameter deprecated, now called use_case
+    return LMCacheEngineMetadata(
+        use_case=fmt,
+        model_name=model_name,
+        world_size=3,
+        worker_id=123,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
 def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
@@ -487,7 +503,7 @@ def create_test_metadata(
     world_size: int = 1,
     kv_shape: tuple = (4, 2, 256, 8, 128),
     engine_id: Optional[str] = "test_engine",
-    num_ranks: int = 1,
+    # num_ranks is deprecated - now a computed property
     kv_connector_extra_config: Optional[dict] = None,
 ) -> LMCacheEngineMetadata:
     """Create test metadata for LMCacheEngine."""
@@ -495,11 +511,11 @@ def create_test_metadata(
         model_name="test_model",
         world_size=world_size,
         worker_id=worker_id,
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
         engine_id=engine_id,
-        num_ranks=num_ranks,
+        # num_ranks is now a computed property
         kv_connector_extra_config=kv_connector_extra_config,
     )
 

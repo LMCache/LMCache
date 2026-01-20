@@ -12,7 +12,6 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
@@ -131,7 +130,7 @@ def create_metadata() -> LMCacheEngineMetadata:
         model_name="test_model",
         world_size=1,
         worker_id=0,
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
     )
@@ -200,9 +199,6 @@ if __name__ == "__main__":
         "test_engine",
         config,
         metadata,
-        gpu_connector,
-        mock_up_broadcast_fn,
-        mock_up_broadcast_object_fn,
     )
 
     # Generate or create buffers that will be reused across rounds

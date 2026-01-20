@@ -452,12 +452,21 @@ class LMCacheConnectorV1Impl:
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
+        # Build metadata using the metadata builder
+        # First Party
+        from lmcache.integration.vllm.metadata import VLLMMetadataBuilder
+
+        metadata = VLLMMetadataBuilder.build(
+            vllm_config=vllm_config,
+            lmcache_config=config,
+            role=role.name.lower(),
+        )
+
         # Initialize LMCacheManager to handle internal components
         self._manager = LMCacheManager(
             config=config,
-            vllm_config=vllm_config,
-            role=role.name.lower(),
-            connector=self,
+            metadata=metadata,
+            northbound=self,
         )
 
         # Start services managed by LMCacheManager

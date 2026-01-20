@@ -62,7 +62,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
 
     metadata = LMCacheEngineMetadata(
         model_name="test-model",
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,
@@ -71,7 +71,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
     )
     metadata0 = LMCacheEngineMetadata(
         model_name="test-model",
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,
@@ -103,7 +103,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
 
     # Create key
     key = CacheEngineKey(
-        fmt="vllm",
+        use_case="vllm",
         model_name="test-model",
         world_size=4,
         worker_id=2,
@@ -123,7 +123,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
     backend0.connection = backend.connection
     # Create key
     key0 = CacheEngineKey(
-        fmt="vllm",
+        use_case="vllm",
         model_name="test-model",
         world_size=4,
         worker_id=0,

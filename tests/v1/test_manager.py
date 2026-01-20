@@ -12,6 +12,7 @@ import pytest
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.manager import LMCacheManager
+from tests.v1.utils import create_test_metadata
 
 
 class TestLMCacheManagerInit:
@@ -20,65 +21,34 @@ class TestLMCacheManagerInit:
     def test_init_stores_config(self):
         """Test that __init__ stores config correctly."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         assert manager._config is config
-        assert manager._vllm_config is vllm_config
-        assert manager._role == "scheduler"
-        assert manager._connector is connector
+        assert manager._metadata is metadata
+        assert manager._northbound is northbound
 
-    def test_init_scheduler_role_calls_scheduler_init(self):
-        """Test that scheduler role calls _init_scheduler_components."""
+    def test_init_calls_init_components(self):
+        """Test that __init__ calls _init_components."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
-        with (
-            patch.object(
-                LMCacheManager, "_init_scheduler_components"
-            ) as mock_scheduler_init,
-            patch.object(LMCacheManager, "_init_worker_components") as mock_worker_init,
-        ):
+        with patch.object(LMCacheManager, "_init_components") as mock_init:
             LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
-            mock_scheduler_init.assert_called_once()
-            mock_worker_init.assert_not_called()
-
-    def test_init_worker_role_calls_worker_init(self):
-        """Test that worker role calls _init_worker_components."""
-        config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
-
-        with (
-            patch.object(
-                LMCacheManager, "_init_scheduler_components"
-            ) as mock_scheduler_init,
-            patch.object(LMCacheManager, "_init_worker_components") as mock_worker_init,
-        ):
-            LMCacheManager(
-                config=config,
-                vllm_config=vllm_config,
-                role="worker",
-                connector=connector,
-            )
-
-            mock_worker_init.assert_called_once()
-            mock_scheduler_init.assert_not_called()
+            mock_init.assert_called_once()
 
 
 class TestLMCacheManagerProperties:
@@ -88,15 +58,14 @@ class TestLMCacheManagerProperties:
     def manager_with_mocked_init(self):
         """Create a manager with mocked initialization."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
         return manager
 
@@ -107,14 +76,6 @@ class TestLMCacheManagerProperties:
         manager._lmcache_engine = mock_engine
 
         assert manager.lmcache_engine is mock_engine
-
-    def test_lmcache_engine_metadata_property(self, manager_with_mocked_init):
-        """Test lmcache_engine_metadata property returns the metadata."""
-        manager = manager_with_mocked_init
-        mock_metadata = MagicMock()
-        manager._lmcache_engine_metadata = mock_metadata
-
-        assert manager.lmcache_engine_metadata is mock_metadata
 
     def test_lookup_client_property(self, manager_with_mocked_init):
         """Test lookup_client property returns the client."""
@@ -152,15 +113,14 @@ class TestLMCacheManagerStart:
     def test_start_calls_api_server_start(self):
         """Test start() calls api_server.start() when api_server exists."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="worker",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         mock_api_server = MagicMock()
@@ -176,15 +136,14 @@ class TestLMCacheManagerStart:
     def test_start_handles_none_api_server(self):
         """Test start() handles None api_server gracefully."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         manager._api_server = None
@@ -200,15 +159,14 @@ class TestLMCacheManagerPostInit:
     def test_post_init_without_engine(self):
         """Test post_init returns early when engine is None."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         manager._lmcache_engine = None
@@ -220,15 +178,14 @@ class TestLMCacheManagerPostInit:
         """Test post_init calls engine.post_init with async_lookup_server."""
         config = LMCacheEngineConfig.from_defaults()
         config.enable_async_loading = True
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="worker",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         mock_engine = MagicMock()
@@ -250,15 +207,14 @@ class TestLMCacheManagerPostInit:
 
         config = LMCacheEngineConfig.from_defaults()
         config.enable_async_loading = True
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="worker",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         mock_engine = MagicMock()
@@ -280,15 +236,14 @@ class TestLMCacheManagerShutdown:
     def test_shutdown_closes_all_components(self):
         """Test shutdown() closes all components."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="worker",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         # Setup mock components
@@ -318,15 +273,14 @@ class TestLMCacheManagerShutdown:
     def test_shutdown_handles_none_components(self):
         """Test shutdown() handles None components gracefully."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         # All components are None
@@ -343,15 +297,14 @@ class TestLMCacheManagerShutdown:
     def test_shutdown_handles_component_errors(self):
         """Test shutdown() handles errors from components gracefully."""
         config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="worker",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         # Setup mock component that raises exception
@@ -378,102 +331,17 @@ class TestLMCacheManagerHelpers:
         """Test _need_gpu_interm_buffer returns opposite of enable_pd."""
         config = LMCacheEngineConfig.from_defaults()
         config.enable_pd = False
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        metadata = create_test_metadata()
+        northbound = MagicMock()
 
         with patch.object(LMCacheManager, "_init_components"):
             manager = LMCacheManager(
                 config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
+                metadata=metadata,
+                northbound=northbound,
             )
 
         assert manager._need_gpu_interm_buffer() is True
 
         config.enable_pd = True
         assert manager._need_gpu_interm_buffer() is False
-
-
-class TestLMCacheManagerValidation:
-    """Tests for LMCacheManager validation methods."""
-
-    def test_validate_mla_config_raises_on_wrong_serde(self):
-        """Test _validate_mla_config raises error for non-naive serde with MLA."""
-        config = LMCacheEngineConfig.from_defaults()
-        config.remote_serde = "cachegen"
-        vllm_config = MagicMock()
-        connector = MagicMock()
-
-        with patch.object(LMCacheManager, "_init_components"):
-            manager = LMCacheManager(
-                config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
-            )
-
-        with pytest.raises(ValueError, match="MLA only works with naive serde mode"):
-            manager._validate_mla_config(use_mla=True)
-
-    def test_validate_mla_config_raises_on_layerwise_with_blending(self):
-        """Test _validate_mla_config raises with MLA + layerwise + blending."""
-        config = LMCacheEngineConfig.from_defaults()
-        config.remote_serde = "naive"
-        config.use_layerwise = True
-        config.enable_blending = True
-        vllm_config = MagicMock()
-        connector = MagicMock()
-
-        with patch.object(LMCacheManager, "_init_components"):
-            manager = LMCacheManager(
-                config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
-            )
-
-        with pytest.raises(ValueError, match="MLA with Cacheblend"):
-            manager._validate_mla_config(use_mla=True)
-
-
-class TestLMCacheManagerCalculateDraftLayers:
-    """Tests for _calculate_draft_layers method."""
-
-    def test_calculate_draft_layers_no_speculative_config(self):
-        """Test returns 0 when no speculative_config."""
-        config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        vllm_config.speculative_config = None
-        connector = MagicMock()
-
-        with patch.object(LMCacheManager, "_init_components"):
-            manager = LMCacheManager(
-                config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
-            )
-
-        assert manager._calculate_draft_layers() == 0
-
-    def test_calculate_draft_layers_deepseek_mtp(self):
-        """Test returns correct layers for deepseek_mtp method."""
-        config = LMCacheEngineConfig.from_defaults()
-        vllm_config = MagicMock()
-        vllm_config.speculative_config = MagicMock()
-        vllm_config.speculative_config.method = "deepseek_mtp"
-        vllm_config.model_config = MagicMock()
-        vllm_config.model_config.hf_config = MagicMock()
-        vllm_config.model_config.hf_config.num_nextn_predict_layers = 3
-        connector = MagicMock()
-
-        with patch.object(LMCacheManager, "_init_components"):
-            manager = LMCacheManager(
-                config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
-            )
-
-        assert manager._calculate_draft_layers() == 3

@@ -20,6 +20,7 @@ from lmcache.utils import (
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
+from lmcache.v1.memory_management import MemoryFormat
 
 # Local
 from .utils import (
@@ -57,7 +58,7 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
 )
 def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
     device = "cuda"
-    fmt = "vllm"
+    fmt = "vllm"  # use_case
     num_tokens = 2000
     num_blocks = 1000
     block_size = 16
@@ -866,7 +867,7 @@ def test_paged_prefetch_retrieve(
     test_lookup_id = "test_lookup_id"
 
     chunk_size = 256
-    fmt = "vllm"
+    _ = "vllm"  # use_case unused
     kv_shape = (32, 2, chunk_size, 8, 128)
     connector = create_gpu_connector(1024, 32)
 
@@ -895,11 +896,12 @@ def test_paged_prefetch_retrieve(
     )
 
     async_lookup_server = DummyLMCacheAsyncLookupServer()
+    memory_format = MemoryFormat.KV_2LTD
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(memory_format, kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -1240,7 +1242,7 @@ def test_builder(autorelease_v1):
 )
 def test_force_store_wait(autorelease_v1):
     device = "cuda"
-    fmt = "vllm"
+    _ = "vllm"  # use_case unused
     num_tokens = 10000
     num_blocks = 5000
     block_size = 16
@@ -1279,11 +1281,12 @@ def test_force_store_wait(autorelease_v1):
             extra_config={"force_store_wait": True},
         )
 
+        memory_format = MemoryFormat.KV_2LTD
         engine = autorelease_v1(
             LMCacheEngineBuilder.get_or_create(
                 "test",
                 cfg,
-                dumb_metadata(fmt, kv_shape),
+                dumb_metadata(memory_format, kv_shape),
                 connector,
                 mock_up_broadcast_fn,
                 mock_up_broadcast_object_fn,

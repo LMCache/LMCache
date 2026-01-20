@@ -112,11 +112,7 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
-        # save_only_first_rank only works when use mla
-        self.save_only_first_rank = (
-            self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
-            and metadata.use_mla
-        )
+        self.save_only_first_rank = metadata.save_only_first_rank(self.config)
 
         if self.save_only_first_rank and self.gpu_connector is not None:
             self.broadcast_stream = (
@@ -1839,25 +1835,191 @@ class LMCacheEngineBuilder:
             return SegmentTokenDatabase(config, metadata)
         return ChunkedTokenDatabase(config, metadata)
 
+    @staticmethod
+    def _Create_gpu_connector(
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ) -> Optional[GPUConnectorInterface]:
+        """
+        Create GPU connector based on use case and configuration.
+
+        Args:
+            config: LMCache engine configuration
+            metadata: LMCache engine metadata (must include use_case)
+
+        Returns:
+            GPU connector instance or None for scheduler role
+        """
+        use_case = metadata.use_case
+
+        if use_case == "vllm":
+            return LMCacheEngineBuilder._create_gpu_connector_for_vllm(config, metadata)
+        elif use_case == "sglang":
+            return LMCacheEngineBuilder._create_gpu_connector_for_sglang(
+                config, metadata
+            )
+        elif use_case == "standalone":
+            return LMCacheEngineBuilder._create_gpu_connector_for_standalone(
+                config, metadata
+            )
+        else:
+            raise ValueError(f"Unsupported use_case for GPU connector: {use_case}")
+
+    @staticmethod
+    def _create_gpu_connector_for_vllm(
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ) -> Optional[GPUConnectorInterface]:
+        """Create vLLM-specific GPU connector."""
+        # First Party
+        from lmcache.v1.gpu_connector import (
+            VLLMBufferLayerwiseGPUConnector,
+            VLLMPagedMemGPUConnectorV2,
+            VLLMPagedMemGPUConnectorV3,
+            VLLMPagedMemLayerwiseGPUConnector,
+        )
+        from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
+
+        use_gpu = not config.enable_pd
+        device = metadata.compute_device
+
+        # Scheduler doesn't need GPU connector
+        # this is for the bypass cache engine
+        # storage_backend/__init__.py will also skip the local cpu backend for
+        # scheduler's bypass cache engine
+        if metadata.role == "scheduler":
+            return None
+
+        # Layerwise connectors
+        if config.use_layerwise:
+            if config.enable_blending:
+                return VLLMBufferLayerwiseGPUConnector.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
+                    metadata, use_gpu, device
+                )
+
+        # Platform-specific connectors
+        if metadata.is_cuda_alike:
+            if config.use_gpu_connector_v3:
+                return VLLMPagedMemGPUConnectorV3.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                return VLLMPagedMemGPUConnectorV2.from_metadata(
+                    metadata, use_gpu, device
+                )
+        elif metadata.is_xpu:
+            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
+        else:
+            raise RuntimeError("No supported connector found for the current platform.")
+
+    @staticmethod
+    def _create_gpu_connector_for_sglang(
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ) -> GPUConnectorInterface:
+        """Create SGLang-specific GPU connector."""
+        # First Party
+        from lmcache.v1.gpu_connector import (
+            SGLangGPUConnector,
+            SGLangLayerwiseGPUConnector,
+        )
+
+        # Extract parameters from metadata
+        num_layer = metadata.kv_shape[0]
+        chunk_size = metadata.kv_shape[2]
+        num_kv_head = metadata.kv_shape[3]
+        head_size = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_head * head_size
+
+        use_gpu = not config.enable_pd
+        device = metadata.compute_device
+        kv_dtype = metadata.kv_dtype
+
+        if config.use_layerwise:
+            return SGLangLayerwiseGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
+        else:
+            return SGLangGPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
+
+    @staticmethod
+    def _create_gpu_connector_for_standalone(
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+    ) -> GPUConnectorInterface:
+        """
+        Create GPU connector for standalone mode.
+
+        Standalone mode always uses MockGPUConnector since:
+        - There's no serving engine to generate real KV caches
+        - Internal API endpoints won't work with real GPU connectors
+        - Generated kv_caches are just for testing/demonstration
+
+        Args:
+            config: LMCache engine configuration
+            metadata: LMCache engine metadata
+
+        Returns:
+            MockGPUConnector instance
+        """
+        # First Party
+        from lmcache.v1.mock_gpu_connector import MockGPUConnector
+
+        logger.info("Creating MockGPUConnector for standalone mode")
+        return MockGPUConnector(kv_shape=metadata.kv_shape)
+
     @classmethod
     def get_or_create(
         cls,
         instance_id: str,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        gpu_connector: Optional[GPUConnectorInterface],
-        broadcast_fn: Callable[[torch.Tensor, int], None],
-        broadcast_object_fn: Callable[[Any, int], Any],
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
-        given ID.
+        given ID. All necessary components (GPU connector, broadcast functions)
+        are automatically created based on the metadata's use_case.
 
-        raises: ValueError if the instance already exists with a different
-            configuration.
+        Args:
+            instance_id: Unique identifier for the engine instance
+            config: LMCache engine configuration
+            metadata: LMCache engine metadata (must include use_case)
+
+        Returns:
+            LMCacheEngine instance
+
+        Raises:
+            ValueError: If instance exists with different configuration
         """
         logger.info(f"Creating LMCacheEngine instance {instance_id}")
         if instance_id not in cls._instances:
+            # Create GPU connector based on use_case
+            logger.info("Creating GPU connector for use_case=%s", metadata.use_case)
+            gpu_connector = cls._Create_gpu_connector(config, metadata)
+
+            # Get broadcast functions from metadata properties
+            logger.info(
+                "Getting broadcast functions for use_case=%s", metadata.use_case
+            )
+            broadcast_fn = metadata.broadcast_fn
+            broadcast_object_fn = metadata.broadcast_object_fn
+
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
             token_database = cls._Create_token_database(config, metadata)

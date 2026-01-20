@@ -199,7 +199,7 @@ def create_test_metadata(worker_id: int = 0):
         model_name="test_model",
         world_size=2,
         worker_id=worker_id,
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
     )
