@@ -261,12 +261,22 @@ def mock_vllm_parallel_state():
     # Standard
     from unittest.mock import MagicMock
 
-    # Create a mock GroupCoordinator with broadcast methods
-    mock_group = MagicMock()
-    mock_group.broadcast = lambda tensor, src: tensor
-    mock_group.broadcast_object = lambda obj, src: obj
+    try:
+        # Only patch if vLLM is available
+        # Third Party
+        import vllm.distributed.parallel_state  # noqa: F401
 
-    with patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_group):
+        # Create a mock GroupCoordinator with broadcast methods
+        mock_group = MagicMock()
+        mock_group.broadcast = lambda tensor, src: tensor
+        mock_group.broadcast_object = lambda obj, src: obj
+
+        with patch(
+            "vllm.distributed.parallel_state.get_tp_group", return_value=mock_group
+        ):
+            yield
+    except ImportError:
+        # vLLM not available, skip mocking
         yield
 
 
