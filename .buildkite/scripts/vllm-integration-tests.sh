@@ -417,18 +417,16 @@ usage() {
 #########
 
 check_memory_leak() {
-    local port="$1"
-    local use_hot="$2"
-
-    echo "→ Checking memory leak on port $port (use_hot=$use_hot)..."
+    local use_hot="$1"
 
     # Fetch metrics from the prometheus endpoint via unix socket
     # Socket path format: /tmp/lmcache_internal_api_server/socket_{port}
     local socket_path="/tmp/lmcache_internal_api_server/socket_7000"
+    echo "→ Checking memory leak on socket_path $socket_path (use_hot=$use_hot)..."
     local metrics
     metrics=$(curl -s --unix-socket "$socket_path" "http://localhost/metrics" 2>/dev/null)
     if [ -z "$metrics" ]; then
-        echo "ERROR: Failed to fetch metrics from port $port"
+        echo "ERROR: Failed to fetch metrics from socket_path $socket_path"
         return 1
     fi
 
@@ -490,11 +488,9 @@ check_memory_leak() {
     return 0
 }
 
-get_use_hot_from_port() {
-    local port="$1"
+get_use_hot_from_conf() {
     # Get local_cpu config from /conf endpoint via unix socket
-    # Socket path format: /tmp/lmcache_internal_api_server/socket_{port}
-    local socket_path="/tmp/lmcache_internal_api_server/socket_${port}"
+    local socket_path="/tmp/lmcache_internal_api_server/socket_7000"
     local use_hot
     use_hot=$(curl -s --unix-socket "$socket_path" "http://localhost/conf" 2>/dev/null | jq -r '.local_cpu // false')
     # Default to false if not set or null
@@ -784,34 +780,10 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
 
     # Check memory leak after test
     echo "→ Checking for memory leaks..."
-    if [[ "$feature_type" == "pd" ]]; then
-        use_hot1=$(get_use_hot_from_port "$PORT1")
-        use_hot2=$(get_use_hot_from_port "$PORT2")
-        if ! check_memory_leak "$PORT1" "$use_hot1"; then
-            echo "Memory leak check failed for prefiller on port $PORT1"
-            exit 1
-        fi
-        if ! check_memory_leak "$PORT2" "$use_hot2"; then
-            echo "Memory leak check failed for decoder on port $PORT2"
-            exit 1
-        fi
-    elif [[ "$feature_type" == "p2p" ]]; then
-        use_hot1=$(get_use_hot_from_port "$PORT1")
-        use_hot2=$(get_use_hot_from_port "$PORT2")
-        if ! check_memory_leak "$PORT1" "$use_hot1"; then
-            echo "Memory leak check failed for instance 1 on port $PORT1"
-            exit 1
-        fi
-        if ! check_memory_leak "$PORT2" "$use_hot2"; then
-            echo "Memory leak check failed for instance 2 on port $PORT2"
-            exit 1
-        fi
-    else
-        use_hot=$(get_use_hot_from_port "$PORT")
-        if ! check_memory_leak "$PORT" "$use_hot"; then
-            echo "Memory leak check failed on port $PORT"
-            exit 1
-        fi
+    use_hot=$(get_use_hot_from_conf)
+    if ! check_memory_leak "$use_hot"; then
+        echo "Memory leak check failed"
+        exit 1
     fi
 
     cleanup 0
