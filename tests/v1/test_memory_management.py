@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+import time
+
 # Third Party
 import pytest
 import torch
@@ -549,3 +552,360 @@ def test_tensor_memory_obj_pin_monitor_integration():
 
     memory_obj.unpin()
     assert pin_monitor.get_monitored_count() == initial_count  # Fully unregistered
+
+
+# =============================================================================
+# LazyMemoryAllocator Tests
+# =============================================================================
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="LazyMemoryAllocator requires CUDA for memory pinning",
+)
+class TestLazyMemoryAllocator:
+    """
+    Test suite for LazyMemoryAllocator.
+
+    These tests focus on the public interface defined by MemoryAllocatorInterface:
+    - allocate(shapes, dtypes, fmt, allocator_type) -> Optional[MemoryObj]
+    - batched_allocate(shapes, dtypes, batch_size, fmt, allocator_type)
+        -> Optional[List[MemoryObj]]
+    - free(memory_obj, allocator_type)
+    - batched_free(memory_objs, allocator_type, update_stats)
+    - close()
+    - memcheck() -> bool
+    """
+
+    # Use sizes that are multiples of PIN_CHUNK_SIZE (16 MB)
+    INIT_SIZE = 1 << 25  # 32 MB
+    FINAL_SIZE = 1 << 27  # 128 MB
+
+    @pytest.fixture
+    def lazy_allocator_cls(self):
+        """Lazily import LazyMemoryAllocator to avoid import errors
+        on CPU-only builds.
+        """
+        # First Party
+        from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+
+        return LazyMemoryAllocator
+
+    def test_allocate_basic(self, lazy_allocator_cls):
+        """Test basic allocation returns a valid MemoryObj."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([512, 512])
+        dtype = torch.float32
+        memory_obj = allocator.allocate(shape, dtype)
+
+        assert memory_obj is not None
+        assert memory_obj.is_valid()
+        assert memory_obj.tensor is not None
+        assert memory_obj.tensor.shape == shape
+        assert memory_obj.tensor.dtype == dtype
+
+        allocator.close()
+
+    def test_allocate_with_format(self, lazy_allocator_cls):
+        """Test allocation with explicit memory format."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([100, 2, 1024])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_T2D
+
+        memory_obj = allocator.allocate(shape, dtype, fmt)
+
+        assert memory_obj is not None
+        assert memory_obj.is_valid()
+        assert memory_obj.get_memory_format() == fmt
+
+        allocator.close()
+
+    def test_allocate_multiple_shapes_and_dtypes(self, lazy_allocator_cls):
+        """Test allocation with multiple shapes and dtypes."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shapes = [torch.Size([100, 2, 512]), torch.Size([100, 2, 512])]
+        dtypes = [torch.bfloat16, torch.bfloat16]
+
+        memory_obj = allocator.allocate(shapes, dtypes)
+
+        assert memory_obj is not None
+        assert memory_obj.is_valid()
+
+        allocator.close()
+
+    def test_allocate_returns_none_when_out_of_memory(self, lazy_allocator_cls):
+        """Test that allocation returns None when memory is exhausted."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.INIT_SIZE,  # Same as init to prevent expansion
+        )
+
+        # Try to allocate more than available
+        huge_shape = torch.Size([self.INIT_SIZE])
+        memory_obj = allocator.allocate(huge_shape, torch.float32)
+
+        assert memory_obj is None
+
+        allocator.close()
+
+    def test_free_basic(self, lazy_allocator_cls):
+        """Test that free invalidates the MemoryObj."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([512, 512])
+        memory_obj = allocator.allocate(shape, torch.float32)
+        assert memory_obj is not None
+        assert memory_obj.is_valid()
+
+        allocator.free(memory_obj)
+        assert not memory_obj.is_valid()
+        assert memory_obj.tensor is None
+
+        allocator.close()
+
+    def test_free_idempotent(self, lazy_allocator_cls):
+        """Test that freeing an already freed object does not crash."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([256, 256])
+        memory_obj = allocator.allocate(shape, torch.float32)
+        assert memory_obj is not None
+
+        allocator.free(memory_obj)
+        # This should not crash
+        allocator.free(memory_obj)
+
+        assert allocator.memcheck()
+        allocator.close()
+
+    def test_batched_allocate_basic(self, lazy_allocator_cls):
+        """Test batched allocation returns correct number of MemoryObjs."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([100, 2, 512])
+        dtype = torch.bfloat16
+        batch_size = 8
+
+        memory_objs = allocator.batched_allocate(shape, dtype, batch_size)
+
+        assert memory_objs is not None
+        assert len(memory_objs) == batch_size
+        for obj in memory_objs:
+            assert obj is not None
+            assert obj.is_valid()
+            assert obj.tensor is not None
+            assert obj.tensor.shape == shape
+            assert obj.tensor.dtype == dtype
+
+        allocator.close()
+
+    def test_batched_allocate_with_format(self, lazy_allocator_cls):
+        """Test batched allocation with explicit memory format."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([100, 2, 512])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_T2D
+        batch_size = 4
+
+        memory_objs = allocator.batched_allocate(shape, dtype, batch_size, fmt)
+
+        assert memory_objs is not None
+        for obj in memory_objs:
+            assert obj.get_memory_format() == fmt
+
+        allocator.close()
+
+    def test_batched_allocate_returns_none_when_out_of_memory(self, lazy_allocator_cls):
+        """Test that batched allocation returns None when memory is exhausted."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.INIT_SIZE,
+        )
+
+        shape = torch.Size([1024 * 1024])  # 1M elements
+        dtype = torch.float32  # 4 bytes each = 4MB per allocation
+        batch_size = 100  # Would need 400MB, more than available
+
+        memory_objs = allocator.batched_allocate(shape, dtype, batch_size)
+
+        assert memory_objs is None
+
+        allocator.close()
+
+    def test_batched_free_basic(self, lazy_allocator_cls):
+        """Test batched free invalidates all MemoryObjs."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([100, 2, 512])
+        dtype = torch.bfloat16
+        batch_size = 4
+
+        memory_objs = allocator.batched_allocate(shape, dtype, batch_size)
+        assert memory_objs is not None
+
+        allocator.batched_free(memory_objs)
+
+        for obj in memory_objs:
+            assert not obj.is_valid()
+
+        assert allocator.memcheck()
+        allocator.close()
+
+    def test_memcheck_returns_true_after_operations(self, lazy_allocator_cls):
+        """Test that memcheck returns True after valid operations."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        # Initial state
+        assert allocator.memcheck()
+
+        # After allocation
+        shape = torch.Size([512, 512])
+        memory_obj = allocator.allocate(shape, torch.float32)
+        assert allocator.memcheck()
+
+        # After free
+        allocator.free(memory_obj)
+        assert allocator.memcheck()
+
+        # After batched operations
+        objs = allocator.batched_allocate(shape, torch.float32, 4)
+        assert allocator.memcheck()
+
+        allocator.batched_free(objs)
+        assert allocator.memcheck()
+
+        allocator.close()
+
+    def test_inplace_tensor_modification(self, lazy_allocator_cls):
+        """Test that allocated tensor data can be modified in place."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([1024])
+        memory_obj = allocator.allocate(shape, torch.float32)
+        assert memory_obj is not None
+
+        # Modify the tensor in place
+        memory_obj.tensor.fill_(42.0)
+        assert torch.all(memory_obj.tensor == 42.0)
+
+        memory_obj.tensor[0] = 123.0
+        assert memory_obj.tensor[0] == 123.0
+
+        allocator.close()
+
+    def test_lazy_expansion_allows_larger_allocations(self, lazy_allocator_cls):
+        """
+        Test that lazy expansion allows allocations beyond init_size.
+
+        The background thread should expand the available memory over time,
+        allowing allocations that exceed the initial size.
+        """
+        # Start with small init_size, larger final_size
+        init_size = 1 << 25  # 32 MB
+        final_size = 1 << 27  # 128 MB
+
+        allocator = lazy_allocator_cls(
+            init_size=init_size,
+            final_size=final_size,
+        )
+
+        # Wait for background expansion to complete
+        # This gives the lazy allocator time to expand memory
+        time.sleep(0.5)
+
+        # Try to allocate more than init_size (but less than final_size)
+        # 64 MB > 32 MB init_size
+        large_shape = torch.Size([16 * 1024 * 1024])  # 16M elements * 4 bytes = 64MB
+        memory_obj = allocator.allocate(large_shape, torch.float32)
+
+        assert memory_obj is not None
+        assert memory_obj.is_valid()
+
+        allocator.close()
+
+    def test_allocate_various_dtypes(self, lazy_allocator_cls):
+        """Test allocation with various data types."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        test_cases = [
+            (torch.Size([512, 512]), torch.float32),
+            (torch.Size([1024, 1024]), torch.bfloat16),
+            (torch.Size([2048, 2048]), torch.int8),
+            (torch.Size([256, 256]), torch.half),
+        ]
+
+        memory_objs = []
+        for shape, dtype in test_cases:
+            obj = allocator.allocate(shape, dtype)
+            assert obj is not None, f"Failed to allocate {shape} with {dtype}"
+            assert obj.tensor.dtype == dtype
+            assert obj.tensor.shape == shape
+            memory_objs.append(obj)
+
+        # Free all
+        for obj in memory_objs:
+            allocator.free(obj)
+
+        assert allocator.memcheck()
+        allocator.close()
+
+    def test_allocation_and_free_interleaved(self, lazy_allocator_cls):
+        """Test interleaved allocation and free operations."""
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+        )
+
+        shape = torch.Size([256, 256])
+        dtype = torch.float32
+
+        obj1 = allocator.allocate(shape, dtype)
+        obj2 = allocator.allocate(shape, dtype)
+
+        allocator.free(obj1)
+
+        obj3 = allocator.allocate(shape, dtype)
+
+        allocator.free(obj2)
+        allocator.free(obj3)
+
+        assert allocator.memcheck()
+        allocator.close()

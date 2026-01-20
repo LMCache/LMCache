@@ -11,6 +11,7 @@ cd "$REPO_ROOT/docker"
 
 # Build the vLLM + LMCache image (used for both lmcache server and vllm process)
 docker build \
+    --progress=plain \
     --build-arg CUDA_VERSION=12.8 \
     --build-arg UBUNTU_VERSION=24.04 \
     --build-arg VLLM_VERSION=nightly \

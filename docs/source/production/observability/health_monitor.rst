@@ -63,6 +63,12 @@ Health monitor configuration is done through the ``extra_config`` section of you
    * - ``ping_timeout``
      - ``5.0``
      - Timeout (in seconds) for each ping operation
+   * - ``get_blocking_failed_threshold``
+     - ``10``
+     - Max number of get_blocking failed count in check interval
+   * - ``waiting_time_for_recovery``
+     - ``300.0``
+     - Waiting time (in seconds) for recovery if get_blocking failed
 
 
 How It Works
