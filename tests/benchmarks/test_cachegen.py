@@ -64,9 +64,9 @@ def test_cachegen_decoder_bench(benchmark, fmt, chunk_size):
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None,
+        kv_shape=(32, 2, chunk_size, 8, 128),  # Need a valid kv_shape
+        use_case=fmt,
     )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)

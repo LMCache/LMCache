@@ -50,17 +50,17 @@ def test_cachegen_encoder(chunk_size):
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None,
+        kv_shape=(32, 2, chunk_size, 8, 128),
+        use_case=fmt,
     )
     metadata2 = LMCacheEngineMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt2,
         kv_dtype=torch.bfloat16,
-        kv_shape=None,
+        kv_shape=(32, 2, chunk_size, 8, 128),
+        use_case=fmt2,
     )
     serializer = CacheGenSerializer(config, metadata)
     serializer2 = CacheGenSerializer(config, metadata2)
@@ -88,9 +88,9 @@ def test_cachegen_decoder(fmt, chunk_size):
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None,
+        kv_shape=(32, 2, chunk_size, 8, 128),
+        use_case=fmt,
     )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
@@ -116,9 +116,9 @@ def test_cachegen_unmatched_size(fmt):
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
         worker_id=0,
-        fmt=fmt,
         kv_dtype=torch.bfloat16,
-        kv_shape=None,
+        kv_shape=(32, 2, chunk_size, 8, 128),
+        use_case=fmt,
     )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)

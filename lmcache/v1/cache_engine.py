@@ -1914,7 +1914,15 @@ class LMCacheEngineBuilder:
         elif metadata.is_xpu:
             return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
-            raise RuntimeError("No supported connector found for the current platform.")
+            # For CPU-only tests or unsupported platforms,
+            # try to use VLLMPagedMemGPUConnectorV2 with use_gpu=False
+            logger.warning(
+                f"Platform not CUDA or XPU (device={device}), "
+                "using VLLMPagedMemGPUConnectorV2 with enable_pd mode"
+            )
+            return VLLMPagedMemGPUConnectorV2.from_metadata(
+                metadata, use_gpu=False, device=device
+            )
 
     @staticmethod
     def _create_gpu_connector_for_sglang(

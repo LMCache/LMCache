@@ -13,11 +13,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from tests.v1.utils import (
-    create_gpu_connector,
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
@@ -160,7 +158,6 @@ def test_store_1GB(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -173,9 +170,6 @@ def test_store_1GB(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
 
@@ -275,7 +269,6 @@ def test_retrieve_1GB_allhit(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -295,9 +288,6 @@ def test_retrieve_1GB_allhit(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
 
@@ -393,7 +383,6 @@ def test_lookup_20K_tokens(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -414,9 +403,6 @@ def test_lookup_20K_tokens(
             "test",
             cfg,
             dumb_metadata(fmt, kv_shape),
-            connector,
-            mock_up_broadcast_fn,
-            mock_up_broadcast_object_fn,
         )
     )
 

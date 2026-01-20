@@ -60,7 +60,12 @@ def test_freeze_with_real_cache_engine(autorelease_v1):
 
     # Use explicit metadata with worker_id=0 to control port offset
     metadata = LMCacheEngineMetadata(
-        "test_model", 1, 0, "vllm", torch.bfloat16, kv_shape
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+        use_case="vllm",
     )
 
     # Create engine

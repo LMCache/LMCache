@@ -123,7 +123,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
     backend0.connection = backend.connection
     # Create key
     key0 = CacheEngineKey(
-        use_case="vllm",
+        fmt="vllm",
         model_name="test-model",
         world_size=4,
         worker_id=0,

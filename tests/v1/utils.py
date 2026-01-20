@@ -31,8 +31,11 @@ def recover_gpu_connector_states(gpu_connector):
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
     # fmt parameter deprecated, now called use_case
+    # Use "standalone" for tests to avoid vLLM parallel state dependency
+    # unless a specific use_case is requested
+    test_use_case = "standalone" if fmt == "vllm" else fmt
     return LMCacheEngineMetadata(
-        use_case=fmt,
+        use_case=test_use_case,
         model_name="test_model",
         world_size=3,
         worker_id=123,
@@ -45,8 +48,11 @@ def dumb_metadata_with_model_name(
     model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
 ):
     # fmt parameter deprecated, now called use_case
+    # Use "standalone" for tests to avoid vLLM parallel state dependency
+    # unless a specific use_case is requested
+    test_use_case = "standalone" if fmt == "vllm" else fmt
     return LMCacheEngineMetadata(
-        use_case=fmt,
+        use_case=test_use_case,
         model_name=model_name,
         world_size=3,
         worker_id=123,
@@ -507,11 +513,12 @@ def create_test_metadata(
     kv_connector_extra_config: Optional[dict] = None,
 ) -> LMCacheEngineMetadata:
     """Create test metadata for LMCacheEngine."""
+    # Use "standalone" for tests to avoid vLLM parallel state dependency
     return LMCacheEngineMetadata(
         model_name="test_model",
         world_size=world_size,
         worker_id=worker_id,
-        use_case="vllm",
+        use_case="standalone",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
         engine_id=engine_id,
