@@ -94,7 +94,17 @@ def allocate_and_copy_objects(
             busy_loop=False,
         )
 
-        if memory_obj is None or memory_obj.tensor is None:
+        if memory_obj is None:
+            break
+
+        if memory_obj.tensor is None:
+            # This should not happen with current implementation,
+            # but handle it defensively to avoid memory leak
+            logger.warning(
+                "Allocated MemoryObj has None tensor, this is unexpected. "
+                "Releasing the memory object."
+            )
+            memory_obj.ref_count_down()
             break
 
         with torch.cuda.stream(stream):
