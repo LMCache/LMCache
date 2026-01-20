@@ -399,13 +399,13 @@ def _get_metadata(use_mla: bool):
     kv_shape = (32, 1 if use_mla else 2, 256, 1 if use_mla else 8, 128)
     dtype = torch.bfloat16
     metadata = LMCacheEngineMetadata(
-        "deepseek/DeepSeek-R1",
-        1,
-        0,
-        "vllm",
-        dtype,
-        kv_shape,
-        use_mla,
+        model_name="deepseek/DeepSeek-R1",
+        world_size=1,
+        worker_id=0,
+        kv_dtype=dtype,
+        kv_shape=kv_shape,
+        use_case="vllm",
+        use_mla=use_mla,
     )
     return metadata
 

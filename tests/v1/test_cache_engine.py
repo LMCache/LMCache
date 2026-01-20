@@ -20,7 +20,6 @@ from lmcache.utils import (
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
-from lmcache.v1.memory_management import MemoryFormat
 
 # Local
 from .utils import (
@@ -896,12 +895,11 @@ def test_paged_prefetch_retrieve(
     )
 
     async_lookup_server = DummyLMCacheAsyncLookupServer()
-    memory_format = MemoryFormat.KV_2LTD
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(memory_format, kv_shape),
+            dumb_metadata("vllm", kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -1281,12 +1279,11 @@ def test_force_store_wait(autorelease_v1):
             extra_config={"force_store_wait": True},
         )
 
-        memory_format = MemoryFormat.KV_2LTD
         engine = autorelease_v1(
             LMCacheEngineBuilder.get_or_create(
                 "test",
                 cfg,
-                dumb_metadata(memory_format, kv_shape),
+                dumb_metadata("vllm", kv_shape),
                 connector,
                 mock_up_broadcast_fn,
                 mock_up_broadcast_object_fn,
