@@ -23,9 +23,9 @@ def test_on_retrieve_request(stats_monitor):
 
 
 def test_on_retrieve_finished(stats_monitor):
-    request_id = stats_monitor.on_retrieve_request(num_tokens=100)
+    stats_obj = stats_monitor.on_retrieve_request(num_tokens=100)
     stats_monitor.on_retrieve_finished(
-        request_id=request_id,
+        stats=stats_obj,
         retrieved_tokens=100,
     )
     stats = stats_monitor.get_stats_and_clear()
@@ -35,8 +35,8 @@ def test_on_retrieve_finished(stats_monitor):
 
 
 def test_on_store_request_and_finished(stats_monitor):
-    request_id = stats_monitor.on_store_request(num_tokens=50)
-    stats_monitor.on_store_finished(request_id=request_id)
+    stats_obj = stats_monitor.on_store_request(num_tokens=50)
+    stats_monitor.on_store_finished(stats=stats_obj)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_store_requests == 1
     assert len(stats.time_to_store) == 1
@@ -73,9 +73,9 @@ def test_on_lookup_request(stats_monitor):
 
 
 def test_on_lookup_finished(stats_monitor):
-    lookup_request_id = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_obj = stats_monitor.on_lookup_request(num_tokens=100)
     assert len(stats_monitor.lookup_requests) == 1
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id, num_hit_tokens=80)
+    stats_monitor.on_lookup_finished(stats=stats_obj, num_hit_tokens=80)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_lookup_requests == 1
     assert stats.interval_lookup_tokens == 100
@@ -135,12 +135,12 @@ def test_remote_ping_errors(stats_monitor):
 
 def test_retrieve_and_store_speed(stats_monitor):
     # Test retrieve speed calculation
-    retrieve_id = stats_monitor.on_retrieve_request(num_tokens=1000)
-    stats_monitor.on_retrieve_finished(request_id=retrieve_id, retrieved_tokens=1000)
+    stats_obj_retrieve = stats_monitor.on_retrieve_request(num_tokens=1000)
+    stats_monitor.on_retrieve_finished(stats=stats_obj_retrieve, retrieved_tokens=1000)
 
     # Test store speed calculation
-    store_id = stats_monitor.on_store_request(num_tokens=500)
-    stats_monitor.on_store_finished(request_id=store_id)
+    stats_obj_store = stats_monitor.on_store_request(num_tokens=500)
+    stats_monitor.on_store_finished(stats=stats_obj_store)
 
     stats = stats_monitor.get_stats_and_clear()
     assert len(stats.retrieve_speed) == 1
@@ -151,13 +151,13 @@ def test_retrieve_and_store_speed(stats_monitor):
 
 def test_multiple_lookup_operations(stats_monitor):
     # Test multiple lookup operations
-    lookup_request_id_1 = stats_monitor.on_lookup_request(num_tokens=100)
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id_1, num_hit_tokens=80)
-    lookup_request_id_2 = stats_monitor.on_lookup_request(num_tokens=200)
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id_2, num_hit_tokens=150)
+    stats_obj_1 = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_monitor.on_lookup_finished(stats=stats_obj_1, num_hit_tokens=80)
+    stats_obj_2 = stats_monitor.on_lookup_request(num_tokens=200)
+    stats_monitor.on_lookup_finished(stats=stats_obj_2, num_hit_tokens=150)
     assert len(stats_monitor.lookup_requests) == 2
-    assert stats_monitor.lookup_requests[lookup_request_id_1].hit_rate() == 0.8
-    assert stats_monitor.lookup_requests[lookup_request_id_2].hit_rate() == 0.75
+    assert stats_monitor.lookup_requests[stats_obj_1.request_id].hit_rate() == 0.8
+    assert stats_monitor.lookup_requests[stats_obj_2.request_id].hit_rate() == 0.75
 
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_lookup_requests == 2
@@ -192,13 +192,13 @@ def test_mixed_remote_operations(stats_monitor):
 
 
 def test_combined_operations(stats_monitor):
-    retrieve_id = stats_monitor.on_retrieve_request(num_tokens=200)
+    stats_obj_retrieve = stats_monitor.on_retrieve_request(num_tokens=200)
     stats_monitor.on_retrieve_finished(
-        request_id=retrieve_id,
+        stats=stats_obj_retrieve,
         retrieved_tokens=200,
     )
-    store_id = stats_monitor.on_store_request(num_tokens=100)
-    stats_monitor.on_store_finished(store_id)
+    stats_obj_store = stats_monitor.on_store_request(num_tokens=100)
+    stats_monitor.on_store_finished(stats_obj_store)
     stats_monitor.update_local_cache_usage(usage=512)
     stats_monitor.update_remote_cache_usage(usage=1024)
     stats_monitor.update_local_storage_usage(usage=2048)
@@ -218,7 +218,7 @@ def test_combined_operations(stats_monitor):
 
 def test_stats_clearing(stats_monitor):
     # Add some data
-    lookup_request_id = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_obj = stats_monitor.on_lookup_request(num_tokens=100)
     stats_monitor.update_interval_remote_read_metrics(read_bytes=1024)
     stats_monitor.update_remote_ping_latency(latency=25.0)
 
@@ -247,7 +247,7 @@ def test_stats_clearing(stats_monitor):
     assert len(stats_monitor.lookup_requests) == 1
 
     # finish lookup request
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id, num_hit_tokens=80)
+    stats_monitor.on_lookup_finished(stats=stats_obj, num_hit_tokens=80)
     stats3 = stats_monitor.get_stats_and_clear()
     assert stats3.interval_lookup_requests == 0
     assert stats3.interval_lookup_tokens == 0
