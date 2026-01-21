@@ -14,6 +14,8 @@ import torch
 from lmcache.v1.multiprocess.kv_format import (
     KVCacheFormat,
     KVCacheFormatEncoder,
+    KVLayerGroupSpec,
+    L0LayoutSpec,
 )
 
 """
@@ -148,6 +150,20 @@ class IPCCacheEngineKey:
 
 # Type exports
 KVCache = list[CudaIPCWrapper]
+
+# Re-export KVCacheFormat types for external use
+__all__ = [
+    "CudaIPCWrapper",
+    "IPCCacheEngineKey",
+    "KVCache",
+    "KVCacheFormat",
+    "KVCacheFormatEncoder",
+    "KVLayerGroupSpec",
+    "L0LayoutSpec",
+    "CustomizedSerdeConfig",
+    "get_customized_encoder",
+    "get_customized_decoder",
+]
 
 
 @dataclass
