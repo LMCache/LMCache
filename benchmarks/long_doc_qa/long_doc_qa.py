@@ -590,7 +590,6 @@ async def main(args):
         query_round_time_per_prompt = query_duration / len(benchmark_df)
         warmup_duration = warmup_end_time - warmup_start_time
         warmup_round_time_per_prompt = warmup_duration / len(warmup_df)
-
         # Standard
         import json
 
