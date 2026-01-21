@@ -586,17 +586,10 @@ async def main(args):
         visualize_results(warmup_df, benchmark_df)
 
     if args.json_output:
-        query_duration = (
-            benchmark_df.query("successful == True")["request_end"]
-            - benchmark_df.query("successful == True")["request_start"]
-        )
-        query_round_time_per_prompt = trimmed_mean(query_duration, args.trim_fraction)
-
-        warmup_duration = (
-            warmup_df.query("successful == True")["request_end"]
-            - warmup_df.query("successful == True")["request_start"]
-        )
-        warmup_round_time_per_prompt = trimmed_mean(warmup_duration, args.trim_fraction)
+        query_duration = benchmark_end_time - benchmark_start_time
+        query_round_time_per_prompt = query_duration / len(benchmark_df)
+        warmup_duration = warmup_end_time - warmup_start_time
+        warmup_round_time_per_prompt = warmup_duration / len(warmup_df)
 
         # Standard
         import json
