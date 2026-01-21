@@ -565,51 +565,16 @@ async def main(args):
     query_mean_ttft = trimmed_mean(
         benchmark_df.query("successful == True")["ttft"], args.trim_fraction
     )
-
     warmup_success_count = warmup_df.query("successful == True").shape[0]
     query_success_count = benchmark_df.query("successful == True").shape[0]
-
-    warmup_round_time_per_prompt = trimmed_mean(
-        (
-            warmup_df.query("successful == True")["request_end"]
-            - warmup_df.query("successful == True")["request_start"]
-        ),
-        args.trim_fraction,
-    )
-    query_round_time_per_prompt = trimmed_mean(
-        (
-            benchmark_df.query("successful == True")["request_end"]
-            - benchmark_df.query("successful == True")["request_start"]
-        ),
-        args.trim_fraction,
-    )
-
     CSI = "\x1b["
     RESET = CSI + "0m"
-
-    if args.trim_fraction > 0:
-        print(
-            f"Warmup round trimmed mean TTFT (trim={args.trim_fraction:.2f}): "
-            f"{warmup_mean_ttft:.3f}s"
-        )
-    else:
-        print(f"Warmup round mean TTFT: {warmup_mean_ttft:.3f}s")
-
-    # Keep original wall-clock round time line (unchanged)
+    print(f"Warmup round mean TTFT: {warmup_mean_ttft:.3f}s")
     print(f"Warmup round time: {warmup_end_time - warmup_start_time:.3f}s")
     print(f"Warmup round prompt count: {len(warmup_df)}")
     print(f"Warmup round successful prompt count: {warmup_success_count}")
     print(f"{CSI}36;1m\n=== BENCHMARK RESULTS ==={RESET}")
-
-    if args.trim_fraction > 0:
-        print(
-            f"{CSI}32mQuery round trimmed mean TTFT (trim={args.trim_fraction:.2f}): "
-            f"{query_mean_ttft:.3f}s{RESET}"
-        )
-    else:
-        print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
-
-    # Keep original wall-clock round time line (unchanged)
+    print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
     print(
         f"{CSI}33mQuery round time: "
         f"{benchmark_end_time - benchmark_start_time:.3f}s{RESET}"
@@ -621,6 +586,18 @@ async def main(args):
         visualize_results(warmup_df, benchmark_df)
 
     if args.json_output:
+        query_duration = (
+            benchmark_df.query("successful == True")["request_end"]
+            - benchmark_df.query("successful == True")["request_start"]
+        )
+        query_round_time_per_prompt = trimmed_mean(query_duration, args.trim_fraction)
+
+        warmup_duration = (
+            warmup_df.query("successful == True")["request_end"]
+            - warmup_df.query("successful == True")["request_start"]
+        )
+        warmup_round_time_per_prompt = trimmed_mean(warmup_duration, args.trim_fraction)
+
         # Standard
         import json
 
