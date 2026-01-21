@@ -302,13 +302,13 @@ TORCH_DTYPE_TO_STR_DTYPE = {
 
 # FP8 variants (PyTorch ≥2.1)
 if hasattr(torch, "float8_e4m3fn"):
-    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e4m3fn] = "fp8_e4m3"
+    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e4m3fn] = "fp8_e4m3fn"
 if hasattr(torch, "float8_e4m3fnuz"):
-    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e4m3fnuz] = "fp8_e4m3"
+    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e4m3fnuz] = "fp8_e4m3fnuz"
 if hasattr(torch, "float8_e5m2"):
     TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e5m2] = "fp8_e5m2"
 if hasattr(torch, "float8_e5m2fnuz"):
-    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e5m2fnuz] = "fp8_e5m2"
+    TORCH_DTYPE_TO_STR_DTYPE[torch.float8_e5m2fnuz] = "fp8_e5m2fnuz"
 
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
