@@ -20,7 +20,10 @@ from lmcache.v1.multiprocess.mp_storage_manager import (
 @pytest.fixture
 def storage_manager():
     """Create a storage manager with 1GB buffer for testing."""
-    manager = MPStorageManager(cpu_buffer_size=1.0)
+    disable_lazy_alloc = True if not torch.cuda.is_available() else False
+    manager = MPStorageManager(
+        cpu_buffer_size=1.0, disable_lazy_alloc=disable_lazy_alloc
+    )
     yield manager
     # Cleanup after test
     manager.close()
@@ -29,7 +32,11 @@ def storage_manager():
 @pytest.fixture
 def small_storage_manager():
     """Create a storage manager with very small buffer to test memory exhaustion."""
-    manager = MPStorageManager(cpu_buffer_size=0.0625)  # 64MB
+    disable_lazy_alloc = True if not torch.cuda.is_available() else False
+    manager = MPStorageManager(
+        cpu_buffer_size=0.0625,  # 64MB
+        disable_lazy_alloc=disable_lazy_alloc,
+    )
     yield manager
     # Cleanup after test
     manager.close()
