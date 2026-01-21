@@ -184,11 +184,12 @@ class LRUCachePolicyWithLock(LRUCachePolicy[IPCCacheEngineKey]):
 
 
 class MPStorageManager:
-    def __init__(self, cpu_buffer_size: float):
+    def __init__(self, cpu_buffer_size: float, disable_lazy_alloc: bool = False):
         """
         Args:
             cpu_buffer_size: the total size (in GB) of CPU memory buffer
                 to be used for storage
+            disable_lazy_alloc: whether to disable lazy allocation
         """
         # Lock manager for locking memory objects
         # TODO: have separate lock manager for different storage backends

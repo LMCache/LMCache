@@ -25,8 +25,13 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.gpu_connector import lmcache_memcpy_async_d2h, lmcache_memcpy_async_h2d
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+    KVCache,
+    KVCacheFormat,
+)
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
@@ -55,93 +60,39 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
 
 class GPUCacheContext:
     """
-    Manages the shape and pointers to vLLM/SGLang GPU KV cache tensors.
+    Manages the shape and pointers to GPU KV cache tensors.
 
-    Supports three formats:
-    - vLLM MHA: [2, num_blocks, block_size, num_heads, head_size] per layer
-    - vLLM MLA: [num_blocks, block_size, hidden_dim] per layer
-    - SGLang MHA: [buffer_size, num_heads, head_size] separate K/V tensors
+    This class is engine-agnostic and uses KVCacheFormat descriptor
+    to understand the KV cache layout.
     """
 
     def __init__(
         self,
         kv_caches: KVCache,
+        kv_format: Optional[KVCacheFormat] = None,
         lmcache_chunk_size: int = 256,
-        backend_type: Optional[str] = None,
-        block_size: Optional[int] = None,
     ):
+        """
+        Initialize GPU cache context.
+
+        Args:
+            kv_caches: List of KV cache tensor wrappers
+            kv_format: Optional KVCacheFormat descriptor. If None, infers from tensors.
+            lmcache_chunk_size: Chunk size for LMCache operations
+        """
         self.kv_caches_ = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = self.kv_caches_[0].device
+        self.kv_format_ = kv_format
 
         # Pointers
         pointers_list = [t.data_ptr() for t in self.kv_caches_]
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
-        ndim = self.kv_caches_[0].ndim
-        num_tensors = len(self.kv_caches_)
-
-        # Determine backend type
-        # If explicitly provided, use it directly (no heuristics needed)
-        if backend_type == "sglang":
-            self.is_sglang_ = True
-            logger.info("Backend type explicitly set to SGLang")
-        elif backend_type == "vllm" or backend_type is None:
-            # For vLLM or auto-detect mode, SGLang is never assumed
-            self.is_sglang_ = False
-            if backend_type is None:
-                logger.info("Backend type not specified, defaulting to vLLM format")
+        # Setup shape info from format or infer from tensors
+        if kv_format is not None:
+            self._setup_from_format(kv_format, lmcache_chunk_size)
         else:
-            logger.warning(
-                "Unknown backend_type '%s', defaulting to vLLM format",
-                backend_type,
-            )
-            self.is_sglang_ = False
-
-        # MLA flag (vLLM MLA format): 3 dims and not SGLang
-        self.is_mla_ = ndim == 3 and not self.is_sglang_
-
-        # Shape related
-        if self.is_sglang_:
-            # SGLang format: [buffer_size, num_heads, head_size]
-            # We have 2 * num_layers tensors (K0, K1, ..., V0, V1, ...)
-            self.num_layers_ = num_tensors // 2
-            # buffer_size = num_blocks * block_size (flattened)
-            buffer_size = self.kv_caches_[0].shape[0]
-            num_heads = self.kv_caches_[0].shape[1]
-            head_size = self.kv_caches_[0].shape[2]
-            self.hidden_dim_size_ = num_heads * head_size
-            # block_size must be provided for SGLang backend
-            if block_size is None:
-                raise ValueError(
-                    "block_size must be provided for SGLang backend. "
-                    "Please update the client to pass block_size during registration."
-                )
-            self.block_size_ = block_size
-            self.num_blocks_ = buffer_size // self.block_size_
-            logger.info(
-                "Detected SGLang format: %d layers, buffer_size=%d, "
-                "num_heads=%d, head_size=%d, hidden_dim=%d, block_size=%d",
-                self.num_layers_,
-                buffer_size,
-                num_heads,
-                head_size,
-                self.hidden_dim_size_,
-                self.block_size_,
-            )
-        elif self.is_mla_:
-            self.num_layers_ = num_tensors
-            self.num_blocks_ = self.kv_caches_[0].shape[0]
-            self.block_size_ = self.kv_caches_[0].shape[1]
-            self.hidden_dim_size_ = self.kv_caches_[0].shape[2]
-        else:
-            # vLLM MHA: [2, num_blocks, block_size, num_heads, head_size]
-            self.num_layers_ = num_tensors
-            self.num_blocks_ = self.kv_caches_[0].shape[1]
-            self.block_size_ = self.kv_caches_[0].shape[2]
-            # hidden_dim = num_heads * head_size
-            num_heads = self.kv_caches_[0].shape[3]
-            head_size = self.kv_caches_[0].shape[4]
-            self.hidden_dim_size_ = num_heads * head_size
+            self._setup_from_tensors(lmcache_chunk_size)
 
         # Pre-computed slot mapping
         # shape: [num_blocks, block_size]
@@ -152,7 +103,7 @@ class GPUCacheContext:
             0, self.block_size_, dtype=torch.long, device=self.device_
         ).unsqueeze(0)
         self.slot_mapping_tensor_ = (offsets + block_ids * self.block_size_).reshape(
-            (self.num_blocks, self.block_size_)
+            (self.num_blocks_, self.block_size_)
         )
 
         # Temporary GPU buffer for transfers
@@ -173,6 +124,88 @@ class GPUCacheContext:
                 "Initialized cuda stream on device %s", str(self.device_)
             ),
             logger,
+        )
+
+    def _setup_from_format(self, kv_format: KVCacheFormat, lmcache_chunk_size: int):
+        """Setup shape info from KVCacheFormat descriptor."""
+        self.is_mla_ = kv_format.is_mla
+        self.block_size_ = kv_format.block_size
+        self.hidden_dim_size_ = kv_format.hidden_dim
+
+        # Number of layers: for separated K/V, it's half the tensor count
+        if kv_format.l0.separation == "separated":
+            self.num_layers_ = len(self.kv_caches_) // 2
+        else:
+            self.num_layers_ = len(self.kv_caches_)
+
+        # Get num_blocks from tensor shape
+        if self.is_mla_:
+            # MLA shape: [num_blocks, block_size, hidden_dim]
+            self.num_blocks_ = self.kv_caches_[0].shape[0]
+        else:
+            # Check if separated K/V (SGLang style) or packed (vLLM style)
+            if self.kv_caches_[0].ndim == 4:
+                # SGLang separated: [num_blocks, block_size, num_heads, head_size]
+                self.num_blocks_ = self.kv_caches_[0].shape[0]
+            else:
+                # vLLM packed: [2, num_blocks, block_size, num_heads, head_size]
+                self.num_blocks_ = self.kv_caches_[0].shape[1]
+
+        logger.info(
+            "GPUCacheContext setup from format: family=%s, is_mla=%s, "
+            "num_layers=%d, block_size=%d, hidden_dim=%d, num_blocks=%d",
+            kv_format.family,
+            self.is_mla_,
+            self.num_layers_,
+            self.block_size_,
+            self.hidden_dim_size_,
+            self.num_blocks_,
+        )
+
+    def _setup_from_tensors(self, lmcache_chunk_size: int):
+        """Infer shape info from tensor shapes (legacy/backward compat)."""
+        # MLA flag
+        # MLA shape: [num_blocks, block_size, hidden_dim]
+        # MHA shape (vLLM): [2, num_blocks, block_size, num_heads, head_size]
+        # MHA shape (SGLang separated): [num_blocks, block_size, num_heads, head_size]
+        first_tensor = self.kv_caches_[0]
+
+        if first_tensor.ndim == 3:
+            # MLA format
+            self.is_mla_ = True
+            self.num_layers_ = len(self.kv_caches_)
+            self.num_blocks_ = first_tensor.shape[0]
+            self.block_size_ = first_tensor.shape[1]
+            self.hidden_dim_size_ = first_tensor.shape[2]
+        elif first_tensor.ndim == 4:
+            # SGLang separated K/V: [num_blocks, block_size, num_heads, head_size]
+            self.is_mla_ = False
+            self.num_layers_ = len(self.kv_caches_) // 2
+            self.num_blocks_ = first_tensor.shape[0]
+            self.block_size_ = first_tensor.shape[1]
+            num_heads = first_tensor.shape[2]
+            head_size = first_tensor.shape[3]
+            self.hidden_dim_size_ = num_heads * head_size
+        elif first_tensor.ndim == 5:
+            # vLLM packed: [2, num_blocks, block_size, num_heads, head_size]
+            self.is_mla_ = False
+            self.num_layers_ = len(self.kv_caches_)
+            self.num_blocks_ = first_tensor.shape[1]
+            self.block_size_ = first_tensor.shape[2]
+            num_heads = first_tensor.shape[3]
+            head_size = first_tensor.shape[4]
+            self.hidden_dim_size_ = num_heads * head_size
+        else:
+            raise ValueError(f"Unsupported tensor shape: {first_tensor.shape}")
+
+        logger.info(
+            "GPUCacheContext inferred from tensors: is_mla=%s, "
+            "num_layers=%d, block_size=%d, hidden_dim=%d, num_blocks=%d",
+            self.is_mla_,
+            self.num_layers_,
+            self.block_size_,
+            self.hidden_dim_size_,
+            self.num_blocks_,
         )
 
     @property
@@ -241,11 +274,44 @@ class GPUCacheContext:
         return self.is_mla_
 
     @property
-    def is_sglang(self) -> bool:
+    def kv_format(self) -> Optional[KVCacheFormat]:
         """
-        Returns whether using SGLang format (separate K/V tensors)
+        Returns the KV cache format descriptor, if available.
         """
-        return self.is_sglang_
+        return self.kv_format_
+
+    @property
+    def format_family(self) -> str:
+        """
+        Returns the format family (MHA_DENSE, MLA_LATENT, SPARSE).
+        Falls back to inferred value if no explicit format is set.
+        """
+        if self.kv_format_ is not None:
+            return self.kv_format_.family
+        return "MLA_LATENT" if self.is_mla_ else "MHA_DENSE"
+
+    def get_memory_format(self) -> MemoryFormat:
+        """
+        Returns the appropriate MemoryFormat for storage based on format family.
+
+        This is used for format-driven kernel selection without hardcoded
+        is_mla checks.
+        """
+        if self.kv_format_ is not None:
+            # Use explicit canonical format from descriptor
+            canonical = self.kv_format_.canonical
+            if canonical == "KV_MLA_FMT":
+                return MemoryFormat.KV_MLA_FMT
+            elif canonical == "KV_2LTD":
+                return MemoryFormat.KV_2LTD
+            elif canonical == "KV_SPARSE_FMT":
+                # Future support for sparse formats
+                raise NotImplementedError("Sparse format not yet implemented")
+            else:
+                raise ValueError(f"Unknown canonical format: {canonical}")
+        else:
+            # Fallback for backward compatibility
+            return MemoryFormat.KV_MLA_FMT if self.is_mla_ else MemoryFormat.KV_2LTD
 
     def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
         """
@@ -272,9 +338,17 @@ class GPUCacheContext:
 
 
 class MPCacheEngine:
-    def __init__(self, chunk_size: int = 256, cpu_buffer_size: float = 5.0):
+    def __init__(
+        self,
+        chunk_size: int = 256,
+        cpu_buffer_size: float = 5.0,
+        disable_lazy_alloc: bool = False,
+    ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
+
+        # Instance ID -> format_id (for key namespacing)
+        self.instance_formats: dict[int, str] = {}
 
         # chunk size
         self.chunk_size = chunk_size
@@ -283,41 +357,50 @@ class MPCacheEngine:
         self.lock = threading.Lock()
 
         # storage manager
-        self.storage_manager = MPStorageManager(cpu_buffer_size)
+        self.storage_manager = MPStorageManager(cpu_buffer_size, disable_lazy_alloc)
 
     def register_kv_cache(
         self,
         instance_id: int,
         kv_caches: KVCache,
-        backend_type: Optional[str] = None,
-        block_size: Optional[int] = None,
+        kv_format: Optional[KVCacheFormat] = None,
     ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
 
         Args:
             instance_id (int): The GPU instance ID (such as PID).
-            kv_caches (KVCache): The KV cache tensor wrappers from vLLM/SGLang.
-            backend_type (Optional[str]): The backend type ("sglang" or "vllm").
-                If None, defaults to vLLM format for backward compatibility.
-            block_size (Optional[int]): The block size for SGLang backend.
-                Required when backend_type is "sglang".
+            kv_caches (KVCache): The KV cache tensor wrappers.
+            kv_format (Optional[KVCacheFormat]): Engine-agnostic format descriptor.
+                If None, shape info is inferred from tensors (backward compat).
         """
         gpu_context = GPUCacheContext(
             kv_caches,
+            kv_format=kv_format,
             lmcache_chunk_size=self.chunk_size,
-            backend_type=backend_type,
-            block_size=block_size,
         )
         self.gpu_contexts[instance_id] = gpu_context
-        logger.info(
-            "Registered KV cache for GPU ID %d with %d layers "
-            "(backend=%s, block_size=%s)",
-            instance_id,
-            gpu_context.num_layers,
-            backend_type or "vllm",
-            block_size,
-        )
+
+        # Track format_id for key namespacing
+        if kv_format is not None:
+            self.instance_formats[instance_id] = kv_format.format_id
+            logger.info(
+                "Registered KV cache for instance %d: format=%s, "
+                "layers=%d, block_size=%d",
+                instance_id,
+                kv_format.format_id,
+                gpu_context.num_layers,
+                gpu_context.block_size,
+            )
+        else:
+            # Use a default format_id for backward compatibility
+            self.instance_formats[instance_id] = "legacy/inferred/v1"
+            logger.info(
+                "Registered KV cache for instance %d: inferred format, "
+                "layers=%d (backward compat)",
+                instance_id,
+                gpu_context.num_layers,
+            )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
         """
@@ -328,10 +411,23 @@ class MPCacheEngine:
         """
         if instance_id in self.gpu_contexts:
             del self.gpu_contexts[instance_id]
+            self.instance_formats.pop(instance_id, None)
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
             torch.cuda.empty_cache()
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
+
+    def get_format_id(self, instance_id: int) -> Optional[str]:
+        """
+        Get the format_id for a registered instance.
+
+        Args:
+            instance_id (int): The GPU instance ID.
+
+        Returns:
+            The format_id string if registered, None otherwise.
+        """
+        return self.instance_formats.get(instance_id)
 
     @_lmcache_nvtx_annotate
     def store(
@@ -369,17 +465,16 @@ class MPCacheEngine:
             event = torch.cuda.Event(interprocess=True)
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
-            # Wait for vLLM to finish
-            vllm_event = torch.cuda.Event.from_ipc_handle(
+            # Wait for engine (SGLang/vLLM) to finish
+            engine_event = torch.cuda.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
-            vllm_event.wait(stream=gpu_context.stream)
+            engine_event.wait(stream=gpu_context.stream)
 
             num_tokens = self.chunk_size
             cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-            fmt = (
-                MemoryFormat.KV_MLA_FMT if gpu_context.is_mla else MemoryFormat.KV_2LTD
-            )
+            # Use format-driven memory format selection
+            fmt = gpu_context.get_memory_format()
             reserve_handle, reserved_dict = self.storage_manager.reserve(
                 keys, cpu_shape, gpu_context.dtype, fmt=fmt
             )
@@ -397,31 +492,19 @@ class MPCacheEngine:
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
                 with self.lock:
-                    if gpu_context.is_sglang:
-                        # SGLang uses separate K/V tensors, use unilateral kernel
-                        page_buffer_size = gpu_context.kv_tensors[0].shape[0]
-                        lmc_ops.multi_layer_kv_transfer_unilateral(
-                            tmp_buffer,
-                            gpu_context.kv_pointers,
-                            slot_mapping,
-                            gpu_context.device,
-                            page_buffer_size,
-                            True,  # direction: GPU to LMCache
-                            gpu_context.is_mla,
-                        )
-                    else:
-                        lmc_ops.multi_layer_kv_transfer(
-                            tmp_buffer,
-                            gpu_context.kv_pointers,
-                            slot_mapping,
-                            gpu_context.device,
-                            gpu_context.block_size * gpu_context.num_blocks,
-                            True,
-                            gpu_context.is_mla,
-                        )
+                    lmc_ops.multi_layer_kv_transfer(
+                        tmp_buffer,
+                        # memory_obj.tensor,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        True,
+                        gpu_context.is_mla,
+                    )
 
                     assert memory_obj.tensor is not None
-                    memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
+                    lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
 
@@ -487,30 +570,17 @@ class MPCacheEngine:
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                 with self.lock:
-                    tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
-
-                    if gpu_context.is_sglang:
-                        # SGLang uses separate K/V tensors, use unilateral kernel
-                        page_buffer_size = gpu_context.kv_tensors[0].shape[0]
-                        lmc_ops.multi_layer_kv_transfer_unilateral(
-                            tmp_gpu_buffer_,
-                            gpu_context.kv_pointers,
-                            slot_mapping,
-                            gpu_context.device,
-                            page_buffer_size,
-                            False,  # direction: LMCache to GPU
-                            gpu_context.is_mla,
-                        )
-                    else:
-                        lmc_ops.multi_layer_kv_transfer(
-                            tmp_gpu_buffer_,
-                            gpu_context.kv_pointers,
-                            slot_mapping,
-                            gpu_context.device,
-                            gpu_context.block_size * gpu_context.num_blocks,
-                            False,
-                            gpu_context.is_mla,
-                        )
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
+                    lmc_ops.multi_layer_kv_transfer(
+                        # memory_obj.tensor,
+                        tmp_gpu_buffer_,
+                        gpu_context.kv_pointers,
+                        slot_mapping,
+                        gpu_context.device,
+                        gpu_context.block_size * gpu_context.num_blocks,
+                        False,
+                        gpu_context.is_mla,
+                    )
 
         with (
             torch.cuda.device(gpu_context.device),
@@ -552,6 +622,52 @@ class MPCacheEngine:
             int: The chunk size.
         """
         return self.chunk_size
+
+    def get_config(self) -> dict:
+        """
+        Returns server configuration for client synchronization.
+
+        As per design doc section 6.2, this provides hash config handshake
+        to avoid Python's randomized hash() issues.
+
+        Returns:
+            dict: Configuration with keys as per design doc:
+                - chunk_size: int
+                - hash_algo_id: str (hash algorithm identifier)
+                - none_hash: int (hash value for None/empty, matches NONE_HASH)
+                - key_version: int (key format version)
+                - hash_seed: Optional[int] (PYTHONHASHSEED if set)
+                - hash_randomization: bool (sys.flags.hash_randomization)
+        """
+        # Standard
+        import os
+        import sys
+
+        hash_seed_str = os.environ.get("PYTHONHASHSEED", None)
+        hash_seed: int | None = None
+        if hash_seed_str is not None:
+            try:
+                hash_seed = int(hash_seed_str)
+            except ValueError:
+                hash_seed = None
+
+        # NONE_HASH is the hash value used for empty/initial prefix
+        # In LMCache, this is typically 0 when vLLM is not available
+        none_hash = 0
+
+        return {
+            # Core config as per design doc section 6.2
+            "chunk_size": self.chunk_size,
+            "hash_algo_id": "python_builtin_hash",  # Using Python's builtin hash()
+            "none_hash": none_hash,
+            "key_version": 2,  # v2 with KVCacheFormat support
+            # Additional hash config for verification
+            "hash_seed": hash_seed,
+            "hash_randomization": sys.flags.hash_randomization,
+            # Server metadata
+            "protocol_version": 2,
+            "server_version": "1.0.0",
+        }
 
     def lookup(
         self,
@@ -619,9 +735,10 @@ def run_cache_server(
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
+    disable_lazy_alloc: bool = False,
 ):
     # Initialize the engine
-    engine = MPCacheEngine(chunk_size, cpu_buffer_size)
+    engine = MPCacheEngine(chunk_size, cpu_buffer_size, disable_lazy_alloc)
 
     # Initialize the message queue server
     context = zmq.Context.instance()
@@ -639,6 +756,7 @@ def run_cache_server(
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
+    add_handler_helper(server, RequestType.GET_CONFIG, engine.get_config)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
     # Start the server
@@ -672,6 +790,10 @@ def parse_args():
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
+
+    parser.add_argument(
+        "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
+    )
     return parser.parse_args()
 
 
@@ -683,4 +805,5 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
+        disable_lazy_alloc=args.disable_lazy_alloc,
     )
