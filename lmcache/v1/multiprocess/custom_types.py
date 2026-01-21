@@ -9,6 +9,13 @@ import threading
 import msgspec
 import torch
 
+# First Party
+# Import KVCacheFormat types - these need to be importable
+from lmcache.v1.multiprocess.kv_format import (
+    KVCacheFormat,
+    KVCacheFormatEncoder,
+)
+
 """
 Defines the types and the customized encoder/decoders for inter-process 
 communications.
@@ -155,6 +162,11 @@ _CUSTOMERIZED_SERIALIZERS = {
         serializer=CudaIPCWrapper.Serialize,
         deserializer=CudaIPCWrapper.Deserialize,
         code=1,
+    ),
+    KVCacheFormat: CustomizedSerdeConfig(
+        serializer=KVCacheFormatEncoder.Serialize,
+        deserializer=KVCacheFormatEncoder.Deserialize,
+        code=2,
     ),
 }
 
