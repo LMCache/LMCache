@@ -1122,7 +1122,7 @@ class LMCacheEngine:
             keys=keys,
             location=old_position,
         )
-        assert memory_objs is not None, "Failed to get memory objects to move"
+        assert None not in memory_objs, "Failed to get memory objects to move"
         logger.debug(
             f"Trying to send {len(memory_objs)} memory objects to {new_position}"
         )
@@ -1275,7 +1275,7 @@ class LMCacheEngine:
             keys=keys,
             location=location,
         )
-        assert memory_objs is not None, (
+        assert None not in memory_objs, (
             "LMCacheEngine.compress: Failed to get memory objects to compress"
         )
 
@@ -1334,7 +1334,7 @@ class LMCacheEngine:
             location=location,
         )
 
-        assert compressed_memory_objs is not None, (
+        assert None not in compressed_memory_objs, (
             "LMCacheEngine.compress: Failed to get compressed "
             "memory objects to decompress"
         )
@@ -1531,14 +1531,6 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
-        # In some scenarios, lookup is called first, and then the original tokens
-        # is sliced based on the lookup result. In these scenarios, the tokens
-        # passed in must exist in LMCache, and we can set skip_contains_check to True.
-        # When skip_contains_check is True and there is only one backend, the `contains`
-        # call can be skipped.
-        skip_contains_check = (
-            kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
-        )
         chunk_infos = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1550,10 +1542,11 @@ class LMCacheEngine:
 
         # block_mapping: location -> [(CacheEngineKey, start, end)]
         if (
-            skip_contains_check
-            and len(self.storage_manager.non_allocator_backends) == 1
+            "req_id" in kwargs
+            and kwargs["req_id"] in self.lookup_pins
+            and len(self.lookup_pins[kwargs["req_id"]]) == 1
         ):
-            location = self.storage_manager.non_allocator_backends[0]
+            location = next(iter(self.lookup_pins[kwargs["req_id"]].keys()))
             block_mapping = {location: chunk_infos}
         else:
             block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
@@ -1564,9 +1557,6 @@ class LMCacheEngine:
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
                 location=location,
-            )
-            assert memory_objs is not None, (
-                "Failed to get memory objects from storage backend"
             )
 
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
