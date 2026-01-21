@@ -113,7 +113,6 @@ class MooncakestoreConnector(RemoteConnector):
             from mooncake.store import (
                 MooncakeDistributedStore,
                 ReplicateConfig,
-                bind_to_numa_node,
             )
         except ImportError as e:
             raise ImportError(
@@ -174,14 +173,23 @@ class MooncakestoreConnector(RemoteConnector):
                     logger.info(
                         f"NUMA mapping detected (pre-Mooncake setup): {gpu_to_numa}"
                     )
-                    if numa_id is not None:
-                        bind_to_numa_node(numa_id)
-                        logger.info(
-                            f"GPU {current_device_id}, NUMA node {numa_id} binding done"
-                        )
-                    else:
-                        logger.info(
-                            f"NUMA mapping not found for GPU {current_device_id}"
+                    try:
+                        # Third Party
+                        from mooncake.store import bind_to_numa_node
+
+                        if numa_id is not None:
+                            bind_to_numa_node(numa_id)
+                            logger.info(
+                                f"GPU {current_device_id}, "
+                                f"NUMA node {numa_id} binding done"
+                            )
+                        else:
+                            logger.info(
+                                f"NUMA mapping not found for GPU {current_device_id}"
+                            )
+                    except ImportError:
+                        logger.warning(
+                            "unable to import bind_to_numa_node from mooncake.store"
                         )
                 else:
                     logger.info("NUMA mapping unavailable or disabled")
