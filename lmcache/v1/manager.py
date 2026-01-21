@@ -644,6 +644,12 @@ class LMCacheManager:
         """Get the role of this manager (scheduler or worker)."""
         return self._role
 
+    @property
+    def kv_caches(self) -> dict[str, torch.Tensor]:
+        if self._connector is not None and hasattr(self._connector, "kv_caches"):
+            return self._connector.kv_caches
+        return {}
+
     def is_healthy(self) -> bool:
         """
         Check if the LMCacheManager is healthy.
