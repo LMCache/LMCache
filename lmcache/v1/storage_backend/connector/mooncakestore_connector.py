@@ -113,7 +113,6 @@ class MooncakestoreConnector(RemoteConnector):
             from mooncake.store import (
                 MooncakeDistributedStore,
                 ReplicateConfig,
-                bind_to_numa_node,
             )
         except ImportError as e:
             raise ImportError(
@@ -174,14 +173,23 @@ class MooncakestoreConnector(RemoteConnector):
                     logger.info(
                         f"NUMA mapping detected (pre-Mooncake setup): {gpu_to_numa}"
                     )
-                    if numa_id is not None:
-                        bind_to_numa_node(numa_id)
-                        logger.info(
-                            f"GPU {current_device_id}, NUMA node {numa_id} binding done"
-                        )
-                    else:
-                        logger.info(
-                            f"NUMA mapping not found for GPU {current_device_id}"
+                    try:
+                        # Third Party
+                        from mooncake.store import bind_to_numa_node
+
+                        if numa_id is not None:
+                            bind_to_numa_node(numa_id)
+                            logger.info(
+                                f"GPU {current_device_id}, "
+                                f"NUMA node {numa_id} binding done"
+                            )
+                        else:
+                            logger.info(
+                                f"NUMA mapping not found for GPU {current_device_id}"
+                            )
+                    except ImportError:
+                        logger.warning(
+                            "unable to import bind_to_numa_node from mooncake.store"
                         )
                 else:
                     logger.info("NUMA mapping unavailable or disabled")
@@ -533,9 +541,6 @@ class MooncakestoreConnector(RemoteConnector):
             logger.warning(
                 "Timeout during batch_put_from; some decoders may redo prefill."
             )
-        finally:
-            for obj in memory_objs:
-                obj.ref_count_down()
 
     async def _batched_put_with_metadata(
         self,
@@ -543,10 +548,7 @@ class MooncakestoreConnector(RemoteConnector):
         memory_objs: List[MemoryObj],
     ) -> None:
         for key, obj in zip(keys, memory_objs, strict=False):
-            try:
-                await self._put_with_metadata(key.to_string(), obj)
-            finally:
-                obj.ref_count_down()
+            await self._put_with_metadata(key.to_string(), obj)
 
     async def _put_without_metadata(self, key_str: str, memory_obj: MemoryObj):
         """

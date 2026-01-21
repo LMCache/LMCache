@@ -582,8 +582,14 @@ class CacheStoreEvent:
     parent_block_hash: int | None
     token_ids: list[int]
     block_size: int
+
+    # Deprecated, use lora_name instead
+    # Retained for backwards compatibility
+    # Remove when vLLM removes it from BlockStored
     lora_id: int | None
+
     medium: str | None
+    lora_name: str | None
 
 
 ##### NVTX annotation #####
