@@ -5,7 +5,11 @@ from typing import Any, Optional
 import enum
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+    KVCache,
+    KVCacheFormat,
+)
 
 """
 Main RPC protocol for the LMCache core server and clients. The following 
@@ -14,8 +18,7 @@ functions are supported:
 - REGISTER_KV_CACHE:
     instance_id: int
     kv_caches: KVCache
-    backend_type: Optional[str]  # "sglang" or "vllm" (default: None for auto-detect)
-    block_size: Optional[int]  # Required for SGLang, KV cache block size
+    kv_format: Optional[KVCacheFormat]  # Engine-agnostic format descriptor
 
 - UNREGISTER_KV_CACHE:
     instance_id: int
@@ -55,8 +58,9 @@ class RequestType(enum.Enum):
     # MOVE = enum.auto()
     # COMPRESS = enum.auto()
 
-    # For configuration read commands (vllm integration)
+    # For configuration read commands
     GET_CHUNK_SIZE = enum.auto()
+    GET_CONFIG = enum.auto()  # NEW: Get server configuration (hash config, etc.)
 
     # For debug, could be used as heartbeats
     NOOP = enum.auto()
@@ -106,11 +110,10 @@ _PROTOCOL_DEFINTIONS = {
     # Register KV Cache
     # - instance_id: int
     # - kv_cache: KVCacheType
-    # - backend_type: Optional[str] ("sglang" or "vllm", None for auto-detect)
-    # - block_size: Optional[int] (required for SGLang backend)
+    # - kv_format: Optional[KVCacheFormat] - Engine-agnostic format descriptor
     # Returns: None
     RequestType.REGISTER_KV_CACHE: ProtocolDefinition(
-        payload_classes=[int, KVCache, Optional[str], Optional[int]],
+        payload_classes=[int, KVCache, Optional[KVCacheFormat]],
         response_class=None,
         handler_type=HandlerType.SYNC,
     ),
@@ -165,6 +168,13 @@ _PROTOCOL_DEFINTIONS = {
     RequestType.GET_CHUNK_SIZE: ProtocolDefinition(
         payload_classes=[],
         response_class=int,
+        handler_type=HandlerType.SYNC,
+    ),
+    # Get server configuration (hash config, etc.)
+    # Returns: dict with keys like "hash_seed", "chunk_size", "version"
+    RequestType.GET_CONFIG: ProtocolDefinition(
+        payload_classes=[],
+        response_class=dict,
         handler_type=HandlerType.SYNC,
     ),
     # Debug commands
