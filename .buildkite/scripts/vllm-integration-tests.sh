@@ -123,6 +123,9 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
+    # Ensure host directory exists for socket mapping
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT}"
+
     # Pick the GPUs based on config
     gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 "$gpu_count"
@@ -135,6 +138,7 @@ run_lmcache_vllmopenai_container() {
         --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
+        --volume /tmp/lmcache_internal_api_server/${PORT}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )
@@ -176,6 +180,10 @@ run_pd_lmcache() {
     PREFILLER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_prefiller.log"
     DECODER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_decoder.log"
 
+    # Ensure host directory exists for socket mapping
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT1}"
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT2}"
+
     ########## Prefiller ##########
     # docker args
     prefiller_docker_args=(
@@ -183,6 +191,7 @@ run_pd_lmcache() {
         --network host
         --gpus "device=0"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT1}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp
@@ -226,6 +235,7 @@ run_pd_lmcache() {
         --network host
         --gpus "device=1"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT2}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp
@@ -293,6 +303,10 @@ run_p2p_lmcache() {
     LOGFILE1="/tmp/build_${BUILD_ID}_${cfg_name}1.log"
     LOGFILE2="/tmp/build_${BUILD_ID}_${cfg_name}2.log"
 
+    # Ensure host directory exists for socket mapping
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT1}"
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT2}"
+
     ########## Instance 1 ##########
     # docker args
     docker1_args=(
@@ -300,6 +314,7 @@ run_p2p_lmcache() {
         --network host
         --gpus "device=0"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT1}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=tcp
@@ -362,6 +377,7 @@ run_p2p_lmcache() {
         --network host
         --gpus "device=1"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT2}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=tcp
@@ -417,12 +433,21 @@ usage() {
 #########
 
 check_memory_leak() {
-    local use_hot="$1"
+    local port="$1"
+
+    # Socket path on host: /tmp/lmcache_internal_api_server/{port}/socket_7000
+    local socket_path="/tmp/lmcache_internal_api_server/${port}/socket_7000"
+
+    # Get use_hot from /conf endpoint
+    local use_hot
+    use_hot=$(curl -s --unix-socket "$socket_path" "http://localhost/conf" 2>/dev/null | jq -r '.local_cpu // false')
+    if [ -z "$use_hot" ] || [ "$use_hot" = "null" ]; then
+        use_hot="false"
+    fi
+
+    echo "→ Checking memory leak on socket_path $socket_path (use_hot=$use_hot)..."
 
     # Fetch metrics from the prometheus endpoint via unix socket
-    # Socket path format: /tmp/lmcache_internal_api_server/socket_{port}
-    local socket_path="/tmp/lmcache_internal_api_server/socket_7000"
-    echo "→ Checking memory leak on socket_path $socket_path (use_hot=$use_hot)..."
     local metrics
     metrics=$(curl -s --unix-socket "$socket_path" "http://localhost/metrics" 2>/dev/null)
     if [ -z "$metrics" ]; then
@@ -486,18 +511,6 @@ check_memory_leak() {
 
     echo "  Memory leak check passed!"
     return 0
-}
-
-get_use_hot_from_conf() {
-    # Get local_cpu config from /conf endpoint via unix socket
-    local socket_path="/tmp/lmcache_internal_api_server/socket_7000"
-    local use_hot
-    use_hot=$(curl -s --unix-socket "$socket_path" "http://localhost/conf" 2>/dev/null | jq -r '.local_cpu // false')
-    # Default to false if not set or null
-    if [ -z "$use_hot" ] || [ "$use_hot" = "null" ]; then
-        use_hot="false"
-    fi
-    echo "$use_hot"
 }
 
 test_vllmopenai_server_with_lmcache_integrated() {
@@ -780,10 +793,32 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
 
     # Check memory leak after test
     echo "→ Checking for memory leaks..."
-    use_hot=$(get_use_hot_from_conf)
-    if ! check_memory_leak "$use_hot"; then
-        echo "Memory leak check failed"
-        exit 1
+    if [[ "$feature_type" == "pd" ]]; then
+        # Check both prefiller and decoder instances
+        if ! check_memory_leak "$PORT1"; then
+            echo "Memory leak check failed for prefiller (port $PORT1)"
+            exit 1
+        fi
+        if ! check_memory_leak "$PORT2"; then
+            echo "Memory leak check failed for decoder (port $PORT2)"
+            exit 1
+        fi
+    elif [[ "$feature_type" == "p2p" ]]; then
+        # Check both p2p instances
+        if ! check_memory_leak "$PORT1"; then
+            echo "Memory leak check failed for instance 1 (port $PORT1)"
+            exit 1
+        fi
+        if ! check_memory_leak "$PORT2"; then
+            echo "Memory leak check failed for instance 2 (port $PORT2)"
+            exit 1
+        fi
+    else
+        # Single instance
+        if ! check_memory_leak "$PORT"; then
+            echo "Memory leak check failed for $cfg_name"
+            exit 1
+        fi
     fi
 
     cleanup 0
