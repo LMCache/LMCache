@@ -16,11 +16,16 @@ from lmcache.v1.multiprocess.mp_storage_manager import (
 )
 
 
+def should_disable_lazy_alloc():
+    """Determine if lazy allocation should be disabled based on CUDA availability."""
+    return True if not torch.cuda.is_available() else False
+
+
 # Fixtures
 @pytest.fixture
 def storage_manager():
     """Create a storage manager with 1GB buffer for testing."""
-    disable_lazy_alloc = True if not torch.cuda.is_available() else False
+    disable_lazy_alloc = should_disable_lazy_alloc()
     manager = MPStorageManager(
         cpu_buffer_size=1.0, disable_lazy_alloc=disable_lazy_alloc
     )
@@ -32,7 +37,7 @@ def storage_manager():
 @pytest.fixture
 def small_storage_manager():
     """Create a storage manager with very small buffer to test memory exhaustion."""
-    disable_lazy_alloc = True if not torch.cuda.is_available() else False
+    disable_lazy_alloc = should_disable_lazy_alloc()
     manager = MPStorageManager(
         cpu_buffer_size=0.0625,  # 64MB
         disable_lazy_alloc=disable_lazy_alloc,
@@ -70,7 +75,9 @@ def test_format():
 class TestInit:
     def test_initialization(self):
         """Test that storage manager initializes correctly."""
-        manager = MPStorageManager(cpu_buffer_size=1.0)
+        manager = MPStorageManager(
+            cpu_buffer_size=1.0, disable_lazy_alloc=should_disable_lazy_alloc()
+        )
         assert manager is not None
         manager.close()
 
@@ -78,7 +85,9 @@ class TestInit:
         """Test initialization with various buffer sizes."""
         sizes = [0.1, 0.5, 1.0, 2.0]
         for size in sizes:
-            manager = MPStorageManager(cpu_buffer_size=size)
+            manager = MPStorageManager(
+                cpu_buffer_size=size, disable_lazy_alloc=should_disable_lazy_alloc()
+            )
             assert manager is not None
             manager.close()
 
@@ -500,12 +509,16 @@ class TestPrefetch:
 class TestClose:
     def test_close_basic(self):
         """Test that close can be called successfully."""
-        manager = MPStorageManager(cpu_buffer_size=0.5)
+        manager = MPStorageManager(
+            cpu_buffer_size=0.5, disable_lazy_alloc=should_disable_lazy_alloc()
+        )
         manager.close()
 
     def test_close_after_operations(self, test_keys, test_dtype, test_format):
         """Test that close works after performing operations."""
-        manager = MPStorageManager(cpu_buffer_size=1.0)
+        manager = MPStorageManager(
+            cpu_buffer_size=1.0, disable_lazy_alloc=should_disable_lazy_alloc()
+        )
         shape = torch.Size([2, 16, 16, 128])
 
         # Perform some operations
