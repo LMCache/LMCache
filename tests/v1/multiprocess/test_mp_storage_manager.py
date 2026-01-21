@@ -29,7 +29,7 @@ def storage_manager():
 @pytest.fixture
 def small_storage_manager():
     """Create a storage manager with very small buffer to test memory exhaustion."""
-    manager = MPStorageManager(cpu_buffer_size=0.001)  # 1MB
+    manager = MPStorageManager(cpu_buffer_size=0.0625)  # 64MB
     yield manager
     # Cleanup after test
     manager.close()
@@ -200,8 +200,8 @@ class TestReserve:
         self, small_storage_manager, test_keys, test_shape, test_dtype, test_format
     ):
         # Try to reserve and commit a lot of small tensors (total size is large)
-        large_shape = torch.Size([2, 50, 50, 256])  # Moderate size
-        small_shape = torch.Size([2, 5, 50, 256])  # Small size (1/10 of large)
+        large_shape = torch.Size([2, 50, 1500, 256])  # Moderate size
+        small_shape = torch.Size([2, 5, 1500, 256])  # Small size (1/10 of large)
 
         # First, reserve a single key with large shape should fail
         with pytest.raises(MemoryExhaustedError):
@@ -340,7 +340,7 @@ class TestLookup:
         self, small_storage_manager, test_keys, test_shape, test_dtype, test_format
     ):
         """Test that lookup locks the objects so they cannot be evicted."""
-        small_shape = torch.Size([2, 4, 50, 256])  # Small size
+        small_shape = torch.Size([2, 5, 1500, 256])  # Small size
         # Reserve and commit multiple small tensors to fill up memory
         target_keys = test_keys[:1]
         handle, _ = small_storage_manager.reserve(
