@@ -11,15 +11,16 @@ Prerequisites
 -------------
 
 - **Multi-GPU Setup**: Your server should have at least 2 GPUs
+- **NIC**: RDMA is recommended for more performance.
 - **NIXL**: Install from `NIXL <https://github.com/ai-dynamo/nixl>`_
+- **vLLM**: v1 version is required, refer to :ref:`installation_guide` for details.
 - **LMCache**: Install from :ref:`installation_guide`
 
 Configuration
 -------------
 
 Create two configuration files for the P2P sharing setup.
-
-The only difference between the two configurations is the ``lmcache_instance_id`` and the ``p2p_init_ports`` and ``p2p_lookup_ports`` and ``lmcache_worker_ports``.
+ 
 
 **Instance 1 Configuration (example1.yaml)**:
 
@@ -27,7 +28,7 @@ The only difference between the two configurations is the ``lmcache_instance_id`
 
     chunk_size: 256
     local_cpu: True
-    max_local_cpu_size: 5
+    max_local_cpu_size: 100
     enable_async_loading: True
 
     # P2P configurations
@@ -53,7 +54,7 @@ The only difference between the two configurations is the ``lmcache_instance_id`
 
     chunk_size: 256
     local_cpu: True
-    max_local_cpu_size: 5
+    max_local_cpu_size: 100
     enable_async_loading: True
 
     # P2P configurations
@@ -80,18 +81,34 @@ Setup and Usage
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=123 lmcache_controller --host localhost --port 9000 --monitor-ports '{"pull": 8300, "reply": 8400}'
+    PYTHONHASHSEED=123 lmcache_controller --host localhost --port 9000 --monitor-ports '{"pull": 8300, "reply": 8400, "heartbeat": 8082}'
 
 Make sure that the 8300 and 8400 ports are set up in **controller_pull_url** and **controller_reply_url** in the configuration files.
 Port 9000 is the controller main port, which is arbitrary and can be changed.
 
+After starting the controller, access the WebUI at:
+
+http://localhost:9000/
+
 **Step 2: Start vLLM Engines with LMCache Workers**
+
+If the NIC supports RDMA:
+
+.. code-block:: bash
+
+    export UCX_TLS=rc
+
+If the NIC does not support RDMA:
+
+.. code-block:: bash
+
+    export UCX_TLS=tcp
 
 Start vLLM engine 1 at port 8010:
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=example1.yaml \
+    PYTHONHASHSEED=123  CUDA_VISIBLE_DEVICES=0 LMCACHE_CONFIG_FILE=/path/to/example1.yaml \
     vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8010 \
@@ -101,7 +118,7 @@ Start vLLM engine 2 at port 8011:
 
 .. code-block:: bash
 
-    PYTHONHASHSEED=123 UCX_TLS=rc CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=example2.yaml \
+    PYTHONHASHSEED=123  CUDA_VISIBLE_DEVICES=1 LMCACHE_CONFIG_FILE=/path/to/example2.yaml \
     vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
         --gpu-memory-utilization 0.8 \
         --port 8011 \
@@ -144,3 +161,72 @@ When the second request successfully retrieves cache from the first instance, yo
     (EngineCore_DP0 pid=2577584)[2025-09-21 00:00:11,792] LMCache INFO: Retrieved 1002 out of total 1002 out of total 1002 tokens. size: 0.1223 gb, cost 60.3595 ms, throughput: 2.0264 GB/s; (cache_engine.py:496:lmcache.v1.cache_engine)
 
 These logs indicate successful P2P connection establishment and high-throughput cache retrieval.
+
+
+
+**Step 4: Benchmarking P2P Cache Sharing**
+
+Send a request workload to instance 1 to populate the cache:
+
+.. code-block:: bash
+
+    python benchmarks/long_doc_qa/long_doc_qa.py \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --num-documents 50 \
+    --document-length 10000 \
+    --output-len 100 \
+    --repeat-count 1 \
+    --repeat-mode tile \
+    --port 8010 \
+    --max-inflight-requests 4
+
+Send the same request workload to instance 2 to demonstrate cache retrieval from **instance 1**:
+
+.. code-block:: bash
+
+    python benchmarks/long_doc_qa/long_doc_qa.py \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --num-documents 50 \
+    --document-length 10000 \
+    --output-len 100 \
+    --repeat-count 1 \
+    --repeat-mode tile \
+    --port 8011 \
+    --max-inflight-requests 4
+
+
+Benchmark Results
+-----------------
+
+First instance metrics:
+
+.. code-block:: text
+ 
+    Warmup round mean TTFT: 2.286s
+    Warmup round time: 37.957s
+    Warmup round prompt count: 50
+    Warmup round successful prompt count: 50
+    
+    === BENCHMARK RESULTS ===
+    Query round mean TTFT: 2.028s
+    Query round time: 38.323s
+    Query round prompt count: 50
+    Query round successful prompt count: 50
+
+Second instance metrics:
+
+.. code-block:: text
+ 
+    Warmup round mean TTFT: 1.036s
+    Warmup round time: 13.814s
+    Warmup round prompt count: 50
+    Warmup round successful prompt count: 50
+    
+    === BENCHMARK RESULTS ===
+    Query round mean TTFT: 0.490s
+    Query round time: 7.964s
+    Query round prompt count: 50
+    Query round successful prompt count: 50
+
+In this example, the warm-up round metric in long_doc_qa is used because no existing KV cache is reused within an instance to benefit solely from P2P sharing. With LMCache P2P sharing enabled, the time to first token (TTFT) is reduced by 54.7%, from 2.286 s to 1.036 s, with a 63.6% reduction in total inference time (37.957 s → 13.814 s).
+

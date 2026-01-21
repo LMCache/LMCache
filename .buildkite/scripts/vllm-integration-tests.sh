@@ -445,9 +445,9 @@ test_vllmopenai_server_with_lmcache_integrated() {
 run_long_doc_qa() {
     local workload_config="$1"
     local port="$2"
-    local has_expected_latency="${3:-"false"}"
-    local has_expected_ttft_gain="${4:-"false"}"
-    local has_expected_latency_gain="${5:-"false"}"
+    local check_warmup_round_time_per_prompt="${3:-"false"}"
+    local check_query_ttft_per_prompt="${4:-"false"}"
+    local check_query_round_time_per_prompt="${5:-"false"}"
     local feature_type="${6:-"dummy"}"
     local need_upload="${7:-"false"}"
 
@@ -529,41 +529,41 @@ run_long_doc_qa() {
     expected_query_round_time_per_prompt=$(echo "$baseline_json" | jq -r '.query_round_time_per_prompt')
     expected_warmup_round_time_per_prompt=$(echo "$baseline_json" | jq -r '.warmup_round_time_per_prompt')
 
-    if [ "$has_expected_ttft_gain" = "true" ]; then
-        echo "Expected latency: $expected_query_ttft_per_prompt"
-        echo "Actual latency: $query_ttft_per_prompt"
+    if [ "$check_query_ttft_per_prompt" = "true" ]; then
+        echo "Expected query ttft per prompt: $expected_query_ttft_per_prompt"
+        echo "Actual query ttft per prompt: $query_ttft_per_prompt"
         awk -v expected="$expected_query_ttft_per_prompt" -v actual="$query_ttft_per_prompt" 'BEGIN {
             if (actual > expected * 1.1) {
-                print "TTFT gain requirement not met"
+                print "Query ttft per prompt requirement not met"
                 exit 1
             } else {
-                print "TTFT gain requirement met"
+                print "Query ttft per prompt requirement met"
             }
         }'
     fi
 
-    if [ "$has_expected_latency_gain" = "true" ]; then
-        echo "Expected latency: $expected_query_round_time_per_prompt"
-        echo "Actual latency: $query_round_time_per_prompt"
+    if [ "$check_query_round_time_per_prompt" = "true" ]; then
+        echo "Expected query round time per prompt: $expected_query_round_time_per_prompt"
+        echo "Actual query round time per prompt: $query_round_time_per_prompt"
         awk -v expected="$expected_query_round_time_per_prompt" -v actual="$query_round_time_per_prompt" 'BEGIN {
             if (actual > expected * 1.1) {
-                print "Latency gain requirement not met"
+                print "Query round time per prompt requirement not met"
                 exit 1
             } else {
-                print "Latency gain requirement met"
+                print "Query round time per prompt requirement met"
             }
         }'
     fi
 
-    if [ "$has_expected_latency" = "true" ]; then
-        echo "Expected warmup latency: $expected_warmup_round_time_per_prompt"
-        echo "Actual warmup latency: $warmup_round_time_per_prompt"
+    if [ "$check_warmup_round_time_per_prompt" = "true" ]; then
+        echo "Expected warmup round time per prompt: $expected_warmup_round_time_per_prompt"
+        echo "Actual warmup round time per prompt: $warmup_round_time_per_prompt"
         awk -v expected="$expected_warmup_round_time_per_prompt" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
             if (actual > expected * 1.1) {
-                print "Latency requirement not met"
+                print "Warmup round time per prompt requirement not met"
                 exit 1
             } else {
-                print "Latency requirement met"
+                print "Warmup round time per prompt requirement met"
             }
         }'
     fi
@@ -671,20 +671,24 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         test_vllmopenai_server_with_lmcache_integrated "$model"
     elif [ "$test_mode" = "long_doc_qa" ]; then
         workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
-        has_expected_latency_gain=$(jq 'has("expected-latency-gain")' <<< "$workload_yaml")
-        has_expected_latency=$(jq 'has("expected-latency")' <<< "$workload_yaml")
-        has_expected_ttft_gain=$(jq 'has("expected-ttft-gain")' <<< "$workload_yaml")
-        tmp_workload_yaml=$(
-            jq 'del(."expected-latency-gain") 
-                | del(."expected-latency") 
-                | del(."expected-ttft-gain")' \
-                <<< "$workload_yaml"
+        cfg_json="$(yq '.' "$cfg_file")"
+        check_warmup_round_time_per_prompt=$(
+            jq -e '(.["checking-fields"] // []) | index("warmup_round_time_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
+        )
+        check_query_round_time_per_prompt=$(
+            jq -e '(.["checking-fields"] // []) | index("query_round_time_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
+        )
+        check_query_ttft_per_prompt=$(
+            jq -e '(.["checking-fields"] // []) | index("warmup_ttft_per_prompt") != null' \
+                <<< "$cfg_json" >/dev/null && echo true || echo false
         )
         if [[ "$feature_type" == "p2p" ]]; then
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT1"
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT2" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
+            run_long_doc_qa "$workload_yaml" "$PORT1"
+            run_long_doc_qa "$workload_yaml" "$PORT2" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         else
-            run_long_doc_qa "$tmp_workload_yaml" "$PORT" "$has_expected_latency" "$has_expected_ttft_gain" "$has_expected_latency_gain" "${cfg_name%.yaml}" "$NEED_UPLOAD"
+            run_long_doc_qa "$workload_yaml" "$PORT" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         fi
     fi
 

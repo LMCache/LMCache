@@ -894,6 +894,7 @@ def test_paged_prefetch_retrieve(
         save_unfull_chunk=save_unfull_chunk,
     )
 
+    async_lookup_server = DummyLMCacheAsyncLookupServer()
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(
             "test",
@@ -902,10 +903,10 @@ def test_paged_prefetch_retrieve(
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
-        )
+        ),
+        async_lookup_server=async_lookup_server,
     )
-    async_lookup_server = DummyLMCacheAsyncLookupServer()
-    engine.post_init(async_lookup_server=async_lookup_server)
+
     """ test store """
     t1 = time.perf_counter()
     engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)

@@ -25,15 +25,15 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import get_size_bytes
+from lmcache.integration.vllm.utils import get_size_bytes, lmcache_get_or_create_config
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
+from lmcache.v1.standalone.manager import StandaloneLMCacheManager
 from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
 
 # Third Party - Platform detection
@@ -207,25 +207,33 @@ class LMCacheStandaloneStarter:
         self.layer_groups = layer_groups
         self.device = device
 
-        # Create objects in constructor for better error handling
-        instance_id = self.config.lmcache_instance_id
-
         # Construct GPU connector based on platform detection
         gpu_connector = self._construct_gpu_connector()
 
-        self.lmcache_engine = LMCacheEngineBuilder.get_or_create(
-            instance_id=instance_id,
-            config=self.config,
-            metadata=self.metadata,
+        # Create standalone manager directly
+        self._manager = StandaloneLMCacheManager(
+            config=config,
+            metadata=metadata,
             gpu_connector=gpu_connector,
             broadcast_fn=mock_up_broadcast_fn,
             broadcast_object_fn=mock_up_broadcast_object_fn,
+            connector=self,
         )
 
-        # Create API server in constructor
-        self.api_server = InternalAPIServer(self)  # type: ignore[arg-type]
-
         self.running = False
+
+    @property
+    def lmcache_engine(self) -> LMCacheEngine:
+        """Get the LMCache engine instance."""
+        # Directly access engine from standalone manager
+        engine = self._manager.lmcache_engine
+        assert engine is not None, "LMCache engine not initialized yet"
+        return engine
+
+    @property
+    def api_server(self):
+        """Get the API server instance."""
+        return self._manager.api_server
 
     def _construct_gpu_connector(self):
         """Construct GPU connector based on platform detection"""
@@ -367,12 +375,11 @@ class LMCacheStandaloneStarter:
         kv_caches = self._generate_fixed_kvcaches(device=self.device)
         self.kv_caches = kv_caches
 
-        # Initialize the engine with kvcaches
-        self.lmcache_engine.post_init(kvcaches=list(kv_caches.values()))
+        # Post-initialize with kvcaches and start API server
+        self._manager.post_init()
         logger.info("LMCache engine post-initialized with fixed kvcaches")
 
-        # Start internal API server
-        self.api_server.start()
+        self._manager.start_services()
 
         self.running = True
         logger.info("LMCache engine started successfully")
@@ -386,17 +393,7 @@ class LMCacheStandaloneStarter:
         logger.info("Stopping LMCache engine...")
         self.running = False
 
-        if self.api_server:
-            logger.info("Stopping internal API server...")
-            self.api_server.stop()
-
-        if self.lmcache_engine:
-            logger.info("Closing LMCache engine...")
-            self.lmcache_engine.close()
-
-            instance_id = self.config.lmcache_instance_id
-            LMCacheEngineBuilder.destroy(instance_id)
-            logger.info("Engine instance %s destroyed", instance_id)
+        self._manager.stop_services()
 
         logger.info("LMCache engine stopped")
 
@@ -573,7 +570,7 @@ def main():
     logger.info("=" * 80)
 
     try:
-        config_path = args.config or os.getenv("LMCACHE_CONFIG_FILE")
+        config_path = args.config
         if config_path:
             logger.info("Loading LMCache config file: %s", config_path)
             config = LMCacheEngineConfig.from_file(config_path)
@@ -581,7 +578,7 @@ def main():
             config.update_config_from_env()
         else:
             logger.info("No config file specified, loading from environment variables.")
-            config = LMCacheEngineConfig.from_env()
+            config = lmcache_get_or_create_config()
         # Override with any extra command-line parameters
         if args.extra_params:
             override_config_from_dict(config, args.extra_params)
@@ -626,6 +623,7 @@ def main():
             kv_shape=kv_shape,
             use_mla=args.use_mla,
             role="worker",
+            num_ranks=args.world_size,
         )
 
         starter = LMCacheStandaloneStarter(config, metadata, layer_groups, args.device)

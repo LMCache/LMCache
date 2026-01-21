@@ -3,6 +3,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -12,6 +13,12 @@ from typing import (
     Tuple,
     Union,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.health_monitor.base import HealthMonitor
+
+# Standard
 import asyncio
 import gc
 import multiprocessing
@@ -50,6 +57,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.v1.token_database import (
@@ -159,30 +167,7 @@ class LMCacheEngine:
         # the storage_manager
         # if save_only_first_rank is True, only the first rank and
         # lookup server workers will initialize the storage_manager
-        self.storage_manager = None
-        lookup_server_worker_ids = self.config.get_lookup_server_worker_ids(
-            metadata.use_mla, metadata.world_size
-        )
-        if (
-            self.lmcache_worker is not None
-            or self.use_layerwise
-            or not self.save_only_first_rank
-            or self.metadata.is_first_rank()
-            or len(lookup_server_worker_ids) == 0
-            or self.metadata.worker_id in lookup_server_worker_ids
-        ):
-            logger.info(
-                f"Initialize storage manager on rank {self.metadata.worker_id}, "
-                f"use layerwise: {self.use_layerwise},"
-                f"save only first rank: {self.save_only_first_rank}"
-            )
-            self.storage_manager = StorageManager(
-                config,
-                metadata,
-                # self.memory_allocator,
-                event_manager=self.event_manager,
-                lmcache_worker=self.lmcache_worker,
-            )
+        self.storage_manager: Optional[StorageManager] = None
 
         # KV events
         self.kv_events_enabled = False
@@ -219,8 +204,10 @@ class LMCacheEngine:
             lambda: defaultdict(list)
         )
 
-        InitializeUsageContext(config.to_original_config(), metadata)
+        InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        # Initialize PinMonitor singleton with config
+        PinMonitor.GetOrCreate(config)
 
         self.post_inited = False
 
@@ -236,15 +223,62 @@ class LMCacheEngine:
         if not config.py_enable_gc:
             gc.disable()
 
+        # Health monitor reference (injected by LMCacheManager)
+        self._health_monitor: Optional["HealthMonitor"] = None
+
+    def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
+        """
+        Set the health monitor reference.
+
+        This is called by LMCacheManager after creating the HealthMonitor
+        to inject the reference into the engine.
+
+        Args:
+            health_monitor: The HealthMonitor instance from LMCacheManager
+        """
+        self._health_monitor = health_monitor
+
+    def is_healthy(self) -> bool:
+        """
+        Check if the LMCache system is healthy.
+
+        This method delegates to the HealthMonitor if one is set.
+        If no health monitor is set, it returns True (assume healthy).
+
+        Returns:
+            bool: True if healthy, False otherwise
+        """
+        if self._health_monitor is not None:
+            return self._health_monitor.is_healthy()
+        return True
+
     def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs["async_lookup_server"]
         if not self.post_inited:
-            if self.storage_manager is not None:
-                self.storage_manager.post_init(**kwargs)
-            logger.info("Post-initializing LMCacheEngine")
-            if self.gpu_connector is not None:
-                self.gpu_connector.initialize_kvcaches_ptr(**kwargs)
+            logger.info("Post initializing LMCacheEngine")
+            lookup_server_worker_ids = self.config.get_lookup_server_worker_ids(
+                self.metadata.use_mla, self.metadata.world_size
+            )
+            if (
+                self.lmcache_worker is not None
+                or self.use_layerwise
+                or not self.save_only_first_rank
+                or self.metadata.is_first_rank()
+                or len(lookup_server_worker_ids) == 0
+                or self.metadata.worker_id in lookup_server_worker_ids
+            ):
+                logger.info(
+                    f"Initialize storage manager on rank {self.metadata.worker_id}, "
+                    f"use layerwise: {self.use_layerwise},"
+                    f"save only first rank: {self.save_only_first_rank}"
+                )
+                async_lookup_server = kwargs.get("async_lookup_server", None)
+                self.storage_manager = StorageManager(
+                    self.config,
+                    self.metadata,
+                    event_manager=self.event_manager,
+                    lmcache_worker=self.lmcache_worker,
+                    async_lookup_server=async_lookup_server,
+                )
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
@@ -303,6 +337,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping store operation")
+            return
+
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store operation"
         )
@@ -377,7 +416,7 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             # Allocate the memory object
             num_tokens = end - start
-            kv_shapes = self.gpu_connector.get_shapes(num_tokens)
+            kv_shapes = self.metadata.get_shapes(num_tokens)
             kv_dtypes = self.metadata.get_dtypes()
 
             # TODO (Jiayi): should be batched in the future
@@ -412,6 +451,7 @@ class LMCacheEngine:
                     block_size=num_tokens,
                     lora_id=None,
                     medium="cpu",
+                    lora_name=None,
                 )
                 if tokens is not None:
                     stored_event.token_ids = convert_tokens_to_list(
@@ -446,7 +486,7 @@ class LMCacheEngine:
         tot_time = offload_time + put_time
 
         logger.info(
-            "Stored %d out of total %d tokens. size: %.4f gb, cost %.4f ms, "
+            "Stored %d out of total %d tokens. size: %.4f GB, cost %.4f ms, "
             "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
             tot_token_num,
             num_to_store_tokens,
@@ -487,6 +527,11 @@ class LMCacheEngine:
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping store_layer operation")
+            return
+
         assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
@@ -573,6 +618,7 @@ class LMCacheEngine:
                     block_size=num_tokens,
                     lora_id=None,
                     medium="cpu",
+                    lora_name=None,
                 )
                 if tokens is not None:
                     stored_event.token_ids = convert_tokens_to_list(
@@ -593,6 +639,11 @@ class LMCacheEngine:
             memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
             keys = [list(row) for row in zip(*keys, strict=False)]
 
+            # Calculate total KV size for logging
+            tot_kv_size = sum(
+                mo.get_size() for layer_objs in memory_objs for mo in layer_objs
+            )
+
             assert isinstance(
                 self.gpu_connector,
                 (
@@ -602,6 +653,7 @@ class LMCacheEngine:
                 ),
             )
 
+            t_start = time.perf_counter()
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
                 memory_objs, starts, ends, **kwargs
             )
@@ -612,6 +664,17 @@ class LMCacheEngine:
                 yield
                 next(mem_obj_generator)
                 self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+
+            tot_time = time.perf_counter() - t_start
+            logger.info(
+                "Stored %d out of total %d tokens. "
+                "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s",
+                tot_token_num,
+                len(tokens),
+                tot_kv_size / 1024**3,
+                tot_time * 1000,
+                tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
+            )
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -619,7 +682,6 @@ class LMCacheEngine:
                 yield
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
-        logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
         yield
 
     @_lmcache_nvtx_annotate
@@ -651,6 +713,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping retrieve operation")
+            return torch.zeros(len(tokens), dtype=torch.bool)
+
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve operation"
         )
@@ -729,17 +796,30 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.info(
-            "Retrieved %d out of %d required tokens (from %d total tokens)."
-            " size: %.4f gb,"
-            " cost %.4f ms, throughput: %.4f GB/s;",
-            retrieved_tokens,
-            num_required_tokens,
-            len(tokens),
-            tot_kv_size / 1024**3,
-            onload_time * 1000,
-            tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
-        )
+        # The retrieved may be larger than the need_to_load
+        # Example (page_size=16, chunk_size=256):
+        #
+        # chunks:  [0..255]                [256..511]
+        # pages:   [0..15]...[240..255]    [256..271][272..287] ...
+        #
+        # num_computed_tokens = 288 => vLLM already has [0..287] (18 pages)
+        # LMCache hit_prefix_tokens = 512 => cache covers [0..511] (2 chunks)
+        #
+        # Skip chunk 1, retrieve chunk 2, overwrite [256..287] (32-token overlap)
+        # need_to_load: 512 - 288 = 224 tokens
+        # retrieved: 256 tokens
+        if not self._is_passive():
+            logger.info(
+                "Retrieved %d out of %d required tokens (from %d total tokens)."
+                " size: %.4f gb,"
+                " cost %.4f ms, throughput: %.4f GB/s;",
+                retrieved_tokens,
+                num_required_tokens,
+                len(tokens),
+                tot_kv_size / 1024**3,
+                onload_time * 1000,
+                tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
+            )
         return ret_mask
 
     @_lmcache_nvtx_annotate
@@ -772,6 +852,12 @@ class LMCacheEngine:
             last iteration, it moves the memory objects of the last layer to
             the GPU.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping retrieve_layer operation")
+            yield torch.zeros(len(tokens), dtype=torch.bool)
+            return
+
         assert self.storage_manager is not None
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
@@ -875,11 +961,12 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.info(
-            f"Retrieved {retrieved_tokens} "
-            f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
-        )
+        if not self._is_passive():
+            logger.info(
+                f"Retrieved {retrieved_tokens} "
+                f"out of {num_required_tokens} "
+                f"out of total {len(tokens)} tokens"
+            )
 
         yield ret_mask
 
@@ -893,7 +980,6 @@ class LMCacheEngine:
         lookup_id: Optional[str] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
-        num_computed_tokens: int = 0,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -918,11 +1004,13 @@ class LMCacheEngine:
 
         :param Optional[dict] request_configs: the configs of the request.
 
-        :param int num_computed_tokens: Number of leading tokens those are already
-            available in the caller.
-
-        :return: An int indicating how many prefix tokens are cached.
+        :return: An int indicating how many prefix tokens exist inside LMCache.
         """
+        # Health check: block operation if LMCache is unhealthy
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping lookup operation")
+            return 0
+
         assert self.storage_manager is not None
 
         if tokens is not None:
@@ -932,10 +1020,7 @@ class LMCacheEngine:
             assert hashes is not None
             lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
 
-        # Skip the number of tokens that are already computed (aligned upstream to
-        # chunk size)
-        aligned_computed_tokens = num_computed_tokens
-        res = aligned_computed_tokens
+        res = 0
         try:
             chunk_info_iterator = self.token_database.process_tokens(
                 tokens=tokens,
@@ -947,8 +1032,6 @@ class LMCacheEngine:
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
-                    if end <= aligned_computed_tokens:
-                        continue
                     assert isinstance(key, CacheEngineKey)
 
                     # TODO(Jiayi): Optimize by checking only the existence of the key
@@ -978,15 +1061,10 @@ class LMCacheEngine:
                 for chunk_info in chunk_info_iterator:
                     assert isinstance(chunk_info[2], CacheEngineKey)
                     start, end, _ = chunk_info
-                    if end <= aligned_computed_tokens:
-                        continue
                     chunk_info_list.append(chunk_info)
                     # chunk_info contains (start, end, key)
                     # chunk_info[2] is the key
                     keys.append(chunk_info[2])
-                # If no tokens to lookup, return immediately
-                if not keys:
-                    return res
                 # hit chunks by prefix matching
                 hit_chunks, block_mapping = self.storage_manager.batched_contains(
                     keys, search_range, pin
@@ -1005,16 +1083,10 @@ class LMCacheEngine:
             # all tokens where found, return the maximal end
             return res
         finally:
-            # When num_computed_tokens is greater than a chunk, we skip
-            # some tokens to reduce the number of lookup requests.
-            # It is possible that res equals aligned_computed_tokens and no lookup is
-            # performed.
-            # In this case, using res as the number of hit tokens will overcount
-            # the number of hit tokens.
-            # TODO deprecate this metric and use retrieve metrics instead.
             self.stats_monitor.on_lookup_finished(lookup_request_id, res)
             # vllm lookup sets pin to True
             if pin:
+                # touch_cache is tightly coupled with batched_contains
                 self.storage_manager.touch_cache()
 
     @_lmcache_nvtx_annotate
@@ -1050,7 +1122,7 @@ class LMCacheEngine:
             keys=keys,
             location=old_position,
         )
-        assert memory_objs is not None, "Failed to get memory objects to move"
+        assert None not in memory_objs, "Failed to get memory objects to move"
         logger.debug(
             f"Trying to send {len(memory_objs)} memory objects to {new_position}"
         )
@@ -1203,7 +1275,7 @@ class LMCacheEngine:
             keys=keys,
             location=location,
         )
-        assert memory_objs is not None, (
+        assert None not in memory_objs, (
             "LMCacheEngine.compress: Failed to get memory objects to compress"
         )
 
@@ -1262,7 +1334,7 @@ class LMCacheEngine:
             location=location,
         )
 
-        assert compressed_memory_objs is not None, (
+        assert None not in compressed_memory_objs, (
             "LMCacheEngine.compress: Failed to get compressed "
             "memory objects to decompress"
         )
@@ -1459,14 +1531,6 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
-        # In some scenarios, lookup is called first, and then the original tokens
-        # is sliced based on the lookup result. In these scenarios, the tokens
-        # passed in must exist in LMCache, and we can set skip_contains_check to True.
-        # When skip_contains_check is True and there is only one backend, the `contains`
-        # call can be skipped.
-        skip_contains_check = (
-            kwargs["skip_contains_check"] if "skip_contains_check" in kwargs else False
-        )
         chunk_infos = []
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1478,10 +1542,11 @@ class LMCacheEngine:
 
         # block_mapping: location -> [(CacheEngineKey, start, end)]
         if (
-            skip_contains_check
-            and len(self.storage_manager.non_allocator_backends) == 1
+            "req_id" in kwargs
+            and kwargs["req_id"] in self.lookup_pins
+            and len(self.lookup_pins[kwargs["req_id"]]) == 1
         ):
-            location = self.storage_manager.non_allocator_backends[0]
+            location = next(iter(self.lookup_pins[kwargs["req_id"]].keys()))
             block_mapping = {location: chunk_infos}
         else:
             block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
@@ -1492,9 +1557,6 @@ class LMCacheEngine:
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
                 location=location,
-            )
-            assert memory_objs is not None, (
-                "Failed to get memory objects from storage backend"
             )
 
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):

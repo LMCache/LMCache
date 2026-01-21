@@ -13,6 +13,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 import asyncio
 import functools
@@ -93,7 +94,17 @@ def allocate_and_copy_objects(
             busy_loop=False,
         )
 
-        if memory_obj is None or memory_obj.tensor is None:
+        if memory_obj is None:
+            break
+
+        if memory_obj.tensor is None:
+            # This should not happen with current implementation,
+            # but handle it defensively to avoid memory leak
+            logger.warning(
+                "Allocated MemoryObj has None tensor, this is unexpected. "
+                "Releasing the memory object."
+            )
+            memory_obj.ref_count_down()
             break
 
         with torch.cuda.stream(stream):
@@ -212,6 +223,7 @@ class StorageManager:
         metadata: LMCacheEngineMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
     ):
         self.config = config
         self.metadata = metadata
@@ -247,8 +259,8 @@ class StorageManager:
         self.allocator_backend = None
         if metadata.role != "scheduler":
             self.allocator_backend = self._get_allocator_backend(config)
-        if config.local_cpu:
-            self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+
+        self.local_cpu_backend = self.storage_backends.get("LocalCPUBackend", None)
 
         self.manager_lock = threading.Lock()
 
@@ -258,7 +270,9 @@ class StorageManager:
 
         self.event_manager = event_manager
 
-        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+        self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
+            async_lookup_server
+        )
         self.async_serializer: Optional[AsyncSerializer] = None
 
         # The cuda stream for internal copies during put
@@ -270,6 +284,14 @@ class StorageManager:
         # freeze mode: only use local_cpu backend for retrieval
         self._freeze = False
         self._freeze_lock = threading.RLock()
+
+        # Backend bypass mode: skip specific backends during health check failures
+        self._bypassed_backends: set[str] = set()
+        self._bypass_lock = threading.RLock()
+
+        if not self.enable_pd and self.config.enable_async_loading:
+            assert self.allocator_backend is not None
+            self.async_serializer = AsyncSingleSerializer(self.loop)
 
         self._setup_metrics()
 
@@ -295,14 +317,6 @@ class StorageManager:
                     EventType.LOADING, s
                 )
             )
-
-    def post_init(self, **kwargs) -> None:
-        if "async_lookup_server" in kwargs:
-            self.async_lookup_server = kwargs.pop("async_lookup_server")
-        # PDBackend has't supported calculate_chunk_budget
-        if not self.enable_pd and self.config.enable_async_loading:
-            assert self.allocator_backend is not None
-            self.async_serializer = AsyncSingleSerializer(self.loop)
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -400,6 +414,10 @@ class StorageManager:
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
                 continue
+            # Skip bypassed backends
+            with self._bypass_lock:
+                if backend_name in self._bypassed_backends:
+                    continue
 
             allocator_backend = backend.get_allocator_backend()
             cname = get_backend_cname(allocator_backend)
@@ -467,7 +485,7 @@ class StorageManager:
         self,
         keys: List[CacheEngineKey],
         location: Optional[str] = None,
-    ) -> Optional[List[Optional[MemoryObj]]]:
+    ) -> List[Optional[MemoryObj]]:
         """
         Blocking function to get the memory objects from the storages.
         """
@@ -475,8 +493,28 @@ class StorageManager:
         for backend_name, storage_backend in self.get_active_storage_backends(location):
             memory_objs = storage_backend.batched_get_blocking(keys)
             if memory_objs:
+                # Align with single-key `get()` logic:
+                # auto-write remote data to local CPU cache
+                if (
+                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    and "LocalCPUBackend" in self.storage_backends
+                    and None not in memory_objs
+                ):
+                    logger.debug(
+                        "Storing %s objects from %s to LocalCPUBackend",
+                        len(keys),
+                        backend_name,
+                    )
+                    local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+                    assert isinstance(local_cpu_backend, LocalCPUBackend)
+                    # Type cast: Safe (we verified no Nones above)
+                    # `batched_submit_put_task` expects list[MemoryObj]
+                    # TODO (lisiG9): Refactor this write-back logic into caching
+                    #  policy module
+                    memory_objs_no_none = cast(List[MemoryObj], memory_objs)
+                    local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
                 return memory_objs
-        return None
+        return [None] * len(keys)
 
     def layerwise_batched_get(
         self,
@@ -759,6 +797,42 @@ class StorageManager:
         with self._freeze_lock:
             return self._freeze
 
+    def set_backend_bypass(self, backend_name: str, bypassed: bool) -> None:
+        """
+        Set bypass mode for a specific backend.
+
+        When a backend is bypassed:
+        - It will be skipped during contains/put/get operations
+        - This is typically used when a health check fails with LOCAL_CPU fallback
+
+        Args:
+            backend_name: The name of the backend to bypass (e.g., "RemoteBackend")
+            bypassed: True to bypass, False to restore normal operation
+        """
+        with self._bypass_lock:
+            if bypassed:
+                self._bypassed_backends.add(backend_name)
+                logger.info(f"StorageManager: Backend {backend_name} is now bypassed")
+            else:
+                self._bypassed_backends.discard(backend_name)
+                logger.info(
+                    f"StorageManager: Backend {backend_name} bypass removed, "
+                    "restored to normal operation"
+                )
+
+    def is_backend_bypassed(self, backend_name: str) -> bool:
+        """
+        Check if a backend is currently bypassed.
+
+        Args:
+            backend_name: The name of the backend to check
+
+        Returns:
+            bool: True if the backend is bypassed, False otherwise
+        """
+        with self._bypass_lock:
+            return backend_name in self._bypassed_backends
+
     def contains(
         self,
         key: CacheEngineKey,
@@ -991,7 +1065,7 @@ class StorageManager:
         search_range: Optional[List[str]] = None,
     ) -> Generator[Tuple[str, StorageBackendInterface], None, None]:
         """
-        Get the active storage backends based on freeze mode and filters.
+        Get the active storage backends based on freeze mode, bypass mode, and filters.
 
         :param Optional[str] location: If specified, only yield backends
             matching this exact name.
@@ -1004,6 +1078,10 @@ class StorageManager:
             # In freeze mode, only use local_cpu backend
             with self._freeze_lock:
                 if self._freeze and backend_name != "LocalCPUBackend":
+                    continue
+            # Skip bypassed backends
+            with self._bypass_lock:
+                if backend_name in self._bypassed_backends:
                     continue
             if location and backend_name != location:
                 continue

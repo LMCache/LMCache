@@ -14,7 +14,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
 
 # This is to mock the constructor and destructor of
@@ -434,7 +434,9 @@ def autorelease(request):
 def autorelease_v1(request):
     objects = []
 
-    def _factory(obj):
+    def _factory(obj, **kwargs):
+        if isinstance(obj, LMCacheEngine):
+            obj.post_init(**kwargs)
         objects.append(obj)
         return obj
 

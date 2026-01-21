@@ -12,6 +12,7 @@ from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
+from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
@@ -20,6 +21,61 @@ if torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+
+# Helper functions
+def lmcache_memcpy_async_h2d(
+    memory_obj: MemoryObj,
+    gpu_buffer: torch.Tensor,
+):
+    """Helper function to copy memory object allocated by different
+    allocators to GPU buffer.
+
+    This function is non-blocking and won't do stream synchronization.
+
+    :param MemoryObj memory_obj: The memory object to be copied.
+    :param torch.Tensor gpu_buffer: The GPU buffer to copy the data to.
+    """
+    assert memory_obj.tensor is not None
+    assert memory_obj.tensor.numel() == gpu_buffer.numel()
+    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
+        lmc_ops.lmcache_memcpy_async(
+            gpu_buffer.data_ptr(),
+            memory_obj.tensor.data_ptr(),
+            memory_obj.get_size(),
+            lmc_ops.TransferDirection.H2D,
+            memory_obj.meta.address,
+            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        )
+    else:
+        gpu_buffer.copy_(memory_obj.tensor, non_blocking=True)
+
+
+def lmcache_memcpy_async_d2h(
+    gpu_buffer: torch.Tensor,
+    memory_obj: MemoryObj,
+):
+    """Helper function to copy memory object allocated by different
+    allocators from GPU buffer.
+
+    This function is non-blocking and won't do stream synchronization.
+
+    :param torch.Tensor gpu_buffer: The GPU buffer to copy the data from.
+    :param MemoryObj memory_obj: The memory object to be copied to.
+    """
+    assert memory_obj.tensor is not None
+    assert memory_obj.tensor.numel() == gpu_buffer.numel()
+    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
+        lmc_ops.lmcache_memcpy_async(
+            memory_obj.tensor.data_ptr(),
+            gpu_buffer.data_ptr(),
+            memory_obj.get_size(),
+            lmc_ops.TransferDirection.D2H,
+            memory_obj.meta.address,
+            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        )
+    else:
+        memory_obj.tensor.copy_(gpu_buffer, non_blocking=True)
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
@@ -103,27 +159,10 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
         """Get the shape of the data given the number of tokens."""
         raise NotImplementedError
 
-    def get_shapes(self, num_tokens: int) -> list[torch.Size]:
-        """Get the shape of the data given the number of tokens."""
-        return [self.get_shape(num_tokens)]
-
     def initialize_kvcaches_ptr(self, **kwargs):
         """Initialize the kvcaches pointers if not already initialized."""
         if "kvcaches" in kwargs:
             self.kvcaches = kwargs["kvcaches"]
-
-    def init_group_info(self):  # noqa: B027
-        """
-        Initialize the group info.
-
-        By default, the shape and dtype of all layers in the model are the same,
-        but when using deepseek v3.2, DSA adds an indexer layer, which has a
-        different shape and dtype. In this case, it is necessary to use `
-        VLLMPagedMemGPUConnectorV3` and initialize the layers and hidden_dim_size
-        of different groups(all layers in the same group have the same shape and
-        dtype) through this method.
-        """
-        pass
 
 
 class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
@@ -393,8 +432,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.use_gpu = use_gpu
         self.kvcaches: Optional[List[torch.Tensor]] = None
         self.page_buffer_size = 0
-        self.group_layers: Optional[list[int]] = None
-        self.group_hidden_dim_sizes: Optional[list[int]] = None
+
+        self.init = False
         self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
         self.group_tmp_buffer: Optional[list[torch.Tensor]] = None
 
@@ -411,23 +450,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert device is not None
         return cls(metadata, device, use_gpu)
 
-    def init_group_info(self):
+    def _initialize_kv_cache_pointers(self):
+        if self.init:
+            return
         assert self.metadata.kv_layer_groups_manager.kv_layer_groups
-        self.group_layers = []
-        self.group_hidden_dim_sizes = []
-        for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
-            # init layers
-            self.group_layers.append(group.num_layers)
-
-            # init hidden dim size
-            num_kv_head = 1 if self.metadata.use_mla else group.shape[3]
-            # hidden_dim_size = num_kv_head * head_size
-            hidden_dim_size = num_kv_head * group.shape[-1]
-            self.group_hidden_dim_sizes.append(hidden_dim_size)
-
         if self.use_gpu:
             # init tmp buffer
-            tmp_buf_shapes = self.get_shapes(self.chunk_size)
+            tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
             tmp_buf_dtypes = self.metadata.get_dtypes()
             assert len(tmp_buf_shapes) == len(tmp_buf_dtypes)
             self.group_tmp_buffer = [
@@ -436,26 +465,6 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                     tmp_buf_shapes, tmp_buf_dtypes, strict=True
                 )
             ]
-        logger.info("init group info success in VLLMPagedMemGPUConnectorV3")
-
-    def _initialize_kv_cache_pointers(self):
-        if self.group_kv_cache_pointers_on_gpu is not None:
-            return
-        assert self.metadata.kv_layer_groups_manager.kv_layer_groups
-        assert self.group_layers is not None
-        assert self.group_hidden_dim_sizes is not None
-        assert (
-            len(self.group_layers) == self.metadata.kv_layer_groups_manager.num_groups
-        )
-        assert (
-            len(self.group_hidden_dim_sizes)
-            == self.metadata.kv_layer_groups_manager.num_groups
-        )
-        if self.use_gpu:
-            assert (
-                len(self.group_tmp_buffer)
-                == self.metadata.kv_layer_groups_manager.num_groups
-            )
         self.group_kv_cache_pointers_on_gpu = []
         for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
             # init kv cache pointers
@@ -484,6 +493,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             self.page_buffer_size = (
                 self.kvcaches[0].shape[1] * self.kvcaches[0].shape[2]
             )
+        self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
 
     @_lmcache_nvtx_annotate
@@ -582,19 +592,6 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         raise NotImplementedError
-
-    def get_shapes(self, num_tokens: int) -> list[torch.Size]:
-        shapes = []
-        kv_size = 1 if self.use_mla else 2
-        assert self.group_layers is not None
-        assert self.group_hidden_dim_sizes is not None
-        for num_layers, hidden_dim_size in zip(
-            self.group_layers, self.group_hidden_dim_sizes, strict=True
-        ):
-            shapes.append(
-                torch.Size([kv_size, num_layers, num_tokens, hidden_dim_size])
-            )
-        return shapes
 
 
 class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
