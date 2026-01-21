@@ -20,6 +20,11 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.health_monitor.base import HealthMonitor
+from lmcache.v1.health_monitor.constants import (
+    DEFAULT_PING_INTERVAL,
+    PING_INTERVAL_CONFIG_KEY,
+)
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
@@ -52,6 +57,7 @@ class LMCacheManager:
     - OffloadServer
     - InternalAPIServer
     - RuntimePluginLauncher
+    - HealthMonitor
 
     This manager supports two main modes:
     - vLLM integration mode (requires vllm_config)
@@ -89,6 +95,7 @@ class LMCacheManager:
         self._offload_server: Optional[ZMQOffloadServer] = None
         self._api_server: Optional[InternalAPIServer] = None
         self._runtime_plugin_launcher: Optional[RuntimePluginLauncher] = None
+        self._health_monitor: Optional[HealthMonitor] = None
 
         # Initialize components based on role
         self._init_components()
@@ -129,7 +136,6 @@ class LMCacheManager:
 
         # Create lookup client
         self._lookup_client = LookupClientFactory.create_lookup_client(
-            self._vllm_config,
             self._config,
             self._lmcache_engine_metadata,
             self._lmcache_engine,
@@ -151,13 +157,12 @@ class LMCacheManager:
 
         # Create lookup server
         self._lookup_server = LookupClientFactory.create_lookup_server(
-            self._lmcache_engine, self._vllm_config
+            self._lmcache_engine, self._lmcache_engine_metadata
         )
 
         # Create offload server
         self._offload_server = ZMQOffloadServer(
             self._lmcache_engine,
-            self._vllm_config,
             get_tensor_model_parallel_rank(),
         )
 
@@ -180,6 +185,46 @@ class LMCacheManager:
             self._vllm_config.parallel_config.tensor_parallel_size,
             worker_id,
         )
+
+    def _init_health_monitor(self) -> None:
+        """
+        Initialize the health monitor for the LMCacheManager.
+
+        This is called during post_init after all components are initialized.
+        The HealthMonitor automatically discovers and instantiates all
+        HealthCheck subclasses based on the manager's role and components.
+        """
+        # First Party
+        from lmcache.observability import PrometheusLogger
+
+        # Get ping interval from config
+        ping_interval = self._config.get_extra_config_value(
+            PING_INTERVAL_CONFIG_KEY, DEFAULT_PING_INTERVAL
+        )
+
+        # Create health monitor with manager - it will auto-discover health checks
+        self._health_monitor = HealthMonitor(
+            manager=self,
+            ping_interval=ping_interval,
+        )
+
+        # Inject health monitor into engine (if exists)
+        if self._lmcache_engine is not None:
+            self._lmcache_engine.set_health_monitor(self._health_monitor)
+
+        # Start the health monitor
+        self._health_monitor.start()
+        logger.info(
+            "Health monitor initialized and started at manager level (role=%s)",
+            self._role,
+        )
+
+        # Setup metrics callback for health status
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is not None:
+            prometheus_logger.lmcache_is_healthy.set_function(
+                lambda: 1 if self.is_healthy() else 0
+            )
 
     def _create_lmcache_engine(self, role: str) -> LMCacheEngine:
         """
@@ -251,7 +296,22 @@ class LMCacheManager:
         # Determine device
         device, torch_dev, dev_name = self._get_device_info(current_platform)
 
+        # Extract engine_id and kv_connector_extra_config from vllm_config
+        engine_id = None
+        kv_connector_extra_config = None
+        if hasattr(self._vllm_config, "kv_transfer_config"):
+            kv_transfer_config = self._vllm_config.kv_transfer_config
+            if kv_transfer_config is not None:
+                engine_id = getattr(kv_transfer_config, "engine_id", None)
+                kv_connector_extra_config = getattr(
+                    kv_transfer_config, "kv_connector_extra_config", None
+                )
+
         # Create metadata
+        num_ranks = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.pipeline_parallel_size
+        )
         metadata = LMCacheEngineMetadata(
             model_config.model,
             parallel_config.world_size,
@@ -263,6 +323,9 @@ class LMCacheManager:
             role,
             served_model_name=model_config.served_model_name,
             chunk_size=self._config.chunk_size,
+            engine_id=engine_id,
+            num_ranks=num_ranks,
+            kv_connector_extra_config=kv_connector_extra_config,
         )
 
         # Create GPU connector
@@ -430,6 +493,8 @@ class LMCacheManager:
         Post-initialization after KV caches are registered.
         """
         if self._lmcache_engine is None:
+            # Initialize health monitor for scheduler (even without engine)
+            self._init_health_monitor()
             return
 
         # vLLM mode post-init
@@ -444,6 +509,9 @@ class LMCacheManager:
             async_lookup_server = self._lookup_server
 
         self._lmcache_engine.post_init(async_lookup_server=async_lookup_server)
+
+        # Initialize health monitor after engine post_init completes
+        self._init_health_monitor()
 
     def stop_services(self) -> None:
         """Stop all managed components gracefully."""
@@ -471,6 +539,10 @@ class LMCacheManager:
             except Exception as e:
                 logger.error("Error closing %s: %s", name, e)
                 errors.append((name, e))
+
+        # Stop health monitor first
+        if self._health_monitor is not None:
+            _safe_close("health_monitor", self._health_monitor.stop, timeout=5.0)
 
         # Close offload server
         if self._offload_server is not None:
@@ -561,6 +633,33 @@ class LMCacheManager:
     def api_server(self) -> Optional[InternalAPIServer]:
         """Get the API server instance."""
         return self._api_server
+
+    @property
+    def health_monitor(self) -> Optional[HealthMonitor]:
+        """Get the health monitor instance."""
+        return self._health_monitor
+
+    @property
+    def role(self) -> str:
+        """Get the role of this manager (scheduler or worker)."""
+        return self._role
+
+    @property
+    def kv_caches(self) -> dict[str, torch.Tensor]:
+        if self._connector is not None and hasattr(self._connector, "kv_caches"):
+            return self._connector.kv_caches
+        return {}
+
+    def is_healthy(self) -> bool:
+        """
+        Check if the LMCacheManager is healthy.
+
+        Returns:
+            bool: True if healthy, False otherwise
+        """
+        if self._health_monitor is None:
+            return True
+        return self._health_monitor.is_healthy()
 
     @property
     def config(self) -> LMCacheEngineConfig:
