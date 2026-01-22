@@ -91,7 +91,9 @@ def test_cachegen_decoder(use_case, chunk_size):
     metadata = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
+        local_worker_id=0,
         use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=None,
