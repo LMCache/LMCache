@@ -294,6 +294,15 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             retrieve_token_num, self.tp_group, torch.device(f"cuda:{self.rank}")
         )
 
+        # No new tokens to retrieve from LMCache
+        if retrieve_token_num <= offset:
+            self.lmcache_engine.lookup_unpin(lookup_id)
+            logger.info(
+                f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
+                f"offset={offset}, no new tokens to retrieve"
+            )
+            return 0
+
         layerwise_retriever = self.lmcache_engine.retrieve_layer(
             token_ids[:retrieve_token_num],
             mask=load_mask[:retrieve_token_num],
@@ -306,15 +315,18 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         # Load First Layer
         next(layerwise_retriever)
 
-        if retrieve_token_num is None:
-            return 0
-
         self.layerwise_retrievers.append(layerwise_retriever)
         self.layer_load_layer.append(1)
 
         self.lookup_id_list.append(lookup_id)
 
-        return retrieve_token_num - offset
+        num_new_tokens = retrieve_token_num - offset
+        logger.info(
+            f"LMCache retrieve started: lookup={retrieve_token_num}, "
+            f"offset={offset}, retrieve {num_new_tokens} new tokens"
+        )
+
+        return num_new_tokens
 
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         slot_mapping = store_metadata.kv_indices.to(torch.int64).cuda()
