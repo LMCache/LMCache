@@ -33,7 +33,9 @@ def dumb_metadata(use_case="vllm", kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheMetadata(
         model_name="test_model",
         world_size=3,
-        worker_id=123,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
         use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
@@ -46,7 +48,9 @@ def dumb_metadata_with_model_name(
     return LMCacheMetadata(
         model_name=model_name,
         world_size=3,
-        worker_id=123,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
         use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
@@ -507,7 +511,9 @@ def create_test_metadata(
     return LMCacheMetadata(
         model_name="test_model",
         world_size=world_size,
+        local_world_size=world_size,
         worker_id=worker_id,
+        local_worker_id=worker_id,
         use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,

@@ -498,7 +498,9 @@ def lmcache_engine_metadata(role="worker"):
     return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
+        local_worker_id=0,
         use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, 32, 128),

@@ -67,7 +67,9 @@ def test_remote_mla_worker_id_as0(mock_stream):
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,
         world_size=4,
+        local_world_size=4,
         worker_id=2,
+        local_worker_id=2,
     )
     metadata0 = LMCacheMetadata(
         model_name="test-model",
@@ -76,7 +78,9 @@ def test_remote_mla_worker_id_as0(mock_stream):
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,
         world_size=4,
+        local_world_size=4,
         worker_id=0,
+        local_worker_id=0,
     )
 
     # Create memory allocator and local backend

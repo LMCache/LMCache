@@ -83,6 +83,8 @@ def create_test_metadata() -> LMCacheMetadata:
     return LMCacheMetadata(
         model_name="test_model",
         worker_id=0,
+        local_world_size=1,
+        local_worker_id=0,
         world_size=1,
         use_case="test",
         kv_dtype=torch.bfloat16,

@@ -868,7 +868,9 @@ def _create_metadata(use_mla, kv_caches):
     metadata = LMCacheMetadata(
         model_name="test",
         world_size=8,
+        local_world_size=8,
         worker_id=0,
+        local_worker_id=0,
         use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, num_heads, 128),

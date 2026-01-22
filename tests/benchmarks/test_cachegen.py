@@ -43,7 +43,8 @@ def to_blob(kv_tuples):
 #    config = LMCacheEngineConfig.from_defaults(chunk_size = chunk_size)
 #    metadata = LMCacheMetadata(
 # model_name = "mistralai/Mistral-7B-Instruct-v0.2",
-# world_size = 1, worker_id = 0, use_case = use_case)
+# world_size = 1, local_world_size = 1, worker_id = 0,
+#    local_worker_id = 0, use_case = use_case)
 #    serializer = CacheGenSerializer(config, metadata)
 #
 #    kv = to_blob(generate_kv_cache(chunk_size, use_case, "cuda"))
@@ -63,7 +64,9 @@ def test_cachegen_decoder_bench(benchmark, use_case, chunk_size):
     metadata = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
+        local_worker_id=0,
         use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=None,

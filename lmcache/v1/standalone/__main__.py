@@ -617,7 +617,9 @@ def main():
         metadata = LMCacheMetadata(
             model_name=args.model_name,
             world_size=args.world_size,
+            local_world_size=args.world_size,
             worker_id=args.worker_id,
+            local_worker_id=args.worker_id,
             fmt=args.fmt,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,

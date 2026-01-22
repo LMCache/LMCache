@@ -55,7 +55,9 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         metadata = LMCacheMetadata(
             model_name="Llama-3.1-70B-Instruct",
             world_size=1,
+            local_world_size=1,
             worker_id=0,
+            local_worker_id=0,
             use_case="vllm",
             kv_dtype=dtype,
             kv_shape=shape,

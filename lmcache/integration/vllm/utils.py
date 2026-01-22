@@ -219,7 +219,9 @@ def create_lmcache_metadata(
     metadata = LMCacheMetadata(
         model_name=model_cfg.model,
         world_size=parallel_cfg.world_size,
+        local_world_size=parallel_cfg.world_size,
         worker_id=parallel_cfg.rank,
+        local_worker_id=parallel_cfg.rank,
         use_case="vllm",
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,

@@ -401,7 +401,9 @@ def _get_metadata(use_mla: bool):
     metadata = LMCacheMetadata(
         model_name="deepseek/DeepSeek-R1",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
+        local_worker_id=0,
         use_case="vllm",
         kv_dtype=dtype,
         kv_shape=kv_shape,

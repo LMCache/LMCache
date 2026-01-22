@@ -49,7 +49,9 @@ def test_cachegen_encoder(chunk_size):
     metadata = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
+        local_worker_id=0,
         use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=None,
@@ -57,7 +59,9 @@ def test_cachegen_encoder(chunk_size):
     metadata2 = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
+        local_worker_id=0,
         use_case=use_case2,
         kv_dtype=torch.bfloat16,
         kv_shape=None,
@@ -115,7 +119,9 @@ def test_cachegen_unmatched_size(use_case):
     metadata = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
+        local_worker_id=0,
         use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=None,

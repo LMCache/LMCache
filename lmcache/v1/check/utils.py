@@ -26,7 +26,9 @@ def _get_default_metadata(model: str) -> LMCacheMetadata:
     return LMCacheMetadata(
         model_name=model,
         world_size=8,
+        local_world_size=8,
         worker_id=0,
+        local_worker_id=0,
         use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(8, 2, 16, 8, 16),
