@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import namedtuple
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import json
 import threading
 
@@ -21,10 +21,6 @@ from lmcache.v1.rpc_utils import (
     get_zmq_rpc_path_lmcache,
     get_zmq_socket,
 )
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -46,19 +42,17 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ):
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
-        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        engine_id = metadata.engine_id
+        assert engine_id is not None, "engine_id is required for RPC communication"
+        self.num_ranks = metadata.num_ranks
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -75,7 +69,7 @@ class LMCacheLookupClient(LookupClientInterface):
         self.socket_params = [
             SocketParams(
                 socket_path=get_zmq_rpc_path_lmcache(
-                    vllm_config, "lookup", rpc_port, rank
+                    engine_id, "lookup", rpc_port, rank
                 ),
                 rank=rank,
             )
@@ -175,15 +169,12 @@ class LMCacheLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
             request_configs_str = json.dumps(request_configs)
         request_configs_buf = request_configs_str.encode("utf-8")
-        num_computed_buf = num_computed_tokens.to_bytes(8, "big", signed=False)
-        aligned_computed_tokens = num_computed_tokens  # pre-aligned in adapter
 
         # NOTE(Jiayi): We cannot only send hashes when blending enabled
         # because the blender need the input embedding.
@@ -197,14 +188,12 @@ class LMCacheLookupClient(LookupClientInterface):
             for start, end, key in self.token_database.process_tokens(
                 token_ids, make_key=False
             ):
-                if end <= aligned_computed_tokens:
-                    continue
                 hashes.append(key)
                 offsets.append(end - start)
-            # Return aligned_computed_tokens immediately if there is no token to
-            # lookup
+
+            # if the token database returns no hashes, return 0
             if not hashes:
-                return aligned_computed_tokens
+                return 0
 
             hash_buf = self.encoder.encode(hashes)
             offset_buf = self.encoder.encode(offsets)
@@ -219,7 +208,6 @@ class LMCacheLookupClient(LookupClientInterface):
             tokens_buf = self.encoder.encode(token_ids)
             msg_buf = [
                 tokens_buf,
-                num_computed_buf,
                 lookup_id_buf,
                 request_configs_buf,
             ]
@@ -236,7 +224,7 @@ class LMCacheLookupClient(LookupClientInterface):
                 failed_rank = i
                 resp = self.sockets[i].recv()
                 result = int.from_bytes(resp, "big")
-                results.append(result + aligned_computed_tokens)
+                results.append(result)
         except zmq.Again as e:
             logger.error(
                 "Timeout occurred for rank %s, recreating all sockets. Error: %s",
@@ -300,14 +288,20 @@ class LMCacheLookupClient(LookupClientInterface):
 class LMCacheLookupServer:
     """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
 
-    def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
+    def __init__(
+        self,
+        lmcache_engine: LMCacheEngine,
+        metadata: LMCacheEngineMetadata,
+    ):
         self.decoder = msgspec.msgpack.Decoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
         )
         socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup", rpc_port, vllm_config.parallel_config.rank
+            metadata.engine_id, "lookup", rpc_port, metadata.worker_id
         )
         self.socket = get_zmq_socket(
             self.ctx,
@@ -347,18 +341,15 @@ class LMCacheLookupServer:
                         lookup_id=lookup_id,
                         pin=True,
                         request_configs=request_configs,
-                        num_computed_tokens=0,
                     )
                 else:
                     token_frames = frames[0]
-                    num_computed_tokens = int.from_bytes(frames[1], "big")
                     tokens = self.decoder.decode(token_frames)
                     result = self.lmcache_engine.lookup(
                         tokens=tokens,
                         lookup_id=lookup_id,
                         pin=True,
                         request_configs=request_configs,
-                        num_computed_tokens=num_computed_tokens,
                     )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)

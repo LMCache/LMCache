@@ -17,6 +17,7 @@ import threading
 import uuid
 
 # Third Party
+import requests
 import yaml
 
 # First Party
@@ -222,6 +223,11 @@ def create_config_class(
 
     def _post_init(self):
         """Post-initialization setup"""
+        # Initialize user-set keys tracking set
+        # This tracks which config keys were explicitly set by user
+        # (via file, env vars, or overrides) vs. using default values
+        if not hasattr(self, "_user_set_keys"):
+            object.__setattr__(self, "_user_set_keys", set())
         # Generate instance ID if not set
         if not hasattr(self, "lmcache_instance_id"):
             self.lmcache_instance_id = f"{config_name.lower()}_{uuid.uuid4().hex}"
@@ -251,6 +257,7 @@ def create_config_class(
         )
 
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
             if name in resolved_config:
                 try:
@@ -260,6 +267,7 @@ def create_config_class(
                     config_values[name] = _apply_env_converter_safely(
                         config_definitions, name, value
                     )
+                    user_set_keys.add(name)  # Mark as user-set
                 except (ValueError, json.JSONDecodeError) as e:
                     raw_value_for_log = resolved_config.get(name, "unknown value")
                     log_message = (
@@ -278,6 +286,8 @@ def create_config_class(
                 )
 
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _from_file(cls, file_path: str):
@@ -295,27 +305,41 @@ def create_config_class(
         )
 
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
-            value = resolved_config.get(name, config["default"])
+            if name in resolved_config:
+                value = resolved_config[name]
+                user_set_keys.add(name)  # Mark as user-set
+            else:
+                value = config["default"]
             # Apply env_converter safely regardless of whether value is None or not
             config_values[name] = _apply_env_converter_safely(
                 config_definitions, name, value
             )
 
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _from_defaults(cls, **kwargs):
         """Create configuration from defaults"""
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
-            value = kwargs.get(name, config["default"])
+            if name in kwargs:
+                value = kwargs[name]
+                user_set_keys.add(name)  # Mark as user-set
+            else:
+                value = config["default"]
             # Apply env_converter safely regardless of whether value is None or not
             config_values[name] = _apply_env_converter_safely(
                 config_definitions, name, value
             )
 
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _update_config_from_env(self):
@@ -342,6 +366,10 @@ def create_config_class(
             deprecated_configs,
         )
 
+        # Ensure _user_set_keys exists
+        if not hasattr(self, "_user_set_keys"):
+            object.__setattr__(self, "_user_set_keys", set())
+
         # Update config object
         for name, config in config_definitions.items():
             if name in resolved_config:
@@ -350,6 +378,8 @@ def create_config_class(
                     value = _parse_quoted_string(raw_value)
                     converted_value = config["env_converter"](value)
                     setattr(self, name, converted_value)
+                    # Mark as user-set
+                    self._user_set_keys.add(name)
                 except (ValueError, json.JSONDecodeError) as e:
                     raw_value_for_log = resolved_config.get(name, "unknown value")
                     log_message = (
@@ -370,12 +400,19 @@ def create_config_class(
             deprecated_configs,
         )
         config_values = {}
+        user_set_keys = set()  # Track keys explicitly set by user
         for name, config in config_definitions.items():
-            value = resolved_config.get(name, config["default"])
+            if name in resolved_config:
+                value = resolved_config[name]
+                user_set_keys.add(name)  # Mark as user-set
+            else:
+                value = config["default"]
             if value is not None:
                 value = config["env_converter"](value)
             config_values[name] = value
         instance = cls(**config_values)
+        # Store user-set keys in the instance
+        object.__setattr__(instance, "_user_set_keys", user_set_keys)
         return instance
 
     def _to_dict(self):
@@ -578,3 +615,178 @@ def parse_command_line_extra_params(extra_args: list[str]) -> dict[str, Any]:
                 params[key] = value  # type: ignore[assignment]
             logger.info("Extra parameter: %s = %s", key, params[key])
     return params
+
+
+def validate_and_set_config_value(config, config_key, value, override: bool = True):
+    """Validate and set configuration value.
+
+    Args:
+        config: Configuration object to update.
+        config_key: The configuration key to set.
+        value: The value to set.
+        override: If True, completely replace the value. If False:
+            - For 'extra_config': merge with existing dict (new values take
+              precedence for conflicting keys).
+            - For other keys: skip if current value is not None.
+            Default is True.
+
+    Returns:
+        True if the value was set successfully, False otherwise.
+    """
+    if not hasattr(config, config_key):
+        logger.warning("Config key '%s' does not exist in configuration", config_key)
+        return False
+
+    try:
+        # Convert string to dict for extra_config
+        if config_key == "extra_config" and isinstance(value, str):
+            value = json.loads(value) if value else None
+
+        # Handle partial merge for extra_config when override is False
+        if config_key == "extra_config" and not override:
+            current_value = getattr(config, config_key, None)
+            if current_value is not None and isinstance(current_value, dict):
+                if value is not None and isinstance(value, dict):
+                    # Merge: current values are preserved, new values override conflicts
+                    merged_value = {**current_value, **value}
+                    setattr(config, config_key, merged_value)
+                    return True
+                # If new value is None or not a dict, keep current value
+                return True
+            # If current value is None or not a dict, just set the new value
+            setattr(config, config_key, value)
+            return True
+
+        # For non-extra_config keys: skip if override is False and key was user-set
+        if not override:
+            user_set_keys: set[str] = getattr(config, "_user_set_keys", set())
+            if config_key in user_set_keys:
+                current_value = getattr(config, config_key, None)
+                logger.info(
+                    "Skipping config %s (override=False, user-set value=%s)",
+                    config_key,
+                    current_value,
+                )
+                return True  # Return True as this is expected behavior, not an error
+
+        setattr(config, config_key, value)
+        return True
+    except Exception as e:
+        logger.error(
+            "Failed to set config item '%s' with value %s: %s",
+            config_key,
+            value,
+            e,
+        )
+        return False
+
+
+def fetch_remote_config(
+    remote_config_url: str,
+    app_id: Optional[str],
+    config: Any,
+    timeout: int = 10,
+) -> Optional[dict]:
+    """Fetch configuration from remote config service.
+
+    The config server protocol:
+    - Request: POST with JSON body containing 'current_config' and 'env_variables'
+    - Query parameter: 'appId' if app_id is provided
+    - Response: JSON with 'configs' array, each item has 'key', 'value', 'override'
+
+    See examples/remote_config_server/ for a reference implementation.
+
+    Args:
+        remote_config_url: URL of the remote config service.
+        app_id: Optional app ID to send to the config service.
+        config: Current LMCacheEngineConfig to send to the config service.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        Parsed JSON response from the config service, or None if failed.
+    """
+    try:
+        # Build request payload with current config and env variables
+        payload: dict[str, Any] = {
+            "current_config": config.to_dict(),
+            "env_variables": {k: v for k, v in os.environ.items()},
+        }
+
+        # Build URL with app_id query parameter if provided
+        params = {"appId": app_id} if app_id else None
+
+        # Send POST request with JSON payload
+        response = requests.get(
+            remote_config_url,
+            json=payload,
+            params=params,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except requests.RequestException as e:
+        logger.warning(
+            "Failed to fetch remote config from %s: %s", remote_config_url, e
+        )
+        return None
+    except json.JSONDecodeError as e:
+        logger.warning("Failed to parse remote config response: %s", e)
+        return None
+    except Exception as e:
+        logger.warning("Unexpected error fetching remote config: %s", e)
+        return None
+
+
+def apply_remote_configs(config: Any, remote_response: dict) -> Any:
+    """Apply remote configuration to LMCacheEngineConfig.
+
+    This function extracts the 'configs' field from the remote response
+    and applies each config item to the LMCacheEngineConfig instance.
+
+    The expected format of remote_response['configs'] is:
+    [
+        {"override": true, "key": "config_key", "value": "config_value"},
+        ...
+    ]
+
+    Args:
+        config: LMCacheEngineConfig instance to update.
+        remote_response: Response from the remote config service.
+
+    Returns:
+        Updated LMCacheEngineConfig instance.
+    """
+    configs = remote_response.get("configs", [])
+    if not configs:
+        logger.info("No configs found in remote response")
+        return config
+
+    applied_count = 0
+    for config_item in configs:
+        if not isinstance(config_item, dict):
+            logger.warning("Invalid config item format: %s", config_item)
+            continue
+
+        key = config_item.get("key")
+        value = config_item.get("value")
+        override = config_item.get("override", True)
+
+        if not key:
+            logger.warning("Config item missing 'key': %s", config_item)
+            continue
+
+        # Try to convert value to appropriate type
+        if validate_and_set_config_value(config, key, value, override=override):
+            logger.info("Applied remote config: %s=%s", key, value)
+            applied_count += 1
+        else:
+            logger.warning(
+                "Failed to apply remote config %s=%s. Using default value.",
+                key,
+                value,
+            )
+
+    logger.info("Applied %d remote configuration items", applied_count)
+    return config

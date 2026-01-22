@@ -440,6 +440,47 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
+    # Memory management configurations
+    "pin_timeout_sec": {
+        "type": int,
+        "default": 300,
+        "env_converter": int,
+        "description": (
+            "Maximum duration in seconds that a memory object can remain pinned. "
+            "If a pinned object exceeds this timeout, it will be forcibly unpinned "
+            "by the PinMonitor to prevent memory leaks. Default is 300 seconds."
+        ),
+    },
+    "pin_check_interval_sec": {
+        "type": int,
+        "default": 30,
+        "env_converter": int,
+        "description": (
+            "Interval in seconds between PinMonitor timeout checks. "
+            "The background thread periodically scans all pinned objects at this "
+            "interval to detect and handle timeouts. Default is 30 seconds."
+        ),
+    },
+    # Remote configuration service
+    "remote_config_url": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+        "description": (
+            "URL of the remote configuration service. When set, LMCache will "
+            "fetch additional configuration from this URL at startup."
+        ),
+    },
+    "app_id": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+        "description": (
+            "Application ID to send to the remote configuration service. "
+            "If not set, the remote service may infer it from current config "
+            "and environment variables."
+        ),
+    },
 }
 
 
@@ -668,22 +709,6 @@ def _update_config_from_env(self):
                 # Keep existing value if conversion fails
     self.validate()
     return self
-
-
-def _validate_and_set_config_value(config, config_key, value):
-    """Validate and set configuration value"""
-    if not hasattr(config, config_key):
-        logger.warning(f"Config key '{config_key}' does not exist in configuration")
-        return False
-
-    try:
-        setattr(config, config_key, value)
-        return True
-    except Exception as e:
-        logger.error(
-            f"Failed to set config item '{config_key}' with value {value}: {e}"
-        )
-        return False
 
 
 # Create configuration class using the base utility

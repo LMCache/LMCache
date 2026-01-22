@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Optional, Tuple
+import hashlib
 import os
+import string
 import threading
 
 if TYPE_CHECKING:
@@ -15,6 +17,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -36,6 +39,11 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
 
     This function is thread-safe and implements singleton pattern,
     ensuring the configuration is loaded only once.
+
+    After loading the configuration, if 'remote_config_url' is configured,
+    this function will attempt to fetch additional configuration from the
+    remote config service. The current config and LMCACHE environment
+    variables will be sent to the service, along with 'appid' if set.
     """
     global _config_instance
 
@@ -59,14 +67,56 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                     _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
+
+                # Fetch and apply remote configuration if configured
+                remote_config_url = _config_instance.remote_config_url
+                if remote_config_url:
+                    logger.info(
+                        "Fetching remote configuration from %s", remote_config_url
+                    )
+                    app_id = _config_instance.app_id
+                    remote_response = fetch_remote_config(
+                        remote_config_url, app_id, _config_instance
+                    )
+                    if remote_response:
+                        _config_instance = apply_remote_configs(
+                            _config_instance, remote_response
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to fetch remote configuration from %s. "
+                            "Using local configuration only.",
+                            remote_config_url,
+                        )
     return _config_instance
 
 
 def hex_hash_to_int16(s: str) -> int:
     """
-    Convert a hex hash string to a 16-bit integer.
+    Convert a hash identifier into a 16-bit integer.
+
+    Historically, LMCache expected multimodal identifiers to be hex strings.
+    In practice (e.g., OpenAI-style multimodal requests), identifiers may be
+    arbitrary strings like `chatcmpl-...-image-0`. This function therefore:
+      - Parses hex strings (optionally prefixed with `0x`) as before, or
+      - Falls back to a stable string hash (SHA-256) when the input is not hex.
     """
-    return int(s, 16) & 0xFFFF
+    # Be defensive: vLLM may pass non-string identifiers.
+    s = "" if s is None else str(s)
+    s_stripped = s.strip()
+
+    # Fast-path: pure hex (optionally 0x-prefixed).
+    hex_part = s_stripped[2:] if s_stripped.lower().startswith("0x") else s_stripped
+    if hex_part and all(c in string.hexdigits for c in hex_part):
+        try:
+            return int(hex_part, 16) & 0xFFFF
+        except ValueError:
+            # Extremely unlikely (e.g., oversized/odd formatting); fall back to hashing.
+            pass
+
+    # Fallback: stable 16-bit value derived from the full identifier string.
+    digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
+    return int.from_bytes(digest[:2], byteorder="big", signed=False)
 
 
 def apply_mm_hashes_to_token_ids(
@@ -154,7 +204,19 @@ def create_lmcache_metadata(
     head_size = model_cfg.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
 
+    # Extract engine_id and kv_connector_extra_config from vllm_config if available
+    engine_id = None
+    kv_connector_extra_config = None
+    if vllm_config is not None and hasattr(vllm_config, "kv_transfer_config"):
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            engine_id = getattr(kv_transfer_config, "engine_id", None)
+            kv_connector_extra_config = getattr(
+                kv_transfer_config, "kv_connector_extra_config", None
+            )
+
     # Create metadata
+    num_ranks = parallel_cfg.tensor_parallel_size * parallel_cfg.pipeline_parallel_size
     metadata = LMCacheEngineMetadata(
         model_cfg.model,
         parallel_cfg.world_size,
@@ -165,6 +227,9 @@ def create_lmcache_metadata(
         use_mla,
         role,
         served_model_name=model_cfg.served_model_name,
+        engine_id=engine_id,
+        num_ranks=num_ranks,
+        kv_connector_extra_config=kv_connector_extra_config,
     )
 
     return metadata, config

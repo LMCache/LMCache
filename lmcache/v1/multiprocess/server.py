@@ -24,6 +24,7 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.gpu_connector import lmcache_memcpy_async_d2h, lmcache_memcpy_async_h2d
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
@@ -206,7 +207,12 @@ class GPUCacheContext:
 
 
 class MPCacheEngine:
-    def __init__(self, chunk_size: int = 256, cpu_buffer_size: float = 5.0):
+    def __init__(
+        self,
+        chunk_size: int = 256,
+        cpu_buffer_size: float = 5.0,
+        disable_lazy_alloc: bool = False,
+    ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
 
@@ -217,7 +223,7 @@ class MPCacheEngine:
         self.lock = threading.Lock()
 
         # storage manager
-        self.storage_manager = MPStorageManager(cpu_buffer_size)
+        self.storage_manager = MPStorageManager(cpu_buffer_size, disable_lazy_alloc)
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -325,7 +331,7 @@ class MPCacheEngine:
                     )
 
                     assert memory_obj.tensor is not None
-                    memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
+                    lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
 
@@ -391,8 +397,7 @@ class MPCacheEngine:
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                 with self.lock:
-                    tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
-
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
                     lmc_ops.multi_layer_kv_transfer(
                         # memory_obj.tensor,
                         tmp_gpu_buffer_,
@@ -511,9 +516,10 @@ def run_cache_server(
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
+    disable_lazy_alloc: bool = False,
 ):
     # Initialize the engine
-    engine = MPCacheEngine(chunk_size, cpu_buffer_size)
+    engine = MPCacheEngine(chunk_size, cpu_buffer_size, disable_lazy_alloc)
 
     # Initialize the message queue server
     context = zmq.Context.instance()
@@ -564,6 +570,10 @@ def parse_args():
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
+
+    parser.add_argument(
+        "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
+    )
     return parser.parse_args()
 
 
@@ -575,4 +585,5 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
+        disable_lazy_alloc=args.disable_lazy_alloc,
     )
