@@ -445,8 +445,19 @@ def autorelease_v1(request):
     LMCacheEngineBuilder.destroy("test")
 
     # Cleanup all objects created by the factory
-    # for obj in objects:
-    #    obj.close()
+    # IMPORTANT: We must close connectors to ensure AsyncPQExecutor and other
+    # async resources are properly cleaned up
+    # NOTE: Skip LMCacheEngine instances since destroy() already calls close()
+    for obj in objects:
+        if isinstance(obj, LMCacheEngine):
+            continue
+        try:
+            # Check if object has a close method
+            if hasattr(obj, "close"):
+                obj.close()
+        except Exception as e:
+            # Log but don't fail the test
+            print("Error during close obj:%s - %s", obj, e)
 
 
 @pytest.fixture(scope="session")

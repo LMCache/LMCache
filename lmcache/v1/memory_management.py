@@ -363,6 +363,13 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        """
+        Get the allocator that allocates this memory object
+        """
+        raise NotImplementedError
+
 
 def _allocate_cpu_memory(
     size: int,
@@ -632,6 +639,9 @@ class TensorMemoryObj(MemoryObj):
             .view(self.meta.shapes[index])
         )
 
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        return self.parent_allocator
+
 
 class BytesBufferMemoryObj(MemoryObj):
     """
@@ -751,6 +761,11 @@ class BytesBufferMemoryObj(MemoryObj):
         return None
 
     def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        return None
+
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        # NOTE: BytesBufferMemoryObj may not be allocated by any allocator,
+        # so just return None here
         return None
 
 

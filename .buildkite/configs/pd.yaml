@@ -1,9 +1,10 @@
 workload:
   type: long_doc_qa
-  max-inflight-requests: 2
+  max-inflight-requests: 1
   repeat-count: 1
   completion: true
   num-documents: 20
+  document-length: 16382
 
 feature:
   type: pd
@@ -54,4 +55,4 @@ vllm-decoder:
     - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_consumer\",\"kv_connector_extra_config\": {\"discard_partial_chunks\": false, \"lmcache_rpc_port\": \"consumer1\", \"skip_last_n_tokens\": 1}}"
 
 checking-fields:
-  - warmup_round_time_per_prompt
+  - query_round_time_per_prompt
