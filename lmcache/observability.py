@@ -301,8 +301,9 @@ class LMCStatsMonitor:
         self.reuse_chunk_id = 0
 
         self._current_retrieve_stats: Optional[RetrieveRequestStats] = None
-        self.retrieve_time_threshold: float = 10.0
-        self.retrieve_speed_threshold: float = 0.0
+        self.retrieve_time_threshold: float = 1e9
+        self.retrieve_speed_threshold: float = -1.0
+        self.last_retrieve_warning_time: float = 0.0
 
     def set_current_retrieve_stats(self, stats: RetrieveRequestStats):
         self._current_retrieve_stats = stats
@@ -403,7 +404,8 @@ class LMCStatsMonitor:
         if (
             time_to_retrieve > self.retrieve_time_threshold
             or 0 < retrieve_speed < self.retrieve_speed_threshold
-        ):
+        ) and curr_time - self.last_retrieve_warning_time > 10.0:
+            self.last_retrieve_warning_time = curr_time
             logger.warning(
                 "Retrieve request %d surpassed threshold: "
                 "time_to_retrieve=%.4f s (threshold=%.4f s), "
@@ -413,8 +415,7 @@ class LMCStatsMonitor:
                 "process_tokens_time=%.5f s, "
                 "broadcast_time=%.5f s, "
                 "to_gpu_time=%.5f s, "
-                "remote_backend_batched_get_blocking_time=%.5f s, "
-                "instrumented_connector_batched_get_time=%.5f s",
+                "detailed_metrics=%s",
                 retrieve_stats.request_id,
                 time_to_retrieve,
                 self.retrieve_time_threshold,
@@ -426,12 +427,7 @@ class LMCStatsMonitor:
                 retrieve_stats.process_tokens_time,
                 retrieve_stats.broadcast_time,
                 retrieve_stats.to_gpu_time,
-                retrieve_stats.detailed_metrics.get(
-                    "remote_backend_batched_get_blocking_time", 0.0
-                ),
-                retrieve_stats.detailed_metrics.get(
-                    "instrumented_connector_batched_get_time", 0.0
-                ),
+                retrieve_stats.detailed_metrics,
             )
 
     @thread_safe
