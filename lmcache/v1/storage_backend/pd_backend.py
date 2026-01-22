@@ -189,6 +189,7 @@ class PDBackend(AllocatorBackendInterface):
             tp_rank=self.tp_rank,
             peer_init_url=peer_init_url,
             backends=config.nixl_backends,
+            mem_type="VRAM",  # GPU memory for PD backend
         )
 
         if self.pd_config.role == "sender":

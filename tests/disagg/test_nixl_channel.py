@@ -110,6 +110,7 @@ if __name__ == "__main__":
         tp_rank=0,
         peer_init_url=f"tcp://{args.host}:{args.port}",
         backends=["UCX"],
+        mem_type="VRAM",  # GPU memory for CUDA buffers
     )
 
     if args.role == "sender":

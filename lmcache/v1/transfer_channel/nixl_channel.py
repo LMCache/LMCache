@@ -76,17 +76,11 @@ class NixlChannel(BaseTransferChannel):
         assert "tp_rank" in kwargs
         assert "peer_init_url" in kwargs
 
-        if "backends" in kwargs:
-            backends = kwargs["backends"]
-        else:
-            backends = ["UCX"]
+        backends = kwargs.get("backends", ["UCX"])
 
         # Get mem_type from kwargs, default to "DRAM" for CPU memory
         # Can be "DRAM" (CPU), "VRAM" (GPU), "FILE", or "OBJ"
-        if "mem_type" in kwargs:
-            mem_type = kwargs["mem_type"]
-        else:
-            mem_type = "DRAM"
+        mem_type = kwargs.get("mem_type", "DRAM")
 
         self.role = kwargs["role"]
 
