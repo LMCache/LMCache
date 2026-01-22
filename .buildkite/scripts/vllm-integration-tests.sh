@@ -792,7 +792,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     fi
 
     # Check memory leak after test
-    sleep 5
+    sleep 15
     echo "→ Checking for memory leaks..."
     if [[ "$feature_type" == "pd" ]]; then
         # Check both prefiller and decoder instances
