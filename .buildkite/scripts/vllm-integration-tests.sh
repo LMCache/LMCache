@@ -518,9 +518,11 @@ run_long_doc_qa() {
 
     # Check if baseline exists, skip comparisons if not
     if [[ -z "$baseline_json" ]] || ! echo "$baseline_json" | jq -e . >/dev/null 2>&1; then
-        echo "⚠️  No baseline found for $feature_type.json - skipping performance comparisons"
-        echo "   This is expected for newly added configs. Baseline will be generated on next nightly run."
-        echo "   Current metrics: TTFT=$query_ttft_per_prompt, Latency=$query_round_time_per_prompt, Warmup=$warmup_round_time_per_prompt"
+        if [[ "$feature_type" != "dummy" ]]; then
+            echo "⚠️  No baseline found for $feature_type.json - skipping performance comparisons"
+            echo "   This is expected for newly added configs. Baseline will be generated on next nightly run."
+            echo "   Current metrics: TTFT=$query_ttft_per_prompt, Latency=$query_round_time_per_prompt, Warmup=$warmup_round_time_per_prompt"
+        fi
         return 0
     fi
 
