@@ -459,24 +459,29 @@ check_memory_leak() {
     local local_cpu_hot_cache_count
     local active_memory_objs_count
     local pinned_memory_objs_count
+    local pin_monitor_pinned_objects_count
 
     local_cpu_hot_cache_count=$(echo "$metrics" | grep -E '^lmcache:local_cpu_hot_cache_count\b' | awk '{print $2}' | head -n 1)
     active_memory_objs_count=$(echo "$metrics" | grep -E '^lmcache:active_memory_objs_count\b' | awk '{print $2}' | head -n 1)
     pinned_memory_objs_count=$(echo "$metrics" | grep -E '^lmcache:pinned_memory_objs_count\b' | awk '{print $2}' | head -n 1)
+    pin_monitor_pinned_objects_count=$(echo "$metrics" | grep -E '^lmcache:pin_monitor_pinned_objects_count\b' | awk '{print $2}' | head -n 1)
 
     # Default to 0 if not found
     local_cpu_hot_cache_count=${local_cpu_hot_cache_count:-0}
     active_memory_objs_count=${active_memory_objs_count:-0}
     pinned_memory_objs_count=${pinned_memory_objs_count:-0}
+    pin_monitor_pinned_objects_count=${pin_monitor_pinned_objects_count:-0}
 
     # Convert to integer (remove decimal part if any)
     local_cpu_hot_cache_count=$(printf "%.0f" "$local_cpu_hot_cache_count")
     active_memory_objs_count=$(printf "%.0f" "$active_memory_objs_count")
     pinned_memory_objs_count=$(printf "%.0f" "$pinned_memory_objs_count")
+    pin_monitor_pinned_objects_count=$(printf "%.0f" "$pin_monitor_pinned_objects_count")
 
     echo "  local_cpu_hot_cache_count: $local_cpu_hot_cache_count"
     echo "  active_memory_objs_count: $active_memory_objs_count"
     echo "  pinned_memory_objs_count: $pinned_memory_objs_count"
+    echo "  pin_monitor_pinned_objects_count: $pin_monitor_pinned_objects_count"
 
     local has_leak=false
 
@@ -506,6 +511,7 @@ check_memory_leak() {
     fi
 
     if [ "$has_leak" = true ]; then
+        echo "$metrics"
         return 1
     fi
 
