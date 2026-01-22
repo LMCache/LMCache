@@ -20,7 +20,6 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
@@ -29,6 +28,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)

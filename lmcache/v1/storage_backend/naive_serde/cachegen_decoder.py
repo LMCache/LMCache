@@ -6,7 +6,6 @@ from typing import Optional
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenGPUEncoderOutput,
@@ -24,6 +23,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.naive_serde.cachegen_basics import CacheGenConfig
 from lmcache.v1.storage_backend.naive_serde.serde import Deserializer
 

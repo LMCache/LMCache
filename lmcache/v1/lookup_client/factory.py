@@ -3,7 +3,6 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -16,6 +15,7 @@ from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
     LMCacheBypassLookupClient,
 )
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party

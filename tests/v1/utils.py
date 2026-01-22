@@ -14,11 +14,11 @@ import uuid
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 
 
 def recover_engine_states(engine):

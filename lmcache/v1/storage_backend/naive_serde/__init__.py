@@ -3,8 +3,8 @@
 from typing import Optional, Tuple
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.naive_serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.v1.storage_backend.naive_serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.storage_backend.naive_serde.kivi_serde import (

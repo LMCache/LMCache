@@ -19,10 +19,10 @@ from typing import List, Optional
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

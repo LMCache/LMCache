@@ -28,7 +28,6 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
@@ -57,6 +56,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping

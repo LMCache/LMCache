@@ -23,7 +23,6 @@ import threading
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
@@ -37,6 +36,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,

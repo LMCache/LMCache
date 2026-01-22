@@ -7,7 +7,6 @@ import abc
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -15,6 +14,7 @@ from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 
 if torch.cuda.is_available():
     # First Party

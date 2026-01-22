@@ -9,9 +9,9 @@ import importlib  # Added for dynamic import
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend

@@ -16,7 +16,6 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -27,6 +26,7 @@ from lmcache.v1.health_monitor.constants import (
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
@@ -35,11 +35,11 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
-    from lmcache.config import LMCacheMetadata
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

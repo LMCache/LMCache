@@ -10,7 +10,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
@@ -25,6 +24,7 @@ from lmcache.v1.memory_management import (
     PinMemoryAllocator,
     TensorMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 # Local
 from .utils import (

@@ -27,9 +27,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 

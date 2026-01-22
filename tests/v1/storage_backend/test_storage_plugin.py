@@ -18,7 +18,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
@@ -26,6 +25,7 @@ from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,

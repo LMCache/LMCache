@@ -11,10 +11,10 @@ from prometheus_client import REGISTRY
 import prometheus_client
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

@@ -12,7 +12,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -25,6 +24,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel

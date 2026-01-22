@@ -9,7 +9,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -18,6 +17,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     TensorMemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
 from lmcache.v1.storage_backend.connector.mock_connector import MockConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -83,7 +83,7 @@ def local_cpu_backend():
         model_name="test_model",
         world_size=1,
         worker_id=0,
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(64, 2, 1, 8, 128),
     )

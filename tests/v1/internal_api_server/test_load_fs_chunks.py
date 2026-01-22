@@ -15,12 +15,12 @@ import torch
 import yaml
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.internal_api_server.api_server import app
 from lmcache.v1.memory_management import AdHocMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from tests.v1.utils import create_test_memory_obj
@@ -70,7 +70,7 @@ class TestLoadFSChunksAPI:
             model_name="test_model",
             world_size=1,
             worker_id=0,
-            fmt="vllm",
+            use_case="vllm",
             kv_dtype=torch.bfloat16,
             kv_shape=(28, 2, 256, 8, 128),
         )

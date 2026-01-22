@@ -10,11 +10,11 @@ removing vLLM dependencies and simplifying the initialization logic.
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.manager import LMCacheManager
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # Fir

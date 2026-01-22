@@ -35,7 +35,6 @@ from nixl._api import (
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -48,6 +47,7 @@ from lmcache.v1.memory_management import (
     _allocate_gpu_memory,
     _free_cpu_memory,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device

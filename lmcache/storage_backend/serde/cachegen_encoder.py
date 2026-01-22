@@ -6,7 +6,6 @@ from typing import Dict, Tuple
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenConfig,
@@ -16,6 +15,7 @@ from lmcache.storage_backend.serde.cachegen_basics import (
 from lmcache.storage_backend.serde.serde import Serializer
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 
 if torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops

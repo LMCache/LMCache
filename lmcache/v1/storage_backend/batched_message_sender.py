@@ -5,7 +5,6 @@ import queue
 import threading
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.v1.cache_controller.message import (
@@ -14,6 +13,7 @@ from lmcache.v1.cache_controller.message import (
     OpType,
 )
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party

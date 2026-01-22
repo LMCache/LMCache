@@ -13,9 +13,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -499,7 +499,7 @@ def lmcache_engine_metadata(role="worker"):
         model_name="test_model",
         world_size=1,
         worker_id=0,
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, 32, 128),
         use_mla=False,

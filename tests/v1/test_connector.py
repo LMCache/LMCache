@@ -9,9 +9,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PinMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
