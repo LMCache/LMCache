@@ -24,7 +24,7 @@ import sys
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.integration.vllm.utils import get_size_bytes, lmcache_get_or_create_config
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
@@ -198,7 +198,7 @@ class LMCacheStandaloneStarter:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         layer_groups: List[LayerGroupSpec],
         device: str = "cpu",
     ):
@@ -614,7 +614,7 @@ def main():
             kv_shape[4],
         )
 
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             model_name=args.model_name,
             world_size=args.world_size,
             worker_id=args.worker_id,

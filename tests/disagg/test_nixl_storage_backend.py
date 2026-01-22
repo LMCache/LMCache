@@ -15,7 +15,7 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -78,9 +78,9 @@ def create_test_config(
     return config
 
 
-def create_test_metadata() -> LMCacheEngineMetadata:
+def create_test_metadata() -> LMCacheMetadata:
     """Create test metadata for NixlStorageBackend"""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         worker_id=0,
         world_size=1,

@@ -14,7 +14,7 @@ import uuid
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
@@ -29,14 +29,14 @@ def recover_gpu_connector_states(gpu_connector):
     gpu_connector.kv_cache_pointers_on_gpu = {}
 
 
-def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata(use_case="vllm", kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata("test_model", 3, 123, use_case, torch.bfloat16, kv_shape)
 
 
 def dumb_metadata_with_model_name(
-    model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
+    model_name: str, use_case="vllm", kv_shape=(32, 2, 256, 8, 128)
 ):
-    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
+    return LMCacheMetadata(model_name, 3, 123, use_case, torch.bfloat16, kv_shape)
 
 
 def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
@@ -95,17 +95,17 @@ def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
     return ports
 
 
-def generate_kv_cache(num_tokens, fmt, device):
+def generate_kv_cache(num_tokens, use_case, device):
     ret = []
     num_layers = 32
     num_heads = 8
     head_size = 128
     shape = (
         [num_tokens, num_heads, head_size]
-        if fmt == "vllm"
+        if use_case == "vllm"
         else [num_heads, num_tokens, head_size]
     )
-    dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
+    dtype = torch.bfloat16 if use_case == "vllm" else torch.float16
 
     for i in range(num_layers):
         k = torch.rand(shape, dtype=dtype, device=device)
@@ -225,8 +225,8 @@ def generate_tokens(num_tokens, device, fixed=False):
         return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
 
-def concatenate_kv_caches(kv_chunks, fmt):
-    dim = 1 if fmt == "huggingface" else 0
+def concatenate_kv_caches(kv_chunks, use_case):
+    dim = 1 if use_case == "huggingface" else 0
     ret = []
     for kv_layer in zip(*kv_chunks, strict=False):
         klist, vlist = zip(*kv_layer, strict=False)
@@ -488,9 +488,9 @@ def create_test_metadata(
     kv_shape: tuple = (4, 2, 256, 8, 128),
     engine_id: Optional[str] = "test_engine",
     kv_connector_extra_config: Optional[dict] = None,
-) -> LMCacheEngineMetadata:
+) -> LMCacheMetadata:
     """Create test metadata for LMCacheEngine."""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=world_size,
         worker_id=worker_id,

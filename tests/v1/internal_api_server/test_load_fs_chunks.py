@@ -15,7 +15,7 @@ import torch
 import yaml
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -66,7 +66,7 @@ class TestLoadFSChunksAPI:
     @pytest.fixture
     def test_metadata(self):
         """Create test metadata."""
-        return LMCacheEngineMetadata(
+        return LMCacheMetadata(
             model_name="test_model",
             world_size=1,
             worker_id=0,
@@ -133,7 +133,7 @@ class TestLoadFSChunksAPI:
         temp_fs_path: str,
         async_loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        test_metadata: LMCacheEngineMetadata,
+        test_metadata: LMCacheMetadata,
         num_chunks: int = 3,
     ):
         """Prepare test data by putting chunks into FSConnector."""

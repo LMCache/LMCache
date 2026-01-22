@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
@@ -182,7 +182,7 @@ class GdsBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         dst_device: str = "cuda",
     ):
@@ -838,7 +838,7 @@ class GdsBackend(AllocatorBackendInterface):
         raise NotImplementedError("Remote backend does not support remove now.")
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> CuFileMemoryAllocator:
         assert config.cufile_buffer_size is not None
         return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)

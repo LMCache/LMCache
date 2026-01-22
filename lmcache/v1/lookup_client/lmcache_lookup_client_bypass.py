@@ -6,7 +6,7 @@ from typing import Optional, Union
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -25,7 +25,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         lmcache_engine: LMCacheEngine,
     ):
         """

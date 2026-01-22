@@ -10,7 +10,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
@@ -865,7 +865,7 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
 
 def _create_metadata(use_mla, kv_caches):
     num_heads = 1 if use_mla else 8
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         "test",
         8,
         0,

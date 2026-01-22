@@ -3,7 +3,7 @@
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_encoder import encode_function
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 
 
 class CacheGenSerializer(Serializer):
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
         self.use_case = metadata.use_case

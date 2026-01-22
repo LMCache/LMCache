@@ -5,7 +5,7 @@ import queue
 import threading
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.v1.cache_controller.message import (
@@ -51,7 +51,7 @@ class BatchedMessageSender:
 
     def __init__(
         self,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         config: LMCacheEngineConfig,
         location: str,
         lmcache_worker: "LMCacheWorker",

@@ -14,9 +14,9 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class LMCacheEngineMetadata:
+class LMCacheMetadata:
     """
-    LMCacheEngineMetadata should be extracted from the northbound
+    LMCacheMetadata should be extracted from the northbound
     serving engine configuration
     """
 
@@ -105,7 +105,7 @@ class LMCacheEngineMetadata:
 
 @dataclass
 class LMCacheMemPoolMetadata:
-    """Subset of `LMCacheEngineMetadata` to initialize MemPool"""
+    """Subset of `LMCacheMetadata` to initialize MemPool"""
 
     kv_shape: Tuple[int, int, int, int, int]
     kv_dtype: torch.dtype

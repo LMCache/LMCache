@@ -12,7 +12,7 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 
 # Import from lmcache with absolute paths
@@ -21,13 +21,13 @@ from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 
-def _get_default_metadata(model: str) -> LMCacheEngineMetadata:
+def _get_default_metadata(model: str) -> LMCacheMetadata:
     """Get default metadata for testing"""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name=model,
         world_size=8,
         worker_id=0,
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(8, 2, 16, 8, 16),
     )
@@ -46,7 +46,7 @@ def create_test_key(model: str, key_id: str = "test_key") -> CacheEngineKey:
 
 
 def create_test_memory_obj_for_storage_manager(
-    storage_manager: StorageManager, metadata: LMCacheEngineMetadata
+    storage_manager: StorageManager, metadata: LMCacheMetadata
 ) -> Optional[MemoryObj]:
     """Create a test MemoryObj for testing with StorageManager."""
     # The metadata.kv_shape is in vllm format:
@@ -131,7 +131,7 @@ def wait_put_tasks_complete(
 
 
 def create_memory_objects_batch(
-    storage_manager: StorageManager, metadata: LMCacheEngineMetadata, batch_size: int
+    storage_manager: StorageManager, metadata: LMCacheMetadata, batch_size: int
 ) -> list[MemoryObj]:
     """Create a batch of memory objects for reuse"""
     memory_objs = []

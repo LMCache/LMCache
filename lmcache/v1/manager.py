@@ -16,7 +16,7 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
-    from lmcache.config import LMCacheEngineMetadata
+    from lmcache.config import LMCacheMetadata
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
@@ -87,7 +87,7 @@ class LMCacheManager:
 
         # Components (initialized later)
         self._lmcache_engine: Optional[LMCacheEngine] = None
-        self._lmcache_engine_metadata: Optional[LMCacheEngineMetadata] = None
+        self._lmcache_engine_metadata: Optional[LMCacheMetadata] = None
         self._lookup_client: Optional[LookupClientInterface] = None
         self._lookup_server: Optional[
             Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]
@@ -308,7 +308,7 @@ class LMCacheManager:
                 )
 
         # Create metadata
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             model_name=model_config.model,
             world_size=parallel_config.world_size,
             worker_id=parallel_config.rank,
@@ -603,7 +603,7 @@ class LMCacheManager:
         return self._lmcache_engine
 
     @property
-    def lmcache_engine_metadata(self) -> Optional[LMCacheEngineMetadata]:
+    def lmcache_engine_metadata(self) -> Optional[LMCacheMetadata]:
         """Get the LMCache engine metadata."""
         return self._lmcache_engine_metadata
 

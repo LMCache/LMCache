@@ -10,7 +10,7 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.full_sync_sender import FullSyncSender
 from lmcache.v1.cache_controller.message import (
@@ -72,7 +72,7 @@ class LMCacheWorker:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         lmcache_engine: "LMCacheEngine",
     ):
         # TODO (Jiayi): "instance_id" might not be needed anymore.

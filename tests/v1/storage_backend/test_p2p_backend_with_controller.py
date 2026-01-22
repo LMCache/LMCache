@@ -15,7 +15,7 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_controller.message import (
@@ -195,7 +195,7 @@ def create_test_config(
 
 def create_test_metadata(worker_id: int = 0):
     """Create test metadata"""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=2,
         worker_id=worker_id,

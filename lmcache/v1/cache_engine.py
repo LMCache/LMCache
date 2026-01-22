@@ -28,7 +28,7 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
@@ -99,7 +99,7 @@ class LMCacheEngine:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         token_database: TokenDatabase,
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
@@ -1742,7 +1742,7 @@ class LMCacheEngine:
 class LMCacheEngineBuilder:
     _instances: Dict[str, LMCacheEngine] = {}
     _cfgs: Dict[str, LMCacheEngineConfig] = {}
-    _metadatas: Dict[str, LMCacheEngineMetadata] = {}
+    _metadatas: Dict[str, LMCacheMetadata] = {}
     _stat_loggers: Dict[str, LMCacheStatsLogger] = {}
 
     # TODO(Jiayi): Please remove this helper function in the future.
@@ -1750,7 +1750,7 @@ class LMCacheEngineBuilder:
     @staticmethod
     def _Create_memory_allocator(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
         # NOTE: should remove this function after fixing the unit tests:
@@ -1825,7 +1825,7 @@ class LMCacheEngineBuilder:
     @staticmethod
     def _Create_token_database(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> TokenDatabase:
         if config.enable_blending:
             return SegmentTokenDatabase(config, metadata)
@@ -1836,7 +1836,7 @@ class LMCacheEngineBuilder:
         cls,
         instance_id: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],

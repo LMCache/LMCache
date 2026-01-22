@@ -18,7 +18,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
@@ -166,7 +166,7 @@ def create_test_config(
 
 def create_test_metadata():
     """Create test metadata for testing."""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
         worker_id=0,

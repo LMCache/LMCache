@@ -9,7 +9,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -79,7 +79,7 @@ def local_cpu_backend():
         remote_url="mock://test",
         extra_config={},
     )
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_name="test_model",
         world_size=1,
         worker_id=0,

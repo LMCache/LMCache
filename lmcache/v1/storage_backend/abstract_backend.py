@@ -9,7 +9,7 @@ import asyncio
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -288,7 +288,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
 
     @abc.abstractmethod
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> MemoryAllocatorInterface:
         """
         Create the correct memory allocator for the current storage backend
@@ -388,7 +388,7 @@ class StoragePluginInterface(StorageBackendInterface):
         self,
         dst_device: str = "cuda",
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
@@ -400,7 +400,7 @@ class StoragePluginInterface(StorageBackendInterface):
             (e.g., "cuda" or "cpu").
         :param LMCacheEngineConfig config: Optional configuration object for the
             cache engine.
-        :param LMCacheEngineMetadata metadata: Optional metadata describing the cache
+        :param LMCacheMetadata metadata: Optional metadata describing the cache
             engine state or version.
         :param LocalCPUBackend local_cpu_backend: Optional backend for local CPU-based
             inference or caching.

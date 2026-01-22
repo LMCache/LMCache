@@ -11,7 +11,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.connector import RemoteConnector
@@ -60,18 +60,18 @@ def test_remote_mla_worker_id_as0(mock_stream):
         extra_config={"remote_enable_mla_worker_id_as0": True},
     )
 
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_name="test-model",
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,
         world_size=4,
         worker_id=2,
     )
-    metadata0 = LMCacheEngineMetadata(
+    metadata0 = LMCacheMetadata(
         model_name="test-model",
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,

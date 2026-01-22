@@ -11,7 +11,7 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PagedTensorMemoryAllocator
@@ -52,7 +52,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         thread = threading.Thread(target=thread_loop.run_forever)
         thread.start()
 
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             "Llama-3.1-70B-Instruct",
             0,
             0,

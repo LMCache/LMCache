@@ -154,7 +154,7 @@ def create_lmcache_metadata(
     role=None,
 ):
     """
-    Create LMCacheEngineMetadata from vLLM configuration.
+    Create LMCacheMetadata from vLLM configuration.
 
     This function extracts common metadata creation logic that was duplicated
     across multiple files.
@@ -167,7 +167,7 @@ def create_lmcache_metadata(
         cache_config: Cache configuration (alternative to vllm_config)
 
     Returns:
-        tuple: (LMCacheEngineMetadata, LMCacheEngineConfig)
+        tuple: (LMCacheMetadata, LMCacheEngineConfig)
     """
     # Third Party
     # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
@@ -178,7 +178,7 @@ def create_lmcache_metadata(
         # Third Party
         from vllm.utils import get_kv_cache_torch_dtype
     # First Party
-    from lmcache.config import LMCacheEngineMetadata
+    from lmcache.config import LMCacheMetadata
 
     config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters
@@ -216,7 +216,7 @@ def create_lmcache_metadata(
             )
 
     # Create metadata
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_cfg.model,
         parallel_cfg.world_size,
         parallel_cfg.rank,

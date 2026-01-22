@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
@@ -118,7 +118,7 @@ def create_config(role: str, host: str, port: int) -> LMCacheEngineConfig:
     return config
 
 
-def create_metadata() -> LMCacheEngineMetadata:
+def create_metadata() -> LMCacheMetadata:
     """Create metadata for the LMCacheEngine."""
     # Define KV shape: (num_layers, 2, chunk_size, num_heads, head_dim)
     chunk_size = 256
@@ -127,11 +127,11 @@ def create_metadata() -> LMCacheEngineMetadata:
     head_dim = 128
     kv_shape = (num_layers, 2, chunk_size, num_heads, head_dim)
 
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
         worker_id=0,
-        fmt="vllm",
+        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
     )

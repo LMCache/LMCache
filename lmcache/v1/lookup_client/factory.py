@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -33,7 +33,7 @@ class LookupClientFactory:
     @staticmethod
     def create_lookup_client(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         lmcache_engine: Optional[LMCacheEngine] = None,
     ) -> LookupClientInterface:
         """
@@ -91,7 +91,7 @@ class LookupClientFactory:
     @staticmethod
     def create_lookup_server(
         lmcache_engine: LMCacheEngine,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> Optional[Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]]:
         """
         Create a lookup server based on the configuration.
@@ -136,7 +136,7 @@ class LookupClientFactory:
     def _create_external_lookup_client(
         external_lookup_uri: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> LookupClientInterface:
         """
         Create an external lookup client based on the URI format.
@@ -176,7 +176,7 @@ class LookupClientFactory:
     def _create_mooncake_lookup_client(
         master_address: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> "MooncakeLookupClient":
         """Create a MooncakeLookupClient instance."""
         # First Party

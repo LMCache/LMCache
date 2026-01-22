@@ -10,7 +10,7 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -49,7 +49,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         # lookup_id -> first lookup time
         # this helps us support timeout semantics
@@ -304,7 +304,7 @@ class LMCacheAsyncLookupServer:
     def __init__(
         self,
         lmcache_engine: LMCacheEngine,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         kv_connector_extra_config = metadata.kv_connector_extra_config or {}

@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
 
@@ -494,8 +494,8 @@ def use_shared_allocator(request, monkeypatch, memory_allocator):
 
 @pytest.fixture(scope="function")
 def lmcache_engine_metadata(role="worker"):
-    """Create a fresh LMCacheEngineMetadata for each test."""
-    return LMCacheEngineMetadata(
+    """Create a fresh LMCacheMetadata for each test."""
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
         worker_id=0,

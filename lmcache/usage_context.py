@@ -18,7 +18,7 @@ import requests
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
@@ -67,7 +67,7 @@ class EnvMessage:
 
 
 class EngineMessage:
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         self.chunksize = config.chunk_size
         self.local_device = "cpu" if config.local_cpu else "cuda"
         self.max_local_cache_size = int(config.max_local_cpu_size)
@@ -106,7 +106,7 @@ class UsageContext:
         self,
         server_url: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         local_log: Optional[str] = None,
     ):
         self.server_url = server_url
@@ -286,7 +286,7 @@ class UsageContext:
 class ContinuousUsageContext:
     _instance = None
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
+    def __init__(self, metadata: LMCacheMetadata):
         self.cache_lifespan_buckets = [
             0,
             1,
@@ -304,7 +304,7 @@ class ContinuousUsageContext:
             2500,
             5000,
         ]
-        self.metadata: LMCacheEngineMetadata = metadata
+        self.metadata: LMCacheMetadata = metadata
         self.cache_usage_url: str = urljoin(
             os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080"),
             "cache-usage",
@@ -329,7 +329,7 @@ class ContinuousUsageContext:
         self.cache_lifespan_data: List[float] = []
 
     @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "ContinuousUsageContext":
+    def GetOrCreate(metadata: LMCacheMetadata) -> "ContinuousUsageContext":
         if ContinuousUsageContext._instance is None:
             ContinuousUsageContext._instance = ContinuousUsageContext(metadata)
         if ContinuousUsageContext._instance.metadata != metadata:
@@ -400,7 +400,7 @@ class ContinuousUsageContext:
 
 def InitializeUsageContext(
     config: LMCacheEngineConfig,
-    metadata: LMCacheEngineMetadata,
+    metadata: LMCacheMetadata,
     local_log: Optional[str] = None,
 ):
     server_url = urljoin(

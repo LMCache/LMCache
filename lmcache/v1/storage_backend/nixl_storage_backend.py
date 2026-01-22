@@ -35,7 +35,7 @@ from nixl._api import (
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -85,7 +85,7 @@ class NixlStorageConfig:
 
     @staticmethod
     def from_cache_engine_config(
-        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ):
         assert config.nixl_buffer_size is not None
         assert config.nixl_buffer_device is not None
@@ -491,7 +491,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         self,
         nixl_config: NixlStorageConfig,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
     ):
         """
@@ -513,7 +513,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> PagedTensorMemoryAllocator:
         extra_config = config.extra_config
         enable_nixl_storage = extra_config is not None and extra_config.get(
@@ -626,7 +626,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
     def CreateNixlStorageBackend(
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         """
         Create a Nixl backend with the given configuration.
@@ -650,7 +650,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         self,
         nixl_config: NixlStorageConfig,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
     ):
         super().__init__(nixl_config, config, metadata, loop)
@@ -933,7 +933,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self,
         nixl_config: NixlStorageConfig,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         cache_policy: Optional[PresenceCache] = None,
     ):
@@ -991,7 +991,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
     def init_chunk_meta(
         self,
-        metadata: Optional[LMCacheEngineMetadata],
+        metadata: Optional[LMCacheMetadata],
     ) -> None:
         """Initialize chunk metadata similar to base_connector.init_chunk_meta()"""
         if metadata is None:

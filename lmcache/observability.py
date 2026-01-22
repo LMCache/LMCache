@@ -11,7 +11,7 @@ from prometheus_client import REGISTRY
 import prometheus_client
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.config import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
@@ -605,7 +605,7 @@ class PrometheusLogger:
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
+    def __init__(self, metadata: LMCacheMetadata):
         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             default_dir = "/tmp/lmcache_prometheus"
@@ -1345,7 +1345,7 @@ class PrometheusLogger:
         )
 
     @staticmethod
-    def _metadata_to_labels(metadata: LMCacheEngineMetadata):
+    def _metadata_to_labels(metadata: LMCacheMetadata):
         labels = {
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
@@ -1358,7 +1358,7 @@ class PrometheusLogger:
     _instance = None
 
     @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "PrometheusLogger":
+    def GetOrCreate(metadata: LMCacheMetadata) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
             PrometheusLogger._instance = PrometheusLogger(metadata)
         # assert PrometheusLogger._instance.metadata == metadata, \
@@ -1388,7 +1388,7 @@ class PrometheusLogger:
 
 
 class LMCacheStatsLogger:
-    def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
+    def __init__(self, metadata: LMCacheMetadata, log_interval: int):
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
