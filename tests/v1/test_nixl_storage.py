@@ -53,13 +53,12 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         thread.start()
 
         metadata = LMCacheMetadata(
-            "Llama-3.1-70B-Instruct",
-            0,
-            0,
-            "MemoryFormat.KV_2LTD",
-            dtype,
-            shape,
-            False,
+            model_name="Llama-3.1-70B-Instruct",
+            world_size=1,
+            worker_id=0,
+            use_case="vllm",
+            kv_dtype=dtype,
+            kv_shape=shape,
         )
 
         backends = CreateStorageBackends(

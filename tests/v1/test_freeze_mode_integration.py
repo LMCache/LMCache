@@ -63,7 +63,14 @@ def test_freeze_with_real_cache_engine(autorelease_v1):
     # Create mock GPU connector that works on CPU
     connector = MockGPUConnector(kv_shape=kv_shape)
     # Use explicit metadata with worker_id=0 to control port offset
-    metadata = LMCacheMetadata("test_model", 1, 0, "vllm", torch.bfloat16, kv_shape)
+    metadata = LMCacheMetadata(
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        use_case="vllm",
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
     # Create engine
     engine = autorelease_v1(

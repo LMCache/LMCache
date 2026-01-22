@@ -866,13 +866,13 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
 def _create_metadata(use_mla, kv_caches):
     num_heads = 1 if use_mla else 8
     metadata = LMCacheMetadata(
-        "test",
-        8,
-        0,
-        "vllm",
-        torch.bfloat16,
-        (32, 2, 256, num_heads, 128),
-        use_mla,
+        model_name="test",
+        world_size=8,
+        worker_id=0,
+        use_case="vllm",
+        kv_dtype=torch.bfloat16,
+        kv_shape=(32, 2, 256, num_heads, 128),
+        use_mla=use_mla,
     )
     metadata.kv_layer_groups_manager.build_kv_layer_groups(kv_caches)
     return metadata
