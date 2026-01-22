@@ -230,6 +230,7 @@ class P2PBackend(StorageBackendInterface):
             peer_init_url=self.peer_init_url,
             peer_lookup_url=self.peer_lookup_url,
             backends=config.nixl_backends,
+            mem_type="DRAM",  # CPU memory for P2P backend
             event_loop=loop,
         )
 

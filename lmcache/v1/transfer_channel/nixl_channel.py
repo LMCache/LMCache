@@ -81,6 +81,13 @@ class NixlChannel(BaseTransferChannel):
         else:
             backends = ["UCX"]
 
+        # Get mem_type from kwargs, default to "DRAM" for CPU memory
+        # Can be "DRAM" (CPU), "VRAM" (GPU), "FILE", or "OBJ"
+        if "mem_type" in kwargs:
+            mem_type = kwargs["mem_type"]
+        else:
+            mem_type = "DRAM"
+
         self.role = kwargs["role"]
 
         self.nixl_wrapper = NixlAgentWrapper(
@@ -89,6 +96,7 @@ class NixlChannel(BaseTransferChannel):
             page_size=kwargs["align_bytes"],
             tp_rank=kwargs["tp_rank"],
             backends=backends,
+            mem_type=mem_type,
         )
         self.nixl_agent = self.nixl_wrapper.agent
 
@@ -579,6 +587,7 @@ class NixlAgentWrapper:
         page_size: int,
         tp_rank: int,
         backends: list[str],
+        mem_type: str = "DRAM",
     ):
         """
         Initialize the NIXL agent.
@@ -590,6 +599,8 @@ class NixlAgentWrapper:
                 the lmcache memory allocator.
             tp_rank (int): The tensor parallel rank.
             backends (list[str]): The list of backends to use.
+            mem_type (str): Memory type - "DRAM" (CPU), "VRAM" (GPU),
+                "FILE", or "OBJ". Defaults to "DRAM".
 
         Returns:
             NixlWrapper: The NIXL agent.
@@ -618,8 +629,7 @@ class NixlAgentWrapper:
         # The four fields are (base_addr, length, dev_id, meta_info)
         # https://github.com/ai-dynamo/nixl/blob/main/src/api/cpp/nixl_descriptors.h#L152
         memory_desc = [(buffer_ptr, buffer_size, tp_rank, "")]
-        # TODO(Jiayi): remove hardcode `mem_type`
-        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type="cuda")
+        reg_descs = nixl_agent.get_reg_descs(memory_desc, mem_type=mem_type)
         nixl_agent.register_memory(reg_descs)
 
         # Create xfer handlers
@@ -627,8 +637,8 @@ class NixlAgentWrapper:
         for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
             xfer_desc.append((base_addr, page_size, tp_rank))
 
-        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="cuda")
-        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="cuda")
+        xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type=mem_type)
+        xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type=mem_type)
 
         self.agent = nixl_agent
         self.reg_descs = reg_descs
