@@ -385,7 +385,7 @@ class CacheEngineKey:
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}"
+            f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags]
@@ -496,6 +496,12 @@ class CacheEngineKey:
             self.request_configs,
         )
 
+    @property
+    def chunk_hash_hex(self) -> str:
+        if isinstance(self.chunk_hash, bytes):
+            return self.chunk_hash.hex()
+        return f"{self.chunk_hash:x}"
+
 
 @dataclass(slots=True)
 class LayerCacheEngineKey(CacheEngineKey):
@@ -526,7 +532,7 @@ class LayerCacheEngineKey(CacheEngineKey):
     def to_string(self):
         s = (
             f"{self.fmt}@{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash:x}@{self._dtype_str}@{self.layer_id}"
+            f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
             tags = [f"{k}%{v}" for k, v in self.tags]
