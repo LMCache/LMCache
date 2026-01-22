@@ -24,7 +24,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
          # The chunk size here is only for illustration purpose, use default one (256) later
          LMCACHE_CHUNK_SIZE=8 \
-         vllm serve Qwen/Qwen3-8B-Instruct \
+         vllm serve Qwen/Qwen3-8B \
              --port 8000 --kv-transfer-config \
              '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
@@ -90,7 +90,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:8000/v1/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-8B-Instruct",
+             "model": "Qwen/Qwen3-8B",
              "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts",
              "max_tokens": 100,
              "temperature": 0.7
@@ -103,7 +103,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:8000/v1/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-8B-Instruct",
+             "model": "Qwen/Qwen3-8B",
              "prompt": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models",
              "max_tokens": 100,
              "temperature": 0.7
