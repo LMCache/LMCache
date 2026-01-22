@@ -10,3 +10,4 @@ Observability
    internal_api_server
    chunk_statistics
    health_monitor
+   periodic_thread_api
