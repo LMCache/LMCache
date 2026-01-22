@@ -259,8 +259,8 @@ class StorageManager:
         self.allocator_backend = None
         if metadata.role != "scheduler":
             self.allocator_backend = self._get_allocator_backend(config)
-        if config.local_cpu:
-            self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+
+        self.local_cpu_backend = self.storage_backends.get("LocalCPUBackend", None)
 
         self.manager_lock = threading.Lock()
 
@@ -485,7 +485,7 @@ class StorageManager:
         self,
         keys: List[CacheEngineKey],
         location: Optional[str] = None,
-    ) -> Optional[List[Optional[MemoryObj]]]:
+    ) -> List[Optional[MemoryObj]]:
         """
         Blocking function to get the memory objects from the storages.
         """
@@ -514,7 +514,7 @@ class StorageManager:
                     memory_objs_no_none = cast(List[MemoryObj], memory_objs)
                     local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
                 return memory_objs
-        return None
+        return [None] * len(keys)
 
     def layerwise_batched_get(
         self,
