@@ -110,7 +110,7 @@ class RemoteMetadata:
         if len(self.dtypes) < len(self.shapes):
             missing_count = len(self.shapes) - len(self.dtypes)
 
-            # Use the first dtype if available, otherwise default to bfloat16 (common in vLLM)
+            # Use the first dtype if available, otherwise default to bfloat16
             if self.dtypes:
                 fill_dtype = self.dtypes[0]
             else:
