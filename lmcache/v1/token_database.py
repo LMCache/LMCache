@@ -212,7 +212,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # collapse the CacheEngineKey.world_size to 1 so that cache keys
         # become world-size agnostic across compatible deployments.
         return CacheEngineKey(
-            self.metadata.fmt,
+            self.metadata.use_case,
             self.metadata.model_name,
             self.metadata.world_size if not self.save_only_first_rank else 1,
             self.metadata.worker_id,

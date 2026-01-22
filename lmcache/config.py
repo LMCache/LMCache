@@ -15,15 +15,17 @@ logger = init_logger(__name__)
 
 @dataclass
 class LMCacheEngineMetadata:
-    """name of the LLM model"""
+    """
+    LMCacheEngineMetadata should be extracted from the northbound
+    serving engine configuration
+    """
 
+    """name of the LLM model"""
     model_name: str
     """ world size when running under a distributed setting """
     world_size: int
     """ worker id when running under a distributed setting """
     worker_id: int
-    """ the format of kv tensors """
-    fmt: str
     """ the data type of kv tensors """
     # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
     kv_dtype: torch.dtype
@@ -31,6 +33,8 @@ class LMCacheEngineMetadata:
     # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
     """ (num_layer, 2, chunk_size, num_kv_head, head_size) """
     kv_shape: tuple[int, int, int, int, int]
+    """ use case of LMCache (vllm, sglang, standalone, etc.) """
+    use_case: str = "vllm"
     """ whether use MLA"""
     use_mla: bool = False
     """ the role of the current instance (e.g., 'scheduler', 'worker') """
@@ -47,8 +51,6 @@ class LMCacheEngineMetadata:
     )
     """ engine_id for RPC path (used by lookup client/server) """
     engine_id: Optional[str] = None
-    """ total number of ranks (tensor_parallel_size * pipeline_parallel_size) """
-    num_ranks: int = 1
     """ extra config from kv_connector (e.g., lmcache_rpc_port) """
     kv_connector_extra_config: Optional[dict] = None
 

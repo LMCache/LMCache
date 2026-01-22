@@ -21,7 +21,7 @@ from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
 
 def create_key(chunk_hash: str):
     return CacheEngineKey(
-        fmt="MemoryFormat.KV_2LTD",
+        use_case="vllm",
         model_name="meta-llama/Llama-3.1-70B-Instruct",
         world_size=8,
         worker_id=0,

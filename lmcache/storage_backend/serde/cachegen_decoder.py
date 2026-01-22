@@ -128,7 +128,7 @@ class CacheGenDeserializer(Deserializer):
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
         self.output_buffer: Optional[torch.Tensor] = None
-        self.fmt = metadata.fmt
+        self.use_case = metadata.use_case
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
@@ -202,7 +202,7 @@ class CacheGenDeserializer(Deserializer):
                 encoder_output.head_size,
             )
         )
-        match self.fmt:
+        match self.use_case:
             case "vllm":
                 return blob.permute((1, 0, 2, 3, 4)).to(
                     self.dtype
@@ -212,4 +212,4 @@ class CacheGenDeserializer(Deserializer):
                     self.dtype
                 )  # [nlayers, 2, num_heads, ntokens, head_size]
             case _:
-                raise RuntimeError("Unknown format %s" % self.fmt)
+                raise RuntimeError("Unknown use case %s" % self.use_case)

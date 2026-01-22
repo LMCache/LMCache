@@ -120,7 +120,7 @@ class TestLoadFSChunksAPI:
     def _create_test_key(self, key_id: int) -> CacheEngineKey:
         """Create a test CacheEngineKey."""
         return CacheEngineKey(
-            fmt="vllm",
+            use_case="vllm",
             model_name="test_model",
             world_size=1,
             worker_id=0,

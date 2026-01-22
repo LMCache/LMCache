@@ -308,23 +308,18 @@ class LMCacheManager:
                 )
 
         # Create metadata
-        num_ranks = (
-            parallel_config.tensor_parallel_size
-            * parallel_config.pipeline_parallel_size
-        )
         metadata = LMCacheEngineMetadata(
-            model_config.model,
-            parallel_config.world_size,
-            parallel_config.rank,
-            "vllm",
-            kv_dtype,
-            kv_shape,
-            use_mla,
-            role,
+            model_name=model_config.model,
+            world_size=parallel_config.world_size,
+            worker_id=parallel_config.rank,
+            use_case="vllm",
+            kv_dtype=kv_dtype,
+            kv_shape=kv_shape,
+            use_mla=use_mla,
+            role=role,
             served_model_name=model_config.served_model_name,
             chunk_size=self._config.chunk_size,
             engine_id=engine_id,
-            num_ranks=num_ranks,
             kv_connector_extra_config=kv_connector_extra_config,
         )
 

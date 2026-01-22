@@ -42,7 +42,7 @@ class LookupClientFactory:
         Args:
             config: The LMCache engine configuration
             metadata: The LMCache engine metadata (includes engine_id,
-                num_ranks, kv_connector_extra_config)
+                world_size, kv_connector_extra_config)
             lmcache_engine: Optional LMCacheEngine instance for
                 bypass lookup client
 
@@ -99,7 +99,7 @@ class LookupClientFactory:
         Args:
             lmcache_engine: The LMCache engine instance
             metadata: The LMCache engine metadata (includes engine_id,
-                num_ranks, kv_connector_extra_config, worker_id)
+                world_size, kv_connector_extra_config, worker_id)
 
         Returns:
             A lookup server instance, or None if no server should be created

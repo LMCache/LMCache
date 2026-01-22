@@ -31,7 +31,7 @@ def generate_test_data(
     for i in range(num_objs):
         keys.append(
             CacheEngineKey(
-                fmt="test",
+                use_case="vllm",
                 model_name="test_model",
                 world_size=1,
                 worker_id=0,

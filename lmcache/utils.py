@@ -318,7 +318,7 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
 
     Args:
         key_str: String in format:
-            fmt@model@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
+            use_case@model@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
 
     Returns:
         CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
@@ -331,7 +331,7 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
 
 @dataclass(slots=True)
 class CacheEngineKey:
-    fmt: str
+    use_case: str
     model_name: str
     world_size: int
     worker_id: int
@@ -358,7 +358,7 @@ class CacheEngineKey:
     def __hash__(self):
         return hash(
             (
-                self.fmt,
+                self.use_case,
                 self.model_name,
                 self.world_size,
                 self.worker_id,
@@ -371,7 +371,7 @@ class CacheEngineKey:
     def __eq__(self, other):
         if type(self) is type(other):
             return (
-                self.fmt == other.fmt
+                self.use_case == other.use_case
                 and self.model_name == other.model_name
                 and self.world_size == other.world_size
                 and self.worker_id == other.worker_id
@@ -384,7 +384,7 @@ class CacheEngineKey:
 
     def to_string(self):
         s = (
-            f"{self.fmt}@{self.model_name}@{self.world_size}"
+            f"{self.use_case}@{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}"
         )
         if self.tags is not None and len(self.tags) != 0:
@@ -398,7 +398,7 @@ class CacheEngineKey:
         for layer_id in range(num_layers):
             keys.append(
                 LayerCacheEngineKey(
-                    self.fmt,
+                    self.use_case,
                     self.model_name,
                     self.world_size,
                     self.worker_id,
@@ -413,7 +413,7 @@ class CacheEngineKey:
     def get_first_layer(self) -> "LayerCacheEngineKey":
         """Return the key for the first layer"""
         key = LayerCacheEngineKey(
-            self.fmt,
+            self.use_case,
             self.model_name,
             self.world_size,
             self.worker_id,
@@ -451,7 +451,7 @@ class CacheEngineKey:
         # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
         msg = {
             "__type__": "CacheEngineKey",
-            "fmt": self.fmt,
+            "use_case": self.use_case,
             "model_name": self.model_name,
             "world_size": self.world_size,
             "worker_id": self.worker_id,
@@ -475,7 +475,7 @@ class CacheEngineKey:
                     raise ValueError(f"Invalid key dict: {d}")
                 request_configs[kvs[0]] = kvs[1]
         return CacheEngineKey(
-            fmt=d["fmt"],
+            use_case=d["use_case"],
             model_name=d["model_name"],
             world_size=d["world_size"],
             worker_id=d["worker_id"],
@@ -487,7 +487,7 @@ class CacheEngineKey:
     def with_new_worker_id(self, new_worker_id: int) -> "CacheEngineKey":
         # Reconstruct the cache engine key with new worker id
         return CacheEngineKey(
-            self.fmt,
+            self.use_case,
             self.model_name,
             self.world_size,
             new_worker_id,
@@ -512,7 +512,7 @@ class LayerCacheEngineKey(CacheEngineKey):
     def __hash__(self):
         return hash(
             (
-                self.fmt,
+                self.use_case,
                 self.model_name,
                 self.world_size,
                 self.worker_id,
@@ -531,7 +531,7 @@ class LayerCacheEngineKey(CacheEngineKey):
 
     def to_string(self):
         s = (
-            f"{self.fmt}@{self.model_name}@{self.world_size}"
+            f"{self.use_case}@{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
@@ -545,7 +545,7 @@ class LayerCacheEngineKey(CacheEngineKey):
         for layer_id in range(num_layers):
             keys.append(
                 LayerCacheEngineKey(
-                    self.fmt,
+                    self.use_case,
                     self.model_name,
                     self.world_size,
                     self.worker_id,
