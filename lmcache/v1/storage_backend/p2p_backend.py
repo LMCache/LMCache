@@ -231,6 +231,7 @@ class P2PBackend(StorageBackendInterface):
             peer_lookup_url=self.peer_lookup_url,
             backends=config.nixl_backends,
             event_loop=loop,
+            device="cpu",
         )
 
         self.running = asyncio.Event()
