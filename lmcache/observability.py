@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 import os
 import threading
@@ -34,6 +34,9 @@ class LMCacheStats:
     interval_lookup_hits: int
     interval_vllm_hit_tokens: int
     interval_prompt_tokens: int
+
+    interval_num_slow_retrieval_by_time: int
+    interval_num_slow_retrieval_by_speed: int
 
     interval_remote_read_requests: int
     interval_remote_read_bytes: int
@@ -129,8 +132,7 @@ class RetrieveRequestStats:
     process_tokens_time: float = 0
     broadcast_time: float = 0
     to_gpu_time: float = 0
-    remote_backend_batched_get_blocking_time: float = 0
-    instrumented_connector_batched_get_time: float = 0
+    detailed_metrics: Dict[str, float] = field(default_factory=dict)
 
     def time_to_retrieve(self):
         if self.end_time == 0:
@@ -246,6 +248,9 @@ class LMCStatsMonitor:
         self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
         self.interval_prompt_tokens = 0  # total prompt tokens
         self.interval_lookup_0_hit_requests = 0
+
+        self.interval_num_slow_retrieval_by_time = 0
+        self.interval_num_slow_retrieval_by_speed = 0
 
         # P2P transfer metrics
         self.interval_p2p_requests = 0
@@ -390,6 +395,11 @@ class LMCStatsMonitor:
 
         time_to_retrieve = retrieve_stats.time_to_retrieve()
         retrieve_speed = retrieve_stats.retrieve_speed()
+        if time_to_retrieve > self.retrieve_time_threshold:
+            self.interval_num_slow_retrieval_by_time += 1
+        if 0 < retrieve_speed < self.retrieve_speed_threshold:
+            self.interval_num_slow_retrieval_by_speed += 1
+
         if (
             time_to_retrieve > self.retrieve_time_threshold
             or 0 < retrieve_speed < self.retrieve_speed_threshold
@@ -416,8 +426,12 @@ class LMCStatsMonitor:
                 retrieve_stats.process_tokens_time,
                 retrieve_stats.broadcast_time,
                 retrieve_stats.to_gpu_time,
-                retrieve_stats.remote_backend_batched_get_blocking_time,
-                retrieve_stats.instrumented_connector_batched_get_time,
+                retrieve_stats.detailed_metrics.get(
+                    "remote_backend_batched_get_blocking_time", 0.0
+                ),
+                retrieve_stats.detailed_metrics.get(
+                    "instrumented_connector_batched_get_time", 0.0
+                ),
             )
 
     @thread_safe
@@ -571,6 +585,9 @@ class LMCStatsMonitor:
         self.interval_vllm_hit_tokens = 0
         self.interval_prompt_tokens = 0
 
+        self.interval_num_slow_retrieval_by_time = 0
+        self.interval_num_slow_retrieval_by_speed = 0
+
         self.interval_remote_read_requests = 0
         self.interval_remote_read_bytes = 0
         self.interval_remote_write_requests = 0
@@ -696,13 +713,17 @@ class LMCStatsMonitor:
         )
         remote_backend_batched_get_blocking_time = filter_out_zeros(
             [
-                stats.remote_backend_batched_get_blocking_time
+                stats.detailed_metrics.get(
+                    "remote_backend_batched_get_blocking_time", 0.0
+                )
                 for stats in self.retrieve_requests.values()
             ]
         )
         instrumented_connector_batched_get_time = filter_out_zeros(
             [
-                stats.instrumented_connector_batched_get_time
+                stats.detailed_metrics.get(
+                    "instrumented_connector_batched_get_time", 0.0
+                )
                 for stats in self.retrieve_requests.values()
             ]
         )
@@ -780,6 +801,8 @@ class LMCStatsMonitor:
             store_put_time=store_put_time,
             interval_vllm_hit_tokens=self.interval_vllm_hit_tokens,
             interval_p2p_requests=self.interval_p2p_requests,
+            interval_num_slow_retrieval_by_time=self.interval_num_slow_retrieval_by_time,
+            interval_num_slow_retrieval_by_speed=self.interval_num_slow_retrieval_by_speed,
             interval_p2p_transferred_tokens=self.interval_p2p_transferred_tokens,
             p2p_time_to_transfer=p2p_time_to_transfer,
             p2p_transfer_speed=p2p_transfer_speed,
@@ -946,6 +969,18 @@ class PrometheusLogger:
         self.counter_lookup_0_hit_requests = self._counter_cls(
             name="lmcache:lookup_0_hit_requests",
             documentation="Total number of 0 hit lookup requests",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_slow_retrieval_by_time = self._counter_cls(
+            name="lmcache:num_slow_retrieval_by_time",
+            documentation="Total number of slow retrievals by time threshold",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_slow_retrieval_by_speed = self._counter_cls(
+            name="lmcache:num_slow_retrieval_by_speed",
+            documentation="Total number of slow retrievals by speed threshold",
             labelnames=labelnames,
         )
 
@@ -1556,6 +1591,14 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_lookup_0_hit_requests,
             stats.interval_lookup_0_hit_requests,
+        )
+        self._log_counter(
+            self.counter_num_slow_retrieval_by_time,
+            stats.interval_num_slow_retrieval_by_time,
+        )
+        self._log_counter(
+            self.counter_num_slow_retrieval_by_speed,
+            stats.interval_num_slow_retrieval_by_speed,
         )
 
         self._log_gauge(self.gauge_retrieve_hit_rate, stats.retrieve_hit_rate)

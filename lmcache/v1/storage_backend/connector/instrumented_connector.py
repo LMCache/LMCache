@@ -48,11 +48,6 @@ class InstrumentedRemoteConnector(RemoteConnector):
         memory_obj = await self._connector.get(key)
         end = time.perf_counter()
         duration = end - begin
-        self._stats_monitor.update_interval_remote_time_to_get(duration * 1000)
-
-        retrieve_stats = self._stats_monitor.get_current_retrieve_stats()
-        if retrieve_stats is not None:
-            retrieve_stats.instrumented_connector_batched_get_time += duration
 
         if memory_obj is not None:
             obj_size = memory_obj.get_size()
@@ -116,11 +111,6 @@ class InstrumentedRemoteConnector(RemoteConnector):
         memory_objs = await self._connector.batched_get_non_blocking(lookup_id, keys)
         end = time.perf_counter()
         duration = end - begin
-        self._stats_monitor.update_interval_remote_time_to_get(duration * 1000)
-
-        retrieve_stats = self._stats_monitor.get_current_retrieve_stats()
-        if retrieve_stats is not None:
-            retrieve_stats.instrumented_connector_batched_get_time += duration
 
         total_size = sum(
             memory_obj.get_size()
@@ -148,7 +138,14 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
         retrieve_stats = self._stats_monitor.get_current_retrieve_stats()
         if retrieve_stats is not None:
-            retrieve_stats.instrumented_connector_batched_get_time += duration
+            retrieve_stats.detailed_metrics[
+                "instrumented_connector_batched_get_time"
+            ] = (
+                retrieve_stats.detailed_metrics.get(
+                    "instrumented_connector_batched_get_time", 0.0
+                )
+                + duration
+            )
 
         total_size = sum(
             memory_obj.get_size()

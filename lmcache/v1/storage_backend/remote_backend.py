@@ -394,7 +394,14 @@ class RemoteBackend(StorageBackendInterface):
 
         retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
         if retrieve_stats is not None:
-            retrieve_stats.remote_backend_batched_get_blocking_time += duration
+            retrieve_stats.detailed_metrics[
+                "remote_backend_batched_get_blocking_time"
+            ] = (
+                retrieve_stats.detailed_metrics.get(
+                    "remote_backend_batched_get_blocking_time", 0.0
+                )
+                + duration
+            )
         decompressed_memory_objs: list[Optional[MemoryObj]] = []
         error_happened = False
         for memory_obj in memory_objs:
