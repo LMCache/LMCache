@@ -56,9 +56,28 @@ def init_asyncio_loop():
 
 def close_asyncio_loop(async_loop, async_thread):
     if async_loop.is_running():
+        # First, cancel all pending tasks
+        try:
+            # Get all tasks and cancel them
+            pending = asyncio.all_tasks(async_loop)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+        except Exception as e:
+            print(f"Error during close pending tasks: - {e}")
+
+        # Then stop the loop
         async_loop.call_soon_threadsafe(async_loop.stop)
+
     if async_thread.is_alive():
-        async_thread.join()
+        async_thread.join(timeout=2.0)
+
+    # Close the loop to release resources
+    if not async_loop.is_closed():
+        async_loop.close()
+
+    # Set event loop to None
+    asyncio.set_event_loop(None)
 
 
 def get_available_port(host: str = "127.0.0.1") -> int:
