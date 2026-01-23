@@ -226,6 +226,9 @@ class LMCacheEngine:
         # Health monitor reference (injected by LMCacheManager)
         self._health_monitor: Optional["HealthMonitor"] = None
 
+        # Flag to indicate if initialization failed (irrecoverable error)
+        self._init_failed = False
+
     def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
         """
         Set the health monitor reference.
@@ -242,15 +245,38 @@ class LMCacheEngine:
         """
         Check if the LMCache system is healthy.
 
-        This method delegates to the HealthMonitor if one is set.
-        If no health monitor is set, it returns True (assume healthy).
+        This method returns False if:
+        - Initialization failed (irrecoverable error)
+        - HealthMonitor reports unhealthy
+
+        If no health monitor is set and initialization succeeded,
+        it returns True (assume healthy).
 
         Returns:
             bool: True if healthy, False otherwise
         """
+        if self._init_failed:
+            return False
         if self._health_monitor is not None:
             return self._health_monitor.is_healthy()
         return True
+
+    def mark_init_failed(self, reason: str = "") -> None:
+        """
+        Mark the engine as having failed initialization.
+
+        This is called by LMCacheManager when an irrecoverable error occurs
+        during initialization or post_init. Once marked, is_healthy() will
+        always return False, causing the system to fall back to recomputation.
+
+        Args:
+            reason: Optional reason string for logging
+        """
+        self._init_failed = True
+        if reason:
+            logger.error("LMCacheEngine marked as init failed: %s", reason)
+        else:
+            logger.error("LMCacheEngine marked as init failed")
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
