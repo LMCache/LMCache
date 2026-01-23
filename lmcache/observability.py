@@ -302,7 +302,7 @@ class LMCStatsMonitor:
 
         self._current_retrieve_stats: Optional[RetrieveRequestStats] = None
         self.retrieve_time_threshold: float = 1e9
-        self.retrieve_speed_threshold: float = -1.0
+        self.retrieve_token_speed_threshold: float = -1.0
         self.last_retrieve_warning_time: float = 0.0
 
     def set_current_retrieve_stats(self, stats: RetrieveRequestStats):
@@ -398,12 +398,12 @@ class LMCStatsMonitor:
         retrieve_speed = retrieve_stats.retrieve_speed()
         if time_to_retrieve > self.retrieve_time_threshold:
             self.interval_num_slow_retrieval_by_time += 1
-        if 0 < retrieve_speed < self.retrieve_speed_threshold:
+        if 0 < retrieve_speed < self.retrieve_token_speed_threshold:
             self.interval_num_slow_retrieval_by_speed += 1
 
         if (
             time_to_retrieve > self.retrieve_time_threshold
-            or 0 < retrieve_speed < self.retrieve_speed_threshold
+            or 0 < retrieve_speed < self.retrieve_token_speed_threshold
         ) and curr_time - self.last_retrieve_warning_time > 10.0:
             self.last_retrieve_warning_time = curr_time
             logger.warning(
@@ -420,7 +420,7 @@ class LMCStatsMonitor:
                 time_to_retrieve,
                 self.retrieve_time_threshold,
                 retrieve_speed,
-                self.retrieve_speed_threshold,
+                self.retrieve_token_speed_threshold,
                 retrieve_stats.num_tokens,
                 retrieve_stats.local_hit_tokens,
                 retrieve_stats.remote_hit_tokens,
