@@ -16,7 +16,7 @@ def test_on_retrieve_request(stats_monitor):
     stats_monitor.on_retrieve_request(num_tokens=100)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_retrieve_requests == 1
-    assert stats.retrieve_hit_rate == 0
+    assert stats.retrieve_hit_rate == 1.0
     assert stats.local_cache_usage_bytes == 0
     assert stats.remote_cache_usage_bytes == 0
     assert len(stats.time_to_retrieve) == 0
@@ -25,8 +25,8 @@ def test_on_retrieve_request(stats_monitor):
 def test_on_retrieve_finished(stats_monitor):
     stats_obj = stats_monitor.on_retrieve_request(num_tokens=100)
     stats_monitor.on_retrieve_finished(
-        stats=stats_obj,
-        retrieved_tokens=100,
+        retrieve_stats=stats_obj,
+        num_retrieved_tokens=100,
     )
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_retrieve_requests == 1
@@ -36,7 +36,7 @@ def test_on_retrieve_finished(stats_monitor):
 
 def test_on_store_request_and_finished(stats_monitor):
     stats_obj = stats_monitor.on_store_request(num_tokens=50)
-    stats_monitor.on_store_finished(stats=stats_obj)
+    stats_monitor.on_store_finished(store_stats=stats_obj)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_store_requests == 1
     assert len(stats.time_to_store) == 1
@@ -136,11 +136,13 @@ def test_remote_ping_errors(stats_monitor):
 def test_retrieve_and_store_speed(stats_monitor):
     # Test retrieve speed calculation
     stats_obj_retrieve = stats_monitor.on_retrieve_request(num_tokens=1000)
-    stats_monitor.on_retrieve_finished(stats=stats_obj_retrieve, retrieved_tokens=1000)
+    stats_monitor.on_retrieve_finished(
+        retrieve_stats=stats_obj_retrieve, num_retrieved_tokens=1000
+    )
 
     # Test store speed calculation
     stats_obj_store = stats_monitor.on_store_request(num_tokens=500)
-    stats_monitor.on_store_finished(stats=stats_obj_store)
+    stats_monitor.on_store_finished(store_stats=stats_obj_store)
 
     stats = stats_monitor.get_stats_and_clear()
     assert len(stats.retrieve_speed) == 1
@@ -194,11 +196,11 @@ def test_mixed_remote_operations(stats_monitor):
 def test_combined_operations(stats_monitor):
     stats_obj_retrieve = stats_monitor.on_retrieve_request(num_tokens=200)
     stats_monitor.on_retrieve_finished(
-        stats=stats_obj_retrieve,
-        retrieved_tokens=200,
+        retrieve_stats=stats_obj_retrieve,
+        num_retrieved_tokens=200,
     )
     stats_obj_store = stats_monitor.on_store_request(num_tokens=100)
-    stats_monitor.on_store_finished(stats_obj_store)
+    stats_monitor.on_store_finished(store_stats=stats_obj_store)
     stats_monitor.update_local_cache_usage(usage=512)
     stats_monitor.update_remote_cache_usage(usage=1024)
     stats_monitor.update_local_storage_usage(usage=2048)
@@ -264,5 +266,5 @@ def test_stats_clearing(stats_monitor):
 def test_zero_division_protection(stats_monitor):
     # Test that hit rates handle zero division gracefully
     stats = stats_monitor.get_stats_and_clear()
-    assert stats.retrieve_hit_rate == 0
+    assert stats.retrieve_hit_rate == 1.0
     assert stats.lookup_hit_rate == 0
