@@ -518,13 +518,12 @@ class MPStorageManager:
         """
         Get all committed keys in the storage manager.
         Thread-safe. Debug Only.
-        
+
         Returns:
             List of all committed IPCCacheEngineKey objects
         """
         with self._buffer_lock:
             return list(self._commited_memory_objects.keys())
-
 
     def clear(self):
         """

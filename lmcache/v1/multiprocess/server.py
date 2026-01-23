@@ -491,69 +491,6 @@ class MPCacheEngine:
             self.storage_manager.clear()
             self.storage_manager.memcheck()
 
-    def search_keys_by_hash(
-        self,
-        chunk_hash: bytes,
-        model_name: str | None = None,
-        world_size: int | None = None,
-        worker_id: int | None = None,
-    ) -> list[IPCCacheEngineKey]:
-        """
-        Search for keys matching the given hash and optional filters.
-        
-        Args:
-            chunk_hash: The chunk hash to search for
-            model_name: Optional model name filter
-            world_size: Optional world size filter
-            worker_id: Optional worker ID filter
-        Returns:
-            List of matching IPCCacheEngineKey objects
-        """
-        matching_keys = []
-        with self.lock:
-            # Access the storage manager's committed objects to search
-            # We need to access _commited_memory_objects through a method
-            all_keys = self.storage_manager.get_all_keys()
-            
-            for key in all_keys:
-                if key.chunk_hash != chunk_hash:
-                    continue
-                if model_name is not None and key.model_name != model_name:
-                    continue
-                if world_size is not None and key.world_size != world_size:
-                    continue
-                if worker_id is not None and key.worker_id != worker_id:
-                    continue
-                matching_keys.append(key)
-        
-        return matching_keys
-
-    def get_memory_objects(self, keys: list[IPCCacheEngineKey]) -> list[MemoryObj]:
-        """
-        Get memory objects for the given keys without locking/unlocking.
-        This is used for HTTP retrieval where we don't need the full retrieve
-        context manager flow.
-        
-        Args:
-            keys: List of keys to retrieve
-            
-        Returns:
-            List of MemoryObj objects (filtered to only include found objects)
-        """
-        memory_objs = []
-        # Use storage manager's buffer lock for thread safety
-        with self.storage_manager._buffer_lock:
-            for key in keys:
-                if self.storage_manager._has_key(key):
-                    obj = self.storage_manager._commited_memory_objects[key]
-                    # Touch the cache policy to update LRU
-                    self.storage_manager._cache_policy.update_on_hit(
-                        key, self.storage_manager._commited_memory_objects
-                    )
-                    memory_objs.append(obj)
-        
-        return memory_objs
-
 
 def add_handler_helper(
     server: MessageQueueServer, request_type: RequestType, handler_function
@@ -632,9 +569,10 @@ def run_cache_server(
         server.close()
 
 
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="LMCache ZMQ Cache Server (without HTTP)")
+    parser = argparse.ArgumentParser(
+        description="LMCache ZMQ Cache Server (without HTTP)"
+    )
     parser.add_argument(
         "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
     )

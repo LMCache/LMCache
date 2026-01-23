@@ -1,26 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import Annotated, Literal, Optional
 import argparse
 import base64
 import binascii
 import io
 import threading
-from typing import Optional, Literal, Tuple
 
 # Third Party
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
+from safetensors.torch import load, save
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException, Query, Body, File, Form, UploadFile
-from fastapi.responses import Response, JSONResponse
-from pydantic import BaseModel
-from safetensors.torch import save, load
 import uvicorn
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.server import MPCacheEngine, run_cache_server
-from lmcache.v1.memory_management import MemoryFormat
 
 logger = init_logger(__name__)
 
@@ -38,6 +38,7 @@ _zmq_server = None  # ZMQ MessageQueueServer reference for cleanup
 # Tensor serialization helpers
 # ----------------------------
 
+
 def tensor_to_npy_bytes(tensor: torch.Tensor) -> bytes:
     if tensor.is_cuda:
         tensor = tensor.cpu()
@@ -52,7 +53,6 @@ def tensor_to_npy_bytes(tensor: torch.Tensor) -> bytes:
     buf = io.BytesIO()
     np.save(buf, arr, allow_pickle=False)
     return buf.getvalue()
-
 
 
 def npy_bytes_to_tensor(data: bytes) -> torch.Tensor:
@@ -75,6 +75,7 @@ HashEncoding = Literal["hex", "b64url"]
 # Request models
 # ----------------------------
 
+
 class DownloadRequest(BaseModel):
     chunk_hash: str
     model_name: Optional[str] = None
@@ -90,7 +91,7 @@ def hash_bytes_to_string(b: bytes, encoding: HashEncoding = "hex") -> str:
     if encoding == "hex":
         return b.hex()
     if encoding == "b64url":
-        # urlsafe, no padding is common; keep padding for strictness unless you decide otherwise
+        # urlsafe, no padding is common; keep padding for strictness
         return base64.urlsafe_b64encode(b).decode("ascii")
     raise ValueError(f"Unsupported encoding: {encoding}")
 
@@ -117,15 +118,95 @@ def hash_string_to_bytes(hash_str: str, encoding: HashEncoding = "hex") -> bytes
         raise ValueError(f"Unsupported encoding: {encoding}")
 
     except (ValueError, binascii.Error) as e:
-        raise ValueError(f"Invalid hash string for encoding={encoding}: {hash_str}") from e
+        raise ValueError(
+            f"Invalid hash string for encoding={encoding}: {hash_str}"
+        ) from e
+
+
+_engine_instance: Optional[MPCacheEngine] = None
 
 
 def get_engine() -> Optional[MPCacheEngine]:
-    return getattr(get_engine, "_engine", None)
+    return _engine_instance
 
 
 def set_engine(engine: MPCacheEngine) -> None:
-    get_engine._engine = engine
+    global _engine_instance
+    _engine_instance = engine
+
+
+# ----------------------------
+# Storage helper functions
+# ----------------------------
+
+
+def search_keys_by_hash(
+    engine: MPCacheEngine,
+    chunk_hash: bytes,
+    model_name: str | None = None,
+    world_size: int | None = None,
+    worker_id: int | None = None,
+) -> list[IPCCacheEngineKey]:
+    """
+    Search for keys matching the given hash and optional filters.
+
+    Args:
+        engine: The MPCacheEngine instance
+        chunk_hash: The chunk hash to search for
+        model_name: Optional model name filter
+        world_size: Optional world size filter
+        worker_id: Optional worker ID filter
+    Returns:
+        List of matching IPCCacheEngineKey objects
+    """
+    matching_keys = []
+    with engine.lock:
+        all_keys = engine.storage_manager.get_all_keys()
+
+        for key in all_keys:
+            if key.chunk_hash != chunk_hash:
+                continue
+            if model_name is not None and key.model_name != model_name:
+                continue
+            if world_size is not None and key.world_size != world_size:
+                continue
+            if worker_id is not None and key.worker_id != worker_id:
+                continue
+            matching_keys.append(key)
+
+    return matching_keys
+
+
+def get_memory_objects(
+    engine: MPCacheEngine,
+    keys: list[IPCCacheEngineKey],
+) -> list[MemoryObj]:
+    """
+    Get memory objects for the given keys without locking/unlocking.
+    This is used for HTTP retrieval where we don't need the full retrieve
+    context manager flow.
+
+    Args:
+        engine: The MPCacheEngine instance
+        keys: List of keys to retrieve
+
+    Returns:
+        List of MemoryObj objects (filtered to only include found objects)
+    """
+    memory_objs = []
+    storage_manager = engine.storage_manager
+    # Use storage manager's buffer lock for thread safety
+    with storage_manager._buffer_lock:
+        for key in keys:
+            if storage_manager._has_key(key):
+                obj = storage_manager._commited_memory_objects[key]
+                # Touch the cache policy to update LRU
+                storage_manager._cache_policy.update_on_hit(
+                    key, storage_manager._commited_memory_objects
+                )
+                memory_objs.append(obj)
+
+    return memory_objs
 
 
 @app.get("/")
@@ -135,7 +216,10 @@ async def root():
 
 @app.get("/all_hashes")
 async def get_all_hashes(
-    encoding: HashEncoding = Query("hex", description="Hash encoding to return: 'hex' or 'b64url'"),
+    encoding: Annotated[
+        HashEncoding,
+        Query(description="Hash encoding to return: 'hex' or 'b64url'"),
+    ] = "hex",
 ):
     """
     Return all chunk hashes in a canonical string encoding.
@@ -149,17 +233,27 @@ async def get_all_hashes(
         return [hash_bytes_to_string(k.chunk_hash, encoding=encoding) for k in all_keys]
     except Exception as e:
         logger.error("Error retrieving all hashes: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @app.get("/kv_cache/{hash_str}")
 async def get_kv_cache(
     hash_str: str,
-    model_name: Optional[str] = Query(None, description="Model name for the key"),
-    world_size: Optional[int] = Query(None, description="World size for the key"),
-    worker_id: Optional[int] = Query(None, description="Worker ID for the key"),
-    response_format: Literal["npy", "json"] = Query("npy", description="Response format: 'npy' or 'json'"),
-    hash_encoding: HashEncoding = Query("hex", description="Hash encoding of hash_str: 'hex' or 'b64url'"),
+    model_name: Annotated[
+        Optional[str], Query(description="Model name for the key")
+    ] = None,
+    world_size: Annotated[
+        Optional[int], Query(description="World size for the key")
+    ] = None,
+    worker_id: Annotated[
+        Optional[int], Query(description="Worker ID for the key")
+    ] = None,
+    response_format: Annotated[
+        Literal["npy", "json"], Query(description="Response format: 'npy' or 'json'")
+    ] = "npy",
+    hash_encoding: Annotated[
+        HashEncoding, Query(description="Hash encoding of hash_str: 'hex' or 'b64url'")
+    ] = "hex",
 ):
     """
     Get KV cache tensor by hash.
@@ -174,18 +268,22 @@ async def get_kv_cache(
         chunk_hash_bytes = hash_string_to_bytes(hash_str, encoding=hash_encoding)
 
         if model_name is not None and world_size is not None and worker_id is not None:
-            keys = [IPCCacheEngineKey(
-                model_name=model_name,
-                world_size=world_size,
-                worker_id=worker_id,
-                chunk_hash=chunk_hash_bytes,
-            )]
+            keys = [
+                IPCCacheEngineKey(
+                    model_name=model_name,
+                    world_size=world_size,
+                    worker_id=worker_id,
+                    chunk_hash=chunk_hash_bytes,
+                )
+            ]
         else:
-            keys = engine.search_keys_by_hash(chunk_hash_bytes, model_name, world_size, worker_id)
+            keys = search_keys_by_hash(
+                engine, chunk_hash_bytes, model_name, world_size, worker_id
+            )
             if not keys:
                 raise HTTPException(status_code=404, detail="KV cache not found")
 
-        memory_objs = engine.get_memory_objects(keys)
+        memory_objs = get_memory_objects(engine, keys)
         if not memory_objs or memory_objs[0].tensor is None:
             raise HTTPException(status_code=404, detail="KV cache not found")
 
@@ -193,21 +291,25 @@ async def get_kv_cache(
         npy_bytes = tensor_to_npy_bytes(tensor)
 
         if response_format == "json":
-            return JSONResponse(content={
-                "hash": hash_str,
-                "hash_encoding": hash_encoding,
-                "shape": list(tensor.shape),
-                "dtype": str(tensor.dtype),
-                "data_b64": base64.b64encode(npy_bytes).decode("ascii"),
-                "data_format": "npy_base64",
-            })
+            return JSONResponse(
+                content={
+                    "hash": hash_str,
+                    "hash_encoding": hash_encoding,
+                    "shape": list(tensor.shape),
+                    "dtype": str(tensor.dtype),
+                    "data_b64": base64.b64encode(npy_bytes).decode("ascii"),
+                    "data_format": "npy_base64",
+                }
+            )
 
         # response_format == "npy"
         return Response(
             content=npy_bytes,
             media_type="application/octet-stream",
             headers={
-                "Content-Disposition": f'attachment; filename="kv_cache_{hash_str}.npy"',
+                "Content-Disposition": (
+                    f'attachment; filename="kv_cache_{hash_str}.npy"'
+                ),
                 "X-Tensor-Shape": str(list(tensor.shape)),
                 "X-Tensor-Dtype": str(tensor.dtype),
                 "X-Hash-Encoding": hash_encoding,
@@ -217,19 +319,23 @@ async def get_kv_cache(
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Error retrieving KV cache for hash %s: %s", hash_str, e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(
+            "Error retrieving KV cache for hash %s: %s", hash_str, e, exc_info=True
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @app.get("/kv_cache/{hash_str}/metadata")
 async def get_kv_cache_metadata(
     hash_str: str,
-    model_name: Optional[str] = Query(None),
-    world_size: Optional[int] = Query(None),
-    worker_id: Optional[int] = Query(None),
-    hash_encoding: HashEncoding = Query("hex", description="Hash encoding of hash_str: 'hex' or 'b64url'"),
+    model_name: Annotated[Optional[str], Query()] = None,
+    world_size: Annotated[Optional[int], Query()] = None,
+    worker_id: Annotated[Optional[int], Query()] = None,
+    hash_encoding: Annotated[
+        HashEncoding, Query(description="Hash encoding of hash_str: 'hex' or 'b64url'")
+    ] = "hex",
 ):
     engine = get_engine()
     if engine is None:
@@ -239,48 +345,59 @@ async def get_kv_cache_metadata(
         chunk_hash_bytes = hash_string_to_bytes(hash_str, encoding=hash_encoding)
 
         if model_name is not None and world_size is not None and worker_id is not None:
-            keys = [IPCCacheEngineKey(
-                model_name=model_name,
-                world_size=world_size,
-                worker_id=worker_id,
-                chunk_hash=chunk_hash_bytes,
-            )]
+            keys = [
+                IPCCacheEngineKey(
+                    model_name=model_name,
+                    world_size=world_size,
+                    worker_id=worker_id,
+                    chunk_hash=chunk_hash_bytes,
+                )
+            ]
         else:
-            keys = engine.search_keys_by_hash(chunk_hash_bytes, model_name, world_size, worker_id)
+            keys = search_keys_by_hash(
+                engine, chunk_hash_bytes, model_name, world_size, worker_id
+            )
             if not keys:
                 raise HTTPException(status_code=404, detail="KV cache not found")
 
-        memory_objs = engine.get_memory_objects(keys)
+        memory_objs = get_memory_objects(engine, keys)
         if not memory_objs or memory_objs[0].tensor is None:
             raise HTTPException(status_code=404, detail="KV cache not found")
 
         tensor = memory_objs[0].tensor
-        return JSONResponse(content={
-            "hash": hash_str,
-            "hash_encoding": hash_encoding,
-            "key": {
-                "model_name": keys[0].model_name,
-                "world_size": keys[0].world_size,
-                "worker_id": keys[0].worker_id,
-            },
-            "shape": list(tensor.shape),
-            "dtype": str(tensor.dtype),
-            "numel": tensor.numel(),
-            "element_size": tensor.element_size(),
-            "size_bytes": tensor.numel() * tensor.element_size(),
-        })
+        return JSONResponse(
+            content={
+                "hash": hash_str,
+                "hash_encoding": hash_encoding,
+                "key": {
+                    "model_name": keys[0].model_name,
+                    "world_size": keys[0].world_size,
+                    "worker_id": keys[0].worker_id,
+                },
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "numel": tensor.numel(),
+                "element_size": tensor.element_size(),
+                "size_bytes": tensor.numel() * tensor.element_size(),
+            }
+        )
 
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Error retrieving KV cache metadata for hash %s: %s", hash_str, e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(
+            "Error retrieving KV cache metadata for hash %s: %s",
+            hash_str,
+            e,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @app.post("/api/kv-cache/download")
-async def download_kv_cache(request: DownloadRequest = Body(...)):
+async def download_kv_cache(request: Annotated[DownloadRequest, Body()]):
     """
     Download KV cache as safetensors file.
     Accepts a POST request with JSON body containing chunk_hash and optional metadata.
@@ -291,21 +408,35 @@ async def download_kv_cache(request: DownloadRequest = Body(...)):
         raise HTTPException(status_code=503, detail="Cache engine not initialized")
 
     try:
-        chunk_hash_bytes = hash_string_to_bytes(request.chunk_hash, encoding=request.hash_encoding)
+        chunk_hash_bytes = hash_string_to_bytes(
+            request.chunk_hash, encoding=request.hash_encoding
+        )
 
-        if request.model_name is not None and request.world_size is not None and request.worker_id is not None:
-            keys = [IPCCacheEngineKey(
-                model_name=request.model_name,
-                world_size=request.world_size,
-                worker_id=request.worker_id,
-                chunk_hash=chunk_hash_bytes,
-            )]
+        if (
+            request.model_name is not None
+            and request.world_size is not None
+            and request.worker_id is not None
+        ):
+            keys = [
+                IPCCacheEngineKey(
+                    model_name=request.model_name,
+                    world_size=request.world_size,
+                    worker_id=request.worker_id,
+                    chunk_hash=chunk_hash_bytes,
+                )
+            ]
         else:
-            keys = engine.search_keys_by_hash(chunk_hash_bytes, request.model_name, request.world_size, request.worker_id)
+            keys = search_keys_by_hash(
+                engine,
+                chunk_hash_bytes,
+                request.model_name,
+                request.world_size,
+                request.worker_id,
+            )
             if not keys:
                 raise HTTPException(status_code=404, detail="KV cache not found")
 
-        memory_objs = engine.get_memory_objects(keys)
+        memory_objs = get_memory_objects(engine, keys)
         if not memory_objs or memory_objs[0].tensor is None:
             raise HTTPException(status_code=404, detail="KV cache not found")
 
@@ -317,7 +448,9 @@ async def download_kv_cache(request: DownloadRequest = Body(...)):
             content=safetensors_bytes,
             media_type="application/octet-stream",
             headers={
-                "Content-Disposition": f'attachment; filename="kv_cache_{request.chunk_hash}.safetensors"',
+                "Content-Disposition": (
+                    f'attachment; filename="kv_cache_{request.chunk_hash}.safetensors"'
+                ),
                 "X-Tensor-Shape": str(list(tensor.shape)),
                 "X-Tensor-Dtype": str(tensor.dtype),
                 "X-Hash-Encoding": request.hash_encoding,
@@ -327,24 +460,30 @@ async def download_kv_cache(request: DownloadRequest = Body(...)):
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Error downloading KV cache for hash %s: %s", request.chunk_hash, e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(
+            "Error downloading KV cache for hash %s: %s",
+            request.chunk_hash,
+            e,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @app.post("/api/kv-cache/set")
 async def set_kv_cache(
-    chunk_hash: str = Form(...),
-    safetensors: UploadFile = File(...),
+    chunk_hash: Annotated[str, Form()],
+    safetensors: Annotated[UploadFile, File()],
     # Optional filters; if omitted we infer metadata by existing key(s) with this hash
-    model_name: Optional[str] = Form(None),
-    world_size: Optional[int] = Form(None),
-    worker_id: Optional[int] = Form(None),
-    hash_encoding: HashEncoding = Form("hex"),
+    model_name: Annotated[Optional[str], Form()] = None,
+    world_size: Annotated[Optional[int], Form()] = None,
+    worker_id: Annotated[Optional[int], Form()] = None,
+    hash_encoding: Annotated[HashEncoding, Form()] = "hex",
 ):
     """
-    Upload a safetensors file and write it into the cache entry identified by `chunk_hash`.
+    Upload a safetensors file and write it into the cache entry
+    identified by `chunk_hash`.
 
     Behavior (for your "-2 := -1" test):
     - If an entry for this chunk_hash exists, OVERWRITE its data in-place.
@@ -367,7 +506,9 @@ async def set_kv_cache(
 
         tensors_dict = load(file_contents)
         if "tensor_bytes" not in tensors_dict:
-            raise HTTPException(status_code=400, detail="safetensors must contain 'tensor_bytes' key")
+            raise HTTPException(
+                status_code=400, detail="safetensors must contain 'tensor_bytes' key"
+            )
 
         uploaded_tensor = tensors_dict["tensor_bytes"]
         if uploaded_tensor.is_cuda:
@@ -375,9 +516,12 @@ async def set_kv_cache(
         uploaded_tensor = uploaded_tensor.contiguous()
 
         # Resolve key metadata:
-        # Prefer inference from existing key(s) for this hash (guarantees correct metadata).
+        # Prefer inference from existing key(s) for this hash
+        # (guarantees correct metadata).
         inferred_key: Optional[IPCCacheEngineKey] = None
-        keys = engine.search_keys_by_hash(chunk_hash_bytes, model_name, world_size, worker_id)
+        keys = search_keys_by_hash(
+            engine, chunk_hash_bytes, model_name, world_size, worker_id
+        )
         if keys:
             inferred_key = keys[0]
         else:
@@ -390,7 +534,10 @@ async def set_kv_cache(
             if model_name is None or world_size is None or worker_id is None:
                 raise HTTPException(
                     status_code=400,
-                    detail="No existing entry for this hash; provide model_name/world_size/worker_id to create one.",
+                    detail=(
+                        "No existing entry for this hash; "
+                        "provide model_name/world_size/worker_id to create one."
+                    ),
                 )
             key = IPCCacheEngineKey(
                 model_name=model_name,
@@ -406,23 +553,67 @@ async def set_kv_cache(
         if existing_obj is not None:
             dst = existing_obj.tensor
             if dst is None:
-                raise HTTPException(status_code=500, detail="Existing MemoryObj has no tensor")
+                raise HTTPException(
+                    status_code=500, detail="Existing MemoryObj has no tensor"
+                )
             if tuple(dst.shape) != tuple(uploaded_tensor.shape):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Shape mismatch: existing={list(dst.shape)} upload={list(uploaded_tensor.shape)}",
+                    detail=(
+                        f"Shape mismatch: existing={list(dst.shape)} "
+                        f"upload={list(uploaded_tensor.shape)}"
+                    ),
                 )
             if dst.dtype != uploaded_tensor.dtype:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Dtype mismatch: existing={str(dst.dtype)} upload={str(uploaded_tensor.dtype)}",
+                    detail=(
+                        f"Dtype mismatch: existing={dst.dtype} "
+                        f"upload={uploaded_tensor.dtype}"
+                    ),
                 )
 
             dst.copy_(uploaded_tensor, non_blocking=False)
 
-            return JSONResponse(content={
+            return JSONResponse(
+                content={
+                    "status": "success",
+                    "mode": "overwrite",
+                    "chunk_hash": chunk_hash,
+                    "hash_encoding": hash_encoding,
+                    "key": {
+                        "model_name": key.model_name,
+                        "world_size": key.world_size,
+                        "worker_id": key.worker_id,
+                    },
+                    "shape": list(uploaded_tensor.shape),
+                    "dtype": str(uploaded_tensor.dtype),
+                }
+            )
+
+        # 2) Create-new path (only if metadata provided above)
+        fmt = MemoryFormat.KV_2LTD  # confirmed correct
+        reserve_handle, reserved_dict = storage.reserve(
+            [key], uploaded_tensor.shape, uploaded_tensor.dtype, fmt=fmt
+        )
+        if key not in reserved_dict:
+            raise HTTPException(
+                status_code=500, detail="Failed to reserve memory for KV cache"
+            )
+
+        obj = reserved_dict[key]
+        if obj.tensor is None:
+            raise HTTPException(
+                status_code=500, detail="Reserved MemoryObj has no tensor"
+            )
+
+        obj.tensor.copy_(uploaded_tensor, non_blocking=False)
+        storage.commit(reserve_handle)
+
+        return JSONResponse(
+            content={
                 "status": "success",
-                "mode": "overwrite",
+                "mode": "reserve_commit",
                 "chunk_hash": chunk_hash,
                 "hash_encoding": hash_encoding,
                 "key": {
@@ -432,44 +623,18 @@ async def set_kv_cache(
                 },
                 "shape": list(uploaded_tensor.shape),
                 "dtype": str(uploaded_tensor.dtype),
-            })
-
-        # 2) Create-new path (only if metadata provided above)
-        fmt = MemoryFormat.KV_2LTD  # confirmed correct
-        reserve_handle, reserved_dict = storage.reserve(
-            [key], uploaded_tensor.shape, uploaded_tensor.dtype, fmt=fmt
+            }
         )
-        if key not in reserved_dict:
-            raise HTTPException(status_code=500, detail="Failed to reserve memory for KV cache")
-
-        obj = reserved_dict[key]
-        if obj.tensor is None:
-            raise HTTPException(status_code=500, detail="Reserved MemoryObj has no tensor")
-
-        obj.tensor.copy_(uploaded_tensor, non_blocking=False)
-        storage.commit(reserve_handle)
-
-        return JSONResponse(content={
-            "status": "success",
-            "mode": "reserve_commit",
-            "chunk_hash": chunk_hash,
-            "hash_encoding": hash_encoding,
-            "key": {
-                "model_name": key.model_name,
-                "world_size": key.world_size,
-                "worker_id": key.worker_id,
-            },
-            "shape": list(uploaded_tensor.shape),
-            "dtype": str(uploaded_tensor.dtype),
-        })
 
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Error storing KV cache for hash %s: %s", chunk_hash, e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(
+            "Error storing KV cache for hash %s: %s", chunk_hash, e, exc_info=True
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 def run_http_server(
@@ -579,7 +744,9 @@ def is_http_server_running() -> bool:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="LMCache HTTP Server with integrated MP Cache Server")
+    parser = argparse.ArgumentParser(
+        description="LMCache HTTP Server with integrated MP Cache Server"
+    )
     parser.add_argument(
         "--host", type=str, default="0.0.0.0", help="Host to bind the HTTP server"
     )
