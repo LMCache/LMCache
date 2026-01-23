@@ -348,6 +348,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_str_list,
     },
+    "lookup_poll_key_intervals_ms": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+    },
+    "lookup_poll_key_timeout_ms": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+    },
     # Lazy memory allocator configurations
     "enable_lazy_memory_allocator": {
         "type": bool,

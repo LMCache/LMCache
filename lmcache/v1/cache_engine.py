@@ -112,6 +112,9 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
+        self.lookup_poll_key_intervals_ms = config.lookup_poll_key_intervals_ms
+        self.lookup_poll_key_timeout_ms = config.lookup_poll_key_timeout_ms
+
         # save_only_first_rank only works when use mla
         self.save_only_first_rank = (
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
@@ -1034,15 +1037,38 @@ class LMCacheEngine:
                 for start, end, key in chunk_info_iterator:
                     assert isinstance(key, CacheEngineKey)
 
-                    # TODO(Jiayi): Optimize by checking only the existence of the key
-                    # of one layer
-                    key_all_layers = key.split_layers(self.num_layers)
+                    start_time = time.monotonic()
+                    while True:
+                        # TODO(Jiayi): Optimize by checking
+                        # only the existence of the key
+                        # of one layer
+                        key_all_layers = key.split_layers(self.num_layers)
 
-                    hit_chunks, block_mapping = self.storage_manager.batched_contains(
-                        key_all_layers,  # type: ignore
-                        search_range,
-                        pin,
-                    )
+                        hit_chunks, block_mapping = (
+                            self.storage_manager.batched_contains(
+                                key_all_layers,  # type: ignore
+                                search_range,
+                                pin,
+                            )
+                        )
+
+                        if hit_chunks == self.num_layers:
+                            break
+
+                        if self.lookup_poll_key_timeout_ms > 0:
+                            if (
+                                time.monotonic() - start_time
+                            ) * 1000 > self.lookup_poll_key_timeout_ms:
+                                logger.warning(
+                                    f"Timeout: hit_chunks({hit_chunks}) "
+                                    f"< layers({self.num_layers})"
+                                )
+                                return res
+                        else:
+                            break
+
+                        time.sleep(self.lookup_poll_key_intervals_ms / 1000)
+
                     # Only all layers are hit and hit in one location,
                     # we consider this key as a hit
                     if hit_chunks == self.num_layers and len(block_mapping) == 1:
@@ -1058,6 +1084,8 @@ class LMCacheEngine:
             else:
                 chunk_info_list = []
                 keys = []
+                hit_chunks = 0
+
                 for chunk_info in chunk_info_iterator:
                     assert isinstance(chunk_info[2], CacheEngineKey)
                     start, end, _ = chunk_info
@@ -1065,15 +1093,37 @@ class LMCacheEngine:
                     # chunk_info contains (start, end, key)
                     # chunk_info[2] is the key
                     keys.append(chunk_info[2])
-                # hit chunks by prefix matching
-                hit_chunks, block_mapping = self.storage_manager.batched_contains(
-                    keys, search_range, pin
-                )
-                if pin and block_mapping:
-                    assert lookup_id is not None, (
-                        "lookup_id is required when pin is True"
+
+                if self.lookup_poll_key_timeout_ms > 0:
+                    start_time = time.monotonic()
+
+                while True:
+                    # hit chunks by prefix matching
+                    hit_chunks, block_mapping = self.storage_manager.batched_contains(
+                        keys, search_range, pin
                     )
-                    self.lookup_pins[lookup_id] = block_mapping
+
+                    if pin and block_mapping:
+                        assert lookup_id is not None, (
+                            "lookup_id is required when pin is True"
+                        )
+                        self.lookup_pins[lookup_id] = block_mapping
+
+                    if hit_chunks == len(keys):
+                        break
+
+                    if self.lookup_poll_key_timeout_ms > 0:
+                        elapsed_ms = (time.monotonic() - start_time) * 1000
+                        if elapsed_ms > self.lookup_poll_key_timeout_ms:
+                            logger.warning(
+                                f"Lookup poll timeout after {elapsed_ms:.2f}ms"
+                            )
+                            break
+                    else:
+                        break
+
+                    time.sleep(self.lookup_poll_key_intervals_ms / 1000)
+
                 for idx, (start, end, key) in enumerate(chunk_info_list):
                     if idx < hit_chunks:
                         res = end
