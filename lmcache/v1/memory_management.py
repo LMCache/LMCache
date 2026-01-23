@@ -1426,7 +1426,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             metadata = MemoryObjMetadata(
                 self.shapes[0],
                 self.dtypes[0],
-                idx,
+                idx * self.align_bytes,  # byte offset for consistency
                 self.align_bytes,  # 1 page
                 1,  # ref_count=1
                 0,  # pin_count=0
@@ -1557,7 +1557,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         if not memory_obj.is_valid():
             return
         if memory_obj.meta.shapes != self.shapes:
-            page_idx = memory_obj.meta.address
+            page_idx = memory_obj.meta.address // self.align_bytes
             memory_obj.raw_data = self.paged_buffers[page_idx]
 
         self.free_blocks.append(memory_obj)
@@ -1592,7 +1592,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 continue
             # memory_obj.invalidate()
             if memory_obj.meta.shapes != self.shapes:
-                page_idx = memory_obj.meta.address
+                page_idx = memory_obj.meta.address // self.align_bytes
                 memory_obj.raw_data = self.paged_buffers[page_idx]
 
             self.free_blocks.append(memory_obj)
