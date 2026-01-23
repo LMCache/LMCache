@@ -104,7 +104,13 @@ def mock_connector(event_loop, local_cpu_backend):
         write_throughput=100.0,
     )
     yield connector
-    # No cleanup needed, let event_loop fixture handle it
+    # Clean up connector to ensure AsyncPQExecutor is properly shut down
+    try:
+        # Close the connector which will shutdown the AsyncPQExecutor
+        connector.close()
+    except Exception as e:
+        # Log but don't fail the test
+        print(f"Failed to close mock connector: {e}")
 
 
 class LogCaptureHandler(logging.Handler):
