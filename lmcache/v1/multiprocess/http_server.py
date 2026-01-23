@@ -489,7 +489,8 @@ async def download_kv_cache(
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": (
-                    f'attachment; filename="kv_cache_{download_request.chunk_hash}.safetensors"'
+                    f'attachment; filename="kv_cache_'
+                    f'{download_request.chunk_hash}.safetensors"'
                 ),
                 "X-Tensor-Shape": str(list(tensor.shape)),
                 "X-Tensor-Dtype": str(tensor.dtype),
