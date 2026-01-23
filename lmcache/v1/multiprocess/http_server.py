@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Annotated, Literal, Optional
 import argparse
 import base64
 import binascii
 import io
-import threading
 
 # Third Party
-from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from safetensors.torch import load, save
@@ -24,14 +25,59 @@ from lmcache.v1.multiprocess.server import MPCacheEngine, run_cache_server
 
 logger = init_logger(__name__)
 
-app = FastAPI(title="LMCache HTTP API", version="1.0.0")
 
 # ----------------------------
-# Global server lifecycle state
+# Server configuration
 # ----------------------------
-_server_instance: Optional[uvicorn.Server] = None
-_server_lock = threading.Lock()
-_zmq_server = None  # ZMQ MessageQueueServer reference for cleanup
+@dataclass
+class ServerConfig:
+    """Configuration for the HTTP server and ZMQ backend."""
+
+    zmq_host: str = "localhost"
+    zmq_port: int = 5555
+    chunk_size: int = 256
+    cpu_buffer_size: float = 5.0
+    max_workers: int = 1
+
+
+_server_config = ServerConfig()
+
+
+# ----------------------------
+# FastAPI lifespan for initialization and cleanup
+# ----------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Manage the lifecycle of the LMCache HTTP server.
+
+    On startup: Initialize ZMQ server and cache engine.
+    On shutdown: Clean up ZMQ server resources.
+    """
+    # Startup
+    logger.info("Starting LMCache HTTP server...")
+    zmq_server, engine = run_cache_server(
+        host=_server_config.zmq_host,
+        port=_server_config.zmq_port,
+        chunk_size=_server_config.chunk_size,
+        cpu_buffer_size=_server_config.cpu_buffer_size,
+        max_workers=_server_config.max_workers,
+        return_engine=True,
+    )
+    app.state.zmq_server = zmq_server
+    app.state.engine = engine
+    logger.info("LMCache HTTP server initialized")
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down LMCache HTTP server...")
+    if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
+        app.state.zmq_server.close()
+    logger.info("LMCache HTTP server stopped")
+
+
+app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 
 
 # ----------------------------
@@ -123,16 +169,12 @@ def hash_string_to_bytes(hash_str: str, encoding: HashEncoding = "hex") -> bytes
         ) from e
 
 
-_engine_instance: Optional[MPCacheEngine] = None
-
-
-def get_engine() -> Optional[MPCacheEngine]:
-    return _engine_instance
-
-
-def set_engine(engine: MPCacheEngine) -> None:
-    global _engine_instance
-    _engine_instance = engine
+def get_engine(request: Request) -> MPCacheEngine:
+    """Get the cache engine from app state."""
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Cache engine not initialized")
+    return engine
 
 
 # ----------------------------
@@ -210,12 +252,13 @@ def get_memory_objects(
 
 
 @app.get("/")
-async def root():
+async def root(request: Request):
     return {"status": "ok", "service": "LMCache HTTP API"}
 
 
-@app.get("/all_hashes")
+@app.get("/api/v1/all_hashes")
 async def get_all_hashes(
+    request: Request,
     encoding: Annotated[
         HashEncoding,
         Query(description="Hash encoding to return: 'hex' or 'b64url'"),
@@ -224,9 +267,7 @@ async def get_all_hashes(
     """
     Return all chunk hashes in a canonical string encoding.
     """
-    engine = get_engine()
-    if engine is None:
-        raise HTTPException(status_code=503, detail="Cache engine not initialized")
+    engine = get_engine(request)
 
     try:
         all_keys = engine.storage_manager.get_all_keys()
@@ -236,8 +277,9 @@ async def get_all_hashes(
         raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
-@app.get("/kv_cache/{hash_str}")
+@app.get("/api/v1/kv_cache/{hash_str}")
 async def get_kv_cache(
+    request: Request,
     hash_str: str,
     model_name: Annotated[
         Optional[str], Query(description="Model name for the key")
@@ -260,9 +302,7 @@ async def get_kv_cache(
     - response_format=npy: returns raw .npy bytes
     - response_format=json: returns base64 of .npy bytes
     """
-    engine = get_engine()
-    if engine is None:
-        raise HTTPException(status_code=503, detail="Cache engine not initialized")
+    engine = get_engine(request)
 
     try:
         chunk_hash_bytes = hash_string_to_bytes(hash_str, encoding=hash_encoding)
@@ -327,8 +367,9 @@ async def get_kv_cache(
         raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
-@app.get("/kv_cache/{hash_str}/metadata")
+@app.get("/api/v1/kv_cache/{hash_str}/metadata")
 async def get_kv_cache_metadata(
+    request: Request,
     hash_str: str,
     model_name: Annotated[Optional[str], Query()] = None,
     world_size: Annotated[Optional[int], Query()] = None,
@@ -337,9 +378,7 @@ async def get_kv_cache_metadata(
         HashEncoding, Query(description="Hash encoding of hash_str: 'hex' or 'b64url'")
     ] = "hex",
 ):
-    engine = get_engine()
-    if engine is None:
-        raise HTTPException(status_code=503, detail="Cache engine not initialized")
+    engine = get_engine(request)
 
     try:
         chunk_hash_bytes = hash_string_to_bytes(hash_str, encoding=hash_encoding)
@@ -396,32 +435,33 @@ async def get_kv_cache_metadata(
         raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
-@app.post("/api/kv-cache/download")
-async def download_kv_cache(request: Annotated[DownloadRequest, Body()]):
+@app.post("/api/v1/kv_cache/download")
+async def download_kv_cache(
+    request: Request,
+    download_request: Annotated[DownloadRequest, Body()],
+):
     """
     Download KV cache as safetensors file.
     Accepts a POST request with JSON body containing chunk_hash and optional metadata.
     Returns the tensor as a safetensors file for download.
     """
-    engine = get_engine()
-    if engine is None:
-        raise HTTPException(status_code=503, detail="Cache engine not initialized")
+    engine = get_engine(request)
 
     try:
         chunk_hash_bytes = hash_string_to_bytes(
-            request.chunk_hash, encoding=request.hash_encoding
+            download_request.chunk_hash, encoding=download_request.hash_encoding
         )
 
         if (
-            request.model_name is not None
-            and request.world_size is not None
-            and request.worker_id is not None
+            download_request.model_name is not None
+            and download_request.world_size is not None
+            and download_request.worker_id is not None
         ):
             keys = [
                 IPCCacheEngineKey(
-                    model_name=request.model_name,
-                    world_size=request.world_size,
-                    worker_id=request.worker_id,
+                    model_name=download_request.model_name,
+                    world_size=download_request.world_size,
+                    worker_id=download_request.worker_id,
                     chunk_hash=chunk_hash_bytes,
                 )
             ]
@@ -429,9 +469,9 @@ async def download_kv_cache(request: Annotated[DownloadRequest, Body()]):
             keys = search_keys_by_hash(
                 engine,
                 chunk_hash_bytes,
-                request.model_name,
-                request.world_size,
-                request.worker_id,
+                download_request.model_name,
+                download_request.world_size,
+                download_request.worker_id,
             )
             if not keys:
                 raise HTTPException(status_code=404, detail="KV cache not found")
@@ -449,11 +489,11 @@ async def download_kv_cache(request: Annotated[DownloadRequest, Body()]):
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": (
-                    f'attachment; filename="kv_cache_{request.chunk_hash}.safetensors"'
+                    f'attachment; filename="kv_cache_{download_request.chunk_hash}.safetensors"'
                 ),
                 "X-Tensor-Shape": str(list(tensor.shape)),
                 "X-Tensor-Dtype": str(tensor.dtype),
-                "X-Hash-Encoding": request.hash_encoding,
+                "X-Hash-Encoding": download_request.hash_encoding,
             },
         )
 
@@ -464,15 +504,16 @@ async def download_kv_cache(request: Annotated[DownloadRequest, Body()]):
     except Exception as e:
         logger.error(
             "Error downloading KV cache for hash %s: %s",
-            request.chunk_hash,
+            download_request.chunk_hash,
             e,
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
-@app.post("/api/kv-cache/set")
+@app.post("/api/v1/kv_cache/set")
 async def set_kv_cache(
+    request: Request,
     chunk_hash: Annotated[str, Form()],
     safetensors: Annotated[UploadFile, File()],
     # Optional filters; if omitted we infer metadata by existing key(s) with this hash
@@ -490,10 +531,7 @@ async def set_kv_cache(
     - If it does not exist, CREATE a new entry using MemoryFormat.KV_2LTD,
       but only if (model_name, world_size, worker_id) are provided.
     """
-    engine = get_engine()
-    if engine is None:
-        raise HTTPException(status_code=503, detail="Cache engine not initialized")
-
+    engine = get_engine(request)
     storage = engine.storage_manager
 
     try:
@@ -649,8 +687,9 @@ def run_http_server(
     """
     Run the LMCache HTTP server with integrated MP (ZMQ) server.
 
-    This function starts the ZMQ cache server in the background, then runs
-    the HTTP server (blocking). On shutdown, both servers are cleaned up.
+    This function configures and runs the HTTP server. The ZMQ cache server
+    is started automatically via FastAPI lifespan on startup, and cleaned up
+    on shutdown.
 
     Args:
         host: HTTP server host
@@ -661,19 +700,14 @@ def run_http_server(
         cpu_buffer_size: CPU buffer size in GB
         max_workers: Maximum number of worker threads for ZMQ server
     """
-    global _server_instance, _zmq_server
+    global _server_config
 
-    # Start ZMQ MP server and get engine
-    zmq_server, engine = run_cache_server(
-        host=zmq_host,
-        port=zmq_port,
-        chunk_size=chunk_size,
-        cpu_buffer_size=cpu_buffer_size,
-        max_workers=max_workers,
-        return_engine=True,
-    )
-    _zmq_server = zmq_server
-    set_engine(engine)
+    # Configure the server (lifespan will use these settings)
+    _server_config.zmq_host = zmq_host
+    _server_config.zmq_port = zmq_port
+    _server_config.chunk_size = chunk_size
+    _server_config.cpu_buffer_size = cpu_buffer_size
+    _server_config.max_workers = max_workers
 
     config = uvicorn.Config(
         app=app,
@@ -684,63 +718,8 @@ def run_http_server(
     )
     server = uvicorn.Server(config)
 
-    with _server_lock:
-        _server_instance = server
-
     logger.info("Starting LMCache HTTP server on http://%s:%d", host, port)
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        logger.info("Received interrupt signal...")
-    finally:
-        # Clean up after server stops
-        with _server_lock:
-            _server_instance = None
-        if _zmq_server is not None:
-            logger.info("Shutting down ZMQ server...")
-            _zmq_server.close()
-            _zmq_server = None
-        logger.info("LMCache HTTP server stopped")
-
-
-def stop_http_server(timeout: float = 5.0) -> bool:
-    """
-    Stop the HTTP server gracefully.
-
-    Args:
-        timeout: Maximum time to wait for server to stop (seconds)
-
-    Returns:
-        True if server was stopped, False if not running or timeout
-    """
-    global _server_instance, _zmq_server
-
-    with _server_lock:
-        if _server_instance is None:
-            logger.info("HTTP server is not running")
-            return False
-
-        logger.info("Stopping HTTP server...")
-        _server_instance.should_exit = True
-
-    # Also stop ZMQ server
-    if _zmq_server is not None:
-        logger.info("Stopping ZMQ server...")
-        _zmq_server.close()
-
-    logger.info("HTTP server stopped successfully")
-    return True
-
-
-def is_http_server_running() -> bool:
-    """
-    Check if the HTTP server is currently running.
-
-    Returns:
-        True if server is running, False otherwise
-    """
-    with _server_lock:
-        return _server_instance is not None and not _server_instance.should_exit
+    server.run()
 
 
 def parse_args():
