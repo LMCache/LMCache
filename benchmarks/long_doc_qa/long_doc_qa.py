@@ -56,6 +56,10 @@ Commandline arguments:
 
     --hit-miss-ratio: In query round, control how many of the prompts
     will miss the cache. For example, 3:1 means every fourth repeated prompt
+    will miss the cache. 2:2 means 2 hits and 2 misses.
+
+    --trim-fraction: Exclude the smallest X fraction and largest X fraction
+    and calculate mean of the rest. For example, 0.1 drops bottom 10% and top 10%.
 """
 
 # Standard
@@ -452,6 +456,28 @@ def visualize_results(warmup_df, benchmark_df):
     plot_bars(benchmark_df, "Query Round", "query_round.png")
 
 
+def trimmed_mean(series: pd.Series, trim_fraction: float) -> float:
+    """
+    Exclude the smallest trim_fraction and largest trim_fraction and take mean
+    of the rest. If trim_fraction <= 0, returns normal mean.
+    """
+    s = series.dropna()
+    if len(s) == 0:
+        return float("nan")
+    if trim_fraction <= 0:
+        return float(s.mean())
+
+    if not (0.0 <= trim_fraction < 0.5):
+        raise ValueError("--trim-fraction must be in [0, 0.5).")
+
+    s = s.sort_values()
+    n = len(s)
+    k = int(n * trim_fraction)
+    if n - 2 * k <= 0:
+        return float(s.mean())
+    return float(s.iloc[k : n - k].mean())
+
+
 async def main(args):
     random.seed(args.shuffle_seed)
 
@@ -533,8 +559,12 @@ async def main(args):
     benchmark_df.to_csv("query_round.csv", index=False)
 
     # Print results
-    warmup_mean_ttft = warmup_df.query("successful == True")["ttft"].mean()
-    query_mean_ttft = benchmark_df.query("successful == True")["ttft"].mean()
+    warmup_mean_ttft = trimmed_mean(
+        warmup_df.query("successful == True")["ttft"], args.trim_fraction
+    )
+    query_mean_ttft = trimmed_mean(
+        benchmark_df.query("successful == True")["ttft"], args.trim_fraction
+    )
     warmup_success_count = warmup_df.query("successful == True").shape[0]
     query_success_count = benchmark_df.query("successful == True").shape[0]
     CSI = "\x1b["
@@ -710,6 +740,16 @@ def create_argument_parser():
         "--json-output",
         action="store_true",
         help="Print benchmark summary as a single JSON line to stdout.",
+    )
+
+    parser.add_argument(
+        "--trim-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Exclude the smallest and largest fraction of successful samples "
+            "before averaging. Example: 0.1 drops bottom 10% and top 10%."
+        ),
     )
 
     return parser

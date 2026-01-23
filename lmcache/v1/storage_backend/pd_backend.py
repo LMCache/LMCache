@@ -2,7 +2,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -372,7 +372,14 @@ class PDBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        Submit batched put tasks to transfer KV caches to peer.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after the transfer completes. Callback exceptions are caught and logged.
+        """
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
@@ -432,6 +439,14 @@ class PDBackend(AllocatorBackendInterface):
             notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
             notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
             self.proxy_side_channel.send(notif_msg_bytes)
+
+        # Call completion callback for all keys after transfer completes
+        if on_complete_callback is not None:
+            for key in keys:
+                try:
+                    on_complete_callback(key)
+                except Exception as e:
+                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     ############################################################
     # Prefiller functions end
