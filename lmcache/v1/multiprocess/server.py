@@ -227,7 +227,7 @@ class MPCacheEngine:
             instance_id (int): The GPU instance ID (such as PID).
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
         """
-        gpu_context = GPUCacheContext(kv_caches)
+        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
@@ -574,20 +574,23 @@ def run_cache_server(
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
-    http_host: str | None = None,
-    http_port: int | None = None,
+    return_engine: bool = False,
 ):
     """
-    Run the LMCache cache server with ZMQ message queue and optional HTTP server.
-    
+    Run the LMCache cache server with ZMQ message queue.
+
     Args:
         host: ZMQ server host
         port: ZMQ server port
         chunk_size: Chunk size for KV cache operations
         cpu_buffer_size: CPU buffer size in GB
         max_workers: Maximum number of worker threads for ZMQ server
-        http_host: HTTP server host (None to disable HTTP server)
-        http_port: HTTP server port (required if http_host is set)
+        return_engine: If True, return (server, engine) after starting;
+                       if False, run blocking loop to keep server alive
+
+    Returns:
+        If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
+        If return_engine is False: None (blocks until interrupted)
     """
     # Initialize the engine
     engine = MPCacheEngine(chunk_size, cpu_buffer_size)
@@ -616,18 +619,9 @@ def run_cache_server(
     server.start()
     logger.info("LMCache cache server is running...")
 
-    # Start HTTP server if configured (import here to avoid circular dependency)
-    http_thread = None
-    if http_host is not None and http_port is not None:
-        from lmcache.v1.multiprocess.http_server import start_http_server_thread
-        
-        http_thread = start_http_server_thread(
-            host=http_host,
-            port=http_port,
-            engine=engine,
-        )
-        logger.info("LMCache HTTP server is running on http://%s:%d", http_host, http_port)
-
+    # Return server and engine if requested (for HTTP server integration)
+    if return_engine:
+        return server, engine
 
     # Dummy loop to keep the server running
     try:
@@ -636,13 +630,11 @@ def run_cache_server(
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         server.close()
-        if http_thread is not None:
-            logger.info("HTTP server thread will terminate automatically")
 
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="LMCache Cache Server")
+    parser = argparse.ArgumentParser(description="LMCache ZMQ Cache Server (without HTTP)")
     parser.add_argument(
         "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
     )
@@ -658,12 +650,6 @@ def parse_args():
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
-    parser.add_argument(
-        "--http-host", type=str, default=None, help="Host to bind the HTTP server (None to disable)"
-    )
-    parser.add_argument(
-        "--http-port", type=int, default=None, help="Port to bind the HTTP server"
-    )
     return parser.parse_args()
 
 
@@ -675,6 +661,4 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
-        http_host=args.http_host,
-        http_port=args.http_port,
     )

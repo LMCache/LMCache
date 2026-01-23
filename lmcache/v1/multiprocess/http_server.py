@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import argparse
 import base64
 import binascii
 import io
 import threading
-from typing import Optional, Literal
+from typing import Optional, Literal, Tuple
 
 # Third Party
 import numpy as np
@@ -18,12 +19,19 @@ import uvicorn
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
-from lmcache.v1.multiprocess.server import MPCacheEngine
+from lmcache.v1.multiprocess.server import MPCacheEngine, run_cache_server
 from lmcache.v1.memory_management import MemoryFormat
 
 logger = init_logger(__name__)
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0")
+
+# ----------------------------
+# Global server lifecycle state
+# ----------------------------
+_server_instance: Optional[uvicorn.Server] = None
+_server_lock = threading.Lock()
+_zmq_server = None  # ZMQ MessageQueueServer reference for cleanup
 
 
 # ----------------------------
@@ -467,10 +475,40 @@ async def set_kv_cache(
 def run_http_server(
     host: str = "0.0.0.0",
     port: int = 8000,
-    engine: Optional[MPCacheEngine] = None,
+    zmq_host: str = "localhost",
+    zmq_port: int = 5555,
+    chunk_size: int = 256,
+    cpu_buffer_size: float = 5.0,
+    max_workers: int = 1,
 ):
-    if engine is not None:
-        set_engine(engine)
+    """
+    Run the LMCache HTTP server with integrated MP (ZMQ) server.
+
+    This function starts the ZMQ cache server in the background, then runs
+    the HTTP server (blocking). On shutdown, both servers are cleaned up.
+
+    Args:
+        host: HTTP server host
+        port: HTTP server port
+        zmq_host: ZMQ server host
+        zmq_port: ZMQ server port
+        chunk_size: Chunk size for KV cache operations
+        cpu_buffer_size: CPU buffer size in GB
+        max_workers: Maximum number of worker threads for ZMQ server
+    """
+    global _server_instance, _zmq_server
+
+    # Start ZMQ MP server and get engine
+    zmq_server, engine = run_cache_server(
+        host=zmq_host,
+        port=zmq_port,
+        chunk_size=chunk_size,
+        cpu_buffer_size=cpu_buffer_size,
+        max_workers=max_workers,
+        return_engine=True,
+    )
+    _zmq_server = zmq_server
+    set_engine(engine)
 
     config = uvicorn.Config(
         app=app,
@@ -480,20 +518,100 @@ def run_http_server(
         access_log=True,
     )
     server = uvicorn.Server(config)
+
+    with _server_lock:
+        _server_instance = server
+
     logger.info("Starting LMCache HTTP server on http://%s:%d", host, port)
-    server.run()
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal...")
+    finally:
+        # Clean up after server stops
+        with _server_lock:
+            _server_instance = None
+        if _zmq_server is not None:
+            logger.info("Shutting down ZMQ server...")
+            _zmq_server.close()
+            _zmq_server = None
+        logger.info("LMCache HTTP server stopped")
 
 
-def start_http_server_thread(
-    host: str = "0.0.0.0",
-    port: int = 8000,
-    engine: Optional[MPCacheEngine] = None,
-) -> threading.Thread:
-    thread = threading.Thread(
-        target=run_http_server,
-        args=(host, port, engine),
-        daemon=True,
-        name="LMCacheHTTPServer",
+def stop_http_server(timeout: float = 5.0) -> bool:
+    """
+    Stop the HTTP server gracefully.
+
+    Args:
+        timeout: Maximum time to wait for server to stop (seconds)
+
+    Returns:
+        True if server was stopped, False if not running or timeout
+    """
+    global _server_instance, _zmq_server
+
+    with _server_lock:
+        if _server_instance is None:
+            logger.info("HTTP server is not running")
+            return False
+
+        logger.info("Stopping HTTP server...")
+        _server_instance.should_exit = True
+
+    # Also stop ZMQ server
+    if _zmq_server is not None:
+        logger.info("Stopping ZMQ server...")
+        _zmq_server.close()
+
+    logger.info("HTTP server stopped successfully")
+    return True
+
+
+def is_http_server_running() -> bool:
+    """
+    Check if the HTTP server is currently running.
+
+    Returns:
+        True if server is running, False otherwise
+    """
+    with _server_lock:
+        return _server_instance is not None and not _server_instance.should_exit
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="LMCache HTTP Server with integrated MP Cache Server")
+    parser.add_argument(
+        "--host", type=str, default="0.0.0.0", help="Host to bind the HTTP server"
     )
-    thread.start()
-    return thread
+    parser.add_argument(
+        "--port", type=int, default=8000, help="Port to bind the HTTP server"
+    )
+    parser.add_argument(
+        "--zmq-host", type=str, default="localhost", help="Host to bind the ZMQ server"
+    )
+    parser.add_argument(
+        "--zmq-port", type=int, default=5555, help="Port to bind the ZMQ server"
+    )
+    parser.add_argument(
+        "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
+    )
+    parser.add_argument(
+        "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
+    )
+    parser.add_argument(
+        "--max-workers", type=int, default=1, help="Maximum number of worker threads"
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    run_http_server(
+        host=args.host,
+        port=args.port,
+        zmq_host=args.zmq_host,
+        zmq_port=args.zmq_port,
+        chunk_size=args.chunk_size,
+        cpu_buffer_size=args.cpu_buffer_size,
+        max_workers=args.max_workers,
+    )
