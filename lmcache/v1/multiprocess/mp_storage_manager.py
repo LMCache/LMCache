@@ -17,7 +17,13 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
+from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_management import (
+    MemoryAllocatorInterface,
+    MemoryFormat,
+    MemoryObj,
+    MixedMemoryAllocator,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 
@@ -184,7 +190,7 @@ class LRUCachePolicyWithLock(LRUCachePolicy[IPCCacheEngineKey]):
 
 
 class MPStorageManager:
-    def __init__(self, cpu_buffer_size: float):
+    def __init__(self, cpu_buffer_size: float, disable_lazy_alloc: bool = False):
         """
         Args:
             cpu_buffer_size: the total size (in GB) of CPU memory buffer
@@ -197,8 +203,16 @@ class MPStorageManager:
 
         # Allocator for CPU memory (note: this will be moved to storage backend
         # implementation in the future)
+        self._memory_allocator: MemoryAllocatorInterface
         size_in_bytes = int(cpu_buffer_size * (1 << 30))  # Convert GB to bytes
-        self._memory_allocator = MixedMemoryAllocator(size_in_bytes)
+        if disable_lazy_alloc:
+            self._memory_allocator = MixedMemoryAllocator(size_in_bytes)
+        else:
+            init_size_in_bytes = min(20 << 30, size_in_bytes)  # 20 GB or total size
+            self._memory_allocator = LazyMemoryAllocator(
+                init_size_in_bytes, size_in_bytes
+            )
+
         self._allocator_lock = threading.Lock()
 
         # Reserved memory objects

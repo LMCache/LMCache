@@ -9,3 +9,4 @@ Observability
    vllm_endpoint
    internal_api_server
    chunk_statistics
+   health_monitor
