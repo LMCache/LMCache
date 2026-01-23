@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import abc
 import asyncio
 
@@ -73,12 +73,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Union[List[Future], None]:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
+        :param Any transfer_spec: Optional transfer specification.
+        :param on_complete_callback: Optional callback invoked once per key
+            after the backend finishes persisting the KV chunk for that key.
+            For batched puts, the callback is invoked separately for each key
+            when that key completes (not once per batch). Callback exceptions
+            are caught and logged. Backends that cannot use this callback may
+            ignore it.
 
         :return:  Union[List[Future], None]: A list of `Future` objects if the
         storage persistence operation is asynchronous and is successful.
@@ -96,9 +104,13 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         An async version of batched_submit_put_task.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after the backend finishes persisting the KV chunk for that key.
         """
         raise NotImplementedError
 
