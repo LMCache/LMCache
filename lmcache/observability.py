@@ -304,6 +304,7 @@ class LMCStatsMonitor:
         self.retrieve_time_threshold: float = 1e9
         self.retrieve_token_speed_threshold: float = -1.0
         self.last_retrieve_warning_time: float = 0.0
+        self.skipped_retrieve_warning_count: int = 0
 
     def set_current_retrieve_stats(self, stats: RetrieveRequestStats):
         self._current_retrieve_stats = stats
@@ -401,34 +402,45 @@ class LMCStatsMonitor:
         if 0 < retrieve_speed < self.retrieve_token_speed_threshold:
             self.interval_num_slow_retrieval_by_speed += 1
 
+        # Log a warning if the retrieval performance is below defined thresholds:
+        # 1. Total time taken (time_to_retrieve) exceeds the maximum allowed time.
+        # 2. Retrieval speed (retrieve_speed) falls below the minimum required tokens/s.
+        # The warnings are rate-limited to once every 10 seconds to avoid log flooding.
         if (
             time_to_retrieve > self.retrieve_time_threshold
             or 0 < retrieve_speed < self.retrieve_token_speed_threshold
-        ) and curr_time - self.last_retrieve_warning_time > 10.0:
-            self.last_retrieve_warning_time = curr_time
-            logger.warning(
-                "Retrieve request %d surpassed threshold: "
-                "time_to_retrieve=%.4f s (threshold=%.4f s), "
-                "retrieve_speed=%.2f tokens/s (threshold=%.2f tokens/s). "
-                "Detailed metrics: "
-                "num_tokens=%d, local_hit_tokens=%d, remote_hit_tokens=%d, "
-                "process_tokens_time=%.5f s, "
-                "broadcast_time=%.5f s, "
-                "to_gpu_time=%.5f s, "
-                "detailed_metrics=%s",
-                retrieve_stats.request_id,
-                time_to_retrieve,
-                self.retrieve_time_threshold,
-                retrieve_speed,
-                self.retrieve_token_speed_threshold,
-                retrieve_stats.num_tokens,
-                retrieve_stats.local_hit_tokens,
-                retrieve_stats.remote_hit_tokens,
-                retrieve_stats.process_tokens_time,
-                retrieve_stats.broadcast_time,
-                retrieve_stats.to_gpu_time,
-                retrieve_stats.detailed_metrics,
-            )
+        ):
+            if curr_time - self.last_retrieve_warning_time > 10.0:
+                logger.warning(
+                    "Retrieve request %d surpassed threshold: "
+                    "time_to_retrieve=%.4f s (threshold=%.4f s), "
+                    "retrieve_speed=%.2f tokens/s (threshold=%.2f tokens/s). "
+                    "Skipped %d slow retrieval logs in the last %.1f seconds. "
+                    "Detailed metrics: "
+                    "num_tokens=%d, local_hit_tokens=%d, remote_hit_tokens=%d, "
+                    "process_tokens_time=%.5f s, "
+                    "broadcast_time=%.5f s, "
+                    "to_gpu_time=%.5f s, "
+                    "detailed_metrics=%s",
+                    retrieve_stats.request_id,
+                    time_to_retrieve,
+                    self.retrieve_time_threshold,
+                    retrieve_speed,
+                    self.retrieve_token_speed_threshold,
+                    self.skipped_retrieve_warning_count,
+                    curr_time - self.last_retrieve_warning_time,
+                    retrieve_stats.num_tokens,
+                    retrieve_stats.local_hit_tokens,
+                    retrieve_stats.remote_hit_tokens,
+                    retrieve_stats.process_tokens_time,
+                    retrieve_stats.broadcast_time,
+                    retrieve_stats.to_gpu_time,
+                    retrieve_stats.detailed_metrics,
+                )
+                self.last_retrieve_warning_time = curr_time
+                self.skipped_retrieve_warning_count = 0
+            else:
+                self.skipped_retrieve_warning_count += 1
 
     @thread_safe
     def on_store_request(self, num_tokens: int) -> StoreRequestStats:
