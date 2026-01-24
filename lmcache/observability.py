@@ -2,7 +2,7 @@
 # Standard
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 import os
 import threading
 import time
@@ -674,79 +674,69 @@ class LMCStatsMonitor:
             else sum_finished_lookup_hit / sum_finished_lookup_requested
         )
 
-        def filter_out_zeros(stats: List[float]):
+        def filter_out_zeros(stats: Iterable[float]) -> List[float]:
             return [x for x in stats if x != 0]
 
         time_to_retrieve = filter_out_zeros(
-            [stats.time_to_retrieve() for stats in self.retrieve_requests.values()]
+            stats.time_to_retrieve() for stats in self.retrieve_requests.values()
         )
 
         time_to_store = filter_out_zeros(
-            [stats.time_to_store() for stats in self.store_requests.values()]
+            stats.time_to_store() for stats in self.store_requests.values()
         )
 
         time_to_lookup = filter_out_zeros(
-            [stats.time_to_lookup() for stats in self.lookup_requests.values()]
+            stats.time_to_lookup() for stats in self.lookup_requests.values()
         )
 
         retrieve_speed = filter_out_zeros(
-            [stats.retrieve_speed() for stats in self.retrieve_requests.values()]
+            stats.retrieve_speed() for stats in self.retrieve_requests.values()
         )
 
         store_speed = filter_out_zeros(
-            [stats.store_speed() for stats in self.store_requests.values()]
+            stats.store_speed() for stats in self.store_requests.values()
         )
 
         # Granular profiling measurements
         retrieve_process_tokens_time = filter_out_zeros(
-            [stats.process_tokens_time for stats in self.retrieve_requests.values()]
+            stats.process_tokens_time for stats in self.retrieve_requests.values()
         )
         retrieve_broadcast_time = filter_out_zeros(
-            [stats.broadcast_time for stats in self.retrieve_requests.values()]
+            stats.broadcast_time for stats in self.retrieve_requests.values()
         )
         retrieve_to_gpu_time = filter_out_zeros(
-            [stats.to_gpu_time for stats in self.retrieve_requests.values()]
+            stats.to_gpu_time for stats in self.retrieve_requests.values()
         )
         remote_backend_batched_get_blocking_time = filter_out_zeros(
-            [
-                stats.detailed_metrics.get(
-                    "remote_backend_batched_get_blocking_time", 0.0
-                )
-                for stats in self.retrieve_requests.values()
-            ]
+            stats.detailed_metrics.get("remote_backend_batched_get_blocking_time", 0.0)
+            for stats in self.retrieve_requests.values()
         )
         instrumented_connector_batched_get_time = filter_out_zeros(
-            [
-                stats.detailed_metrics.get(
-                    "instrumented_connector_batched_get_time", 0.0
-                )
-                for stats in self.retrieve_requests.values()
-            ]
+            stats.detailed_metrics.get("instrumented_connector_batched_get_time", 0.0)
+            for stats in self.retrieve_requests.values()
         )
         store_process_tokens_time = filter_out_zeros(
-            [stats.process_tokens_time for stats in self.store_requests.values()]
+            stats.process_tokens_time for stats in self.store_requests.values()
         )
         store_from_gpu_time = filter_out_zeros(
-            [stats.from_gpu_time for stats in self.store_requests.values()]
+            stats.from_gpu_time for stats in self.store_requests.values()
         )
         store_put_time = filter_out_zeros(
-            [stats.put_time for stats in self.store_requests.values()]
+            stats.put_time for stats in self.store_requests.values()
         )
 
         p2p_time_to_transfer = filter_out_zeros(
-            [stats.time_to_transfer() for stats in self.p2p_requests.values()]
+            stats.time_to_transfer() for stats in self.p2p_requests.values()
         )
 
         p2p_transfer_speed = filter_out_zeros(
-            [stats.transfer_speed() for stats in self.p2p_requests.values()]
+            stats.transfer_speed() for stats in self.p2p_requests.values()
         )
 
         request_lookup_hit_rates = filter_out_zeros(
-            [
-                stats.hit_rate()
-                for stats in self.lookup_requests.values()
-                if stats.is_finished
-            ]
+            stats.hit_rate()
+            for stats in self.lookup_requests.values()
+            if stats.is_finished
         )
 
         request_lifespan = list(self.interval_request_cache_lifespan.values())
