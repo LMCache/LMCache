@@ -49,6 +49,15 @@ class InstrumentedRemoteConnector(RemoteConnector):
         end = time.perf_counter()
         duration = end - begin
 
+        retrieve_stats = self._stats_monitor.get_current_retrieve_stats()
+        if (
+            retrieve_stats is not None
+            and "remote_backend_individual_get_stats" in retrieve_stats.detailed_metrics
+        ):
+            retrieve_stats.detailed_metrics["remote_backend_individual_get_stats"][
+                key
+            ] = {"instrumented_connector_get_time": duration}
+
         if memory_obj is not None:
             obj_size = memory_obj.get_size()
             self._stats_monitor.update_interval_remote_read_metrics(obj_size)

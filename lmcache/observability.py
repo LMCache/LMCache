@@ -2,7 +2,7 @@
 # Standard
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import os
 import threading
 import time
@@ -132,7 +132,7 @@ class RetrieveRequestStats:
     process_tokens_time: float = 0
     broadcast_time: float = 0
     to_gpu_time: float = 0
-    detailed_metrics: Dict[str, float] = field(default_factory=dict)
+    detailed_metrics: Dict[str, Any] = field(default_factory=dict)
 
     def time_to_retrieve(self):
         if self.end_time == 0:

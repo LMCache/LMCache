@@ -403,6 +403,15 @@ class RemoteBackend(StorageBackendInterface):
                     )
                 memory_objs = [None] * len(keys)
         else:
+            remote_backend_individual_get_stats: dict[
+                CacheEngineKey, dict[str, float]
+            ] = {}
+            retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
+            if retrieve_stats is not None:
+                retrieve_stats.detailed_metrics[
+                    "remote_backend_individual_get_stats"
+                ] = remote_backend_individual_get_stats
+
             futures = [
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
                 for key in keys
