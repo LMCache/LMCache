@@ -233,7 +233,7 @@ class MPCacheEngine:
             instance_id (int): The GPU instance ID (such as PID).
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
         """
-        gpu_context = GPUCacheContext(kv_caches)
+        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
@@ -517,7 +517,24 @@ def run_cache_server(
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
     disable_lazy_alloc: bool = False,
+    return_engine: bool = False,
 ):
+    """
+    Run the LMCache cache server with ZMQ message queue.
+
+    Args:
+        host: ZMQ server host
+        port: ZMQ server port
+        chunk_size: Chunk size for KV cache operations
+        cpu_buffer_size: CPU buffer size in GB
+        max_workers: Maximum number of worker threads for ZMQ server
+        return_engine: If True, return (server, engine) after starting;
+                       if False, run blocking loop to keep server alive
+
+    Returns:
+        If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
+        If return_engine is False: None (blocks until interrupted)
+    """
     # Initialize the engine
     engine = MPCacheEngine(chunk_size, cpu_buffer_size, disable_lazy_alloc)
 
@@ -539,10 +556,15 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
-    # Start the server
+    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
+    # Start the ZMQ server
     torch.cuda.init()
     server.start()
     logger.info("LMCache cache server is running...")
+
+    # Return server and engine if requested (for HTTP server integration)
+    if return_engine:
+        return server, engine
 
     # Dummy loop to keep the server running
     try:
@@ -554,12 +576,14 @@ def run_cache_server(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="LMCache Cache Server")
-    parser.add_argument(
-        "--host", type=str, default="localhost", help="Host to bind the server"
+    parser = argparse.ArgumentParser(
+        description="LMCache ZMQ Cache Server (without HTTP)"
     )
     parser.add_argument(
-        "--port", type=int, default=5555, help="Port to bind the server"
+        "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
+    )
+    parser.add_argument(
+        "--port", type=int, default=5555, help="Port to bind the ZMQ server"
     )
     parser.add_argument(
         "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
