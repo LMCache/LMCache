@@ -528,6 +528,17 @@ class MPStorageManager:
         with self._allocator_lock:
             return self._memory_allocator.memcheck()
 
+    def get_all_keys(self) -> list[IPCCacheEngineKey]:
+        """
+        Get all committed keys in the storage manager.
+        Thread-safe. Debug Only.
+
+        Returns:
+            List of all committed IPCCacheEngineKey objects
+        """
+        with self._buffer_lock:
+            return list(self._commited_memory_objects.keys())
+
     def clear(self):
         """
         Clear all the memory objects in the storage manager.
