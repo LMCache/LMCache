@@ -8,6 +8,11 @@
 // #ifndef MEM_KERNELS_CUH
 // #define MEM_KERNELS_CUH
 
+enum class TransferDirection : int {
+  H2D = 0,
+  D2H = 1,
+};
+
 void multi_layer_kv_transfer(torch::Tensor& key_value,
                              const torch::Tensor& key_value_ptrs,
                              const torch::Tensor& slot_mapping,
@@ -43,3 +48,8 @@ void reshape_and_cache_back_flash(torch::Tensor& key_value,
                                   torch::Tensor& value_cache,
                                   torch::Tensor& slot_mapping,
                                   const int layer_idx);
+
+void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
+                          TransferDirection direction,
+                          size_t host_buffer_offset,
+                          size_t host_buffer_alignments);
