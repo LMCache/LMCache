@@ -54,9 +54,9 @@ class RustRawBlockBackend(StoragePluginInterface):
 
     Features:
     - High-throughput I/O via direct block device access
-    - O_DIRECT support to bypass page cache
+    - O_DIRECT support to bypass page cache (requires aligned buffers)
     - Manifest persistence for recovery across restarts
-    - Zero-copy operations via Rust extension
+    - Efficient buffer operations via Rust extension
 
     .. warning::
        **This backend currently only supports TP=1 (single GPU) deployments.**
@@ -218,7 +218,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         return "RustRawBlockBackend"
 
     def _rawdev(self):
-        """Lazy init: create single-FD device for basic read/write operations."""
+        """Lazy init: create single-FD device for synchronous read/write operations."""
         if self._raw is None:
             try:
                 from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
@@ -298,7 +298,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             return key in self._index
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
-        # WIP: does not reclaim space yet; just drops index entry.
+        """Remove key from index and reclaim slot for reuse."""
         with self._lock:
             existed = key in self._index or key in self._inflight
             entry = self._index.pop(key, None)
@@ -389,7 +389,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         memory_obj: MemoryObj,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
-        """Execute write: direct blocking write wrapped in async."""
+        """Execute write: synchronous blocking write wrapped in async thread."""
         try:
             buf = memory_obj.byte_array
             if hasattr(buf, "cast"):
@@ -401,7 +401,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 if total_len > (self.slot_bytes - self.header_bytes):
                     raise RuntimeError(f"O_DIRECT payload {total_len} > slot capacity")
 
-            # Direct blocking write wrapped in async
+            # Synchronous blocking write executed in thread pool
             def _do_write():
                 try:
                     raw_dev = self._rawdev()
@@ -443,16 +443,6 @@ class RustRawBlockBackend(StoragePluginInterface):
         hdr[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
         return bytes(hdr)
 
-    def _decode_header(self, header: bytes) -> tuple[int, int]:
-        # NOTE: header decoding is intentionally unused on the hot path.
-        # We rely on the in-memory index/manifest for payload size.
-        if len(header) < 24:
-            raise RuntimeError("short header")
-        if header[0:8] != b"LMCBLK01":
-            raise RuntimeError("bad magic")
-        chunk_hash = int.from_bytes(header[8:16], "little", signed=False)
-        payload_len = int.from_bytes(header[16:24], "little", signed=False)
-        return chunk_hash, payload_len
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Blocking read: lookup key, allocate buffer, read from device."""
@@ -507,14 +497,6 @@ class RustRawBlockBackend(StoragePluginInterface):
                 hit += 1
         return hit
 
-    async def batched_get_non_blocking(
-        self,
-        lookup_id: str,  # noqa: ARG002
-        keys: list[CacheEngineKey],
-        transfer_spec: Any = None,  # noqa: ARG002
-    ) -> list[MemoryObj]:
-        """Not implemented yet."""
-        return []
 
     def get_allocator_backend(self) -> "AllocatorBackendInterface":
         assert self.local_cpu_backend is not None
