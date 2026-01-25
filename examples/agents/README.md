@@ -9,7 +9,7 @@ This example estimates KV cache hit rates under different cache pool sizes by re
 ## Prerequisites
 - Python 3.9+
 - Install dependencies:
-  - pip install -r requirements.txt
+  - `pip install -r requirements.txt`
 
 ## Input format
 The input file must be JSONL with an `input` field per line:
