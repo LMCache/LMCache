@@ -403,12 +403,16 @@ class RustRawBlockBackend(StoragePluginInterface):
 
             # Direct blocking write wrapped in async
             def _do_write():
-                raw_dev = self._rawdev()
-                # Write header
-                hdr_total = _round_up(len(header), self.block_align) if self.use_odirect else len(header)
-                raw_dev.pwrite(offset, header, len(header), hdr_total)
-                # Write payload
-                raw_dev.pwrite(offset + self.header_bytes, buf, payload_len, total_len)
+                try:
+                    raw_dev = self._rawdev()
+                    # Write header
+                    hdr_total = _round_up(len(header), self.block_align) if self.use_odirect else len(header)
+                    raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
+                    # Write payload
+                    raw_dev.pwrite_from_buffer(offset + self.header_bytes, buf, payload_len, total_len)
+                except Exception as e:
+                    logger.error(f"Write failed for key {self._dbg_key_short(key)}: {e}")
+                    raise
 
             await asyncio.to_thread(_do_write)
 
@@ -479,7 +483,11 @@ class RustRawBlockBackend(StoragePluginInterface):
         except Exception:
             pass
 
-        self._rawdev().pread_into(entry.offset + self.header_bytes, buf, payload_len, total_len)
+        try:
+            self._rawdev().pread_into(entry.offset + self.header_bytes, buf, payload_len, total_len)
+        except Exception as e:
+            logger.error(f"Read failed for key {self._dbg_key_short(key)}: {e}")
+            raise
         memory_obj.metadata.cached_positions = meta.cached_positions
         with self._lock:
             self._touch(key)
@@ -539,9 +547,10 @@ class RustRawBlockBackend(StoragePluginInterface):
         if self._raw is not None:
             try:
                 self._raw.close()
-            except Exception:
-                pass
-            self._raw = None
+            except Exception as e:
+                logger.warning(f"Failed to close raw block device: {e}")
+            finally:
+                self._raw = None
 
     def _maybe_save_manifest(self) -> None:
         """Save manifest periodically (every N writes) for crash recovery."""

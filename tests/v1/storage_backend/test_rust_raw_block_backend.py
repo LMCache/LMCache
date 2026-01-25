@@ -97,7 +97,7 @@ def test_rust_raw_block_backend_put_get_roundtrip(memory_allocator, loop_in_thre
             key = CacheEngineKey("vllm", "test_model", 1, 0, 12345, torch.bfloat16)
             allocator = AdHocMemoryAllocator(device="cpu")
             obj = allocator.allocate(
-                (2, 16, 8, 128), torch.bfloat16, fmt=MemoryFormat.KV_T2D
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
             )
             assert obj is not None
             assert obj.tensor is not None
@@ -170,13 +170,13 @@ def test_rust_raw_block_backend_eviction_lru(memory_allocator, loop_in_thread):
             k3 = CacheEngineKey("vllm", "test_model", 1, 0, 3, torch.bfloat16)
 
             o1 = alloc.allocate(
-                (2, 16, 8, 128), torch.bfloat16, fmt=MemoryFormat.KV_T2D
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
             )
             o2 = alloc.allocate(
-                (2, 16, 8, 128), torch.bfloat16, fmt=MemoryFormat.KV_T2D
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
             )
             o3 = alloc.allocate(
-                (2, 16, 8, 128), torch.bfloat16, fmt=MemoryFormat.KV_T2D
+                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
             )
             assert o1 and o2 and o3
             assert (
@@ -255,7 +255,7 @@ def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thr
         )
         alloc = AdHocMemoryAllocator(device="cpu")
         k1 = CacheEngineKey("vllm", "test_model", 1, 0, 111, torch.bfloat16)
-        o1 = alloc.allocate((2, 16, 8, 128), torch.bfloat16, fmt=MemoryFormat.KV_T2D)
+        o1 = alloc.allocate([torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D)
         assert o1 and o1.tensor is not None
         o1.tensor.fill_(9)
         expected = bytes(o1.byte_array)
