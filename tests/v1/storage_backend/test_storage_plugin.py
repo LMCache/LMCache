@@ -10,7 +10,7 @@ and verifies that:
 """
 
 # Standard
-from typing import Any, List, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence
 import asyncio
 
 # Third Party
@@ -83,6 +83,7 @@ class MockStoragePlugin(StoragePluginInterface):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """Submit a batched put task."""
         for key, obj in zip(keys, objs, strict=True):

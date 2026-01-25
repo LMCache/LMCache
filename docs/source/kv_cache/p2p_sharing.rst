@@ -20,8 +20,7 @@ Configuration
 -------------
 
 Create two configuration files for the P2P sharing setup.
-
-The only difference between the two configurations is the ``lmcache_instance_id`` and the ``p2p_init_ports`` and ``p2p_lookup_ports`` and ``lmcache_worker_ports``.
+ 
 
 **Instance 1 Configuration (example1.yaml)**:
 
@@ -29,7 +28,7 @@ The only difference between the two configurations is the ``lmcache_instance_id`
 
     chunk_size: 256
     local_cpu: True
-    max_local_cpu_size: 10
+    max_local_cpu_size: 100
     enable_async_loading: True
 
     # P2P configurations
@@ -55,7 +54,7 @@ The only difference between the two configurations is the ``lmcache_instance_id`
 
     chunk_size: 256
     local_cpu: True
-    max_local_cpu_size: 10
+    max_local_cpu_size: 100
     enable_async_loading: True
 
     # P2P configurations
@@ -91,7 +90,6 @@ After starting the controller, access the WebUI at:
 
 http://localhost:9000/
 
- 
 **Step 2: Start vLLM Engines with LMCache Workers**
 
 If the NIC supports RDMA:
@@ -204,19 +202,31 @@ First instance metrics:
 
 .. code-block:: text
  
-    Warmup round mean TTFT: 0.466s
-    Warmup round time: 19.838s
+    Warmup round mean TTFT: 2.286s
+    Warmup round time: 37.957s
     Warmup round prompt count: 50
     Warmup round successful prompt count: 50
+    
+    === BENCHMARK RESULTS ===
+    Query round mean TTFT: 2.028s
+    Query round time: 38.323s
+    Query round prompt count: 50
+    Query round successful prompt count: 50
 
 Second instance metrics:
 
 .. code-block:: text
  
-    Warmup round mean TTFT: 0.360s
-    Warmup round time: 17.896s
+    Warmup round mean TTFT: 1.036s
+    Warmup round time: 13.814s
     Warmup round prompt count: 50
     Warmup round successful prompt count: 50
+    
+    === BENCHMARK RESULTS ===
+    Query round mean TTFT: 0.490s
+    Query round time: 7.964s
+    Query round prompt count: 50
+    Query round successful prompt count: 50
 
-In this example, the warm-up round metric in long_doc_qa is used because no existing KV cache is reused within an instance. With LMCache P2P sharing enabled, the time to first token (TTFT) is reduced by 22%, from 0.466 s to 0.360 s.
+In this example, the warm-up round metric in long_doc_qa is used because no existing KV cache is reused within an instance to benefit solely from P2P sharing. With LMCache P2P sharing enabled, the time to first token (TTFT) is reduced by 54.7%, from 2.286 s to 1.036 s, with a 63.6% reduction in total inference time (37.957 s → 13.814 s).
 
