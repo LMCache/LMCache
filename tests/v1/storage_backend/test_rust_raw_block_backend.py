@@ -255,7 +255,9 @@ def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thr
         )
         alloc = AdHocMemoryAllocator(device="cpu")
         k1 = CacheEngineKey("vllm", "test_model", 1, 0, 111, torch.bfloat16)
-        o1 = alloc.allocate([torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D)
+        o1 = alloc.allocate(
+            [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+        )
         assert o1 and o1.tensor is not None
         o1.tensor.fill_(9)
         expected = bytes(o1.byte_array)
@@ -280,4 +282,3 @@ def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thr
             assert bytes(out.byte_array) == expected
         finally:
             backend2.close()
-

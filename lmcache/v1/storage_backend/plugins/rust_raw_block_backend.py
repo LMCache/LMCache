@@ -114,7 +114,9 @@ class RustRawBlockBackend(StoragePluginInterface):
             raise ValueError("extra_config['rust_raw_block.device_path'] is required")
 
         self.manifest_path: Optional[str] = extra.get("rust_raw_block.manifest_path")
-        self.capacity_bytes: int = int(extra.get("rust_raw_block.capacity_bytes", 0))  # 0 = use full device
+        self.capacity_bytes: int = int(
+            extra.get("rust_raw_block.capacity_bytes", 0)
+        )  # 0 = use full device
         self.block_align: int = int(extra.get("rust_raw_block.block_align", 4096))
         self.header_bytes: int = int(extra.get("rust_raw_block.header_bytes", 4096))
         self.use_odirect: bool = bool(extra.get("rust_raw_block.use_odirect", False))
@@ -138,10 +140,16 @@ class RustRawBlockBackend(StoragePluginInterface):
             )
 
         self._lock = threading.Lock()
-        self._index: dict[CacheEngineKey, _Entry] = {}  # key -> entry (successfully written)
+        self._index: dict[
+            CacheEngineKey, _Entry
+        ] = {}  # key -> entry (successfully written)
         self._pinned: set[CacheEngineKey] = set()  # keys that cannot be evicted
-        self._inflight: dict[CacheEngineKey, _Inflight] = {}  # keys currently being written
-        self._lru: "OrderedDict[CacheEngineKey, None]" = OrderedDict()  # LRU order (oldest first)
+        self._inflight: dict[
+            CacheEngineKey, _Inflight
+        ] = {}  # keys currently being written
+        self._lru: "OrderedDict[CacheEngineKey, None]" = (
+            OrderedDict()
+        )  # LRU order (oldest first)
 
         self._next_slot: int = 0  # next slot index to allocate
         self._free_slots: list[int] = []  # reusable slots from evicted chunks
@@ -221,6 +229,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         """Lazy init: create single-FD device for synchronous read/write operations."""
         if self._raw is None:
             try:
+                # Third Party
                 from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
             except Exception as e:
                 raise RuntimeError(
@@ -228,13 +237,18 @@ class RustRawBlockBackend(StoragePluginInterface):
                     "Install / build `rust_raw_block_io` and retry."
                 ) from e
             self._raw = RawBlockDevice(
-                self.device_path, writable=True, use_odirect=self.use_odirect,
+                self.device_path,
+                writable=True,
+                use_odirect=self.use_odirect,
                 alignment=self.block_align,
             )
         return self._raw
 
     def _allocate_slot(self) -> int:
-        """Allocate a slot on device. Reuses free slots first, then allocates new ones."""
+        """Allocate a slot on device.
+
+        Reuses free slots first, then allocates new ones.
+        """
         if self.capacity_bytes <= 0:
             self.capacity_bytes = int(self._rawdev().size_bytes())
         if self._max_slots <= 0:
@@ -318,7 +332,10 @@ class RustRawBlockBackend(StoragePluginInterface):
         transfer_spec: Any = None,  # noqa: ARG002
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ):
-        """Submit batch of put tasks: allocate slots, encode headers, submit async writes."""
+        """Submit batch of put tasks.
+
+        Allocates slots, encodes headers, and submits async writes.
+        """
         if logger.isEnabledFor(10):  # DEBUG
             self._dbg_put_batches += 1
             self._dbg_put_keys += int(len(keys))
@@ -329,7 +346,9 @@ class RustRawBlockBackend(StoragePluginInterface):
             if self._dbg_should_log(self._dbg_put_batches):
                 logger.debug(
                     "RustRawBlockBackend PUT: keys=%d inflight=%d indexed=%d",
-                    len(keys), len(self._inflight), len(self._index),
+                    len(keys),
+                    len(self._inflight),
+                    len(self._index),
                 )
 
         futures = []
@@ -406,12 +425,20 @@ class RustRawBlockBackend(StoragePluginInterface):
                 try:
                     raw_dev = self._rawdev()
                     # Write header
-                    hdr_total = _round_up(len(header), self.block_align) if self.use_odirect else len(header)
+                    hdr_total = (
+                        _round_up(len(header), self.block_align)
+                        if self.use_odirect
+                        else len(header)
+                    )
                     raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
                     # Write payload
-                    raw_dev.pwrite_from_buffer(offset + self.header_bytes, buf, payload_len, total_len)
+                    raw_dev.pwrite_from_buffer(
+                        offset + self.header_bytes, buf, payload_len, total_len
+                    )
                 except Exception as e:
-                    logger.error(f"Write failed for key {self._dbg_key_short(key)}: {e}")
+                    logger.error(
+                        f"Write failed for key {self._dbg_key_short(key)}: {e}"
+                    )
                     raise
 
             await asyncio.to_thread(_do_write)
@@ -419,7 +446,11 @@ class RustRawBlockBackend(StoragePluginInterface):
             with self._lock:
                 inflight = self._inflight.pop(key, None)
                 if inflight is not None:
-                    self._index[key] = _Entry(offset=inflight.offset, size=inflight.meta.size, meta=inflight.meta)
+                    self._index[key] = _Entry(
+                        offset=inflight.offset,
+                        size=inflight.meta.size,
+                        meta=inflight.meta,
+                    )
                     self._touch(key)
 
             self._maybe_save_manifest()
@@ -443,7 +474,6 @@ class RustRawBlockBackend(StoragePluginInterface):
         hdr[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
         return bytes(hdr)
 
-
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Blocking read: lookup key, allocate buffer, read from device."""
         if logger.isEnabledFor(10):
@@ -456,13 +486,21 @@ class RustRawBlockBackend(StoragePluginInterface):
         meta = entry.meta
         assert meta.shape is not None and meta.dtype is not None
         payload_len = int(meta.size)
-        total_len = _round_up(payload_len, self.block_align) if self.use_odirect else payload_len
+        total_len = (
+            _round_up(payload_len, self.block_align)
+            if self.use_odirect
+            else payload_len
+        )
 
         if logger.isEnabledFor(10):
             self._dbg_get_bytes += int(payload_len)
             if self._dbg_should_log(self._dbg_get_calls):
-                logger.debug("RustRawBlockBackend GET: %s offset=%d size=%d",
-                    self._dbg_key_short(key), int(entry.offset), int(payload_len))
+                logger.debug(
+                    "RustRawBlockBackend GET: %s offset=%d size=%d",
+                    self._dbg_key_short(key),
+                    int(entry.offset),
+                    int(payload_len),
+                )
 
         assert self.local_cpu_backend is not None
         memory_obj = self.local_cpu_backend.allocate(meta.shape, meta.dtype, meta.fmt)
@@ -474,7 +512,9 @@ class RustRawBlockBackend(StoragePluginInterface):
             pass
 
         try:
-            self._rawdev().pread_into(entry.offset + self.header_bytes, buf, payload_len, total_len)
+            self._rawdev().pread_into(
+                entry.offset + self.header_bytes, buf, payload_len, total_len
+            )
         except Exception as e:
             logger.error(f"Read failed for key {self._dbg_key_short(key)}: {e}")
             raise
@@ -484,7 +524,10 @@ class RustRawBlockBackend(StoragePluginInterface):
         return memory_obj
 
     async def batched_async_contains(
-        self, lookup_id: str, keys: list[CacheEngineKey], pin: bool = False  # noqa: ARG002
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        pin: bool = False,  # noqa: ARG002
     ) -> int:
         # Prefix semantics: stop at first miss.
         hit = 0
@@ -496,7 +539,6 @@ class RustRawBlockBackend(StoragePluginInterface):
                     self._pinned.add(k)
                 hit += 1
         return hit
-
 
     def get_allocator_backend(self) -> "AllocatorBackendInterface":
         assert self.local_cpu_backend is not None
@@ -544,7 +586,10 @@ class RustRawBlockBackend(StoragePluginInterface):
             if self.manifest_path:
                 try:
                     self._save_manifest(self.manifest_path)
-                    logger.debug("RustRawBlockBackend: manifest saved, entries=%d", len(self._index))
+                    logger.debug(
+                        "RustRawBlockBackend: manifest saved, entries=%d",
+                        len(self._index),
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to save periodic manifest: {e}")
 
@@ -566,13 +611,23 @@ class RustRawBlockBackend(StoragePluginInterface):
                     k.to_string(): {
                         "offset": e.offset,
                         "size": e.meta.size,
-                        "shape": list(e.meta.shape) if e.meta.shape is not None else None,
+                        "shape": list(e.meta.shape)
+                        if e.meta.shape is not None
+                        else None,
                         "dtype": k._dtype_str,
-                        "fmt": (e.meta.fmt.name if e.meta.fmt and hasattr(e.meta.fmt, "name")
-                                else str(e.meta.fmt) if e.meta.fmt else None),
-                        "cached_positions": (e.meta.cached_positions.tolist()
-                                           if e.meta.cached_positions is not None
-                                           and hasattr(e.meta.cached_positions, "tolist") else None),
+                        "fmt": (
+                            e.meta.fmt.name
+                            if e.meta.fmt and hasattr(e.meta.fmt, "name")
+                            else str(e.meta.fmt)
+                            if e.meta.fmt
+                            else None
+                        ),
+                        "cached_positions": (
+                            e.meta.cached_positions.tolist()
+                            if e.meta.cached_positions is not None
+                            and hasattr(e.meta.cached_positions, "tolist")
+                            else None
+                        ),
                     }
                     for k, e in self._index.items()
                 },
@@ -670,4 +725,3 @@ class RustRawBlockBackend(StoragePluginInterface):
                 len(self._index),
                 self._next_slot,
             )
-

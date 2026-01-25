@@ -21,6 +21,7 @@ const PYBUF_STRIDES: i32 = 0x0010 | PYBUF_ND;
 const PYBUF_ANY_CONTIGUOUS: i32 = 0x0080 | PYBUF_STRIDES;
 
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
+#[allow(clippy::manual_div_ceil)]
 fn round_up(x: usize, align: usize) -> usize {
     (x + align - 1) / align * align
 }
@@ -34,7 +35,12 @@ fn os_err(msg: &str) -> PyErr {
     PyOSError::new_err((errno(), msg.to_string()))
 }
 
-fn pwrite_from_ptr(fd: RawFd, mut offset: u64, mut ptr: *const u8, mut len: usize) -> Result<(), PyErr> {
+fn pwrite_from_ptr(
+    fd: RawFd,
+    mut offset: u64,
+    mut ptr: *const u8,
+    mut len: usize,
+) -> Result<(), PyErr> {
     while len > 0 {
         // SAFETY: caller guarantees ptr is valid for len bytes.
         let chunk = unsafe { slice::from_raw_parts(ptr, len) };
@@ -64,14 +70,7 @@ fn pread_into(fd: RawFd, offset: u64, mut dst: *mut u8, mut size: usize) -> Resu
     let mut off = offset;
     while size > 0 {
         // SAFETY: pread writes into dst for size bytes.
-        let n = unsafe {
-            libc::pread(
-                fd,
-                dst as *mut libc::c_void,
-                size,
-                off as libc::off_t,
-            )
-        };
+        let n = unsafe { libc::pread(fd, dst as *mut libc::c_void, size, off as libc::off_t) };
         if n < 0 {
             return Err(os_err("pread failed"));
         }
@@ -110,7 +109,9 @@ fn fd_size_bytes(fd: RawFd) -> Result<u64, PyErr> {
 /// Aligned buffer for O_DIRECT I/O (automatically freed on drop).
 struct AlignedBuf {
     ptr: *mut u8,
+    #[allow(dead_code)]
     len: usize,
+    #[allow(dead_code)]
     align: usize,
 }
 
@@ -120,12 +121,18 @@ impl AlignedBuf {
         // SAFETY: posix_memalign writes to p.
         let rc = unsafe { libc::posix_memalign(&mut p as *mut *mut libc::c_void, align, len) };
         if rc != 0 {
-            return Err(PyRuntimeError::new_err(format!("posix_memalign failed rc={rc}")));
+            return Err(PyRuntimeError::new_err(format!(
+                "posix_memalign failed rc={rc}"
+            )));
         }
         if p.is_null() {
             return Err(PyRuntimeError::new_err("posix_memalign returned null"));
         }
-        Ok(Self { ptr: p as *mut u8, len, align })
+        Ok(Self {
+            ptr: p as *mut u8,
+            len,
+            align,
+        })
     }
 
     fn as_mut_ptr(&self) -> *mut u8 {
@@ -192,7 +199,11 @@ impl RawBlockDevice {
     #[pyo3(signature=(path, writable, use_odirect=false, alignment=4096))]
     fn new(path: String, writable: bool, use_odirect: bool, alignment: usize) -> PyResult<Self> {
         let cpath = CString::new(path).map_err(|_| PyValueError::new_err("path contains NUL"))?;
-        let mut flags = if writable { libc::O_RDWR } else { libc::O_RDONLY };
+        let mut flags = if writable {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        };
         if use_odirect {
             flags |= libc::O_DIRECT;
         }
@@ -202,7 +213,13 @@ impl RawBlockDevice {
             return Err(os_err("open failed"));
         }
         let size = fd_size_bytes(fd)?;
-        Ok(Self { fd, size, closed: false, use_odirect, alignment })
+        Ok(Self {
+            fd,
+            size,
+            closed: false,
+            use_odirect,
+            alignment,
+        })
     }
 
     fn size_bytes(&self) -> PyResult<u64> {
@@ -237,7 +254,7 @@ impl RawBlockDevice {
             release_pybuffer(view);
             return Err(PyValueError::new_err("payload_len exceeds buffer length"));
         }
-        let mut total_len = total_len.unwrap_or(payload_len);
+        let total_len = total_len.unwrap_or(payload_len);
         if total_len < payload_len {
             release_pybuffer(view);
             return Err(PyValueError::new_err("total_len must be >= payload_len"));
@@ -245,10 +262,12 @@ impl RawBlockDevice {
 
         let align = self.alignment;
         if self.use_odirect {
+            #[allow(clippy::manual_is_multiple_of)]
             if (offset as usize) % align != 0 {
                 release_pybuffer(view);
                 return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
             }
+            #[allow(clippy::manual_is_multiple_of)]
             if total_len % align != 0 {
                 release_pybuffer(view);
                 return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
@@ -319,7 +338,7 @@ impl RawBlockDevice {
             return Err(PyValueError::new_err("null buffer pointer"));
         }
 
-        let mut total_len = total_len.unwrap_or(payload_len);
+        let total_len = total_len.unwrap_or(payload_len);
         if total_len < payload_len {
             release_pybuffer(view);
             return Err(PyValueError::new_err("total_len must be >= payload_len"));
@@ -327,10 +346,12 @@ impl RawBlockDevice {
 
         let align = self.alignment;
         if self.use_odirect {
+            #[allow(clippy::manual_is_multiple_of)]
             if (offset as usize) % align != 0 {
                 release_pybuffer(view);
                 return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
             }
+            #[allow(clippy::manual_is_multiple_of)]
             if total_len % align != 0 {
                 release_pybuffer(view);
                 return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
