@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -139,12 +139,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return False
 
     def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Optional[Future]:
         """
         Synchronously put the MemoryObj into the local cpu backend.
-        """
 
+        :param on_complete_callback: Optional callback invoked after the
+            synchronous put completes. Callback exceptions are caught and logged.
+        """
+        stored = False
         with self.cpu_lock:
             if key in self.hot_cache:
                 return None
@@ -160,6 +166,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     op_type=OpType.ADMIT,
                     key=key.chunk_hash,
                 )
+            stored = True
+
+        # Call callback after put completes (outside lock)
+        if stored and on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
         return None
 
@@ -168,16 +182,22 @@ class LocalCPUBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's put completes (not once per batch).
         """
         if not self.use_hot:
             return
 
         # TODO(Jiayi): optimize this with batching
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
 
     def get_blocking(
         self,
