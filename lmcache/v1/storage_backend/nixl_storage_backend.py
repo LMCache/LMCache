@@ -16,7 +16,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Set, Union, cast
+from typing import Any, Callable, List, Optional, Sequence, Set, Union, cast
 from urllib.parse import quote as url_quote
 import asyncio
 import os
@@ -590,6 +590,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         pass
 
@@ -814,7 +815,12 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        :param on_complete_callback: Optional callback (not yet supported for
+            NixlCacheBackend async operations).
+        """
         with self.key_lock:
             available_descs = self.pool.get_num_available_descs()
             num_evict = len(keys) - available_descs
@@ -838,6 +844,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         asyncio.run_coroutine_threadsafe(
             self.mem_to_storage(keys, memory_objs), self.loop
         )
+        # TODO: Add callback support for async NIXL operations
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -1281,7 +1288,12 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        :param on_complete_callback: Optional callback invoked once per key
+            after transfer completes. Only supported in sync mode (async_mode=False).
+        """
         with self.progress_lock:
             for key in keys:
                 self.progress_set.add(key)
@@ -1292,11 +1304,22 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             asyncio.run_coroutine_threadsafe(
                 self.mem_to_storage(keys, memory_objs), self.loop
             )
+            # Note: callback not supported in async mode
         else:
             future = asyncio.run_coroutine_threadsafe(
                 self.mem_to_storage(keys, memory_objs), self.loop
             )
             future.result()
+
+            # Call completion callback for sync mode
+            if on_complete_callback is not None:
+                for key in keys:
+                    try:
+                        on_complete_callback(key)
+                    except Exception as e:
+                        logger.warning(
+                            f"on_complete_callback failed for key {key}: {e}"
+                        )
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """

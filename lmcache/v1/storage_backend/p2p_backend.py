@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import asyncio
 import enum
 
@@ -662,6 +662,7 @@ class P2PBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         # TODO(baoloongmao): Add exception handling for socket operations
         # Code path for `move` operation in controller.
@@ -754,7 +755,9 @@ class P2PBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """P2P backend does not support put operations."""
         pass
 
     # NOTE: Synchronous get is not supported for now.
