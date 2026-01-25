@@ -404,20 +404,24 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
             if use_lazy:
-                raise RuntimeError("LazyMixedMemoryAllocator being refactored.")
-            else:
-                if config.enable_lazy_memory_allocator:
-                    logger.info(
-                        f"LazyMixedMemoryAllocator is disabled because "
-                        f"cpu_size ({cpu_size:.2f} GB) does not exceed "
-                        f"lazy_memory_safe_size "
-                        f"({config.lazy_memory_safe_size:.2f} GB). "
-                        f"Using MixedMemoryAllocator instead."
-                    )
-                return MixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
-                    numa_mapping=numa_mapping,
+                logger.warning(
+                    "LazyMixedMemoryAllocator is temporarily unavailable; "
+                    "falling back to MixedMemoryAllocator with full allocation. "
+                    "Disable enable_lazy_memory_allocator or reduce "
+                    "max_local_cpu_size to avoid large pinned allocations."
                 )
+            elif config.enable_lazy_memory_allocator:
+                logger.info(
+                    f"LazyMixedMemoryAllocator is disabled because "
+                    f"cpu_size ({cpu_size:.2f} GB) does not exceed "
+                    f"lazy_memory_safe_size "
+                    f"({config.lazy_memory_safe_size:.2f} GB). "
+                    f"Using MixedMemoryAllocator instead."
+                )
+            return MixedMemoryAllocator(
+                int(cpu_size * 1024**3),
+                numa_mapping=numa_mapping,
+            )
 
     @_lmcache_nvtx_annotate
     def allocate(

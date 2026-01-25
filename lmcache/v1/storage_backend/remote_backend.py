@@ -403,6 +403,15 @@ class RemoteBackend(StorageBackendInterface):
                     )
                 memory_objs = [None] * len(keys)
         else:
+            remote_backend_individual_get_stats: dict[
+                CacheEngineKey, dict[str, float]
+            ] = {}
+            retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
+            if retrieve_stats is not None:
+                retrieve_stats.detailed_metrics[
+                    "remote_backend_individual_get_stats"
+                ] = remote_backend_individual_get_stats
+
             futures = [
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
                 for key in keys
@@ -431,8 +440,19 @@ class RemoteBackend(StorageBackendInterface):
                     fut.cancel()
 
         t2 = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
+        duration = t2 - t1
+        self.stats_monitor.update_interval_remote_time_to_get_sync(duration * 1000)
 
+        retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
+        if retrieve_stats is not None:
+            retrieve_stats.detailed_metrics[
+                "remote_backend_batched_get_blocking_time"
+            ] = (
+                retrieve_stats.detailed_metrics.get(
+                    "remote_backend_batched_get_blocking_time", 0.0
+                )
+                + duration
+            )
         decompressed_memory_objs: list[Optional[MemoryObj]] = []
         error_happened = False
         for memory_obj in memory_objs:
