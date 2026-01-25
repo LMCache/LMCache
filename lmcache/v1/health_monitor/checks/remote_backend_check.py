@@ -205,9 +205,7 @@ class RemoteBackendHealthCheck(HealthCheck):
                 return False
 
         # Check read failed
-        current_get_blocking_failed_count = (
-            self.backend.get_interval_get_blocking_failed_count()
-        )
+        current_get_blocking_failed_count = self.backend.get_get_blocking_failed_count()
         get_blocking_failed_count = (
             current_get_blocking_failed_count - self._last_get_blocking_failed_count
         )

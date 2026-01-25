@@ -363,10 +363,10 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_obj
 
-    def get_interval_get_blocking_failed_count(self):
+    def get_get_blocking_failed_count(self):
         return self._get_blocking_failed_count
 
-    def get_interval_put_failed_count(self):
+    def get_put_failed_count(self):
         return self._put_failed_count
 
     def batched_get_blocking(
