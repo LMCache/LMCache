@@ -17,7 +17,7 @@ The input file must be JSONL with an `input` field per line:
 {"input": "another prompt"}
 
 ## Run
-python prefix_analysis.py -i trace.jsonl
+`python prefix_analysis.py -i trace.jsonl`
 
 ## Output
 - A PNG plot file (default: prefix_cache_hit_rate.png)
