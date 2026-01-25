@@ -6,6 +6,24 @@ The KV Cache Size Calculator provides a web interface for calculating the size o
 
 This document also provides an overview of the JSON format for model configurations and explains how to use the `generate_config.py` script to generate model configurations using the `transformers` library's `AutoConfig` feature.
 
+## KV Cache Size Calculation (Overview)
+
+For decoder-only transformer models, the KV cache size grows linearly with the number of tokens.
+
+An approximate KV cache size per sequence is calculated as:
+
+KV Cache = 2 × num_hidden_layers × num_key_value_heads × head_dim × num_tokens × dtype_size
+
+Where:
+- `2` accounts for storing both **Key** and **Value**
+- `head_dim = hidden_size / num_attention_heads`
+- `num_tokens` is the sequence length
+- `dtype_size` is typically:
+  - 2 bytes for FP16 / BF16
+  - 4 bytes for FP32
+
+> Note: The calculator provides an estimate. Actual memory usage may vary depending on model architecture and implementation details.
+
 ## JSON Configuration Format
 
 The JSON configuration file produced by `generate_config.py` or manually maintained should adhere to the following format:
@@ -24,8 +42,25 @@ The JSON configuration file produced by `generate_config.py` or manually maintai
 - **num_attention_heads**: The number of attention heads used in each transformer block.
 - **num_hidden_layers**: The total number of hidden layers in the model.
 - **num_key_value_heads**: (Optional) The number of key-value heads used in certain transformer architectures.
+- **head_dim**: (Optional) Dimension of each attention head. If not provided, it is commonly inferred as `hidden_size / num_attention_heads`.
+- **kv_lora_rank**, **qk_rope_head_dim**: (Optional) Architecture-specific fields used by certain models.
 
 > Note: If an attribute is not applicable to a particular model, it may be set to `null` or omitted altogether.
+
+### Attention and KV Heads
+
+The relationship between `num_attention_heads` and `num_key_value_heads` determines the attention type:
+
+- **Multi-Head Attention (MHA)**:  
+  `num_key_value_heads == num_attention_heads`
+
+- **Grouped-Query Attention (GQA)**:  
+  `num_key_value_heads < num_attention_heads`
+
+- **Multi-Query Attention (MQA)**:  
+  `num_key_value_heads == 1`
+
+Models using GQA or MQA generally require less KV cache memory than MHA models.
 
 ## How to Use `generate_config.py`
 
@@ -92,8 +127,7 @@ This will save the configuration to a file named `model_config.json` in the curr
 ## Notes
 - The script relies on the internet to fetch model configurations unless the model is available locally.
 - If certain fields are not available in a model's configuration, they will be set to `null` or excluded from the JSON.
-
-Feel free to modify `generate_config.py` as needed to add more fields or adjust the output format to better suit your requirements.
+- The KV cache size reported is an estimate intended for planning and comparison purposes.
 
 ## How to Contribute
 
@@ -105,5 +139,3 @@ We welcome contributions to improve the KV Cache Size Calculator and related scr
 - Submit a pull request describing your changes and the motivation behind them.
 
 If you have any suggestions or find any issues, feel free to open an issue on GitHub. Your contributions are greatly appreciated!
-
-
