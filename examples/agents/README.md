@@ -3,7 +3,7 @@
 This example estimates KV cache hit rates under different cache pool sizes by replaying a trace of prompts.
 
 ## What this demonstrates
-- Prefix‑based reuse vs. substring reuse
+- Prefix-based reuse vs. substring reuse
 - How cache size (GB) translates to hit rate
 
 ## Prerequisites
