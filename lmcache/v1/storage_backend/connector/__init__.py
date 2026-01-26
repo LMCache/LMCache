@@ -237,7 +237,8 @@ class ConnectorManager:
                 extra_config = config.extra_config
                 if extra_config is None:
                     logger.warning(
-                        f"Remote connector {remote_connector_plugin} configuration is missing 'extra_config'."
+                        f"Remote connector {remote_connector_plugin} configuration is "
+                        f"missing 'extra_config'."
                     )
                     continue
 
@@ -246,7 +247,6 @@ class ConnectorManager:
                 )
                 class_name = extra_config.get(
                     f"remote_connector.{remote_connector_plugin}.class_name"
-                )
                 )
 
                 if not module_path or not class_name:
@@ -272,11 +272,13 @@ class ConnectorManager:
                 logger.info(f"Discovered adapter: {adapter_class.__name__}")
             except (ImportError, AttributeError) as e:
                 logger.error(
-                    f"Failed to load remote connector {remote_connector_plugin} due to import/attribute error: {e}"
+                    f"Failed to load remote connector {remote_connector_plugin} due to "
+                    f"import/attribute error: {e}"
                 )
             except Exception as e:
                 logger.error(
-                    f"Failed to create remote connector {remote_connector_plugin} adapter: {str(e)}"
+                    f"Failed to create remote connector {remote_connector_plugin} "
+                    f"adapter: {str(e)}"
                 )
 
     def create_connector(self) -> RemoteConnector:
