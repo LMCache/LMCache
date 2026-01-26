@@ -10,9 +10,21 @@ from starlette.responses import PlainTextResponse
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.config import _CONFIG_DEFINITIONS, LMCacheEngineConfig
+from lmcache.v1.config_base import validate_and_set_config_value
+
+logger = init_logger(__name__)
 
 router = APIRouter()
+
+
+def _is_mutable_config(key: str) -> bool:
+    """Check if a config key is mutable at runtime.
+
+    By default, all configs are mutable unless explicitly set to False.
+    """
+    return _CONFIG_DEFINITIONS.get(key, {}).get("mutable", True)
 
 
 def _get_config_dict(
@@ -69,4 +81,66 @@ async def get_metadata(request: Request, names: Optional[str] = None):
     return PlainTextResponse(
         content=json.dumps(metadata_dict, indent=2, default=str),
         media_type="text/plain",
+    )
+
+
+@router.post("/conf")
+async def set_config(request: Request):
+    """Set config values dynamically.
+
+    By default, all configs are mutable at runtime unless explicitly set
+    "mutable": False in _CONFIG_DEFINITIONS.
+
+    Request body should be JSON with config name-value pairs:
+        {"min_retrieve_tokens": 512, "save_decode_cache": true}
+
+    Returns:
+        PlainTextResponse: JSON response with updated config values
+    """
+    config = request.app.state.lmcache_adapter.config
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        return PlainTextResponse(
+            content=json.dumps({"error": "Invalid JSON body", "message": str(e)}),
+            media_type="application/json",
+            status_code=400,
+        )
+
+    if not isinstance(body, dict):
+        return PlainTextResponse(
+            content=json.dumps({"error": "Request body must be a JSON object"}),
+            media_type="application/json",
+            status_code=400,
+        )
+
+    updated: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+
+    for key, value in body.items():
+        if not _is_mutable_config(key):
+            errors[key] = "Config is not mutable at runtime"
+            continue
+
+        if key not in _CONFIG_DEFINITIONS:
+            errors[key] = "Unknown config"
+            continue
+
+        # Use shared validation and setting function
+        if validate_and_set_config_value(config, key, value):
+            updated[key] = getattr(config, key)
+            logger.info("Config %s updated to %s", key, updated[key])
+        else:
+            errors[key] = "Failed to set config value"
+
+    result: Dict[str, Any] = {"updated": updated}
+    if errors:
+        result["errors"] = errors
+
+    status_code = 200 if updated else 400
+    return PlainTextResponse(
+        content=json.dumps(result, indent=2),
+        media_type="application/json",
+        status_code=status_code,
     )
