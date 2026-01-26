@@ -76,6 +76,9 @@ Basic cache settings that control the core functionality of LMCache.
    * - priority_limit
      - LMCACHE_PRIORITY_LIMIT
      - Caches requests only if priority value ≤ limit. (**Not applicable for PD Disaggregation**) Type: int. Default: None
+   * - min_retrieve_tokens
+     - LMCACHE_MIN_RETRIEVE_TOKENS
+     - Minimum number of hit tokens required to perform retrieve. If hit tokens < this value, skip retrieve but still record the hits to avoid re-storing existing chunks. See :ref:`performance_tuning` for a working example. Default: 0 (disabled)
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
      - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}
