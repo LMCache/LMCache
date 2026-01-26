@@ -31,38 +31,17 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
     def __init__(
         self,
         vllm_config: "VllmConfig",
-        role: Optional[KVConnectorRole] = None,
+        role: KVConnectorRole,
         kv_cache_config: Optional[Any] = None,
-        *args: Any,
-        **kwargs: Any,
     ):
-        if args:
-            logger.warning(
-                "Unexpected positional args for LMCacheConnectorV1Dynamic: %s",
-                args,
+        if kv_cache_config is not None:
+            super().__init__(
+                vllm_config=vllm_config,
+                role=role,
+                kv_cache_config=kv_cache_config,
             )
-        role = kwargs.pop("role", role)
-        kv_cache_config = kwargs.pop("kv_cache_config", kv_cache_config)
-        if kwargs:
-            logger.warning(
-                "Unexpected kwargs for LMCacheConnectorV1Dynamic: %s",
-                sorted(kwargs.keys()),
-            )
-        if not isinstance(role, KVConnectorRole) and isinstance(
-            kv_cache_config, KVConnectorRole
-        ):
-            logger.warning(
-                "Detected swapped role/kv_cache_config in connector init; "
-                "auto-correcting."
-            )
-            role, kv_cache_config = kv_cache_config, role
-        if role is None:
-            raise ValueError("KVConnectorRole is required to initialize connector.")
-        super().__init__(
-            vllm_config=vllm_config,
-            role=role,
-            kv_cache_config=kv_cache_config,
-        )
+        else:
+            super().__init__(vllm_config=vllm_config, role=role)
         self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
 
     # ==============================
