@@ -270,10 +270,13 @@ class ConnectorManager:
                     continue
                 self.adapters.append(adapter_instance)
                 logger.info(f"Discovered adapter: {adapter_class.__name__}")
+            except (ImportError, AttributeError) as e:
+                logger.error(
+                    f"Failed to load remote connector {remote_connector_plugin} due to import/attribute error: {e}"
+                )
             except Exception as e:
                 logger.error(
-                    f"Failed to create remote connector {remote_connector_plugin} "
-                    f"adapter: {str(e)}"
+                    f"Failed to create remote connector {remote_connector_plugin} adapter: {str(e)}"
                 )
 
     def create_connector(self) -> RemoteConnector:
