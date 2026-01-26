@@ -234,11 +234,19 @@ class ConnectorManager:
 
         for remote_connector_plugin in remote_connector_plugins:
             try:
-                module_path = config.extra_config.get(
+                extra_config = config.extra_config
+                if extra_config is None:
+                    logger.warning(
+                        f"Remote connector {remote_connector_plugin} configuration is missing 'extra_config'."
+                    )
+                    continue
+
+                module_path = extra_config.get(
                     f"remote_connector.{remote_connector_plugin}.module_path"
                 )
-                class_name = config.extra_config.get(
+                class_name = extra_config.get(
                     f"remote_connector.{remote_connector_plugin}.class_name"
+                )
                 )
 
                 if not module_path or not class_name:
