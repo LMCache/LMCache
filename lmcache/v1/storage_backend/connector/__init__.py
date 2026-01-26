@@ -226,32 +226,32 @@ class ConnectorManager:
             )
 
         # Get the list of allowed remote connector adapters if configured
-        remote_connector_plugins = (
-            set(config.remote_connector_plugins)
-            if config.remote_connector_plugins
+        external_storage_plugins = (
+            set(config.external_storage_plugins)
+            if config.external_storage_plugins
             else set()
         )
 
-        for remote_connector_plugin in remote_connector_plugins:
+        for external_storage_plugin in external_storage_plugins:
             try:
                 extra_config = config.extra_config
                 if extra_config is None:
                     logger.warning(
-                        f"Remote connector {remote_connector_plugin} configuration is "
+                        f"Remote connector {external_storage_plugin} configuration is "
                         f"missing 'extra_config'."
                     )
                     continue
 
                 module_path = extra_config.get(
-                    f"remote_connector.{remote_connector_plugin}.module_path"
+                    f"remote_connector.{external_storage_plugin}.module_path"
                 )
                 class_name = extra_config.get(
-                    f"remote_connector.{remote_connector_plugin}.class_name"
+                    f"remote_connector.{external_storage_plugin}.class_name"
                 )
 
                 if not module_path or not class_name:
                     logger.warning(
-                        f"Remote connector {remote_connector_plugin} missing adapter "
+                        f"Remote connector {external_storage_plugin} missing adapter "
                         f"module_path or class_name"
                     )
                     continue
@@ -263,7 +263,7 @@ class ConnectorManager:
                 adapter_instance = adapter_class()
                 if not isinstance(adapter_instance, ConnectorAdapter):
                     logger.warning(
-                        f"Remote connector {remote_connector_plugin} adapter does not "
+                        f"Remote connector {external_storage_plugin} adapter does not "
                         f"implement the 'ConnectorAdapter' interface"
                     )
                     adapter_instance = None
@@ -272,12 +272,12 @@ class ConnectorManager:
                 logger.info(f"Discovered adapter: {adapter_class.__name__}")
             except (ImportError, AttributeError) as e:
                 logger.error(
-                    f"Failed to load remote connector {remote_connector_plugin} due to "
+                    f"Failed to load remote connector {external_storage_plugin} due to "
                     f"import/attribute error: {e}"
                 )
             except Exception as e:
                 logger.error(
-                    f"Failed to create remote connector {remote_connector_plugin} "
+                    f"Failed to create remote connector {external_storage_plugin} "
                     f"adapter: {str(e)}"
                 )
 

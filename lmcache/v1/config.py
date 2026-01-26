@@ -322,7 +322,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_str_list,
     },
-    "remote_connector_plugins": {
+    "external_storage_plugins": {
         "type": Optional[list[str]],
         "default": None,
         "env_converter": _to_str_list,
