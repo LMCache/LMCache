@@ -310,10 +310,9 @@ class HealthMonitor:
         # First Party
         from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
-        if hasattr(storage_manager, "local_cpu_backend"):
-            backend = storage_manager.local_cpu_backend
-            if isinstance(backend, LocalCPUBackend):
-                return backend
+        backend = storage_manager.local_cpu_backend
+        if backend is not None and isinstance(backend, LocalCPUBackend):
+            return backend
         return None
 
     def _apply_local_cpu_fallback(self, check: HealthCheck) -> None:

@@ -24,6 +24,7 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.gpu_connector import lmcache_memcpy_async_d2h, lmcache_memcpy_async_h2d
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
@@ -206,7 +207,12 @@ class GPUCacheContext:
 
 
 class MPCacheEngine:
-    def __init__(self, chunk_size: int = 256, cpu_buffer_size: float = 5.0):
+    def __init__(
+        self,
+        chunk_size: int = 256,
+        cpu_buffer_size: float = 5.0,
+        disable_lazy_alloc: bool = False,
+    ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
 
@@ -217,7 +223,7 @@ class MPCacheEngine:
         self.lock = threading.Lock()
 
         # storage manager
-        self.storage_manager = MPStorageManager(cpu_buffer_size)
+        self.storage_manager = MPStorageManager(cpu_buffer_size, disable_lazy_alloc)
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -227,7 +233,7 @@ class MPCacheEngine:
             instance_id (int): The GPU instance ID (such as PID).
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
         """
-        gpu_context = GPUCacheContext(kv_caches)
+        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
@@ -325,7 +331,7 @@ class MPCacheEngine:
                     )
 
                     assert memory_obj.tensor is not None
-                    memory_obj.tensor.copy_(tmp_buffer, non_blocking=True)
+                    lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
 
@@ -391,8 +397,7 @@ class MPCacheEngine:
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                 with self.lock:
-                    tmp_gpu_buffer_.copy_(memory_obj.tensor, non_blocking=True)
-
+                    lmcache_memcpy_async_h2d(memory_obj, tmp_gpu_buffer_)
                     lmc_ops.multi_layer_kv_transfer(
                         # memory_obj.tensor,
                         tmp_gpu_buffer_,
@@ -511,9 +516,27 @@ def run_cache_server(
     chunk_size: int = 256,
     cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
+    disable_lazy_alloc: bool = False,
+    return_engine: bool = False,
 ):
+    """
+    Run the LMCache cache server with ZMQ message queue.
+
+    Args:
+        host: ZMQ server host
+        port: ZMQ server port
+        chunk_size: Chunk size for KV cache operations
+        cpu_buffer_size: CPU buffer size in GB
+        max_workers: Maximum number of worker threads for ZMQ server
+        return_engine: If True, return (server, engine) after starting;
+                       if False, run blocking loop to keep server alive
+
+    Returns:
+        If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
+        If return_engine is False: None (blocks until interrupted)
+    """
     # Initialize the engine
-    engine = MPCacheEngine(chunk_size, cpu_buffer_size)
+    engine = MPCacheEngine(chunk_size, cpu_buffer_size, disable_lazy_alloc)
 
     # Initialize the message queue server
     context = zmq.Context.instance()
@@ -533,10 +556,15 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
-    # Start the server
+    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
+    # Start the ZMQ server
     torch.cuda.init()
     server.start()
     logger.info("LMCache cache server is running...")
+
+    # Return server and engine if requested (for HTTP server integration)
+    if return_engine:
+        return server, engine
 
     # Dummy loop to keep the server running
     try:
@@ -548,12 +576,14 @@ def run_cache_server(
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="LMCache Cache Server")
-    parser.add_argument(
-        "--host", type=str, default="localhost", help="Host to bind the server"
+    parser = argparse.ArgumentParser(
+        description="LMCache ZMQ Cache Server (without HTTP)"
     )
     parser.add_argument(
-        "--port", type=int, default=5555, help="Port to bind the server"
+        "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
+    )
+    parser.add_argument(
+        "--port", type=int, default=5555, help="Port to bind the ZMQ server"
     )
     parser.add_argument(
         "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
@@ -563,6 +593,10 @@ def parse_args():
     )
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
+    )
+
+    parser.add_argument(
+        "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
     )
     return parser.parse_args()
 
@@ -575,4 +609,5 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
+        disable_lazy_alloc=args.disable_lazy_alloc,
     )

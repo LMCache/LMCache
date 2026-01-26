@@ -292,7 +292,17 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ):
+        """
+        Submit a single put task to store KV cache to disk asynchronously.
+
+        :param key: The cache key for this KV chunk.
+        :param memory_obj: The memory object containing the KV data.
+        :param on_complete_callback: Optional callback invoked once per key
+            after the disk write completes. Callback exceptions are caught
+            and logged.
+        """
         assert memory_obj.tensor is not None
 
         # skip repeated save
@@ -339,6 +349,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.async_save_bytes_to_disk,
                 key=key,
                 memory_obj=memory_obj,
+                on_complete_callback=on_complete_callback,
             ),
             self.loop,
         )
@@ -349,9 +360,22 @@ class LocalDiskBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        Submit batched put tasks to store KV caches to disk asynchronously.
+
+        :param keys: The cache keys for the KV chunks.
+        :param memory_objs: The memory objects containing the KV data.
+        :param transfer_spec: Optional transfer specification (unused).
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's disk write completes (not once per batch).
+            Callback exceptions are caught and logged.
+        """
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
 
     def get_blocking(
         self,
@@ -458,9 +482,14 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Convert KV to bytes and async store bytes to disk.
+
+        :param on_complete_callback: Optional callback invoked after the disk
+            write completes for this key. Callback exceptions are caught and
+            logged.
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
@@ -490,6 +519,13 @@ class LocalDiskBackend(StorageBackendInterface):
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
 
         self.disk_worker.remove_put_task(key)
+
+        # Call the completion callback if provided
+        if on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     def batched_async_load_bytes_from_disk(
         self,

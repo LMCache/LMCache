@@ -12,6 +12,10 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(c_ops, m) {
+  py::enum_<TransferDirection>(m, "TransferDirection")
+      .value("H2D", TransferDirection::H2D)
+      .value("D2H", TransferDirection::D2H)
+      .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
@@ -19,6 +23,7 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
+  m.def("lmcache_memcpy_async", &lmcache_memcpy_async);
   m.def("encode_fast_new", &encode_cuda_new);
   m.def("decode_fast_new", &decode_cuda_new);
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
