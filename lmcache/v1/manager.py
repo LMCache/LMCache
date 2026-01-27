@@ -196,6 +196,10 @@ class LMCacheManager:
         """
         # First Party
         from lmcache.observability import PrometheusLogger
+        from lmcache.v1.periodic_thread import (
+            PeriodicThreadRegistry,
+            ThreadLevel,
+        )
 
         # Get ping interval from config
         ping_interval = self._config.get_extra_config_value(
@@ -225,6 +229,39 @@ class LMCacheManager:
             prometheus_logger.lmcache_is_healthy.set_function(
                 lambda: 1 if self.is_healthy() else 0
             )
+
+            # Setup PeriodicThread metrics callbacks
+            registry = PeriodicThreadRegistry.get_instance()
+
+            prometheus_logger.periodic_threads_total_count.set_function(
+                lambda: len(registry.get_all())
+            )
+            prometheus_logger.periodic_threads_running_count.set_function(
+                lambda: registry.get_running_count()
+            )
+            prometheus_logger.periodic_threads_active_count.set_function(
+                lambda: registry.get_active_count()
+            )
+
+            # Per-level metrics
+            for level in ThreadLevel:
+                level_name = level.value
+                total_attr = f"periodic_threads_{level_name}_total"
+                running_attr = f"periodic_threads_{level_name}_running"
+                active_attr = f"periodic_threads_{level_name}_active"
+
+                if hasattr(prometheus_logger, total_attr):
+                    getattr(prometheus_logger, total_attr).set_function(
+                        lambda lvl=level: registry.get_count_by_level(lvl)["total"]
+                    )
+                if hasattr(prometheus_logger, running_attr):
+                    getattr(prometheus_logger, running_attr).set_function(
+                        lambda lvl=level: registry.get_count_by_level(lvl)["running"]
+                    )
+                if hasattr(prometheus_logger, active_attr):
+                    getattr(prometheus_logger, active_attr).set_function(
+                        lambda lvl=level: registry.get_count_by_level(lvl)["active"]
+                    )
 
     def _create_lmcache_engine(self, role: str) -> LMCacheEngine:
         """
