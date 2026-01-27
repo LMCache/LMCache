@@ -364,7 +364,9 @@ class LMCacheLookupServer:
                 self.socket.send_multipart([identity, b"", response])
 
         logger.info("lmcache lookup server start on %s", socket_path)
-        self.thread = threading.Thread(target=process_request, daemon=True)
+        self.thread = threading.Thread(
+            target=process_request, daemon=True, name="lookup-server-thread"
+        )
         self.thread.start()
 
     def __enter__(self):

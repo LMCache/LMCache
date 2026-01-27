@@ -132,7 +132,9 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Launch the background expansion thread
         self._stop_expand = threading.Event()
-        self._expand_thread = threading.Thread(target=self._expand_worker, daemon=True)
+        self._expand_thread = threading.Thread(
+            target=self._expand_worker, daemon=True, name="lazy-mem-expand-thread"
+        )
         self._expand_thread.start()
 
     # Public methods
