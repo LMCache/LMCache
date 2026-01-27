@@ -198,6 +198,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         # works with a single device?
         self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
+        self.block_size = 8  # Default block size for vLLM
+        self.two_major = True  # Default: K/V-first (shape[0] == 2)
 
         self.kvcaches: Optional[List[torch.Tensor]] = None
 
@@ -265,14 +267,29 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.num_layers, dtype=torch.int64, device=self.device
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
+        shape = kv_caches[0].shape
+
         if self.use_mla:
             # kv_caches[0].shape: [num_pages, page_size, head_size]
             assert kv_caches[0].dim() == 3
             self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
         else:
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size] (K/V-first)
+            # or [num_blocks, 2, num_pages, num_heads, block_size, head_size] (Block-first, FP8)
+            # Note: vLLM uses block_size param, not num_pages
             assert kv_caches[0].dim() == 5
-            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+            # Detect layout by checking first dimension
+            if shape[0] == 2:
+                # K/V-first layout (BF16): [2, num_blocks, block_size, num_heads, head_dim]
+                self.two_major = True
+                self.page_buffer_size = shape[1] * shape[2]  # num_blocks * block_size
+                self.block_size = shape[2]
+            else:
+                # Block-first layout (FP8): [num_blocks, 2, block_size, num_heads, head_dim]
+                self.two_major = False
+                self.page_buffer_size = shape[0]  # num_blocks
+                self.block_size = shape[2]
+                logger.info(f"Detected Block-first KV cache layout (FP8): shape={shape}")
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -330,6 +347,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.page_buffer_size,
             False,
             self.use_mla,
+            self.block_size,
+            self.two_major,
         )
 
     @_lmcache_nvtx_annotate
@@ -375,6 +394,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    self.block_size,
+                    self.two_major,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -388,6 +409,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    self.block_size,
+                    self.two_major,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 

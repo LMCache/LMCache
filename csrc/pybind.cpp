@@ -16,7 +16,17 @@ PYBIND11_MODULE(c_ops, m) {
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H)
       .export_values();
-  m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
+  m.def(
+      "multi_layer_kv_transfer", &multi_layer_kv_transfer,
+      py::arg("key_value"),
+      py::arg("key_value_ptrs"),
+      py::arg("slot_mapping"),
+      py::arg("paged_memory_device"),
+      py::arg("page_buffer_size"),
+      py::arg("direction"),
+      py::arg("use_mla"),
+      py::arg("block_size") = 8,
+      py::arg("two_major") = true);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer);
