@@ -38,7 +38,6 @@ def create_test_metadata():
         local_world_size=1,
         worker_id=0,
         local_worker_id=0,
-        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
     )
@@ -46,7 +45,13 @@ def create_test_metadata():
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
-    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), torch.bfloat16)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=hash(key_id),
+        dtype=torch.bfloat16,
+    )
 
 
 @pytest.fixture

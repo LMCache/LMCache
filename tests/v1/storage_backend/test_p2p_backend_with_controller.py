@@ -201,7 +201,6 @@ def create_test_metadata(worker_id: int = 0):
         local_world_size=2,
         worker_id=worker_id,
         local_worker_id=worker_id,
-        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
     )
@@ -210,7 +209,12 @@ def create_test_metadata(worker_id: int = 0):
 def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey"""
     return CacheEngineKey(
-        "vllm", "test_model", 2, 0, hash(key_id), torch.bfloat16, None
+        model_name="test_model",
+        world_size=2,
+        worker_id=0,
+        chunk_hash=hash(key_id),
+        dtype=torch.bfloat16,
+        request_configs=None,
     )
 
 

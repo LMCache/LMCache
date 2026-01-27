@@ -81,7 +81,6 @@ class EngineMessage:
         self.model_name = metadata.model_name
         self.world_size = metadata.world_size
         self.worker_id = metadata.worker_id
-        self.use_case = metadata.use_case
         self.kv_dtype = metadata.kv_dtype
         self.kv_shape = metadata.kv_shape
 

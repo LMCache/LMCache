@@ -46,8 +46,6 @@ class LMCacheMetadata:
     # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
     """ (num_layer, 2, chunk_size, num_kv_head, head_size) """
     kv_shape: tuple[int, int, int, int, int]
-    """ use case of LMCache (vllm, sglang, standalone, etc.) """
-    use_case: str = "vllm"
     """ whether use MLA"""
     use_mla: bool = False
     """ the role of the current instance (e.g., 'scheduler', 'worker') """

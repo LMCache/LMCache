@@ -314,7 +314,6 @@ class LMCacheManager:
             local_world_size=parallel_config.world_size,
             worker_id=parallel_config.rank,
             local_worker_id=parallel_config.rank,
-            use_case="vllm",
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=use_mla,

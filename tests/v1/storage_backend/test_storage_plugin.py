@@ -137,12 +137,11 @@ MOCK_BACKEND_STORAGE_PLUGINS = ["mock_backend"]
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
-        "vllm",
-        "test_model",
-        1,  # world_size
-        0,  # worker_id
-        key_id,  # chunk_hash
-        torch.bfloat16,
+        model_name="test_model",
+        world_size=1,
+        worker_id=0,
+        chunk_hash=key_id,
+        dtype=torch.bfloat16,
     )
 
 
@@ -172,7 +171,6 @@ def create_test_metadata():
         local_world_size=1,
         worker_id=0,
         local_worker_id=0,
-        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(
             4,

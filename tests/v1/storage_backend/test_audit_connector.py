@@ -25,7 +25,13 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 def create_test_key(key_id: str) -> CacheEngineKey:
     """Helper to create a test CacheEngineKey"""
-    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), dtype=torch.uint8)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=hash(key_id),
+        dtype=torch.uint8,
+    )
 
 
 def create_mock_memory_obj(backend: LocalCPUBackend, data: bytes) -> MemoryObj:
@@ -85,7 +91,6 @@ def local_cpu_backend():
         local_world_size=1,
         worker_id=0,
         local_worker_id=0,
-        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(64, 2, 1, 8, 128),
     )

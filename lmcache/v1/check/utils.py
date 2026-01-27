@@ -29,7 +29,6 @@ def _get_default_metadata(model: str) -> LMCacheMetadata:
         local_world_size=8,
         worker_id=0,
         local_worker_id=0,
-        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(8, 2, 16, 8, 16),
     )
@@ -38,12 +37,11 @@ def _get_default_metadata(model: str) -> LMCacheMetadata:
 def create_test_key(model: str, key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
-        "vllm",
-        model,
-        8,
-        0,
-        int(hashlib.sha256(key_id.encode()).hexdigest(), 16),
-        torch.bfloat16,
+        model_name=model,
+        world_size=8,
+        worker_id=0,
+        chunk_hash=int(hashlib.sha256(key_id.encode()).hexdigest(), 16),
+        dtype=torch.bfloat16,
     )
 
 

@@ -343,7 +343,6 @@ class CacheGenSerializer(Serializer):
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
-        self.use_case = metadata.use_case
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
@@ -384,8 +383,8 @@ class CacheGenSerializer(Serializer):
 
         # TODO: permute is expensive here, need a better way to do it at lower
         # level
-        if self.use_case == "huggingface":
-            tensor = tensor.permute(0, 1, 3, 2, 4)
+        # huggingface:
+        # tensor = tensor.permute(0, 1, 3, 2, 4)
         """ expecting a tensor of shape 
         [num_layers, 2, num_tokens, num_heads, head_size] """
         ntokens = tensor.shape[2]

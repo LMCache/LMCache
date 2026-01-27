@@ -85,7 +85,6 @@ def storage_manager_metadata():
         local_world_size=1,
         worker_id=0,
         local_worker_id=0,
-        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
         role="scheduler",

@@ -39,7 +39,6 @@ def generate_test_data(
     for i in range(num_objs):
         keys.append(
             CacheEngineKey(
-                use_case="vllm",
                 model_name="test_model",
                 world_size=1,
                 worker_id=0,
@@ -86,7 +85,6 @@ def create_test_metadata() -> LMCacheMetadata:
         local_world_size=1,
         local_worker_id=0,
         world_size=1,
-        use_case="test",
         kv_dtype=torch.bfloat16,
         kv_shape=(
             32,

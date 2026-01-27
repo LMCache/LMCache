@@ -19,7 +19,6 @@ class CacheGenSerializer(Serializer):
     def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
-        self.use_case = metadata.use_case
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 

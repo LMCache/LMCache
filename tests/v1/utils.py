@@ -29,36 +29,38 @@ def recover_gpu_connector_states(gpu_connector):
     gpu_connector.kv_cache_pointers_on_gpu = {}
 
 
-def dumb_metadata(use_case="vllm", kv_shape=(32, 2, 256, 8, 128)):
+def dumb_metadata(kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheMetadata(
         model_name="test_model",
         world_size=3,
         local_world_size=3,
         worker_id=1,
         local_worker_id=1,
-        use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
     )
 
 
-def dumb_metadata_with_model_name(
-    model_name: str, use_case="vllm", kv_shape=(32, 2, 256, 8, 128)
-):
+def dumb_metadata_with_model_name(model_name: str, kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheMetadata(
         model_name=model_name,
         world_size=3,
         local_world_size=3,
         worker_id=1,
         local_worker_id=1,
-        use_case=use_case,
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
     )
 
 
 def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
-    return CacheEngineKey("vllm", "test_model", 3, 123, id, torch.bfloat16)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=id,
+        dtype=torch.bfloat16,
+    )
 
 
 def random_string(N):
@@ -132,17 +134,13 @@ def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
     return ports
 
 
-def generate_kv_cache(num_tokens, use_case, device):
+def generate_kv_cache(num_tokens, device):
     ret = []
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = (
-        [num_tokens, num_heads, head_size]
-        if use_case == "vllm"
-        else [num_heads, num_tokens, head_size]
-    )
-    dtype = torch.bfloat16 if use_case == "vllm" else torch.float16
+    shape = [num_tokens, num_heads, head_size]
+    dtype = torch.bfloat16
 
     for i in range(num_layers):
         k = torch.rand(shape, dtype=dtype, device=device)
@@ -262,8 +260,8 @@ def generate_tokens(num_tokens, device, fixed=False):
         return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
 
-def concatenate_kv_caches(kv_chunks, use_case):
-    dim = 1 if use_case == "huggingface" else 0
+def concatenate_kv_caches(kv_chunks):
+    dim = 0
     ret = []
     for kv_layer in zip(*kv_chunks, strict=False):
         klist, vlist = zip(*kv_layer, strict=False)
@@ -533,7 +531,6 @@ def create_test_metadata(
         local_world_size=world_size,
         worker_id=worker_id,
         local_worker_id=worker_id,
-        use_case="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
         engine_id=engine_id,

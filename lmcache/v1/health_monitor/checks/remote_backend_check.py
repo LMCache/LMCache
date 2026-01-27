@@ -264,7 +264,6 @@ class RemoteBackendHealthCheck(HealthCheck):
     @contextmanager
     def _resource_manager(self):
         key = CacheEngineKey(
-            use_case="vllm",
             model_name="test",
             world_size=1,
             worker_id=0,

@@ -318,20 +318,19 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
 
     Args:
         key_str: String in format:
-            use_case@model@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
+            model_name@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
 
     Returns:
         CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
     """
     parts = key_str.strip().split("@")
-    if len(parts) >= 6 and parts[5].isdigit():
+    if len(parts) >= 5 and parts[4].isdigit():
         return LayerCacheEngineKey.from_string(key_str)
     return CacheEngineKey.from_string(key_str)
 
 
 @dataclass(slots=True)
 class CacheEngineKey:
-    use_case: str
     model_name: str
     world_size: int
     worker_id: int
@@ -358,7 +357,6 @@ class CacheEngineKey:
     def __hash__(self):
         return hash(
             (
-                self.use_case,
                 self.model_name,
                 self.world_size,
                 self.worker_id,
@@ -371,8 +369,7 @@ class CacheEngineKey:
     def __eq__(self, other):
         if type(self) is type(other):
             return (
-                self.use_case == other.use_case
-                and self.model_name == other.model_name
+                self.model_name == other.model_name
                 and self.world_size == other.world_size
                 and self.worker_id == other.worker_id
                 and self.chunk_hash == other.chunk_hash
@@ -384,7 +381,7 @@ class CacheEngineKey:
 
     def to_string(self):
         s = (
-            f"{self.use_case}@{self.model_name}@{self.world_size}"
+            f"{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}"
         )
         if self.tags is not None and len(self.tags) != 0:
@@ -398,7 +395,6 @@ class CacheEngineKey:
         for layer_id in range(num_layers):
             keys.append(
                 LayerCacheEngineKey(
-                    self.use_case,
                     self.model_name,
                     self.world_size,
                     self.worker_id,
@@ -413,7 +409,6 @@ class CacheEngineKey:
     def get_first_layer(self) -> "LayerCacheEngineKey":
         """Return the key for the first layer"""
         key = LayerCacheEngineKey(
-            self.use_case,
             self.model_name,
             self.world_size,
             self.worker_id,
@@ -427,23 +422,22 @@ class CacheEngineKey:
     @staticmethod
     def from_string(s):
         parts = s.split("@")
-        if len(parts) < 6:
+        if len(parts) < 5:
             raise ValueError(f"Invalid key string: {s}")
         request_configs = None
-        if len(parts) >= 7:
+        if len(parts) >= 6:
             request_configs = {}
-            for kv in parts[6:]:
+            for kv in parts[5:]:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return CacheEngineKey(
             parts[0],
-            parts[1],
+            int(parts[1]),
             int(parts[2]),
-            int(parts[3]),
-            int(parts[4], 16),
-            STR_DTYPE_TO_TORCH_DTYPE[parts[5]],
+            int(parts[3], 16),
+            STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
             request_configs,
         )
 
@@ -451,7 +445,6 @@ class CacheEngineKey:
         # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
         msg = {
             "__type__": "CacheEngineKey",
-            "use_case": self.use_case,
             "model_name": self.model_name,
             "world_size": self.world_size,
             "worker_id": self.worker_id,
@@ -475,7 +468,6 @@ class CacheEngineKey:
                     raise ValueError(f"Invalid key dict: {d}")
                 request_configs[kvs[0]] = kvs[1]
         return CacheEngineKey(
-            use_case=d["use_case"],
             model_name=d["model_name"],
             world_size=d["world_size"],
             worker_id=d["worker_id"],
@@ -487,7 +479,6 @@ class CacheEngineKey:
     def with_new_worker_id(self, new_worker_id: int) -> "CacheEngineKey":
         # Reconstruct the cache engine key with new worker id
         return CacheEngineKey(
-            self.use_case,
             self.model_name,
             self.world_size,
             new_worker_id,
@@ -512,7 +503,6 @@ class LayerCacheEngineKey(CacheEngineKey):
     def __hash__(self):
         return hash(
             (
-                self.use_case,
                 self.model_name,
                 self.world_size,
                 self.worker_id,
@@ -531,7 +521,7 @@ class LayerCacheEngineKey(CacheEngineKey):
 
     def to_string(self):
         s = (
-            f"{self.use_case}@{self.model_name}@{self.world_size}"
+            f"{self.model_name}@{self.world_size}"
             f"@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}@{self.layer_id}"
         )
         if self.tags is not None and len(self.tags) != 0:
@@ -545,7 +535,6 @@ class LayerCacheEngineKey(CacheEngineKey):
         for layer_id in range(num_layers):
             keys.append(
                 LayerCacheEngineKey(
-                    self.use_case,
                     self.model_name,
                     self.world_size,
                     self.worker_id,
@@ -560,25 +549,24 @@ class LayerCacheEngineKey(CacheEngineKey):
     @staticmethod
     def from_string(s):
         parts = s.split("@")
-        if len(parts) < 7:
+        if len(parts) < 6:
             raise ValueError(f"Invalid key string: {s}")
         request_configs = None
-        if len(parts) >= 8:
+        if len(parts) >= 7:
             request_configs = {}
-            for kv in parts[7:]:
+            for kv in parts[6:]:
                 kvs = kv.split("%", 1)
                 if len(kvs) != 2:
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return LayerCacheEngineKey(
             parts[0],
-            parts[1],
+            int(parts[1]),
             int(parts[2]),
-            int(parts[3]),
-            int(parts[4], 16),
-            STR_DTYPE_TO_TORCH_DTYPE[parts[5]],
+            int(parts[3], 16),
+            STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
             request_configs,
-            int(parts[6]),
+            int(parts[5]),
         )
 
 

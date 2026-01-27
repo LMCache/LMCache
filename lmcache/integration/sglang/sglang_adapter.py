@@ -90,7 +90,6 @@ def init_lmcache_engine(
         local_world_size=tp_size,
         worker_id=global_rank,
         local_worker_id=local_rank,
-        use_case="sglang",
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
     )
