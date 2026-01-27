@@ -78,6 +78,16 @@ def lmcache_memcpy_async_d2h(
         memory_obj.tensor.copy_(gpu_buffer, non_blocking=True)
 
 
+def _kv_layout_from_metadata(metadata: LMCacheMetadata) -> dict:
+    """Extract a uniform layout description, honoring kv_format when present.
+
+    Returns dict with keys: block_size, hidden_dim, num_layers, use_mla, dtype.
+    Raises ValueError on inconsistencies between kv_format and legacy fields.
+    """
+    layout, _ = metadata.get_kv_layout("for connector use")
+    return layout
+
+
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -236,22 +246,16 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         Returns:
             A new instance of VLLMPagedMemGPUConnectorV2.
         """
-        # Extract parameters from metadata
-        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
-        num_layers = metadata.kv_shape[0]
-        chunk_size = metadata.kv_shape[2]
-        num_kv_head = metadata.kv_shape[3]
-        head_size = metadata.kv_shape[4]
-        hidden_dim_size = num_kv_head * head_size
+        layout = _kv_layout_from_metadata(metadata)
 
         return cls(
-            hidden_dim_size=hidden_dim_size,
-            num_layers=num_layers,
+            hidden_dim_size=layout["hidden_dim"],
+            num_layers=layout["num_layers"],
             use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=metadata.kv_dtype,
+            chunk_size=layout["block_size"],
+            dtype=layout["dtype"],
             device=device,
-            use_mla=metadata.use_mla,
+            use_mla=layout["use_mla"],
         )
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
@@ -448,7 +452,11 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV3":
         assert device is not None
-        return cls(metadata, device, use_gpu)
+        layout = _kv_layout_from_metadata(metadata)
+        connector = cls(metadata, device, use_gpu)
+        connector.chunk_size = layout["block_size"]
+        connector.use_mla = layout["use_mla"]
+        return connector
 
     def _initialize_kv_cache_pointers(self):
         if self.init:
@@ -649,18 +657,13 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         Returns:
             A new instance of VLLMBufferLayerwiseGPUConnector.
         """
-        # Extract parameters from metadata
-        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
-        num_layers = metadata.kv_shape[0]
-        num_kv_head = metadata.kv_shape[3]
-        head_size = metadata.kv_shape[4]
-        hidden_dim_size = num_kv_head * head_size
+        layout = _kv_layout_from_metadata(metadata)
 
         return cls(
-            hidden_dim_size=hidden_dim_size,
-            num_layers=num_layers,
+            hidden_dim_size=layout["hidden_dim"],
+            num_layers=layout["num_layers"],
             use_gpu=use_gpu,
-            dtype=metadata.kv_dtype,
+            dtype=layout["dtype"],
             device=device,
         )
 
@@ -1053,22 +1056,16 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         Returns:
             A new instance of VLLMPagedMemLayerwiseGPUConnector.
         """
-        # Extract parameters from metadata
-        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
-        num_layers = metadata.kv_shape[0]
-        chunk_size = metadata.kv_shape[2]
-        num_kv_head = metadata.kv_shape[3]
-        head_size = metadata.kv_shape[4]
-        hidden_dim_size = num_kv_head * head_size
+        layout = _kv_layout_from_metadata(metadata)
 
         return cls(
-            hidden_dim_size=hidden_dim_size,
-            num_layers=num_layers,
+            hidden_dim_size=layout["hidden_dim"],
+            num_layers=layout["num_layers"],
             use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=metadata.kv_dtype,
+            chunk_size=layout["block_size"],
+            dtype=layout["dtype"],
             device=device,
-            use_mla=metadata.use_mla,
+            use_mla=layout["use_mla"],
         )
 
     def _lazy_initialize_buffer(self, kv_caches):

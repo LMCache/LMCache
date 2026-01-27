@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 # Third Party
 import torch
@@ -9,6 +9,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.kvcache_format import KVCacheFormat, get_kv_layout_from_metadata
 
 logger = init_logger(__name__)
 
@@ -64,6 +65,8 @@ class LMCacheMetadata:
     engine_id: Optional[str] = None
     """ extra config from kv_connector (e.g., lmcache_rpc_port) """
     kv_connector_extra_config: Optional[dict] = None
+    """ declared KV cache format descriptor (integration mode; optional) """
+    kv_format: Optional[KVCacheFormat] = None
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
@@ -112,3 +115,9 @@ class LMCacheMetadata:
         if self.kv_layer_groups_manager.kv_layer_groups:
             return self.kv_layer_groups_manager.num_groups
         return 1
+
+    def get_kv_layout(
+        self, hidden_dim_context: str
+    ) -> Tuple[dict, Optional[KVCacheFormat]]:
+        """Return derived KV layout and optional validated KVCacheFormat."""
+        return get_kv_layout_from_metadata(self, hidden_dim_context=hidden_dim_context)

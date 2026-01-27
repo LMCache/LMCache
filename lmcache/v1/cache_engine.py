@@ -75,6 +75,24 @@ ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
 ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
 
 
+def _validate_metadata_kv_format(metadata: LMCacheMetadata) -> None:
+    """Validate kv_format (if provided) against legacy metadata fields."""
+    layout, fmt = metadata.get_kv_layout("in integration mode")
+    if fmt is None:
+        return
+
+    logger.info(
+        "Using kv_format in integration mode: %s/%s "
+        "separation=%s block=%s layers=%s hidden_dim=%s",
+        fmt.family,
+        fmt.canonical,
+        fmt.separation,
+        layout["block_size"],
+        layout["num_layers"],
+        layout["hidden_dim"],
+    )
+
+
 class CacheEngineEndSignal:
     pass
 
@@ -106,6 +124,7 @@ class LMCacheEngine:
         broadcast_object_fn: Callable[[Any, int], Any],
     ):
         logger.info(f"Creating LMCacheEngine with config: {config}")
+        _validate_metadata_kv_format(metadata)
         self.config = config
         self.metadata = metadata
         self.token_database = token_database
