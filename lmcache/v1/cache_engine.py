@@ -388,102 +388,104 @@ class LMCacheEngine:
             )
             return
 
-        monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
+        store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
 
         starts: List[int] = []
         ends: List[int] = []
         keys: List[CacheEngineKey] = []
         memory_objs: List[MemoryObj] = []
 
-        offload_time = 0.0
-        put_time = 0.0
         tot_kv_size = 0
         tot_token_num = 0
-        t = time.perf_counter()
 
         request_configs = kwargs.get("request_configs")
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
-        prev_key = 0
-        for start, end, key in self.token_database.process_tokens(
-            tokens,
-            hashes,
-            offsets,
-            mask,
-            request_configs=request_configs,
-        ):
-            assert isinstance(key, CacheEngineKey)
-            # Allocate the memory object
-            num_tokens = end - start
-            kv_shapes = self.metadata.get_shapes(num_tokens)
-            kv_dtypes = self.metadata.get_dtypes()
+        with store_stats.profile_process_tokens():
+            prev_key = 0
+            for start, end, key in self.token_database.process_tokens(
+                tokens,
+                hashes,
+                offsets,
+                mask,
+                request_configs=request_configs,
+            ):
+                assert isinstance(key, CacheEngineKey)
+                # Allocate the memory object
+                num_tokens = end - start
+                kv_shapes = self.metadata.get_shapes(num_tokens)
+                kv_dtypes = self.metadata.get_dtypes()
 
-            # TODO (Jiayi): should be batched in the future
-            memory_obj = self.storage_manager.allocate(
-                kv_shapes,
-                kv_dtypes,
-                busy_loop=self.force_store_wait,
-                fmt=self.fmt,
-            )
-            if memory_obj is None:
-                logger.warning(
-                    "Local cpu memory under pressure so"
-                    " choosing to store only "
-                    f" {len(memory_objs)}"
-                    " total chunks of KV cache."
+                # TODO (Jiayi): should be batched in the future
+                memory_obj = self.storage_manager.allocate(
+                    kv_shapes,
+                    kv_dtypes,
+                    busy_loop=self.force_store_wait,
+                    fmt=self.fmt,
                 )
-                break
-
-            starts.append(start)
-            ends.append(end)
-            keys.append(key)
-            memory_objs.append(memory_obj)
-            tot_kv_size += memory_obj.get_size()
-            tot_token_num += num_tokens
-
-            # Create KV event
-            if self.kv_events_enabled:
-                stored_event = CacheStoreEvent(
-                    block_hashes=[key.chunk_hash],
-                    parent_block_hash=None if start == 0 else prev_key,
-                    token_ids=[],
-                    block_size=num_tokens,
-                    lora_id=None,
-                    medium="cpu",
-                    lora_name=None,
-                )
-                if tokens is not None:
-                    stored_event.token_ids = convert_tokens_to_list(
-                        tokens,
-                        start,
-                        end,
+                if memory_obj is None:
+                    logger.warning(
+                        "Local cpu memory under pressure so"
+                        " choosing to store only "
+                        f" {len(memory_objs)}"
+                        " total chunks of KV cache."
                     )
-                    if isinstance(tokens, torch.Tensor):
-                        stored_event.medium = tokens.device
-                elif hashes is not None:
-                    stored_event.token_ids = hashes[start : end + 1]
-                logger.debug(
-                    f"Added kv cache event '{stored_event}' to kv cache events queue"
-                )
-                self.kv_events.append(stored_event)
-                prev_key = key.chunk_hash
+                    break
+
+                starts.append(start)
+                ends.append(end)
+                keys.append(key)
+                memory_objs.append(memory_obj)
+                tot_kv_size += memory_obj.get_size()
+                tot_token_num += num_tokens
+
+                # Create KV event
+                if self.kv_events_enabled:
+                    stored_event = CacheStoreEvent(
+                        block_hashes=[key.chunk_hash],
+                        parent_block_hash=None if start == 0 else prev_key,
+                        token_ids=[],
+                        block_size=num_tokens,
+                        lora_id=None,
+                        medium="cpu",
+                        lora_name=None,
+                    )
+                    if tokens is not None:
+                        stored_event.token_ids = convert_tokens_to_list(
+                            tokens,
+                            start,
+                            end,
+                        )
+                        if isinstance(tokens, torch.Tensor):
+                            stored_event.medium = tokens.device
+                    elif hashes is not None:
+                        stored_event.token_ids = hashes[start : end + 1]
+                    logger.debug(
+                        (
+                            "Added kv cache event '%s' to kv cache events queue"
+                            % stored_event
+                        )
+                    )
+                    self.kv_events.append(stored_event)
+                    prev_key = key.chunk_hash
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
             return
-        self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
-        offload_time += time.perf_counter() - t
 
-        t = time.perf_counter()
+        with store_stats.profile_from_gpu():
+            self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
 
-        transfer_spec = kwargs.get("transfer_spec", None)
-        # TODO: we implicitly rely on batched_put to call ref_count_down
-        # this management should be done in a cleaner way
-        self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
-        put_time += time.perf_counter() - t
+        with store_stats.profile_put():
+            transfer_spec = kwargs.get("transfer_spec", None)
+            # TODO: we implicitly rely on batched_put to call ref_count_down
+            # this management should be done in a cleaner way
+            self.storage_manager.batched_put(
+                keys, memory_objs, transfer_spec=transfer_spec
+            )
 
-        tot_time = offload_time + put_time
+        tot_time = store_stats.time_to_store()
 
         logger.info(
             "Stored %d out of total %d tokens. size: %.4f GB, cost %.4f ms, "
@@ -492,12 +494,15 @@ class LMCacheEngine:
             num_to_store_tokens,
             tot_kv_size / 1024**3,
             tot_time * 1000,
-            tot_kv_size / tot_time / 1024**3,
-            offload_time * 1000,
-            put_time * 1000,
+            tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
+            (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
+            store_stats.put_time * 1000,
         )
 
-        self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
+        self.stats_monitor.on_store_finished(
+            store_stats,
+            tot_token_num,
+        )
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -723,7 +728,6 @@ class LMCacheEngine:
         )
 
         tot_kv_size = 0
-        t = time.perf_counter()
 
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
@@ -738,51 +742,55 @@ class LMCacheEngine:
             require_req_id=True,
         )
 
-        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
+        retrieve_stats = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
         reordered_chunks: List[ProcessedChunk] = []
         if not self._is_passive():
-            if self.async_loading:
-                reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
-                    tokens,
-                    mask,
-                    ret_mask,
-                    **kwargs,
-                )
-            else:
-                reordered_chunks, tot_kv_size = self._process_tokens_internal(
-                    tokens,
-                    mask,
-                    ret_mask,
-                    **kwargs,
-                )
-        if self.save_only_first_rank:
-            with torch.cuda.stream(self.broadcast_stream):
-                self._broadcast_or_receive_memory_objs(
-                    reordered_chunks,
-                    ret_mask,
-                )
+            with retrieve_stats.profile_process_tokens():
+                if self.async_loading:
+                    reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
+                        tokens,
+                        mask,
+                        ret_mask,
+                        **kwargs,
+                    )
+                else:
+                    reordered_chunks, tot_kv_size = self._process_tokens_internal(
+                        tokens,
+                        mask,
+                        ret_mask,
+                        **kwargs,
+                    )
 
-            # if self.gpu_connector has load_stream, self.broadcast_stream is equals
-            # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
-            # will execute sequentially within the stream.
-            # if self.gpu_connector does not have load_stream, self.broadcast_stream
-            # is created by torch.cuda.Stream(), we need to synchronize broadcast
-            # operation, and then process to_cpu operation.
-            if not hasattr(self.gpu_connector, "load_stream"):
-                self.broadcast_stream.synchronize()
+        if self.save_only_first_rank:
+            with retrieve_stats.profile_broadcast():
+                with torch.cuda.stream(self.broadcast_stream):
+                    self._broadcast_or_receive_memory_objs(
+                        reordered_chunks,
+                        ret_mask,
+                    )
+
+                # if self.gpu_connector has load_stream, self.broadcast_stream is equals
+                # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
+                # will execute sequentially within the stream.
+                # if self.gpu_connector does not have load_stream, self.broadcast_stream
+                # is created by torch.cuda.Stream(), we need to synchronize broadcast
+                # operation, and then process to_cpu operation.
+                if not hasattr(self.gpu_connector, "load_stream"):
+                    self.broadcast_stream.synchronize()
 
         # NOTE(Jiayi): memory_obj doesn't have to be a pinned
         # cpu tensor for the sake of performance.
         # For example, disk->gpu is faster than disk->cpu->gpu.
         # RDMA is another example.
         if len(reordered_chunks) > 0:
-            _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-            self.gpu_connector.batched_to_gpu(
-                list(memory_objs), list(starts), list(ends), **kwargs
-            )
+            with retrieve_stats.profile_to_gpu():
+                _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+                self.gpu_connector.batched_to_gpu(
+                    list(memory_objs), list(starts), list(ends), **kwargs
+                )
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
@@ -792,10 +800,13 @@ class LMCacheEngine:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
-        onload_time = time.perf_counter() - t
+        onload_time = retrieve_stats.time_to_retrieve()
 
         retrieved_tokens = torch.sum(ret_mask)
-        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        self.stats_monitor.on_retrieve_finished(
+            retrieve_stats,
+            retrieved_tokens,
+        )
         # The retrieved may be larger than the need_to_load
         # Example (page_size=16, chunk_size=256):
         #
@@ -1014,11 +1025,11 @@ class LMCacheEngine:
         assert self.storage_manager is not None
 
         if tokens is not None:
-            lookup_request_id = self.stats_monitor.on_lookup_request(len(tokens))
+            lookup_stats = self.stats_monitor.on_lookup_request(len(tokens))
         else:
             assert offsets is not None
             assert hashes is not None
-            lookup_request_id = self.stats_monitor.on_lookup_request(sum(offsets))
+            lookup_stats = self.stats_monitor.on_lookup_request(sum(offsets))
 
         res = 0
         try:
@@ -1083,7 +1094,7 @@ class LMCacheEngine:
             # all tokens where found, return the maximal end
             return res
         finally:
-            self.stats_monitor.on_lookup_finished(lookup_request_id, res)
+            self.stats_monitor.on_lookup_finished(lookup_stats, res)
             # vllm lookup sets pin to True
             if pin:
                 # touch_cache is tightly coupled with batched_contains

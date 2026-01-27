@@ -143,7 +143,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self.running = True
 
         self.thread = threading.Thread(
-            target=self.process_responses_from_workers, daemon=True
+            target=self.process_responses_from_workers,
+            daemon=True,
+            name="async-lookup-client-thread",
         )
         self.thread.start()
 
@@ -344,7 +346,9 @@ class LMCacheAsyncLookupServer:
             worker_socket_path,
         )
         self.thread = threading.Thread(
-            target=self.process_requests_from_scheduler, daemon=True
+            target=self.process_requests_from_scheduler,
+            daemon=True,
+            name="async-lookup-server-thread",
         )
         self.thread.start()
 
