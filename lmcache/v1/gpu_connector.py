@@ -274,9 +274,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             assert kv_caches[0].dim() == 3
             self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
         else:
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size] (K/V-first)
-            # or [num_blocks, 2, num_pages, num_heads, block_size, head_size] (Block-first, FP8)
-            # Note: vLLM uses block_size param, not num_pages
+            # kv_caches[0].shape: [2, num_blocks, block_size, num_heads, head_size] (K/V-first)
+            # or [num_blocks, 2, block_size, num_heads, head_dim] (Block-first, FP8)
+            # Note: dimension 3 is block_size, not num_pages
             assert kv_caches[0].dim() == 5
             # Detect layout by checking first dimension
             if shape[0] == 2:
