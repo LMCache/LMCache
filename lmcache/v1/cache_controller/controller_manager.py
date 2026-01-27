@@ -148,7 +148,11 @@ class LMCacheControllerManager:
                 "Start health check thread, interval: %s", self.health_check_interval
             )
             self.loop = asyncio.new_event_loop()
-            self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+            self.thread = threading.Thread(
+                target=self.loop.run_forever,
+                daemon=True,
+                name="controller-health-thread",
+            )
             self.thread.start()
             asyncio.run_coroutine_threadsafe(self.health_check(), self.loop)
 
