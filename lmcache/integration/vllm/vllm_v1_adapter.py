@@ -532,7 +532,9 @@ class LMCacheConnectorV1Impl:
         # Legacy compatibility check
         self._check_legacy_register_kv_caches()
 
+        self.use_cross_layers = False
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self.cross_layers_kv_caches: torch.Tensor = None
         self._block_size = vllm_config.cache_config.block_size
         self.load_specs: dict[str, LoadSpec] = {}
         self.kv_cache_manager: Optional["KVCacheManager"] = None
@@ -734,6 +736,15 @@ class LMCacheConnectorV1Impl:
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
+    def register_cross_layers_kv_cache(
+        self, cross_layers_kv_cache: torch.Tensor, cross_layers_attn_backend: Any
+    ):
+        assert not self.cross_layers_kv_caches and cross_layers_kv_cache is not None
+        self.cross_layers_kv_caches = cross_layers_kv_cache
+        self._manager.post_init()
+        self.use_cross_layers = True
+
+    @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
@@ -748,7 +759,7 @@ class LMCacheConnectorV1Impl:
         """
         self.current_layer = 0
 
-        if len(self.kv_caches) == 0:
+        if len(self.kv_caches) == 0 and not self.use_cross_layers:
             logger.warning(
                 "Please update LMCacheConnector, "
                 "use register_kv_caches to init kv_caches"
@@ -758,8 +769,11 @@ class LMCacheConnectorV1Impl:
         metadata = self._parent._get_connector_metadata()
         assert isinstance(metadata, LMCacheConnectorMetadata)
 
-        assert len(self.kv_caches) > 0
-        kvcaches = list(self.kv_caches.values())
+        if self.use_cross_layers:
+            kvcaches = self.cross_layers_kv_caches
+        else:
+            assert len(self.kv_caches) > 0
+            kvcaches = list(self.kv_caches.values())
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
@@ -1083,8 +1097,12 @@ class LMCacheConnectorV1Impl:
                 self.lmcache_engine.lookup_unpin(request.req_id)
             return
 
-        assert len(self.kv_caches) > 0
-        kvcaches = list(self.kv_caches.values())
+        if self.use_cross_layers:
+            assert self.cross_layers_kv_caches is not None
+            kvcaches = self.cross_layers_kv_caches
+        else:
+            assert len(self.kv_caches) > 0
+            kvcaches = list(self.kv_caches.values())
 
         assert self.lmcache_engine is not None
 

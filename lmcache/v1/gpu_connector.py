@@ -1863,3 +1863,392 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
+
+
+class VLLMCrossLayersGPUConnector(GPUConnectorInterface):
+    """
+    New vLLM cross-layer KV cache (single tensor) connector.
+
+    Assumption (non-MLA):
+      vLLM provides a *single* CUDA tensor with shape:
+        [num_blocks, num_layers, 2, block_size, num_kv_head, head_size]
+      Example (from your log):
+        [26309, 32, 2, 16, 8, 128]
+
+    LMCache MemoryObj behavior remains:
+      - KV_2LTD tensor layout: [2, num_layers, num_kv_head, T * head_size]
+    """
+
+    def __init__(
+        self,
+        num_kv_head: int,
+        head_size: int,
+        hidden_dim_size: int,
+        num_layers: int,
+        use_gpu: bool = False,
+        **kwargs,
+    ):
+        """
+        If use_gpu is true, it will create a gpu intermediate buffer. In this
+        case, it requires the following kwargs:
+        - chunk_size: The MAX size of the chunk to be copied to GPU.
+        - dtype: The data type of the intermediate buffer.
+        - device: The CUDA device for the intermediate buffer.
+        """
+        self.num_kv_head = int(num_kv_head)
+        self.head_size = int(head_size)
+        self.hidden_dim_size = int(hidden_dim_size)
+        self.num_layers = int(num_layers)
+
+        assert "block_size" in kwargs, "block_size should be provided."
+        self.block_size = int(kwargs["block_size"])
+
+        # Keep these fields to preserve API/behavior expectations
+        self.kv_cache_pointers = torch.empty(
+            self.num_layers, dtype=torch.int64, device="cpu"
+        )
+        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
+        self.page_buffer_size = 0
+
+        # IMPORTANT: In new world, kvcaches is a single tensor, but we keep
+        # self.kvcaches type as Optional[List[torch.Tensor]] to preserve API.
+        # We will store per-layer *views* in this list
+        # (each is a view into base tensor).
+        self.kvcaches: Optional[List[torch.Tensor]] = None
+        self._cross_layer_base: Optional[torch.Tensor] = None
+
+        self.gpu_buffer: Optional[torch.Tensor] = None
+        self.use_mla = bool(kwargs.get("use_mla", False))
+        if self.use_mla:
+            raise NotImplementedError(
+                "This connector implementation currently supports non-MLA only."
+            )
+
+        if use_gpu:
+            assert "chunk_size" in kwargs, (
+                "chunk_size should be provided to create a GPU buffer."
+            )
+            assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
+            assert "device" in kwargs, (
+                "device should be provided to create a GPU buffer."
+            )
+            shape = self.get_shape(int(kwargs["chunk_size"]))
+            self.gpu_buffer = torch.empty(
+                shape, dtype=kwargs["dtype"], device=kwargs["device"]
+            )
+
+        self.store_stream = torch.cuda.Stream()
+        self.load_stream = torch.cuda.Stream()
+
+        # lazily set in _initialize_pointers
+        self.device: Optional[torch.device] = None
+
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: "LMCacheEngineMetadata",
+        block_size: int,
+        use_gpu: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> "VLLMCrossLayersGPUConnector":
+        """
+        Create a connector from LMCacheEngineMetadata.
+
+        metadata.kv_shape expected:
+          (num_layers, 2 or 1, chunk_size, num_kv_head, head_size)
+        """
+        num_layers = int(metadata.kv_shape[0])
+        chunk_size = int(metadata.kv_shape[2])
+        num_kv_head = int(metadata.kv_shape[3])
+        head_size = int(metadata.kv_shape[4])
+        hidden_dim_size = num_kv_head * head_size
+
+        return cls(
+            num_kv_head=num_kv_head,
+            head_size=head_size,
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=metadata.kv_dtype,
+            device=device,
+            use_mla=metadata.use_mla,
+            block_size=block_size,
+        )
+
+    # ---------------- internal plumbing (API kept) ----------------
+
+    def initialize_kvcaches_ptr(self, **kwargs):
+        """
+        Expect kwarg 'kvcaches' which is a *single* cross-layer KV tensor.
+        This function populates:
+          - self._cross_layer_base
+          - self.kvcaches: List[Tensor] of per-layer views (views into base)
+        """
+        if self.kvcaches is not None:
+            return
+        if "kvcaches" not in kwargs:
+            raise ValueError("'kvcaches' should be provided in kwargs.")
+
+        base = kwargs["kvcaches"]
+        if not isinstance(base, torch.Tensor):
+            raise TypeError(
+                "kvcaches must be a single torch.Tensor (cross-layer KV cache)."
+            )
+
+        self._cross_layer_base = self._validate_cross_layer_base(base)
+        self.kvcaches = self._base_to_per_layer_views(self._cross_layer_base)
+
+    def _validate_cross_layer_base(self, base: torch.Tensor) -> torch.Tensor:
+        logger.info(
+            f"[cross-layer] base.shape={tuple(base.shape)}, base.dtype={base.dtype}, "
+            f"base.device={base.device}, stride={base.stride()}"
+        )
+        assert base.is_cuda, "kvcaches must be CUDA tensor"
+        assert base.dim() == 6, f"Expected 6D cross-layer KV cache, got {base.shape}"
+
+        # Correct layout from vLLM:
+        # [B, L, 2, BS, H, D]
+        nb, L, kv2, bs, H, D = base.shape
+
+        # block_size 以 vLLM tensor 为准
+        if int(bs) != int(self.block_size):
+            self.block_size = int(bs)
+
+        assert kv2 == 2, (kv2, base.shape)
+        assert int(L) == int(self.num_layers), (L, self.num_layers, base.shape)
+        assert int(H) == int(self.num_kv_head), (H, self.num_kv_head, base.shape)
+        assert int(D) == int(self.head_size), (D, self.head_size, base.shape)
+        _ = nb  # unused; keep for clarity
+        return base
+
+    def _base_to_per_layer_views(self, base: torch.Tensor) -> List[torch.Tensor]:
+        """
+        base: [B, L, 2, BS, H, D]
+        return per-layer views as: [B, BS, 2, H, D]
+        """
+        # base[:, l] -> [B, 2, BS, H, D]
+        # permute -> [B, BS, 2, H, D]
+        return [
+            base[:, layer, :, :, :, :].permute(0, 2, 1, 3, 4)
+            for layer in range(self.num_layers)
+        ]
+
+    def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Keep API same (returns CUDA int64[num_layers] pointer array).
+        """
+        self.device = kv_caches[0].device
+        assert self.device.type == "cuda", "The device should be CUDA."
+        idx = int(self.device.index)
+        if idx in self.kv_cache_pointers_on_gpu:
+            return self.kv_cache_pointers_on_gpu[idx]
+
+        # data_ptr() is fine: each per-layer tensor is a view into base storage
+        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+        self.kv_cache_pointers_on_gpu[idx] = torch.empty(
+            self.num_layers, dtype=torch.int64, device=self.device
+        )
+        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
+
+        # For per-layer view [B, BS, 2, H, D]
+        assert kv_caches[0].dim() == 5, (
+            f"Expected per-layer view to be 5D, got {kv_caches[0].shape}"
+        )
+        self.page_buffer_size = int(kv_caches[0].shape[0]) * int(kv_caches[0].shape[1])
+
+        return self.kv_cache_pointers_on_gpu[idx]
+
+    # ---------------- layout conversion helpers ----------------
+
+    def _lmcache_tensor_to_T2LHD(self, t: torch.Tensor, T: int) -> torch.Tensor:
+        """
+        LMCache non-MLA KV_2LTD:
+          t: [2, L, H, T*D]
+        -> [T, 2, L, H, D]
+        """
+        assert t.dim() == 4, f"Expected [2,L,H,T*D], got {t.shape}"
+        kv2, L, H, TD = t.shape
+        assert kv2 == 2
+        assert int(L) == int(self.num_layers)
+        assert int(H) == int(self.num_kv_head)
+        assert int(TD) == int(T) * int(self.head_size), (
+            f"last dim {TD} != {T * self.head_size}"
+        )
+
+        t5 = t.view(2, L, H, T, self.head_size)  # [2,L,H,T,D]
+        return t5.permute(3, 0, 1, 2, 4).contiguous()  # [T,2,L,H,D]
+
+    def _T2LHD_to_lmcache_tensor(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        [T,2,L,H,D] -> [2,L,H,T*D]
+        """
+        assert t.dim() == 5, f"Expected [T,2,L,H,D], got {t.shape}"
+        T, kv2, L, H, D = t.shape
+        assert kv2 == 2
+        assert int(L) == int(self.num_layers)
+        assert int(H) == int(self.num_kv_head)
+        assert int(D) == int(self.head_size)
+
+        t5 = t.permute(1, 2, 3, 0, 4).contiguous()  # [2,L,H,T,D]
+        return t5.view(2, L, H, T * D)  # [2,L,H,T*D]
+
+    def _slots_to_block_offsets(
+        self, slots: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        slots: [T] int64-like tensor of slot indices (no -1 here by your contract).
+        returns:
+          block_ids: [T]
+          offsets:  [T]
+        """
+        s = slots.to(torch.int64)
+        block_ids = torch.div(s, self.block_size, rounding_mode="floor")
+        offsets = s - block_ids * self.block_size
+        return block_ids, offsets
+
+    # ---------------- main APIs (unchanged signatures) ----------------
+
+    @_lmcache_nvtx_annotate
+    def to_gpu(self, memory_obj: "MemoryObj", start: int, end: int, **kwargs):
+        """
+        Copy LMCache memory_obj.tensor into vLLM cross-layer KV cache.
+
+        Expects:
+          - kwargs["kvcaches"]: single cross-layer KV tensor [B,L,2,BS,H,D]
+          - kwargs["slot_mapping"]: full slot mapping tensor (len = full seq)
+        """
+        assert memory_obj.tensor is not None
+
+        self.initialize_kvcaches_ptr(**kwargs)
+        assert self.kvcaches is not None and self._cross_layer_base is not None
+
+        if self.use_mla:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                raise ValueError("The memory object should be KV_MLA_FMT.")
+            raise NotImplementedError("MLA path not implemented in this connector.")
+        else:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+                raise ValueError("The memory object should be KV_2LTD.")
+
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs.")
+        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+
+        # Keep pointer init for compatibility/caching
+        _ = self._initialize_pointers(self.kvcaches)
+
+        T = int(end - start)
+        if T <= 0:
+            return
+
+        device = self._cross_layer_base.device
+        slots = slot_mapping[start:end].to(device=device, non_blocking=True)
+
+        # Contract: start:end never overlaps prefix cached region => no -1
+        if (slots < 0).any():
+            raise ValueError(
+                "slot_mapping contains -1 in [start:end], "
+                "which is disallowed by contract."
+            )
+
+        block_ids, offsets = self._slots_to_block_offsets(slots)
+
+        # src: [T,2,L,H,D]
+        src = self._lmcache_tensor_to_T2LHD(
+            memory_obj.tensor.to(device=device, non_blocking=True),
+            T,
+        )
+
+        # base slice expects: [T,L,2,H,D] at [block_ids, :, :, offsets, :, :]
+        src_vllm = src.permute(0, 2, 1, 3, 4).contiguous()  # [T,L,2,H,D]
+
+        # base: [B,L,2,BS,H,D]
+        # indexing: base[block_ids, :, :, offsets, :, :] -> [T,L,2,H,D]
+        self._cross_layer_base[block_ids, :, :, offsets, :, :].copy_(
+            src_vllm, non_blocking=True
+        )
+
+    @_lmcache_nvtx_annotate
+    def from_gpu(self, memory_obj: "MemoryObj", start: int, end: int, **kwargs):
+        """
+        Copy from vLLM cross-layer KV cache into LMCache memory_obj.tensor.
+
+        Expects:
+          - kwargs["kvcaches"]: single cross-layer KV tensor [B,L,2,BS,H,D]
+          - kwargs["slot_mapping"]: full slot mapping tensor (len = full seq)
+        """
+        assert memory_obj.tensor is not None
+
+        self.initialize_kvcaches_ptr(**kwargs)
+        assert self.kvcaches is not None and self._cross_layer_base is not None
+
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs.")
+        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+
+        T = int(end - start)
+        if T <= 0:
+            return
+
+        device = self._cross_layer_base.device
+        slots = slot_mapping[start:end].to(device=device, non_blocking=True)
+
+        if (slots < 0).any():
+            raise ValueError(
+                "slot_mapping contains -1 in [start:end], "
+                "which is disallowed by contract."
+            )
+
+        block_ids, offsets = self._slots_to_block_offsets(slots)
+
+        with torch.cuda.stream(self.store_stream):
+            # Gather from base: base[block_ids, :, :, offsets, :, :] -> [T,L,2,H,D]
+            gathered = self._cross_layer_base[
+                block_ids, :, :, offsets, :, :
+            ]  # [T,L,2,H,D]
+            gathered = gathered.permute(0, 2, 1, 3, 4).contiguous()  # [T,2,L,H,D]
+
+            out = self._T2LHD_to_lmcache_tensor(gathered)  # [2,L,H,T*D]
+
+            if memory_obj.tensor.is_cuda:
+                memory_obj.tensor.copy_(out, non_blocking=True)
+            else:
+                memory_obj.tensor.copy_(
+                    out.to("cpu", non_blocking=True), non_blocking=True
+                )
+
+        if not memory_obj.tensor.is_cuda:
+            self.store_stream.synchronize()
+
+        if self.use_mla:
+            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
+
+    # TODO(Jiayi): need to optimize to enable real batching
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        with torch.cuda.stream(self.load_stream):
+            for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+                self.to_gpu(memory_obj, start, end, **kwargs)
+        self.load_stream.synchronize()
+
+    # TODO(Jiayi): need to optimize to enable real batching
+    def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.from_gpu(memory_obj, start, end, **kwargs)
+
+    def get_shape(self, num_tokens: int) -> torch.Size:
+        kv_size = 1 if self.use_mla else 2
+        if self.use_mla:
+            return torch.Size(
+                [kv_size, self.num_layers, num_tokens, self.hidden_dim_size]
+            )
+        else:
+            # LMCache memobj shape expectation
+            return torch.Size(
+                [
+                    kv_size,
+                    self.num_layers,
+                    self.num_kv_head,
+                    int(num_tokens) * self.head_size,
+                ]
+            )
