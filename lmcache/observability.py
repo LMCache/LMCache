@@ -1516,6 +1516,52 @@ class PrometheusLogger:
             ).labels(**self.labels)
             setattr(self, metric_name, gauge)
 
+        # PeriodicThread metrics
+        self.periodic_threads_total_count = self._gauge_cls(
+            name="lmcache:periodic_threads_total_count",
+            documentation="Total number of registered periodic threads",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.periodic_threads_running_count = self._gauge_cls(
+            name="lmcache:periodic_threads_running_count",
+            documentation="Number of running periodic threads",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.periodic_threads_active_count = self._gauge_cls(
+            name="lmcache:periodic_threads_active_count",
+            documentation="Number of active periodic threads (recently executed)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
+        # Per-level metrics for periodic threads
+        for level_name in ["critical", "high", "medium", "low"]:
+            total_gauge = self._gauge_cls(
+                name=f"lmcache:periodic_threads_{level_name}_total",
+                documentation=f"Total number of {level_name} level periodic threads",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, f"periodic_threads_{level_name}_total", total_gauge)
+
+            running_gauge = self._gauge_cls(
+                name=f"lmcache:periodic_threads_{level_name}_running",
+                documentation=f"Number of running {level_name} level periodic threads",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, f"periodic_threads_{level_name}_running", running_gauge)
+
+            active_gauge = self._gauge_cls(
+                name=f"lmcache:periodic_threads_{level_name}_active",
+                documentation=f"Number of active {level_name} level periodic threads",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, f"periodic_threads_{level_name}_active", active_gauge)
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -1740,7 +1786,9 @@ class LMCacheStatsLogger:
         # Event for interruptible sleep during shutdown
         self.shutdown_event = threading.Event()
 
-        self.thread = threading.Thread(target=self.log_worker, daemon=True)
+        self.thread = threading.Thread(
+            target=self.log_worker, daemon=True, name="stats-logger-thread"
+        )
         self.thread.start()
 
     def log_worker(self):
