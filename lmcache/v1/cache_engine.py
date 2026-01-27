@@ -799,13 +799,12 @@ class LMCacheEngine:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
-        onload_time = retrieve_stats.time_to_retrieve()
-
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
             retrieve_stats,
             retrieved_tokens,
         )
+        onload_time = retrieve_stats.time_to_retrieve()
         # The retrieved may be larger than the need_to_load
         # Example (page_size=16, chunk_size=256):
         #
