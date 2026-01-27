@@ -3,8 +3,8 @@
 from typing import Generic, Optional, TypeVar
 import threading
 
-# Third Party
-import torch
+# First Party
+from lmcache.utils import torch_dev
 
 T = TypeVar("T")
 
@@ -69,7 +69,7 @@ class MessagingFuture(Generic[T]):
 
     def to_cuda_future(
         self,
-        device: torch.cuda.device | None = None,
+        device: torch_dev.device | None = None,
     ) -> "CUDAMessagingFuture":
         # TODO: need extra type checking for the future type
         return CUDAMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
@@ -87,13 +87,13 @@ class CUDAMessagingFuture(MessagingFuture[T]):
     def __init__(
         self,
         raw_future: MessagingFuture[tuple[bytes, T]],
-        device: torch.cuda.device | None = None,
+        device: torch_dev.device | None = None,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
-        self.event_: torch.cuda.Event | None = None
+        self.event_: torch_dev.Event | None = None
         self.result_: T | None = None
-        self.device_ = device if device is not None else torch.cuda.current_device()
+        self.device_ = device if device is not None else torch_dev.current_device()
 
     def _on_raw_future_complete(self):
         """
@@ -103,7 +103,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         self.result_ = result
 
         # Deserialize the CUDA event
-        self.event_ = torch.cuda.Event.from_ipc_handle(self.device_, event_bytes)
+        self.event_ = torch_dev.Event.from_ipc_handle(self.device_, event_bytes)
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
@@ -189,6 +189,6 @@ class CUDAMessagingFuture(MessagingFuture[T]):
     @staticmethod
     def FromMessagingFuture(
         raw_future: MessagingFuture[tuple[bytes, T]],
-        device: torch.cuda.device | None = None,
+        device: torch_dev.device | None = None,
     ) -> "CUDAMessagingFuture[T]":
         return CUDAMessagingFuture(raw_future, device)

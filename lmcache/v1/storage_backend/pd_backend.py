@@ -18,6 +18,8 @@ from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     TORCH_DTYPE_TO_STR_DTYPE,
     CacheEngineKey,
+    torch_dev,
+    torch_dev_name,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -217,8 +219,8 @@ class PDBackend(AllocatorBackendInterface):
             config.pd_buffer_device,
             metadata.worker_id,
         )
-        logger.info(f"Setting cuda device to {corrected_device} ")
-        torch.cuda.set_device(corrected_device)
+        logger.info(f"Setting {torch_dev_name} device to {corrected_device} ")
+        torch_dev.set_device(corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         paged_mem_allocator.init_gpu_memory_allocator(

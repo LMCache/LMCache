@@ -10,7 +10,7 @@ import torch
 
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, torch_dev_name
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 class StorageBackendInterface(metaclass=abc.ABCMeta):
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = torch_dev_name,
     ):
         """
         Initialize the storage backend.
@@ -398,7 +398,7 @@ class StoragePluginInterface(StorageBackendInterface):
 
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = torch_dev_name,
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheEngineMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,

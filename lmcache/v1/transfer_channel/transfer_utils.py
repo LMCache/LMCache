@@ -5,6 +5,9 @@ from typing import Union
 # Third Party
 import msgspec
 
+# First Party
+from lmcache.utils import torch_dev_name
+
 
 def get_correct_device(device: str, worker_id: int) -> str:
     """
@@ -19,8 +22,8 @@ def get_correct_device(device: str, worker_id: int) -> str:
     """
     if device == "cpu":
         return "cpu"
-    elif device.startswith("cuda"):
-        return f"cuda:{worker_id}"
+    elif device.startswith(torch_dev_name):
+        return f"{torch_dev_name}:{worker_id}"
     else:
         raise ValueError(f"Invalid device: {device}")
 

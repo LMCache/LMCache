@@ -662,3 +662,17 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
+
+
+torch_dev: Any = None
+torch_dev_name: str = "cuda"
+
+if hasattr(torch, "xpu") and torch.xpu.is_available():
+    torch_dev = torch.xpu
+    torch_dev_name = "xpu"
+elif torch.cuda.is_available():
+    torch_dev = torch.cuda
+    torch_dev_name = "cuda"
+else:  # TODO: fall back to cuda as default
+    torch_dev = torch.cuda
+    torch_dev_name = "cuda"

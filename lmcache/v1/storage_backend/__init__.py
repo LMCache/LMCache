@@ -5,12 +5,10 @@ from typing import TYPE_CHECKING, Optional
 import asyncio
 import importlib  # Added for dynamic import
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.utils import torch_dev, torch_dev_name
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
@@ -36,7 +34,7 @@ def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
     Returns:
         True if the worker is not a scheduler and CUDA is available.
     """
-    return metadata.role != "scheduler" and torch.cuda.is_available()
+    return metadata.role != "scheduler" and torch_dev.is_available()
 
 
 def storage_plugin_launcher(
@@ -110,10 +108,8 @@ def CreateStorageBackends(
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
-    if is_cuda_worker(metadata):
-        dst_device = f"cuda:{torch.cuda.current_device()}"
-    elif dst_device == "xpu":
-        dst_device = f"xpu:{torch.xpu.current_device()}"
+    if is_cuda_worker(metadata) or dst_device == "xpu":
+        dst_device = f"{torch_dev_name}:{torch_dev.current_device()}"
     else:
         dst_device = "cpu"
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()

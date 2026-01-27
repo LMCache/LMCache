@@ -9,6 +9,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import torch_dev
 from lmcache.v1.memory_management import (
     AddressManager,
     MemoryAllocatorInterface,
@@ -42,7 +43,7 @@ def get_numa_id(numa_mapping: NUMAMapping) -> int:
     Raises:
         KeyError: If GPU id is not detected in the numa mapping.
     """
-    gpu_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
+    gpu_id = torch_dev.current_device() if torch_dev.is_available() else 0
     return numa_mapping.gpu_to_numa_mapping[gpu_id]
 
 
@@ -96,7 +97,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
         # CUDA runtime API
-        self._cudart = torch.cuda.cudart()
+        self._cudart = torch_dev.cudart()
 
         # List of (ptr, size) for pinned memory chunks
         self._pin_record: list[tuple[int, int]] = []

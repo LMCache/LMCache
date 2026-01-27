@@ -18,6 +18,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.utils import torch_dev, torch_dev_name
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.health_monitor.base import HealthMonitor
@@ -331,7 +332,7 @@ class LMCacheManager:
         )
 
         # Determine device
-        device, torch_dev, dev_name = self._get_device_info(current_platform)
+        device = self._get_device_info(current_platform)
 
         # Extract engine_id and kv_connector_extra_config from vllm_config
         engine_id = None
@@ -447,23 +448,12 @@ class LMCacheManager:
         """Get device information based on platform."""
         assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
-        if current_platform.is_cuda_alike():
-            logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-            torch_dev = torch.cuda
-            dev_name = "cuda"
-        elif current_platform.is_xpu():
-            logger.info("XPU device is available. Using XPU for LMCache engine.")
-            torch_dev = torch.xpu
-            dev_name = "xpu"
-        else:
-            raise RuntimeError("Unsupported device platform for LMCache engine.")
-
         num_gpus = torch_dev.device_count()
         local_rank = self._vllm_config.parallel_config.rank % num_gpus
         torch_dev.set_device(local_rank)
-        device = torch.device(f"{dev_name}:{local_rank}")
+        device = torch.device(f"{torch_dev_name}:{local_rank}")
 
-        return device, torch_dev, dev_name
+        return device
 
     def _create_gpu_connector(self, role, use_mla, metadata, device, current_platform):
         """Create the GPU connector based on configuration."""

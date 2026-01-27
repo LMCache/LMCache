@@ -9,6 +9,9 @@ import threading
 import msgspec
 import torch
 
+# First Party
+from lmcache.utils import torch_dev
+
 """
 Defines the types and the customized encoder/decoders for inter-process 
 communications.
@@ -22,17 +25,17 @@ class CudaIPCWrapper:
     @staticmethod
     def _get_device_uuid(device_index: int) -> str:
         """Get the UUID of a GPU device given its index."""
-        return str(torch.cuda.get_device_properties(device_index).uuid)
+        return str(torch_dev.get_device_properties(device_index).uuid)
 
     @staticmethod
     def _discover_gpu_devices():
         """Discover all available GPU devices and map their UUIDs to
         the physical device ordinals.
         """
-        if not torch.cuda.is_available():
+        if not torch_dev.is_available():
             return
 
-        num_devices = torch.cuda.device_count()
+        num_devices = torch_dev.device_count()
         with CudaIPCWrapper._device_mapping_lock:
             if CudaIPCWrapper._discovered_device_mapping:
                 return  # Already discovered

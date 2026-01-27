@@ -38,6 +38,8 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     compress_slot_mapping,
     convert_tokens_to_list,
+    torch_dev,
+    torch_dev_name,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
@@ -122,7 +124,7 @@ class LMCacheEngine:
             self.broadcast_stream = (
                 self.gpu_connector.load_stream
                 if hasattr(self.gpu_connector, "load_stream")
-                else torch.cuda.Stream()
+                else torch_dev.Stream()
             )
 
         self.enable_controller = config.enable_controller
@@ -365,7 +367,7 @@ class LMCacheEngine:
             )
             num_to_store_tokens = sum(offsets)
             kwargs["slot_mapping"] = torch.tensor(
-                kwargs["slot_mapping"], dtype=torch.long, device="cuda"
+                kwargs["slot_mapping"], dtype=torch.long, device=torch_dev_name
             )
 
         assert tokens is not None or hashes is not None, (
@@ -766,7 +768,7 @@ class LMCacheEngine:
 
         if self.save_only_first_rank:
             with retrieve_stats.profile_broadcast():
-                with torch.cuda.stream(self.broadcast_stream):
+                with torch_dev.stream(self.broadcast_stream):
                     self._broadcast_or_receive_memory_objs(
                         reordered_chunks,
                         ret_mask,
@@ -776,7 +778,7 @@ class LMCacheEngine:
                 # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
                 # will execute sequentially within the stream.
                 # if self.gpu_connector does not have load_stream, self.broadcast_stream
-                # is created by torch.cuda.Stream(), we need to synchronize broadcast
+                # is created by torch_dev.Stream(), we need to synchronize broadcast
                 # operation, and then process to_cpu operation.
                 if not hasattr(self.gpu_connector, "load_stream"):
                     self.broadcast_stream.synchronize()
@@ -1634,7 +1636,9 @@ class LMCacheEngine:
                 # Broadcast tensor data
                 raw_tensor = memory_obj.raw_tensor
                 assert raw_tensor is not None
-                tensor_to_broadcast = raw_tensor.to(f"cuda:{self.metadata.worker_id}")
+                tensor_to_broadcast = raw_tensor.to(
+                    f"{torch_dev_name}:{self.metadata.worker_id}"
+                )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
         else:
             # Receive total chunk count
@@ -1662,11 +1666,11 @@ class LMCacheEngine:
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
-                local_rank = self.metadata.worker_id % torch.cuda.device_count()
+                local_rank = self.metadata.worker_id % torch_dev.device_count()
                 raw_tensor = torch.empty(
                     torch.Size([metadata.get_size()]),
                     dtype=torch.uint8,
-                    device=f"cuda:{local_rank}",
+                    device=f"{torch_dev_name}:{local_rank}",
                 )
                 self.broadcast_fn(raw_tensor, self.metadata.first_rank)
 
@@ -1790,12 +1794,12 @@ class LMCacheEngineBuilder:
             )
 
             if corrected_device == "cpu":
-                torch.cuda.cudart().cudaHostRegister(
+                torch_dev.cudart().cudaHostRegister(
                     buffer.data_ptr(), config.nixl_buffer_size, 0
                 )
             else:
-                logger.info(f"Setting cuda device to {corrected_device} ")
-                torch.cuda.set_device(corrected_device)
+                logger.info(f"Setting {torch_dev_name} device to {corrected_device} ")
+                torch_dev.set_device(corrected_device)
 
             return PagedTensorMemoryAllocator(
                 buffer,

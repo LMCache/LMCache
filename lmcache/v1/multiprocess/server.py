@@ -23,7 +23,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import _lmcache_nvtx_annotate, torch_dev
 from lmcache.v1.gpu_connector import lmcache_memcpy_async_d2h, lmcache_memcpy_async_h2d
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
@@ -104,7 +104,7 @@ class GPUCacheContext:
         )
 
         # Cuda streams
-        self.cuda_stream_ = torch.cuda.Stream(device=self.device_)
+        self.cuda_stream_ = torch_dev.Stream(device=self.device_)
         self.cupy_stream_ = cupy.cuda.ExternalStream(
             self.cuda_stream_.cuda_stream, self.device_.index
         )
@@ -137,7 +137,7 @@ class GPUCacheContext:
         return self.kv_cache_pointers_
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> torch_dev.Stream:
         """
         Returns the CUDA stream for KV cache operations
         """
@@ -251,7 +251,7 @@ class MPCacheEngine:
         if instance_id in self.gpu_contexts:
             del self.gpu_contexts[instance_id]
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
-            torch.cuda.empty_cache()
+            torch_dev.empty_cache()
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
@@ -285,14 +285,14 @@ class MPCacheEngine:
         gpu_context = self.gpu_contexts[instance_id]
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            event = torch_dev.Event(interprocess=True)
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
             # Wait for vLLM to finish
-            vllm_event = torch.cuda.Event.from_ipc_handle(
+            vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
@@ -410,12 +410,12 @@ class MPCacheEngine:
                     )
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
             slot_mapping_tensor = gpu_context.get_slot_mapping_tensor(gpu_block_ids)
 
-            event = torch.cuda.Event(interprocess=True)
+            event = torch_dev.Event(interprocess=True)
 
             try:
                 with self.storage_manager.retrieve(keys) as memory_objs:
@@ -558,7 +558,7 @@ def run_cache_server(
 
     logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
     # Start the ZMQ server
-    torch.cuda.init()
+    torch_dev.init()
     server.start()
     logger.info("LMCache cache server is running...")
 
