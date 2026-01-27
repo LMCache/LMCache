@@ -19,23 +19,46 @@ class L1MemoryManagerError(enum.Enum):
     """ Operation failed due to insufficient memory. """
 
 
-class L1ObjectManagerError(enum.Enum):
-    """Errors *Returned* by L1ObjectManager class APIs."""
+class L1ObjectManagerError(enum.IntFlag):
+    """Errors *Returned* by L1ObjectManager class APIs.
 
-    SUCCESS = enum.auto()
+    Support mixing using bitwise OR operation. Uses IntFlag to allow
+    combining multiple error flags into a single value.
+    """
+
+    SUCCESS = 0x00
     """ Operation succeeded. """
 
-    KEYS_NOT_FOUND = enum.auto()
+    KEYS_NOT_FOUND = 0x01
     """ Expected existing keys but found keys not found. """
 
-    KEYS_ALREADY_EXIST = enum.auto()
+    KEYS_ALREADY_EXIST = 0x02
     """ Expected non-exist keys but found keys existed. """
 
-    KEYS_NOT_RESERVED = enum.auto()
+    KEYS_NOT_RESERVED = 0x04
     """ Expected non-reserved keys but found keys reserved. """
 
-    KEYS_NOT_COMMITTED = enum.auto()
+    KEYS_NOT_COMMITTED = 0x08
     """ Expected committed keys but found keys not committed. """
+
+    KEYS_ALREADY_LOCKED = 0x10
+    """ Expected unlocked keys but found keys already locked. """
+
+    def has_error(self, error: "L1ObjectManagerError") -> bool:
+        """Check if the error code has the specific error in it.
+
+        Returns:
+            bool: True if there is any error, False otherwise.
+        """
+        return self & error != 0
+
+    def mix_error(self, error: "L1ObjectManagerError") -> "L1ObjectManagerError":
+        """Mix the current error code with another error code using bitwise OR.
+
+        Returns:
+            L1ObjectManagerError: The mixed error code.
+        """
+        return self | error
 
 
 ErrorType = Union[L1MemoryManagerError, L1ObjectManagerError]
@@ -55,17 +78,28 @@ def strerror(error: ErrorType) -> str:
             return "Operation succeeded."
         elif error == L1MemoryManagerError.OUT_OF_MEMORY:
             return "Operation failed due to insufficient memory."
-
     elif isinstance(error, L1ObjectManagerError):
         if error == L1ObjectManagerError.SUCCESS:
             return "Operation succeeded."
-        elif error == L1ObjectManagerError.KEYS_NOT_FOUND:
-            return "Expected existing keys but found keys not found."
-        elif error == L1ObjectManagerError.KEYS_ALREADY_EXIST:
-            return "Expected non-exist keys but found keys existed."
-        elif error == L1ObjectManagerError.KEYS_NOT_RESERVED:
-            return "Expected non-reserved keys but found keys reserved."
-        elif error == L1ObjectManagerError.KEYS_NOT_COMMITTED:
-            return "Expected committed keys but found keys not committed."
+
+        # Handle multiple errors combined with bitwise OR
+        error_messages = []
+        if error.has_error(L1ObjectManagerError.KEYS_NOT_FOUND):
+            error_messages.append("Expected existing keys but found keys not found.")
+        if error.has_error(L1ObjectManagerError.KEYS_ALREADY_EXIST):
+            error_messages.append("Expected non-exist keys but found keys existed.")
+        if error.has_error(L1ObjectManagerError.KEYS_NOT_RESERVED):
+            error_messages.append("Expected non-reserved keys but found keys reserved.")
+        if error.has_error(L1ObjectManagerError.KEYS_NOT_COMMITTED):
+            error_messages.append(
+                "Expected committed keys but found keys not committed."
+            )
+        if error.has_error(L1ObjectManagerError.KEYS_ALREADY_LOCKED):
+            error_messages.append(
+                "Expected unlocked keys but found keys already locked."
+            )
+
+        if error_messages:
+            return " ".join(error_messages)
 
     return "Unknown error."
