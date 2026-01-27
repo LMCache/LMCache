@@ -33,8 +33,9 @@ def create_test_config(gds_path: str):
 
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
+    # NO UNDERSCORE HERE for model_name
     return CacheEngineKey(
-        model_name="test_model",
+        model_name="testmodel",
         world_size=3,
         worker_id=1,
         chunk_hash=key_id,
