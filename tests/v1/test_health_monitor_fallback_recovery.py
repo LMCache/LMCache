@@ -626,7 +626,11 @@ class TestFallbackIntegrationWithRealStorageManager:
         """Test contains operation respects bypass mode."""
         sm = real_storage_manager
         test_key = CacheEngineKey(
-            "vllm", "test_model", 1, 0, hash("test"), torch.bfloat16
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=hash("test"),
+            dtype=torch.bfloat16,
         )
 
         # Test with LocalCPUBackend bypass

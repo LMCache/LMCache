@@ -395,13 +395,13 @@ class CacheEngineKey:
         for layer_id in range(num_layers):
             keys.append(
                 LayerCacheEngineKey(
-                    self.model_name,
-                    self.world_size,
-                    self.worker_id,
-                    self.chunk_hash,
-                    self.dtype,
-                    self.request_configs,
-                    layer_id,
+                    model_name=self.model_name,
+                    world_size=self.world_size,
+                    worker_id=self.worker_id,
+                    chunk_hash=self.chunk_hash,
+                    dtype=self.dtype,
+                    request_configs=self.request_configs,
+                    layer_id=layer_id,
                 )
             )
         return keys
@@ -409,13 +409,13 @@ class CacheEngineKey:
     def get_first_layer(self) -> "LayerCacheEngineKey":
         """Return the key for the first layer"""
         key = LayerCacheEngineKey(
-            self.model_name,
-            self.world_size,
-            self.worker_id,
-            self.chunk_hash,
-            self.dtype,
-            self.request_configs,
-            0,
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=self.worker_id,
+            chunk_hash=self.chunk_hash,
+            dtype=self.dtype,
+            request_configs=self.request_configs,
+            layer_id=0,
         )
         return key
 
@@ -433,12 +433,12 @@ class CacheEngineKey:
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return CacheEngineKey(
-            parts[0],
-            int(parts[1]),
-            int(parts[2]),
-            int(parts[3], 16),
-            STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
-            request_configs,
+            model_name=parts[0],
+            world_size=int(parts[1]),
+            worker_id=int(parts[2]),
+            chunk_hash=int(parts[3], 16),
+            dtype=STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
+            request_configs=request_configs,
         )
 
     def to_dict(self):
@@ -480,11 +480,11 @@ class CacheEngineKey:
         # Reconstruct the cache engine key with new worker id
         return CacheEngineKey(
             self.model_name,
-            self.world_size,
-            new_worker_id,
-            self.chunk_hash,
-            self.dtype,
-            self.request_configs,
+            world_size=self.world_size,
+            worker_id=new_worker_id,
+            chunk_hash=self.chunk_hash,
+            dtype=self.dtype,
+            request_configs=self.request_configs,
         )
 
     @property
@@ -535,13 +535,13 @@ class LayerCacheEngineKey(CacheEngineKey):
         for layer_id in range(num_layers):
             keys.append(
                 LayerCacheEngineKey(
-                    self.model_name,
-                    self.world_size,
-                    self.worker_id,
-                    self.chunk_hash,
-                    self.dtype,
-                    self.request_configs,
-                    layer_id,
+                    model_name=self.model_name,
+                    world_size=self.world_size,
+                    worker_id=self.worker_id,
+                    chunk_hash=self.chunk_hash,
+                    dtype=self.dtype,
+                    request_configs=self.request_configs,
+                    layer_id=layer_id,
                 )
             )
         return keys
@@ -560,13 +560,13 @@ class LayerCacheEngineKey(CacheEngineKey):
                     raise ValueError(f"Invalid key string: {s}")
                 request_configs["lmcache.tag." + kvs[0]] = kvs[1]
         return LayerCacheEngineKey(
-            parts[0],
-            int(parts[1]),
-            int(parts[2]),
-            int(parts[3], 16),
-            STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
-            request_configs,
-            int(parts[5]),
+            model_name=parts[0],
+            world_size=int(parts[1]),
+            worker_id=int(parts[2]),
+            chunk_hash=int(parts[3], 16),
+            dtype=STR_DTYPE_TO_TORCH_DTYPE[parts[4]],
+            request_configs=request_configs,
+            layer_id=int(parts[5]),
         )
 
 
