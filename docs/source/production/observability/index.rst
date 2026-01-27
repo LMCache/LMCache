@@ -8,6 +8,7 @@ Observability
 
    vllm_endpoint
    internal_api_server
+   metrics
    chunk_statistics
    health_monitor
    periodic_thread_api
