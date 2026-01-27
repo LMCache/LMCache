@@ -10,10 +10,10 @@
 - **Storage Mode**
 - Single node
 - CPU hot cache only
-This recipe demonstrates how to run **vLLM with LMCache enabled** on a single GPU using a **CPU pinned-memory hot cache**. KV blocks generated during the first request are cached and reused on subsequent requests, reducing **time-to-first-token (TTFT)** and GPU KV pressure.
+This recipe demonstrates how to run **vLLM with LMCache enabled** on a single GPU using a **CPU pinned-memory hot cache**. KV blocks generated during the first request are cached and reused on subsequent requests, reducing **time-to-first-token (TTFT)** and GPU KV pressure. The GPU model is not fixed—size the CPU cache based on your GPU KV cache budget.
 
 To make LMCache effects easy to observe:
-- vLLM’s internal prefix caching is disabled
+- vLLM’s internal prefix caching is disabled for measurement only
 - cache reuse is validated explicitly via LMCache logs
 - benchmarks focus on cache-sensitive workloads
 
@@ -38,7 +38,7 @@ Create `recipes/dense_instruct_cpu_hot_cache.yaml`:
 ```yaml
 chunk_size: 256           # Default chunk size
 local_cpu: true
-max_local_cpu_size: 8     # GB of pinned CPU memory
+max_local_cpu_size: 48    # Example; set >=1.5x GPU KV cache budget
 use_layerwise: true       # Overlap KV load with forward pass
 ```
 
@@ -49,14 +49,16 @@ use_layerwise: false
 ```
 
 Notes:
-- If CPU RAM is tight, reduce `max_local_cpu_size`.
+- In practice, `max_local_cpu_size` should be **>= 1.5×** the GPU KV cache budget to see consistent gains.
+- Use vLLM startup logs to estimate the GPU KV cache budget; scale `max_local_cpu_size` accordingly.
+- If CPU RAM is tight, reduce `max_local_cpu_size`, but expect smaller LMCache benefits.
 - If you do not need persistence, remove the disk tier and keep CPU only.
 
 ## 4. Launching the vLLM Server (with LMCache)
 
 ### Why disable vLLM prefix caching?
 
-Prefix caching is disabled so that **all reuse comes from LMCache**, making cache hits and TTFT deltas easier to interpret.
+Prefix caching is disabled so that **all reuse comes from LMCache**, making cache hits and TTFT deltas easier to interpret. For real deployments, keep vLLM prefix caching enabled and size the CPU cache appropriately.
 
 ### Standard connector (recommended default)
 
@@ -83,7 +85,7 @@ Setting `PYTHONHASHSEED=0` is recommended for deterministic chunk hashing, espec
 ## 5. Startup Validation
 Successful LMCache initialization should include logs similar to:
 
-`LMCache INFO: Loading LMCache config file recipes/dense_instruct_cpu_hot_cache.yaml LMCache INFO: LMCache initialized for role KVConnectorRole.WORKER LMCache INFO: Creating LMCacheEngine with config:   {'chunk_size': 256, 'local_cpu': True, 'max_local_cpu_size': 8.0, ...}`
+`LMCache INFO: Loading LMCache config file recipes/dense_instruct_cpu_hot_cache.yaml LMCache INFO: LMCache initialized for role KVConnectorRole.WORKER LMCache INFO: Creating LMCacheEngine with config:   {'chunk_size': 256, 'local_cpu': True, 'max_local_cpu_size': 48.0, ...}`
 
 **Important**  
 Verify that the printed LMCache config matches your YAML (e.g., `use_layerwise: true`).  
@@ -140,7 +142,7 @@ This is expected: vLLM labels KV supplied by external connectors (LMCache) as **
 ### 7.1 Baseline (no LMCache)
 
 Run the same benchmark twice: once without LMCache and once with LMCache. Keep
-vLLM prefix caching disabled in both runs to isolate LMCache effects.
+vLLM prefix caching disabled in both runs to isolate LMCache effects (benchmark-only).
 
 Baseline launch (no LMCache):
 
@@ -307,7 +309,7 @@ P99 ITL (ms):                            14.96
 
 ## 8. Performance Tips
 - `chunk_size`: 256 is a good default; smaller improves partial reuse, larger reduces metadata overhead.
-- `max_local_cpu_size`: increase if you have repeated prompts and spare RAM.
+- `max_local_cpu_size`: size to **>= 1.5×** the GPU KV cache budget for stable wins.
 - `use_layerwise`: hides KV load latency; disable only if you observe instability.
 - `save_unfull_chunk`: important for short or medium prompts.
 - NVMe disk tiering helps when CPU memory is insufficient.
@@ -317,7 +319,7 @@ P99 ITL (ms):                            14.96
 |---|---|---|
 |No cache hits|Prompt tokens differ|Ensure identical tokenization|
 |No hits on short prompts|Chunk not filled|Enable `save_unfull_chunk`|
-|Warm runs still slow|CPU cache too small|Increase `max_local_cpu_size`|
+|Warm runs still slow|CPU cache too small|Increase `max_local_cpu_size` (>=1.5× GPU KV cache budget)|
 |CPU OOM|Pinned pool too large|Reduce size or enable lazy allocator|
 |`StopIteration` in `wait_for_save`|Known issue|Disable `use_layerwise`|
 |Config mismatch in logs|Wrong config loaded|Check `LMCACHE_CONFIG_FILE`

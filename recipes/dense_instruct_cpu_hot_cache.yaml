@@ -1,4 +1,4 @@
 chunk_size: 256
 local_cpu: true
-max_local_cpu_size: 8
+max_local_cpu_size: 48
 use_layerwise: true
