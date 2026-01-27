@@ -183,6 +183,17 @@ class RequestTracker:
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
+        # DEBUG LOGGING
+        logger.warning(
+            "[DEBUG] from_new_request: req_id=%s, prompt_len=%d, "
+            "num_tokens_to_compute=%d, token_ids_len=%d, lmcache_cached_tokens=%d",
+            new_request.req_id,
+            len(new_request.prompt_token_ids),
+            num_tokens_to_compute,
+            len(new_request.prompt_token_ids[:num_tokens_to_compute]),
+            lmcache_cached_tokens,
+        )
+
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
@@ -345,6 +356,21 @@ class ReqMeta:
             )
         else:
             num_tokens_to_save = input_token_len
+
+        # DEBUG LOGGING
+        logger.warning(
+            "[DEBUG] from_request_tracker: req_id=%s, input_token_len=%d, "
+            "prompt_len=%d, is_last_prefill=%s, discard_partial_chunks=%s, "
+            "num_tokens_to_save=%d, skip_save=%s, has_disagg_spec=%s",
+            tracker.req_id,
+            input_token_len,
+            tracker.prompt_len,
+            is_last_prefill,
+            discard_partial_chunks,
+            num_tokens_to_save,
+            skip_save,
+            tracker.disagg_spec is not None,
+        )
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
@@ -1115,6 +1141,17 @@ class LMCacheConnectorV1Impl:
                 )
 
             if skip_leading_tokens == len(token_ids):
+                # DEBUG LOGGING
+                logger.warning(
+                    "[DEBUG] wait_for_save: SKIPPING req_id=%s, "
+                    "skip_leading_tokens=%d, token_ids_len=%d, "
+                    "is_last_prefill=%s, has_disagg_spec=%s",
+                    request.req_id,
+                    skip_leading_tokens,
+                    len(token_ids),
+                    request.is_last_prefill,
+                    request.disagg_spec is not None,
+                )
                 continue  # skip this request
             # Align to lmcache chunk size
             skip_leading_tokens = (
@@ -1412,6 +1449,18 @@ class LMCacheConnectorV1Impl:
                 request.num_computed_tokens
                 + scheduler_output.num_scheduled_tokens[request.req_id]
             )
+
+            # DEBUG LOGGING
+            logger.warning(
+                "[DEBUG] build_connector_meta: req_id=%s, num_computed_tokens=%d, "
+                "num_scheduled_tokens=%d, num_tokens_to_compute=%d, prompt_len=%d",
+                request.req_id,
+                request.num_computed_tokens,
+                scheduler_output.num_scheduled_tokens[request.req_id],
+                num_tokens_to_compute,
+                len(request.prompt_token_ids),
+            )
+
             lmcache_cached_tokens = 0
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
