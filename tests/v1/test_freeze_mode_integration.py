@@ -265,7 +265,7 @@ def test_freeze_direct_api(autorelease_v1):
     )
 
     connector = MockGPUConnector(kv_shape=kv_shape)
-    metadata = dumb_metadata("vllm", kv_shape)
+    metadata = dumb_metadata(kv_shape)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(

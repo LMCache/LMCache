@@ -543,12 +543,6 @@ def parse_args() -> argparse.Namespace:
         help="Enable MLA (Multi-Level Attention)",
     )
     parser.add_argument(
-        "--fmt",
-        type=str,
-        default="vllm",
-        help="Cache format (default: vllm)",
-    )
-    parser.add_argument(
         "--device",
         type=str,
         default="cpu",
