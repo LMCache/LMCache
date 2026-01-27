@@ -642,19 +642,26 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
         if config_key == "extra_config" and isinstance(value, str):
             value = json.loads(value) if value else None
 
-        # Handle partial merge for extra_config when override is False
-        if config_key == "extra_config" and not override:
+        # Handle extra_config: check for 'override' member in value dict
+        if config_key == "extra_config" and isinstance(value, dict):
+            # Extract and remove 'override' from value dict
+            should_override = value.pop("override", False)
+            if should_override:
+                # Full override: replace current value with new value
+                setattr(config, config_key, value)
+                logger.info("Overridden extra_config")
+                return True
+            # Merge mode: merge with existing dict
             current_value = getattr(config, config_key, None)
             if current_value is not None and isinstance(current_value, dict):
-                if value is not None and isinstance(value, dict):
-                    # Merge: current values are preserved, new values override conflicts
-                    merged_value = {**current_value, **value}
-                    setattr(config, config_key, merged_value)
-                    return True
-                # If new value is None or not a dict, keep current value
+                # Merge: current values are preserved, new values override conflicts
+                merged_value = {**current_value, **value}
+                setattr(config, config_key, merged_value)
+                logger.info("Merged extra_config")
                 return True
             # If current value is None or not a dict, just set the new value
             setattr(config, config_key, value)
+            logger.info("Set extra_config")
             return True
 
         # For non-extra_config keys: skip if override is False and key was user-set
@@ -667,9 +674,10 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
                     config_key,
                     current_value,
                 )
-                return True  # Return True as this is expected behavior, not an error
+                return False  # Return False to indicate keep existing value
 
         setattr(config, config_key, value)
+        logger.info("Set config item '%s'", config_key)
         return True
     except Exception as e:
         logger.error(
