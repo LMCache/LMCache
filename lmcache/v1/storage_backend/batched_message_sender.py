@@ -90,7 +90,9 @@ class BatchedMessageSender:
     def _start_background_thread(self):
         """Start background thread for periodic flushing."""
         self.running = True
-        self.thread = threading.Thread(target=self._consumer_loop, daemon=True)
+        self.thread = threading.Thread(
+            target=self._consumer_loop, daemon=True, name="batched-msg-sender-thread"
+        )
         self.thread.start()
 
     def _consumer_loop(self):

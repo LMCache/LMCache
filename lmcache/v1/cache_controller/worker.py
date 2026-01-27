@@ -147,7 +147,9 @@ class LMCacheWorker:
         logger.info(f"Reply socket established at {self.lmcache_worker_internal_url}")
 
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread = threading.Thread(
+            target=self.loop.run_forever, daemon=True, name="lmcache-worker-thread"
+        )
         self.thread.start()
         asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
