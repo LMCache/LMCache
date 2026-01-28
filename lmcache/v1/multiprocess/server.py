@@ -25,7 +25,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache, StorageKey
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
@@ -50,6 +50,38 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
     return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(
         device, non_blocking=True
     )
+
+def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageKey]:
+    '''
+    Converts a list of IPCCacheEngineKeys to a list of StorageKeys.
+
+    When scheduler calls `lookup`, the corresponding IPCCacheEngineKey will have
+    worker_id = None. In this case, this means "lookup the given model name and chunk
+    hash for ALL workers". 
+
+    When worker calls `store` or `retrieve`, the corresponding IPCCacheEngineKey will have
+    worker_id != None. In this case, this means "store/retrieve the given model name and 
+    chunk hash for the given worker".
+    '''
+    storage_keys = []
+    for ipc_key in ipc_keys:
+        if ipc_key.worker_id is None:
+            for worker_id in range(ipc_key.world_size):
+                storage_keys.append(StorageKey(
+                    model_name=ipc_key.model_name,
+                    world_size=ipc_key.world_size,
+                    worker_id=worker_id,
+                    chunk_hash=ipc_key.chunk_hash,
+                ))
+        else:
+            storage_keys.append(StorageKey(
+                model_name=ipc_key.model_name,
+                world_size=ipc_key.world_size,
+                worker_id=ipc_key.worker_id,
+                chunk_hash=ipc_key.chunk_hash,
+            ))
+
+    return storage_keys
 
 
 class GPUCacheContext:
@@ -252,7 +284,7 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def store(
         self,
-        keys: list[IPCCacheEngineKey],
+        ipc_keys: list[IPCCacheEngineKey],
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
@@ -272,6 +304,11 @@ class MPCacheEngine:
                 element indicates whether the store operation was successful.
         """
         st = time.perf_counter()
+
+        if not all(ipc_key.worker_id is not None for ipc_key in ipc_keys):
+            logger.warning("In vLLM, MPCacheEngine must store with worker_id != None")
+
+        keys = ipc_keys_to_storage_keys(ipc_keys)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -344,7 +381,7 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
-        keys: list[IPCCacheEngineKey],
+        ipc_keys: list[IPCCacheEngineKey],
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
@@ -374,6 +411,10 @@ class MPCacheEngine:
         # retrieves objects is pre-locked by the lookup function (so they
         # must be all found)
         st = time.perf_counter()
+
+        assert all(ipc_key.worker_id is not None for ipc_key in ipc_keys), "Must retrieve with worker_id != None"
+        keys = ipc_keys_to_storage_keys(ipc_keys)
+
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
         )
@@ -447,7 +488,7 @@ class MPCacheEngine:
 
     def lookup(
         self,
-        keys: list[IPCCacheEngineKey],
+        ipc_keys: list[IPCCacheEngineKey],
         lock: bool | None = None,
     ) -> list[bool]:
         """
@@ -476,7 +517,14 @@ class MPCacheEngine:
                 "for 5 minutes"
             )
 
+        assert all(ipc_key.worker_id is None for ipc_key in ipc_keys), "Must lookup with worker_id == None"
+        keys = ipc_keys_to_storage_keys(ipc_keys)
+
         found_count = self.storage_manager.lookup(keys)
+        # NOTE(Kuntai): this assumes two things:
+        # 1. the world size is the same between keys
+        # 2. the lookup sort the keys in prefix order and breaks at the first failure
+        found_count = found_count // ipc_keys[0].world_size
         return [True] * found_count + [False] * (len(keys) - found_count)
 
     def debug(self) -> str:
