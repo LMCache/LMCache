@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Iterable, List, Optional
 import uuid
 
 # Third Party
@@ -13,7 +13,11 @@ import torch.distributed as dist
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
+from lmcache.utils import (
+    CacheStoreEvent,
+    mock_up_broadcast_fn,
+    mock_up_broadcast_object_fn,
+)
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import (
@@ -212,6 +216,11 @@ class LMCacheConnector:
             slot_mapping=slot_mapping,
             offset=offset,
         )
+
+    def get_kv_events(self) -> Iterable[CacheStoreEvent]:
+        if self.lmcache_engine is not None:
+            return self.lmcache_engine.get_kv_events()
+        return []
 
     def chunk_size(self):
         return self.lmcache_engine.config.chunk_size
