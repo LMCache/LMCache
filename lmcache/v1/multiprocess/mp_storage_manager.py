@@ -18,13 +18,13 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MixedMemoryAllocator
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, StorageKey
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 
 logger = init_logger(__name__)
 
 ReserveHandle = int
-ReserveResult = tuple[ReserveHandle, dict[IPCCacheEngineKey, MemoryObj]]
+ReserveResult = tuple[ReserveHandle, dict[StorageKey, MemoryObj]]
 
 
 class MemoryExhaustedError(Exception):
@@ -137,16 +137,16 @@ class LockManager(Generic[LockKey]):
             return False
 
 
-ObjDict = OrderedDict[IPCCacheEngineKey, Any]
+ObjDict = OrderedDict[StorageKey, Any]
 
 
-class LRUCachePolicyWithLock(LRUCachePolicy[IPCCacheEngineKey]):
+class LRUCachePolicyWithLock(LRUCachePolicy[StorageKey]):
     """
     An LRU cache policy that considers the lock status of the keys.
     Locked keys cannot be evicted.
     """
 
-    def __init__(self, lock_manager: LockManager[IPCCacheEngineKey]):
+    def __init__(self, lock_manager: LockManager[StorageKey]):
         super().__init__()
         self._lock_manager = lock_manager
 
@@ -154,7 +154,7 @@ class LRUCachePolicyWithLock(LRUCachePolicy[IPCCacheEngineKey]):
         self,
         cache_dict: ObjDict,
         num_candidates: int = 1,
-    ) -> list[IPCCacheEngineKey]:
+    ) -> list[StorageKey]:
         """
         Overriding the LRUCachePolicy's `get_evict_candidates` method.
 
@@ -166,11 +166,11 @@ class LRUCachePolicyWithLock(LRUCachePolicy[IPCCacheEngineKey]):
             num_candidates: the number of candidates to get
 
         Returns:
-            list[IPCCacheEngineKey]: the list of evict candidates
+            list[StorageKey]: the list of evict candidates
         """
         evict_keys = []
 
-        def _cannot_evict(key: IPCCacheEngineKey, obj: MemoryObj) -> bool:
+        def _cannot_evict(key: StorageKey, obj: MemoryObj) -> bool:
             return self._lock_manager.is_locked(key) or not obj.can_evict
 
         for key, cache in cache_dict.items():
@@ -193,7 +193,7 @@ class MPStorageManager:
         # Lock manager for locking memory objects
         # TODO: have separate lock manager for different storage backends
         # in the future
-        self._obj_lock_manager = LockManager[IPCCacheEngineKey]()
+        self._obj_lock_manager = LockManager[StorageKey]()
 
         # Allocator for CPU memory (note: this will be moved to storage backend
         # implementation in the future)
@@ -203,15 +203,15 @@ class MPStorageManager:
 
         # Reserved memory objects
         self._reserved_memory_object_pools: dict[
-            ReserveHandle, dict[IPCCacheEngineKey, MemoryObj]
+            ReserveHandle, dict[StorageKey, MemoryObj]
         ] = {}
-        self._reserved_keys: set[IPCCacheEngineKey] = set()
+        self._reserved_keys: set[StorageKey] = set()
         self._reserve_handle = 0
         self._reserve_handle_lock = threading.Lock()
 
         # Committed memory objects, with LRU policy
         self._cache_policy = LRUCachePolicyWithLock(self._obj_lock_manager)
-        self._commited_memory_objects: OrderedDict[IPCCacheEngineKey, MemoryObj] = (
+        self._commited_memory_objects: OrderedDict[StorageKey, MemoryObj] = (
             self._cache_policy.init_mutable_mapping()
         )
 
@@ -230,7 +230,7 @@ class MPStorageManager:
             self._reserve_handle += 1
         return handle
 
-    def _has_key(self, key: IPCCacheEngineKey) -> bool:
+    def _has_key(self, key: StorageKey) -> bool:
         """Check whether the given key already exists in the storage manager.
         Both reserved and committed keys will be considered.
 
@@ -245,7 +245,7 @@ class MPStorageManager:
     @_lmcache_nvtx_annotate
     def reserve(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[StorageKey],
         shape: Union[torch.Size, tuple[int, ...]],
         dtype: torch.dtype,
         fmt: MemoryFormat,
@@ -261,7 +261,7 @@ class MPStorageManager:
         Returns:
             ReserveHandle: a special handle to represent this reservation.
                 Will be used in "commit".
-            dict[IPCCacheEngineKey, MemoryObj]: a dictionary mapping from
+            dict[StorageKey, MemoryObj]: a dictionary mapping from
                 reserved keys to the allocated memory objects.
 
         Raises:
@@ -272,11 +272,11 @@ class MPStorageManager:
         """
 
         def _confirm_reserve_objects(
-            keys: list[IPCCacheEngineKey],
+            keys: list[StorageKey],
             mask: list[bool],
             objects: list[MemoryObj],
             handle: ReserveHandle,
-        ) -> dict[IPCCacheEngineKey, MemoryObj]:
+        ) -> dict[StorageKey, MemoryObj]:
             """Helper function to confirm the reserved objects.
             Will put the reserved objects dictionary into the "reserved pool"
 
@@ -287,7 +287,7 @@ class MPStorageManager:
                 objects: the list of allocated memory objects.
 
             Returns:
-                dict[IPCCacheEngineKey, MemoryObj]: a dictionary mapping from
+                dict[StorageKey, MemoryObj]: a dictionary mapping from
                     reserved keys to the allocated memory objects.
 
             Note:
@@ -404,7 +404,7 @@ class MPStorageManager:
     @_lmcache_nvtx_annotate
     def lookup(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[StorageKey],
     ) -> int:
         """Lookup the and lock memory objects for the given keys.
 
@@ -429,7 +429,7 @@ class MPStorageManager:
     @contextmanager
     def retrieve(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[StorageKey],
     ) -> Iterator[list[MemoryObj]]:
         """Retrieve the memory objects for the given keys.
         The memory objects should be locked before retrieval.
@@ -479,7 +479,7 @@ class MPStorageManager:
     @_lmcache_nvtx_annotate
     def on_retrieve_finished(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[StorageKey],
     ) -> None:
         """Callback function to be called after the retrieve operation is
         finished. It will unlock the memory objects for the given keys.
@@ -492,7 +492,7 @@ class MPStorageManager:
 
     def prefetch(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[StorageKey],
     ) -> None:
         """Prefetch the memory objects for the given keys into L1 memory.
 

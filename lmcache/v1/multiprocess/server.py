@@ -421,7 +421,7 @@ class MPCacheEngine:
 
         gpu_context = self.gpu_contexts[instance_id]
 
-        def _retrieve_loop(keys: list[IPCCacheEngineKey], memory_objs: list[MemoryObj]):
+        def _retrieve_loop(keys: list[StorageKey], memory_objs: list[MemoryObj]):
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
             ):

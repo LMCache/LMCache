@@ -156,7 +156,8 @@ class StorageKey:
     model_name: str
     world_size: int
 
-    # NOTE(Kuntai): worker_id will be None for scheduler and int for worker
+    # NOTE(Kuntai): worker_id must always be an int (not None).
+    # This is different from IPCCacheEngineKey which can have worker_id == None.
     worker_id: int
     chunk_hash: bytes
 
