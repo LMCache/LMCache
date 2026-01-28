@@ -157,6 +157,8 @@ class PDBackend(AllocatorBackendInterface):
         # only receiver/decoder will.
         self.data: dict[CacheEngineKey, MemoryObj] = {}
         self.data_lock = threading.Lock()
+        self.condition = threading.Condition()
+        self.count_waiting_req = 0
 
         self.memory_allocator = self.initialize_allocator(config, metadata)
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
@@ -481,6 +483,15 @@ class PDBackend(AllocatorBackendInterface):
         alloc_indexes = []
         already_send_indexes = []
 
+        self.condition.acquire()
+        while not self.memory_allocator.check_gpu_blocks(total_allocs):
+            self.count_waiting_req += 1
+            self.condition.wait()
+            self.count_waiting_req -= 1
+
+            if self.memory_allocator.check_gpu_blocks(total_allocs):
+                break
+
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
             if self.contains(key, pin=True):
@@ -573,8 +584,13 @@ class PDBackend(AllocatorBackendInterface):
             if mem_obj := self.data.get(key, None):
                 if mem_obj.get_ref_count() == 1:
                     del self.data[key]
-                return True
-            return False
+            else:
+                return False
+
+        mem_obj.ref_count_down()
+        if self.count_waiting_req > 0:
+            self.condition.notify_all()
+        return True
 
     ############################################################
     # Decoder functions end

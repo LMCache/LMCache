@@ -1633,6 +1633,11 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         return True
 
+    def check_free_blocks(self, needed_blocks: int):
+        if len(self.free_blocks) < needed_blocks:
+            return False
+        return True
+
     def __str__(self):
         return "PagedTensorMemoryAllocator"
 
@@ -2303,6 +2308,9 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             self.cpu_allocator.free(memory_obj)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
+
+    def check_gpu_blocks(self, needed_blocks: int):
+        return self.gpu_allocator.check_free_blocks(needed_blocks)
 
     def batched_free(
         self,

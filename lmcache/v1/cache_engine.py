@@ -798,7 +798,8 @@ class LMCacheEngine:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
                 self.storage_manager.remove(key)
-            memory_obj.ref_count_down()
+            if memory_obj.get_ref_count() > 0:
+                memory_obj.ref_count_down()
 
         onload_time = retrieve_stats.time_to_retrieve()
 
