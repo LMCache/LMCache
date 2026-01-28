@@ -121,7 +121,8 @@ class IPCCacheEngineKey:
         return int.from_bytes(chunk_hash, byteorder="big") & ((1 << 64) - 1)
 
     def no_worker_id_version(self) -> "IPCCacheEngineKey":
-        # NOTE(Kuntai): this is only used for testing
+        # NOTE(Kuntai): this is for constructing lookup keys
+        # current lookup requests require worker_id to be None.
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
