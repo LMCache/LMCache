@@ -475,9 +475,7 @@ class TestTPEdgeCases:
 
         # Store chunks for worker 0
         storage_keys = [
-            create_storage_key(
-                chunk_hash=i, worker_id=0, world_size=world_size
-            )
+            create_storage_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(num_chunks)
         ]
         handle, _ = storage_manager.reserve(
