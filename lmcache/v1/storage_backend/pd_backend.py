@@ -483,14 +483,11 @@ class PDBackend(AllocatorBackendInterface):
         alloc_indexes = []
         already_send_indexes = []
 
-        self.condition.acquire()
-        while not self.memory_allocator.check_gpu_blocks(total_allocs):
-            self.count_waiting_req += 1
-            self.condition.wait()
-            self.count_waiting_req -= 1
-
-            if self.memory_allocator.check_gpu_blocks(total_allocs):
-                break
+        with self.condition:
+            while not self.memory_allocator.check_gpu_blocks(total_allocs):
+                self.count_waiting_req += 1
+                self.condition.wait()
+                self.count_waiting_req -= 1
 
         for idx, key_str in enumerate(alloc_request.keys):
             key = CacheEngineKey.from_string(key_str)
