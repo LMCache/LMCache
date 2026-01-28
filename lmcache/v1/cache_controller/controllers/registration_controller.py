@@ -44,7 +44,7 @@ class RegistrationController:
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
             prometheus_logger.registered_workers_count.set_function(
-                lambda: len(self.registry.get_all_worker_infos())
+                lambda: len(self.registry.get_all_worker_infos_cached())
             )
 
     def post_init(self, kv_controller, cluster_executor):
@@ -126,6 +126,7 @@ class RegistrationController:
                 "Instance-worker %s already registered, skip registration",
                 (instance_id, worker_id),
             )
+            self.registry.clear_worker_kv(instance_id, worker_id)
             return (
                 RegisterRetMsg()
                 if extra_config is None
@@ -226,6 +227,18 @@ class RegistrationController:
             await self.register(register_msg)
             # New worker needs full sync
             commands.append(FullSyncCommand(reason="worker_re_registered"))
+        else:
+            # Check if full sync is needed (e.g., controller restart)
+            if self.kv_controller is not None and hasattr(
+                self.kv_controller, "full_sync_tracker"
+            ):
+                should_sync, reason = (
+                    self.kv_controller.full_sync_tracker.should_request_full_sync(
+                        instance_id, worker_id
+                    )
+                )
+                if should_sync:
+                    commands.append(FullSyncCommand(reason=reason))
 
         return HeartbeatRetMsg(commands=commands)
 
@@ -239,7 +252,7 @@ class RegistrationController:
         # Handle special case: instance_id = "all"
         if msg.instance_id == "all":
             # Get all worker infos from the registry
-            worker_infos = self.registry.get_all_worker_infos()
+            worker_infos = self.registry.get_all_worker_infos_cached()
             # If specific worker_ids are requested, filter the results
             if msg.worker_ids is not None and len(msg.worker_ids) > 0:
                 worker_infos = [

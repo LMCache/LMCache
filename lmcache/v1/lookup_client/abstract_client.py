@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import abc
 
 # Third Party
 import torch
-
-if TYPE_CHECKING:
-    # Third Party
-    pass
 
 
 class LookupClientInterface(metaclass=abc.ABCMeta):

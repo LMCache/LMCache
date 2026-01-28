@@ -12,6 +12,7 @@ import zmq.asyncio
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.v1.cache_controller.full_sync_sender import FullSyncSender
 from lmcache.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
@@ -56,7 +57,6 @@ from lmcache.v1.rpc_utils import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.cache_engine import LMCacheEngine
-    from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
 
 logger = init_logger(__name__)
 
@@ -147,7 +147,9 @@ class LMCacheWorker:
         logger.info(f"Reply socket established at {self.lmcache_worker_internal_url}")
 
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread = threading.Thread(
+            target=self.loop.run_forever, daemon=True, name="lmcache-worker-thread"
+        )
         self.thread.start()
         asyncio.run_coroutine_threadsafe(self.start_all(), self.loop)
 
@@ -308,10 +310,6 @@ class LMCacheWorker:
     def _get_full_sync_sender(self):
         """Lazy initialization of FullSyncSender"""
         if self._full_sync_sender is None:
-            # Import here to avoid circular imports
-            # First Party
-            from lmcache.v1.storage_backend.full_sync_sender import FullSyncSender
-
             # Get the local_cpu_backend from lmcache_engine
             local_cpu_backend = self.lmcache_engine.storage_manager.local_cpu_backend
             self._full_sync_sender = FullSyncSender(
@@ -387,10 +385,13 @@ class LMCacheWorker:
             return HeartbeatRetMsg()
         try:
             # DEALER socket: send [empty_frame, payload]
+            logger.info("Sending heartbeat message to controller...")
             await self.heartbeat_socket.send_multipart(
                 [b"", msgspec.msgpack.encode(msg)]
             )
+            logger.info("Heartbeat message sent, waiting for response...")
             frames = await self.heartbeat_socket.recv_multipart()
+            logger.info("Received heartbeat response with %d frames", len(frames))
             # DEALER receives: [empty_frame, payload]
             serialized_ret_msg = frames[-1]
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)

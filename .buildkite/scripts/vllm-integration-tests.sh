@@ -270,7 +270,7 @@ run_pd_lmcache() {
     fi
     source .venv/bin/activate
     uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
-    uv pip install torch==2.7.1 httpx fastapi uvicorn > /dev/null 2>&1
+    uv pip install torch==2.7.1 httpx fastapi uvicorn requests > /dev/null 2>&1
     uv pip install -e "$ORIG_DIR" --no-build-isolation > /dev/null 2>&1
     # Start proxy
     python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
@@ -518,9 +518,11 @@ run_long_doc_qa() {
 
     # Check if baseline exists, skip comparisons if not
     if [[ -z "$baseline_json" ]] || ! echo "$baseline_json" | jq -e . >/dev/null 2>&1; then
-        echo "⚠️  No baseline found for $feature_type.json - skipping performance comparisons"
-        echo "   This is expected for newly added configs. Baseline will be generated on next nightly run."
-        echo "   Current metrics: TTFT=$query_ttft_per_prompt, Latency=$query_round_time_per_prompt, Warmup=$warmup_round_time_per_prompt"
+        if [[ "$feature_type" != "dummy" ]]; then
+            echo "⚠️  No baseline found for $feature_type.json - skipping performance comparisons"
+            echo "   This is expected for newly added configs. Baseline will be generated on next nightly run."
+            echo "   Current metrics: TTFT=$query_ttft_per_prompt, Latency=$query_round_time_per_prompt, Warmup=$warmup_round_time_per_prompt"
+        fi
         return 0
     fi
 

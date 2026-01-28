@@ -18,6 +18,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 
 
 def recover_engine_states(engine):
@@ -55,9 +56,28 @@ def init_asyncio_loop():
 
 def close_asyncio_loop(async_loop, async_thread):
     if async_loop.is_running():
+        # First, cancel all pending tasks
+        try:
+            # Get all tasks and cancel them
+            pending = asyncio.all_tasks(async_loop)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+        except Exception as e:
+            print(f"Error during close pending tasks: - {e}")
+
+        # Then stop the loop
         async_loop.call_soon_threadsafe(async_loop.stop)
+
     if async_thread.is_alive():
-        async_thread.join()
+        async_thread.join(timeout=2.0)
+
+    # Close the loop to release resources
+    if not async_loop.is_closed():
+        async_loop.close()
+
+    # Set event loop to None
+    asyncio.set_event_loop(None)
 
 
 def get_available_port(host: str = "127.0.0.1") -> int:
@@ -115,16 +135,20 @@ def generate_kv_cache(num_tokens, fmt, device):
 
 
 def generate_kv_cache_paged_list_tensors(
-    num_blocks, device, block_size=16, dtype=torch.bfloat16, use_mla=False
+    num_blocks,
+    device,
+    block_size=16,
+    dtype=torch.bfloat16,
+    use_mla=False,
+    num_layers=32,
+    head_size=128,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
     where KV are in the same tensor
     """
     ret = []
-    num_layers = 32
     num_heads = 1 if use_mla else 8
-    head_size = 128
     shape = (
         [num_blocks, block_size, head_size]
         if use_mla
@@ -132,7 +156,11 @@ def generate_kv_cache_paged_list_tensors(
     )
 
     for i in range(num_layers):
-        kv = torch.rand(shape, dtype=dtype, device=device)
+        # TODO(chunxiaozheng): support more dtypes
+        if dtype == torch.uint8:
+            kv = torch.randint(0, 256, shape, dtype=dtype, device=device)
+        else:
+            kv = torch.rand(shape, dtype=dtype, device=device)
         ret.append(kv)
 
     return ret
@@ -477,6 +505,9 @@ def create_test_metadata(
     worker_id: int = 0,
     world_size: int = 1,
     kv_shape: tuple = (4, 2, 256, 8, 128),
+    engine_id: Optional[str] = "test_engine",
+    num_ranks: int = 1,
+    kv_connector_extra_config: Optional[dict] = None,
 ) -> LMCacheEngineMetadata:
     """Create test metadata for LMCacheEngine."""
     return LMCacheEngineMetadata(
@@ -486,6 +517,9 @@ def create_test_metadata(
         fmt="vllm",
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
+        engine_id=engine_id,
+        num_ranks=num_ranks,
+        kv_connector_extra_config=kv_connector_extra_config,
     )
 
 
@@ -548,3 +582,12 @@ def create_mock_vllm_config(
     )
 
     return vllm_config
+
+
+def create_test_memory_obj(shape=None, dtype=torch.bfloat16, device="cpu") -> MemoryObj:
+    """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
+    if shape is None:
+        shape = torch.Size([2, 16, 8, 128])
+    allocator = AdHocMemoryAllocator(device=device)
+    memory_obj = allocator.allocate([shape], [dtype], fmt=MemoryFormat.KV_T2D)
+    return memory_obj

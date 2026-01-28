@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import namedtuple
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import json
 import threading
 
@@ -21,10 +21,6 @@ from lmcache.v1.rpc_utils import (
     get_zmq_rpc_path_lmcache,
     get_zmq_socket,
 )
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -46,19 +42,17 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ):
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
-        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        engine_id = metadata.engine_id
+        assert engine_id is not None, "engine_id is required for RPC communication"
+        self.num_ranks = metadata.num_ranks
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -75,7 +69,7 @@ class LMCacheLookupClient(LookupClientInterface):
         self.socket_params = [
             SocketParams(
                 socket_path=get_zmq_rpc_path_lmcache(
-                    vllm_config, "lookup", rpc_port, rank
+                    engine_id, "lookup", rpc_port, rank
                 ),
                 rank=rank,
             )
@@ -294,20 +288,26 @@ class LMCacheLookupClient(LookupClientInterface):
 class LMCacheLookupServer:
     """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
 
-    def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
+    def __init__(
+        self,
+        lmcache_engine: LMCacheEngine,
+        metadata: LMCacheEngineMetadata,
+    ):
         self.decoder = msgspec.msgpack.Decoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
         )
         socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup", rpc_port, vllm_config.parallel_config.rank
+            metadata.engine_id, "lookup", rpc_port, metadata.worker_id
         )
         self.socket = get_zmq_socket(
             self.ctx,
             socket_path,
             "ipc",
-            zmq.REP,  # type: ignore[attr-defined]
+            zmq.ROUTER,  # type: ignore[attr-defined]
             "bind",
         )
         # Set socket timeout to allow periodic check of running flag
@@ -325,14 +325,22 @@ class LMCacheLookupServer:
                 except zmq.Again:
                     # Timeout occurred, check running flag and continue
                     continue
-                lookup_id = frames[-2].bytes.decode("utf-8")
-                request_configs_str = frames[-1].bytes.decode("utf-8")
-                request_configs = None
-                if request_configs_str != "":
-                    request_configs = json.loads(request_configs_str)
+                # ROUTER socket prepends identity frame and empty delimiter
+                # frames[0] = identity, frames[1] = empty delimiter, frames[2:] = data
+                identity = frames[0].bytes
+                # frames[1] is the empty delimiter frame from REQ socket
+                data_frames = frames[2:]
+                if len(data_frames) < 2:
+                    logger.warning("Malformed request received: not enough frames.")
+                    continue
+                lookup_id = data_frames[-2].bytes.decode("utf-8")
+                request_configs_str = data_frames[-1].bytes.decode("utf-8")
+                request_configs = (
+                    json.loads(request_configs_str) if request_configs_str else None
+                )
                 if not self.enable_blending:
-                    hash_frames = frames[0]
-                    offset_frames = frames[1]
+                    hash_frames = data_frames[0]
+                    offset_frames = data_frames[1]
                     hashes = self.decoder.decode(hash_frames)
                     offsets = self.decoder.decode(offset_frames)
                     result = self.lmcache_engine.lookup(
@@ -343,7 +351,7 @@ class LMCacheLookupServer:
                         request_configs=request_configs,
                     )
                 else:
-                    token_frames = frames[0]
+                    token_frames = data_frames[0]
                     tokens = self.decoder.decode(token_frames)
                     result = self.lmcache_engine.lookup(
                         tokens=tokens,
@@ -352,10 +360,13 @@ class LMCacheLookupServer:
                         request_configs=request_configs,
                     )
                 response = result.to_bytes(4, "big")
-                self.socket.send(response)
+                # ROUTER requires identity frame and empty delimiter for reply
+                self.socket.send_multipart([identity, b"", response])
 
         logger.info("lmcache lookup server start on %s", socket_path)
-        self.thread = threading.Thread(target=process_request, daemon=True)
+        self.thread = threading.Thread(
+            target=process_request, daemon=True, name="lookup-server-thread"
+        )
         self.thread.start()
 
     def __enter__(self):
