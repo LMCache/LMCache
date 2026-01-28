@@ -44,7 +44,7 @@ def storage_manager():
 @pytest.fixture
 def test_shape():
     """Standard test shape for tensors."""
-    return (2, 16, 16, 128)
+    return torch.Size((2, 16, 16, 128))
 
 
 @pytest.fixture
