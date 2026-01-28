@@ -62,7 +62,28 @@ def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageK
     When worker calls `store` or `retrieve`, the corresponding IPCCacheEngineKey will have
     worker_id != None. In this case, this means "store/retrieve the given model name and 
     chunk hash for the given worker".
+
+    Args:
+        ipc_keys: List of IPC cache engine keys to convert
+
+    Returns:
+        List of storage keys. If any IPC key has worker_id=None, it will be expanded
+        to one storage key per worker (based on world_size).
+
+    Raises:
+        ValueError: If IPC keys have inconsistent world_size values
     '''
+    if not ipc_keys:
+        return []
+
+    # Validate that all keys have the same world_size
+    world_size = ipc_keys[0].world_size
+    if not all(ipc_key.world_size == world_size for ipc_key in ipc_keys):
+        raise ValueError(
+            "All IPC keys must have the same world_size. "
+            f"Found world_size values: {set(ipc_key.world_size for ipc_key in ipc_keys)}"
+        )
+
     storage_keys = []
     for ipc_key in ipc_keys:
         if ipc_key.worker_id is None:
@@ -293,7 +314,8 @@ class MPCacheEngine:
         Stores the GPU KV cache blocks to CPU.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            ipc_keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
+                All keys must have worker_id != None (worker store operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to store.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -390,7 +412,8 @@ class MPCacheEngine:
         Retrieves the CPU KV cache and put into GPU blocks.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            ipc_keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
+                All keys must have worker_id != None (worker retrieve operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -398,9 +421,8 @@ class MPCacheEngine:
         Returns:
             tuple[bytes, list[bool]]: The first element is the IPC handle of the event
                 that signals the completion of the retrieve operation. The second
-                element is a list indicating whether each key was successfully
-                retrieved.
-
+                element is a list indicating whether each IPC key was successfully
+                retrieved. The length matches len(ipc_keys).
 
         Notes:
             - The caller must ensure that all keys are present in the storage (i.e.,
@@ -496,17 +518,20 @@ class MPCacheEngine:
         should belongs to a single request (same prompt).
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys to look up.
+            ipc_keys (list[IPCCacheEngineKey]): The IPC keys to look up.
+                All keys must have worker_id=None (scheduler lookup).
             lock (bool | None): Whether to lock the found keys.
 
         Returns:
-            list[bool]: A list indicating whether each key was found.
+            list[bool]: A list indicating whether each IPC key was found.
+                The length matches len(ipc_keys).
 
         Notes:
             - `lock` is going to be always True in the future.
             - The function does prefix-based lookup. Therefore, it
                 requires that the keys are from the same request and
                 are in order.
+            - When worker_id=None, lookup checks all workers for each IPC key.
         """
         # NOTE: we are doing per-request lookup, the caller need
         # to be aware of this! We need to add this to the doc!
@@ -518,6 +543,7 @@ class MPCacheEngine:
             )
 
         assert all(ipc_key.worker_id is None for ipc_key in ipc_keys), "Must lookup with worker_id == None"
+        assert len(ipc_keys) > 0, "Cannot lookup with empty IPC keys list"
         keys = ipc_keys_to_storage_keys(ipc_keys)
 
         found_count = self.storage_manager.lookup(keys)
@@ -525,7 +551,7 @@ class MPCacheEngine:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the first failure
         found_count = found_count // ipc_keys[0].world_size
-        return [True] * found_count + [False] * (len(keys) - found_count)
+        return [True] * found_count + [False] * (len(ipc_keys) - found_count)
 
     def debug(self) -> str:
         return "OK"
