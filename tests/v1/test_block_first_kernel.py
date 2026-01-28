@@ -71,6 +71,10 @@ def test_kv_first_layout_detection():
     )
 
 
+@pytest.mark.skipif(
+    not CUDA_AVAILABLE,
+    reason="CUDA not available on this system",
+)
 def test_block_first_layout_detection():
     """Test Block-first layout detection (FP8 style)."""
     # Create metadata for Block-first layout
