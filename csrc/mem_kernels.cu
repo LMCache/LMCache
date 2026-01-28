@@ -199,8 +199,6 @@ __device__ __forceinline__ int64_t page_buffer_offset(
     int block_idx = token_idx / block_size;
     int offset_in_block = token_idx % block_size;
     int block_kv_size = 2 * block_size * scalars_per_token;
-    // K offset: block_start * page_buffer_size + offset_in_block * scalars_per_token
-    // V offset: block_start * page_buffer_size + block_size * scalars_per_token + offset_in_block * scalars_per_token
     return block_idx * block_kv_size + k_or_v * block_size * scalars_per_token +
            offset_in_block * scalars_per_token + scalar_offset;
   }
