@@ -547,8 +547,10 @@ class MPCacheEngine:
                 "for 5 minutes"
             )
 
+        if not ipc_keys:
+            return []
+
         assert all(ipc_key.worker_id is None for ipc_key in ipc_keys), "Must lookup with worker_id == None"
-        assert len(ipc_keys) > 0, "Cannot lookup with empty IPC keys list"
         keys = ipc_keys_to_storage_keys(ipc_keys)
 
         found_count = self.storage_manager.lookup(keys)
