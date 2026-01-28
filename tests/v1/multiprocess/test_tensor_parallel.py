@@ -22,11 +22,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, StorageKey
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.server import ipc_keys_to_storage_keys
-
 
 # ==============================================================================
 # Test Fixtures
@@ -247,7 +246,9 @@ class TestStorageManagerTPLookup:
         # Store chunks for both workers
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(num_chunks)
             ]
             handle, _ = storage_manager.reserve(
@@ -302,7 +303,8 @@ class TestStorageManagerTPLookup:
         lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
         found_count = storage_manager.lookup(lookup_keys)
 
-        # Only worker 0's first chunk is found, then lookup stops at worker 1's missing chunk
+        # Only worker 0's first chunk is found, then lookup stops
+        # at worker 1's missing chunk
         # The ordering is: [chunk0_worker0, chunk0_worker1, chunk1_worker0, ...]
         # So we find chunk0_worker0 (1), then miss chunk0_worker1
         assert found_count == 1
@@ -363,7 +365,9 @@ class TestStorageManagerTPLookup:
         # Store first 3 chunks for both workers
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(num_stored_chunks)
             ]
             handle, _ = storage_manager.reserve(
@@ -427,7 +431,8 @@ class TestStorageManagerTPLookup:
         lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
         found_count = storage_manager.lookup(lookup_keys)
 
-        # Lookup order: chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, chunk2_w0, chunk2_w1...
+        # Lookup order:
+        # chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, chunk2_w0, chunk2_w1...
         # chunk0_w0: found (1)
         # chunk0_w1: found (2)
         # chunk1_w0: found (3)
@@ -453,7 +458,9 @@ class TestStorageManagerTPLookup:
         # Store chunks for all workers
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(num_chunks)
             ]
             handle, _ = storage_manager.reserve(
@@ -489,7 +496,9 @@ class TestStorageManagerTPLookup:
         # Store chunks for workers 0, 1, 3 (skip worker 2)
         for worker_id in [0, 1, 3]:
             storage_keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(num_chunks)
             ]
             handle, _ = storage_manager.reserve(
@@ -569,10 +578,14 @@ class TestStorageManagerTPStoreRetrieve:
         # Store for both workers
         for worker_id in range(world_size):
             keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(3)
             ]
-            handle, _ = storage_manager.reserve(keys, test_shape, test_dtype, test_format)
+            handle, _ = storage_manager.reserve(
+                keys, test_shape, test_dtype, test_format
+            )
             storage_manager.commit(handle)
 
         # Retrieve only worker 0's data
@@ -653,12 +666,17 @@ class TestTPEdgeCases:
         assert decoded.chunk_hash == key.chunk_hash
 
     def test_all_workers_same_chunk_different_keys(self):
-        """Test that same chunk_hash with different worker_ids creates distinct storage keys."""
+        """
+        Test that same chunk_hash with different worker_ids creates
+        distinct storage keys.
+        """
         world_size = 4
         chunk_hash = 42
 
         storage_keys = [
-            create_storage_key(chunk_hash=chunk_hash, worker_id=i, world_size=world_size)
+            create_storage_key(
+                chunk_hash=chunk_hash, worker_id=i, world_size=world_size
+            )
             for i in range(world_size)
         ]
 
@@ -696,7 +714,9 @@ class TestTPIntegration:
         # Step 1 & 2: Workers store their chunks
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(stored_chunks)
             ]
             handle, reserved = storage_manager.reserve(
@@ -716,14 +736,20 @@ class TestTPIntegration:
         # Step 4: Verify hit count
         found_ipc_count = found_count // world_size
         assert found_ipc_count == stored_chunks
-        expected_result = [True] * stored_chunks + [False] * (requested_chunks - stored_chunks)
-        actual_result = [True] * found_ipc_count + [False] * (requested_chunks - found_ipc_count)
+        expected_result = [True] * stored_chunks + [False] * (
+            requested_chunks - stored_chunks
+        )
+        actual_result = [True] * found_ipc_count + [False] * (
+            requested_chunks - found_ipc_count
+        )
         assert actual_result == expected_result
 
         # Step 5: Workers retrieve their chunks
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(stored_chunks)
             ]
             with storage_manager.retrieve(storage_keys) as objs:
@@ -743,7 +769,9 @@ class TestTPIntegration:
 
         def worker_store(worker_id: int):
             storage_keys = [
-                create_storage_key(chunk_hash=i, worker_id=worker_id, world_size=world_size)
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
                 for i in range(num_chunks)
             ]
             handle, reserved = storage_manager.reserve(

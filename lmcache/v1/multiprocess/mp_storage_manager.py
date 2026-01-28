@@ -24,7 +24,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     MixedMemoryAllocator,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, StorageKey
+from lmcache.v1.multiprocess.custom_types import StorageKey
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 
 logger = init_logger(__name__)
@@ -528,13 +528,13 @@ class MPStorageManager:
         with self._allocator_lock:
             return self._memory_allocator.memcheck()
 
-    def get_all_keys(self) -> list[IPCCacheEngineKey]:
+    def get_all_keys(self) -> list[StorageKey]:
         """
         Get all committed keys in the storage manager.
         Thread-safe. Debug Only.
 
         Returns:
-            List of all committed IPCCacheEngineKey objects
+            List of all committed StorageKey objects
         """
         with self._buffer_lock:
             return list(self._commited_memory_objects.keys())
