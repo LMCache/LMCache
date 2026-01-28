@@ -169,11 +169,16 @@ class RuntimePluginLauncher:
             logger.error(f"Error capturing output for {plugin_name}: {e}")
 
     def stop_plugins(self):
-        """Terminate all plugin processes"""
+        """Terminate all plugin processes.
+
+        Note: This method may be called via atexit during interpreter shutdown,
+        when the logging system may already be closed. We avoid using logger
+        here to prevent "I/O operation on closed file" errors.
+        """
         for proc in self.plugin_processes:
             try:
                 if proc.poll() is None:
                     proc.terminate()
-                    logger.info(f"Terminated runtime plugin process: {proc.pid}")
-            except Exception as e:
-                logger.error(f"Error terminating runtime plugin process: {e}")
+            except Exception:
+                # Silently ignore errors during shutdown
+                pass
