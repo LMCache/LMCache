@@ -25,7 +25,7 @@ import torch
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, StorageKey
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
-from lmcache.v1.multiprocess.server import ipc_keys_to_storage_keys
+from lmcache.v1.multiprocess.custom_types import ipc_keys_to_storage_keys
 
 # ==============================================================================
 # Test Fixtures

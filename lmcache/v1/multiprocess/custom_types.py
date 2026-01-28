@@ -223,3 +223,61 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
+
+
+def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageKey]:
+    """
+    Converts a list of IPCCacheEngineKeys to a list of StorageKeys.
+
+    When scheduler calls `lookup`, the corresponding IPCCacheEngineKey will have
+    worker_id = None. In this case, this means "lookup the given model name and chunk
+    hash for ALL workers".
+
+    When worker calls `store` or `retrieve`, the corresponding IPCCacheEngineKey will
+    have worker_id != None. In this case, this means "store/retrieve the given model
+    name and chunk hash for the given worker".
+
+    Args:
+        ipc_keys: List of IPC cache engine keys to convert
+
+    Returns:
+        List of storage keys. If any IPC key has worker_id=None, it will be expanded
+        to one storage key per worker (based on world_size).
+
+    Raises:
+        ValueError: If IPC keys have inconsistent world_size values
+    """
+    if not ipc_keys:
+        return []
+
+    # Validate that all keys have the same world_size
+    world_size = ipc_keys[0].world_size
+    if not all(ipc_key.world_size == world_size for ipc_key in ipc_keys):
+        raise ValueError(
+            "All IPC keys must have the same world_size. Found world_size values:"
+            f" {set(ipc_key.world_size for ipc_key in ipc_keys)}"
+        )
+
+    storage_keys = []
+    for ipc_key in ipc_keys:
+        if ipc_key.worker_id is None:
+            for worker_id in range(ipc_key.world_size):
+                storage_keys.append(
+                    StorageKey(
+                        model_name=ipc_key.model_name,
+                        world_size=ipc_key.world_size,
+                        worker_id=worker_id,
+                        chunk_hash=ipc_key.chunk_hash,
+                    )
+                )
+        else:
+            storage_keys.append(
+                StorageKey(
+                    model_name=ipc_key.model_name,
+                    world_size=ipc_key.world_size,
+                    worker_id=ipc_key.worker_id,
+                    chunk_hash=ipc_key.chunk_hash,
+                )
+            )
+
+    return storage_keys
