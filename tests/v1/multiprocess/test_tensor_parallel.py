@@ -15,7 +15,6 @@ Key scenarios tested:
 """
 
 # Standard
-from collections import OrderedDict
 import threading
 
 # Third Party
@@ -627,8 +626,6 @@ class TestTPEdgeCases:
 
     def test_ipc_key_serialization_with_none_worker_id(self):
         """Test that IPCCacheEngineKey with worker_id=None serializes correctly."""
-        import msgspec
-
         key = create_ipc_key(chunk_hash=100, worker_id=None, world_size=2)
 
         # Serialize
@@ -640,6 +637,37 @@ class TestTPEdgeCases:
         assert decoded.worker_id is None
         assert decoded.world_size == key.world_size
         assert decoded.chunk_hash == key.chunk_hash
+
+    def test_ipc_key_serialization_with_int_worker_id(self):
+        """Test that IPCCacheEngineKey with integer worker_id serializes correctly."""
+        key = create_ipc_key(chunk_hash=100, worker_id=1, world_size=2)
+
+        # Serialize
+        encoded = IPCCacheEngineKey.Serialize(key)
+
+        # Deserialize
+        decoded = IPCCacheEngineKey.Deserialize(encoded)
+
+        assert decoded.worker_id == 1
+        assert decoded.world_size == key.world_size
+        assert decoded.chunk_hash == key.chunk_hash
+
+    def test_all_workers_same_chunk_different_keys(self):
+        """Test that same chunk_hash with different worker_ids creates distinct storage keys."""
+        world_size = 4
+        chunk_hash = 42
+
+        storage_keys = [
+            create_storage_key(chunk_hash=chunk_hash, worker_id=i, world_size=world_size)
+            for i in range(world_size)
+        ]
+
+        # All keys should be distinct
+        assert len(set(storage_keys)) == world_size
+
+        # But all share the same chunk_hash
+        for key in storage_keys:
+            assert StorageKey.Bytes2IntHash(key.chunk_hash) == chunk_hash
 
 
 # ==============================================================================

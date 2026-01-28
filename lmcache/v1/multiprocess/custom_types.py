@@ -150,7 +150,6 @@ class IPCCacheEngineKey:
         return msgspec.msgpack.decode(data, type=IPCCacheEngineKey)
 
 
-
 @dataclass(order=True, frozen=True)
 class StorageKey:
     model_name: str
@@ -182,7 +181,6 @@ class StorageKey:
             worker_id=worker_id,
             chunk_hash=cls.IntHash2Bytes(chunk_hash),
         )
-
 
 
 # Type exports

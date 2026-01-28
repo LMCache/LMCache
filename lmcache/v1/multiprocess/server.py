@@ -52,15 +52,15 @@ def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
     )
 
 def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageKey]:
-    '''
+    """
     Converts a list of IPCCacheEngineKeys to a list of StorageKeys.
 
     When scheduler calls `lookup`, the corresponding IPCCacheEngineKey will have
     worker_id = None. In this case, this means "lookup the given model name and chunk
-    hash for ALL workers". 
+    hash for ALL workers".
 
     When worker calls `store` or `retrieve`, the corresponding IPCCacheEngineKey will have
-    worker_id != None. In this case, this means "store/retrieve the given model name and 
+    worker_id != None. In this case, this means "store/retrieve the given model name and
     chunk hash for the given worker".
 
     Args:
@@ -72,7 +72,7 @@ def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageK
 
     Raises:
         ValueError: If IPC keys have inconsistent world_size values
-    '''
+    """
     if not ipc_keys:
         return []
 
@@ -327,8 +327,8 @@ class MPCacheEngine:
         """
         st = time.perf_counter()
 
-        if not all(ipc_key.worker_id is not None for ipc_key in ipc_keys):
-            logger.warning("In vLLM, MPCacheEngine must store with worker_id != None")
+        assert all(ipc_key.worker_id is not None for ipc_key in ipc_keys), \
+            "Must store with worker_id != None"
 
         keys = ipc_keys_to_storage_keys(ipc_keys)
 

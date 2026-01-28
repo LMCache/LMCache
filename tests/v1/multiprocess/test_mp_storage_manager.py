@@ -740,7 +740,7 @@ class TestThreadSafety:
         def perform_operations(thread_id):
             for i in range(operations_per_thread):
                 keys = [
-                    IPCCacheEngineKey.from_int_hash(
+                    StorageKey.from_int_hash(
                         "model1", 1, 0, thread_id * 1000 + i * 10 + j
                     )
                     for j in range(3)
