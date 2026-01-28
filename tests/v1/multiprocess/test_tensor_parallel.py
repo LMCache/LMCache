@@ -11,7 +11,7 @@ Key scenarios tested:
 - TP=2 with both workers having all chunks cached
 - TP=2 with only one worker having cache (asymmetric)
 - TP=2 with different partial hits across workers
-- The ipc_keys_to_storage_keys conversion function
+- Various world sizes (TP=1, TP=2, TP=4, TP=8)
 """
 
 # Standard
@@ -24,9 +24,7 @@ import torch
 # First Party
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheEngineKey,
     StorageKey,
-    ipc_keys_to_storage_keys,
 )
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 
@@ -66,21 +64,6 @@ def test_format():
 # ==============================================================================
 
 
-def create_ipc_key(
-    chunk_hash: int,
-    worker_id: int | None = None,
-    world_size: int = 2,
-    model_name: str = "test_model",
-) -> IPCCacheEngineKey:
-    """Create an IPCCacheEngineKey for testing."""
-    return IPCCacheEngineKey.from_int_hash(
-        model_name=model_name,
-        world_size=world_size,
-        worker_id=worker_id,
-        chunk_hash=chunk_hash,
-    )
-
-
 def create_storage_key(
     chunk_hash: int,
     worker_id: int,
@@ -96,131 +79,33 @@ def create_storage_key(
     )
 
 
-# ==============================================================================
-# Tests for ipc_keys_to_storage_keys function
-# ==============================================================================
+def create_interleaved_lookup_keys(
+    num_chunks: int,
+    world_size: int,
+    model_name: str = "test_model",
+) -> list[StorageKey]:
+    """
+    Create interleaved lookup keys for scheduler-style TP lookup.
 
+    The order matches what the scheduler expects:
+    [chunk0_worker0, chunk0_worker1, ..., chunk0_workerN,
+     chunk1_worker0, chunk1_worker1, ..., chunk1_workerN, ...]
 
-class TestIpcKeysToStorageKeys:
-    """Tests for the ipc_keys_to_storage_keys conversion function."""
-
-    def test_empty_keys(self):
-        """Test conversion with empty key list."""
-        result = ipc_keys_to_storage_keys([])
-        assert result == []
-
-    def test_single_key_with_worker_id(self):
-        """Test conversion of a single key with specific worker_id."""
-        ipc_key = create_ipc_key(chunk_hash=100, worker_id=0, world_size=2)
-        result = ipc_keys_to_storage_keys([ipc_key])
-
-        assert len(result) == 1
-        assert result[0].worker_id == 0
-        assert result[0].chunk_hash == ipc_key.chunk_hash
-
-    def test_single_key_with_none_worker_id_tp2(self):
-        """Test conversion of a single key with worker_id=None (TP=2)."""
-        ipc_key = create_ipc_key(chunk_hash=100, worker_id=None, world_size=2)
-        result = ipc_keys_to_storage_keys([ipc_key])
-
-        assert len(result) == 2
-        assert result[0].worker_id == 0
-        assert result[1].worker_id == 1
-        # Both should have the same chunk_hash
-        assert result[0].chunk_hash == ipc_key.chunk_hash
-        assert result[1].chunk_hash == ipc_key.chunk_hash
-
-    def test_single_key_with_none_worker_id_tp4(self):
-        """Test conversion of a single key with worker_id=None (TP=4)."""
-        ipc_key = create_ipc_key(chunk_hash=100, worker_id=None, world_size=4)
-        result = ipc_keys_to_storage_keys([ipc_key])
-
-        assert len(result) == 4
-        for i in range(4):
-            assert result[i].worker_id == i
-            assert result[i].chunk_hash == ipc_key.chunk_hash
-
-    def test_multiple_keys_with_none_worker_id(self):
-        """Test conversion of multiple keys with worker_id=None (TP=2)."""
-        ipc_keys = [
-            create_ipc_key(chunk_hash=100, worker_id=None, world_size=2),
-            create_ipc_key(chunk_hash=101, worker_id=None, world_size=2),
-            create_ipc_key(chunk_hash=102, worker_id=None, world_size=2),
-        ]
-        result = ipc_keys_to_storage_keys(ipc_keys)
-
-        # 3 IPC keys * 2 workers = 6 storage keys
-        assert len(result) == 6
-
-        # Check ordering: [chunk0_worker0, chunk0_worker1, chunk1_worker0, ...]
-        expected_order = [
-            (100, 0),
-            (100, 1),
-            (101, 0),
-            (101, 1),
-            (102, 0),
-            (102, 1),
-        ]
-        for i, (chunk_hash, worker_id) in enumerate(expected_order):
-            assert StorageKey.Bytes2IntHash(result[i].chunk_hash) == chunk_hash
-            assert result[i].worker_id == worker_id
-
-    def test_mixed_keys_with_and_without_worker_id(self):
-        """Test conversion of mixed keys (some with worker_id, some without)."""
-        ipc_keys = [
-            create_ipc_key(chunk_hash=100, worker_id=0, world_size=2),
-            create_ipc_key(chunk_hash=101, worker_id=None, world_size=2),
-        ]
-        result = ipc_keys_to_storage_keys(ipc_keys)
-
-        # First key: 1 storage key (worker_id=0)
-        # Second key: 2 storage keys (worker_id=0, 1)
-        assert len(result) == 3
-
-        assert result[0].worker_id == 0
-        assert StorageKey.Bytes2IntHash(result[0].chunk_hash) == 100
-
-        assert result[1].worker_id == 0
-        assert StorageKey.Bytes2IntHash(result[1].chunk_hash) == 101
-
-        assert result[2].worker_id == 1
-        assert StorageKey.Bytes2IntHash(result[2].chunk_hash) == 101
-
-    def test_inconsistent_world_size_raises_error(self):
-        """Test that inconsistent world_size values raise ValueError."""
-        ipc_keys = [
-            create_ipc_key(chunk_hash=100, worker_id=None, world_size=2),
-            create_ipc_key(chunk_hash=101, worker_id=None, world_size=4),
-        ]
-        with pytest.raises(ValueError, match="same world_size"):
-            ipc_keys_to_storage_keys(ipc_keys)
-
-
-# ==============================================================================
-# Tests for IPCCacheEngineKey.no_worker_id_version()
-# ==============================================================================
-
-
-class TestIPCCacheEngineKeyNoWorkerIdVersion:
-    """Tests for the no_worker_id_version() method."""
-
-    def test_converts_worker_id_to_none(self):
-        """Test that no_worker_id_version converts worker_id to None."""
-        key = create_ipc_key(chunk_hash=100, worker_id=1, world_size=2)
-        no_worker_key = key.no_worker_id_version()
-
-        assert no_worker_key.worker_id is None
-        assert no_worker_key.model_name == key.model_name
-        assert no_worker_key.world_size == key.world_size
-        assert no_worker_key.chunk_hash == key.chunk_hash
-
-    def test_already_none_remains_none(self):
-        """Test that a key with worker_id=None remains unchanged."""
-        key = create_ipc_key(chunk_hash=100, worker_id=None, world_size=2)
-        no_worker_key = key.no_worker_id_version()
-
-        assert no_worker_key.worker_id is None
-        assert no_worker_key == key
+    This simulates the key expansion that happens for scheduler lookups
+    where worker_id=None gets expanded to all workers.
+    """
+    keys = []
+    for chunk_idx in range(num_chunks):
+        for worker_id in range(world_size):
+            keys.append(
+                create_storage_key(
+                    chunk_hash=chunk_idx,
+                    worker_id=worker_id,
+                    world_size=world_size,
+                    model_name=model_name,
+                )
+            )
+    return keys
 
 
 # ==============================================================================
@@ -259,14 +144,8 @@ class TestStorageManagerTPLookup:
             )
             storage_manager.commit(handle)
 
-        # Create IPC keys for scheduler lookup (worker_id=None)
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(num_chunks)
-        ]
-
-        # Convert to storage keys and lookup
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Create interleaved lookup keys for scheduler-style lookup
+        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         found_count = storage_manager.lookup(lookup_keys)
 
         # All keys should be found (5 chunks * 2 workers = 10)
@@ -296,14 +175,8 @@ class TestStorageManagerTPLookup:
         )
         storage_manager.commit(handle)
 
-        # Create IPC keys for scheduler lookup (worker_id=None)
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(num_chunks)
-        ]
-
-        # Convert to storage keys and lookup
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Create interleaved lookup keys for scheduler-style lookup
+        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         found_count = storage_manager.lookup(lookup_keys)
 
         # Only worker 0's first chunk is found, then lookup stops
@@ -337,14 +210,8 @@ class TestStorageManagerTPLookup:
         )
         storage_manager.commit(handle)
 
-        # Create IPC keys for scheduler lookup (worker_id=None)
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(num_chunks)
-        ]
-
-        # Convert to storage keys and lookup
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Create interleaved lookup keys for scheduler-style lookup
+        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         found_count = storage_manager.lookup(lookup_keys)
 
         # First lookup key is chunk0_worker0 which is missing
@@ -378,13 +245,8 @@ class TestStorageManagerTPLookup:
             )
             storage_manager.commit(handle)
 
-        # Request 5 chunks with scheduler lookup
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(num_requested_chunks)
-        ]
-
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Request 5 chunks with scheduler-style interleaved lookup
+        lookup_keys = create_interleaved_lookup_keys(num_requested_chunks, world_size)
         found_count = storage_manager.lookup(lookup_keys)
 
         # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
@@ -425,13 +287,8 @@ class TestStorageManagerTPLookup:
         )
         storage_manager.commit(handle)
 
-        # Request 5 chunks with scheduler lookup
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(5)
-        ]
-
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Request 5 chunks with scheduler-style interleaved lookup
+        lookup_keys = create_interleaved_lookup_keys(5, world_size)
         found_count = storage_manager.lookup(lookup_keys)
 
         # Lookup order:
@@ -471,13 +328,8 @@ class TestStorageManagerTPLookup:
             )
             storage_manager.commit(handle)
 
-        # Scheduler lookup
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(num_chunks)
-        ]
-
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Scheduler-style interleaved lookup
+        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         found_count = storage_manager.lookup(lookup_keys)
 
         # All keys found: 3 chunks * 4 workers = 12
@@ -509,13 +361,8 @@ class TestStorageManagerTPLookup:
             )
             storage_manager.commit(handle)
 
-        # Scheduler lookup
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(num_chunks)
-        ]
-
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Scheduler-style interleaved lookup
+        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         found_count = storage_manager.lookup(lookup_keys)
 
         # Lookup order: chunk0_w0, chunk0_w1, chunk0_w2, chunk0_w3, ...
@@ -616,66 +463,96 @@ class TestStorageManagerTPStoreRetrieve:
 class TestTPEdgeCases:
     """Edge case tests for tensor parallel support."""
 
-    def test_world_size_1_no_expansion(self):
-        """Test that world_size=1 (no TP) doesn't expand keys unnecessarily."""
-        ipc_key = create_ipc_key(chunk_hash=100, worker_id=None, world_size=1)
-        result = ipc_keys_to_storage_keys([ipc_key])
+    def test_world_size_1_stores_and_retrieves(
+        self, storage_manager, test_shape, test_dtype, test_format
+    ):
+        """
+        Test that world_size=1 (no TP) works correctly through the API.
+        Single worker stores and retrieves data successfully.
+        """
+        world_size = 1
+        num_chunks = 3
 
-        assert len(result) == 1
-        assert result[0].worker_id == 0
+        # Store chunks for worker 0
+        storage_keys = [
+            create_storage_key(
+                chunk_hash=i, worker_id=0, world_size=world_size
+            )
+            for i in range(num_chunks)
+        ]
+        handle, _ = storage_manager.reserve(
+            storage_keys, test_shape, test_dtype, test_format
+        )
+        storage_manager.commit(handle)
 
-    def test_large_world_size(self):
-        """Test with larger world_size (TP=8)."""
+        # Lookup should find all chunks
+        found_count = storage_manager.lookup(storage_keys)
+        assert found_count == num_chunks
+
+        # Retrieve should work
+        with storage_manager.retrieve(storage_keys) as objs:
+            assert len(objs) == num_chunks
+
+    def test_large_world_size_tp8(
+        self, storage_manager, test_shape, test_dtype, test_format
+    ):
+        """
+        Test with larger world_size (TP=8) through the API.
+        All 8 workers store and lookup works correctly.
+        """
         world_size = 8
-        ipc_key = create_ipc_key(chunk_hash=100, worker_id=None, world_size=world_size)
-        result = ipc_keys_to_storage_keys([ipc_key])
+        num_chunks = 3
 
-        assert len(result) == world_size
-        for i in range(world_size):
-            assert result[i].worker_id == i
+        # Store chunks for all workers
+        for worker_id in range(world_size):
+            storage_keys = [
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
+                for i in range(num_chunks)
+            ]
+            handle, _ = storage_manager.reserve(
+                storage_keys, test_shape, test_dtype, test_format
+            )
+            storage_manager.commit(handle)
 
-    def test_storage_key_requires_worker_id(self):
-        """Test that StorageKey always has integer worker_id (not None)."""
-        key = create_storage_key(chunk_hash=100, worker_id=0, world_size=2)
-        assert isinstance(key.worker_id, int)
-        assert key.worker_id == 0
+        # Create interleaved lookup keys (simulating scheduler lookup)
+        # Order: [chunk0_w0, chunk0_w1, ..., chunk0_w7, chunk1_w0, ...]
+        lookup_keys = []
+        for chunk_idx in range(num_chunks):
+            for worker_id in range(world_size):
+                lookup_keys.append(
+                    create_storage_key(
+                        chunk_hash=chunk_idx, worker_id=worker_id, world_size=world_size
+                    )
+                )
 
-    def test_ipc_key_serialization_with_none_worker_id(self):
-        """Test that IPCCacheEngineKey with worker_id=None serializes correctly."""
-        key = create_ipc_key(chunk_hash=100, worker_id=None, world_size=2)
+        # All keys should be found
+        found_count = storage_manager.lookup(lookup_keys)
+        assert found_count == num_chunks * world_size
 
-        # Serialize
-        encoded = IPCCacheEngineKey.Serialize(key)
+        # Verify retrieval for each worker
+        for worker_id in range(world_size):
+            worker_keys = [
+                create_storage_key(
+                    chunk_hash=i, worker_id=worker_id, world_size=world_size
+                )
+                for i in range(num_chunks)
+            ]
+            with storage_manager.retrieve(worker_keys) as objs:
+                assert len(objs) == num_chunks
 
-        # Deserialize
-        decoded = IPCCacheEngineKey.Deserialize(encoded)
-
-        assert decoded.worker_id is None
-        assert decoded.world_size == key.world_size
-        assert decoded.chunk_hash == key.chunk_hash
-
-    def test_ipc_key_serialization_with_int_worker_id(self):
-        """Test that IPCCacheEngineKey with integer worker_id serializes correctly."""
-        key = create_ipc_key(chunk_hash=100, worker_id=1, world_size=2)
-
-        # Serialize
-        encoded = IPCCacheEngineKey.Serialize(key)
-
-        # Deserialize
-        decoded = IPCCacheEngineKey.Deserialize(encoded)
-
-        assert decoded.worker_id == 1
-        assert decoded.world_size == key.world_size
-        assert decoded.chunk_hash == key.chunk_hash
-
-    def test_all_workers_same_chunk_different_keys(self):
+    def test_all_workers_same_chunk_different_keys(
+        self, storage_manager, test_shape, test_dtype, test_format
+    ):
         """
         Test that same chunk_hash with different worker_ids creates
-        distinct storage keys.
+        distinct entries in storage and can be stored/retrieved independently.
         """
         world_size = 4
         chunk_hash = 42
 
+        # Create storage keys for all workers with same chunk_hash
         storage_keys = [
             create_storage_key(
                 chunk_hash=chunk_hash, worker_id=i, world_size=world_size
@@ -686,9 +563,25 @@ class TestTPEdgeCases:
         # All keys should be distinct
         assert len(set(storage_keys)) == world_size
 
-        # But all share the same chunk_hash
-        for key in storage_keys:
-            assert StorageKey.Bytes2IntHash(key.chunk_hash) == chunk_hash
+        # Store all keys
+        handle, reserved = storage_manager.reserve(
+            storage_keys, test_shape, test_dtype, test_format
+        )
+        assert len(reserved) == world_size
+        storage_manager.commit(handle)
+
+        # Lookup all keys
+        found_count = storage_manager.lookup(storage_keys)
+        assert found_count == world_size
+
+        # Retrieve each worker's key independently
+        for worker_id in range(world_size):
+            worker_key = create_storage_key(
+                chunk_hash=chunk_hash, worker_id=worker_id, world_size=world_size
+            )
+            with storage_manager.retrieve([worker_key]) as objs:
+                assert len(objs) == 1
+                assert objs[0] is not None
 
 
 # ==============================================================================
@@ -706,7 +599,7 @@ class TestTPIntegration:
         Simulate a full TP=2 workflow:
         1. Worker 0 stores chunks 0, 1, 2
         2. Worker 1 stores chunks 0, 1, 2
-        3. Scheduler looks up chunks 0, 1, 2, 3, 4
+        3. Scheduler looks up chunks 0, 1, 2, 3, 4 (interleaved for all workers)
         4. Verify correct hit count
         5. Workers retrieve their respective chunks
         """
@@ -728,24 +621,27 @@ class TestTPIntegration:
             assert len(reserved) == stored_chunks
             storage_manager.commit(handle)
 
-        # Step 3: Scheduler lookup
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(requested_chunks)
-        ]
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Step 3: Scheduler lookup with interleaved keys
+        # Order: [chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, ...]
+        lookup_keys = []
+        for chunk_idx in range(requested_chunks):
+            for worker_id in range(world_size):
+                lookup_keys.append(
+                    create_storage_key(
+                        chunk_hash=chunk_idx,
+                        worker_id=worker_id,
+                        world_size=world_size,
+                    )
+                )
         found_count = storage_manager.lookup(lookup_keys)
 
         # Step 4: Verify hit count
+        # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
+        assert found_count == stored_chunks * world_size
+
+        # Compute number of complete IPC-level hits
         found_ipc_count = found_count // world_size
         assert found_ipc_count == stored_chunks
-        expected_result = [True] * stored_chunks + [False] * (
-            requested_chunks - stored_chunks
-        )
-        actual_result = [True] * found_ipc_count + [False] * (
-            requested_chunks - found_ipc_count
-        )
-        assert actual_result == expected_result
 
         # Step 5: Workers retrieve their chunks
         for worker_id in range(world_size):
@@ -797,11 +693,16 @@ class TestTPIntegration:
         assert results[0] == num_chunks
         assert results[1] == num_chunks
 
-        # Verify lookup works
-        ipc_keys = [
-            create_ipc_key(chunk_hash=i, worker_id=None, world_size=world_size)
-            for i in range(num_chunks)
-        ]
-        lookup_keys = ipc_keys_to_storage_keys(ipc_keys)
+        # Verify lookup works with interleaved keys
+        lookup_keys = []
+        for chunk_idx in range(num_chunks):
+            for worker_id in range(world_size):
+                lookup_keys.append(
+                    create_storage_key(
+                        chunk_hash=chunk_idx,
+                        worker_id=worker_id,
+                        world_size=world_size,
+                    )
+                )
         found_count = storage_manager.lookup(lookup_keys)
         assert found_count == num_chunks * world_size
