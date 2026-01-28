@@ -45,6 +45,7 @@ class _Entry:
 class _Inflight:
     offset: int
     meta: DiskCacheMetadata
+    canceled: bool = False
 
 
 class RustRawBlockBackend(StoragePluginInterface):
@@ -312,17 +313,22 @@ class RustRawBlockBackend(StoragePluginInterface):
             return key in self._index
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
-        """Remove key from index and reclaim slot for reuse."""
+        """Remove key from index and reclaim slot for reuse.
+
+        If the key is currently in-flight, defer slot reuse until the
+        async write completes to avoid reusing the same offset while the
+        write is still running.
+        """
         with self._lock:
             existed = key in self._index or key in self._inflight
             entry = self._index.pop(key, None)
-            inflight = self._inflight.pop(key, None)
+            inflight = self._inflight.get(key)
             self._pinned.discard(key)
             self._lru.pop(key, None)
             if entry is not None:
                 self._free_slots.append(int(entry.offset // self.slot_bytes))
             if inflight is not None:
-                self._free_slots.append(int(inflight.offset // self.slot_bytes))
+                inflight.canceled = True
             return existed
 
     def batched_submit_put_task(
@@ -446,12 +452,17 @@ class RustRawBlockBackend(StoragePluginInterface):
             with self._lock:
                 inflight = self._inflight.pop(key, None)
                 if inflight is not None:
-                    self._index[key] = _Entry(
-                        offset=inflight.offset,
-                        size=inflight.meta.size,
-                        meta=inflight.meta,
-                    )
-                    self._touch(key)
+                    if inflight.canceled:
+                        self._free_slots.append(
+                            int(inflight.offset // self.slot_bytes)
+                        )
+                    else:
+                        self._index[key] = _Entry(
+                            offset=inflight.offset,
+                            size=inflight.meta.size,
+                            meta=inflight.meta,
+                        )
+                        self._touch(key)
 
             self._maybe_save_manifest()
             if on_complete_callback is not None:
