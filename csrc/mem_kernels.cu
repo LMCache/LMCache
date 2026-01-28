@@ -191,9 +191,9 @@ __device__ __forceinline__ int64_t page_buffer_offset(
 }
 
 __device__ __forceinline__ int64_t cross_layers_page_buffer_offset(
-    const int k_or_v, const int token_idx, const int scalar_offset,
+    const int k_or_v, const int slot_idx, const int scalar_offset,
     const int scalars_per_token, const int page_buffer_size,
-    const int page_size, const int num_layers) {
+    const int page_size, const int num_layers, const int layer_id) {
   const int page_id = (int)(slot_idx / page_size);
   const int within = (int)(slot_idx % page_size);
   const int64_t page_stride = (int64_t)num_layers * 2LL * (int64_t)page_size *
@@ -203,7 +203,7 @@ __device__ __forceinline__ int64_t cross_layers_page_buffer_offset(
   const int64_t kv_stride = (int64_t)page_size * (int64_t)scalars_per_token;
   return (int64_t)page_id * page_stride + (int64_t)layer_id * layer_stride +
          (int64_t)k_or_v * kv_stride +
-         (int64_t)within * (int64_t)scalars_per_token + i;
+         (int64_t)within * (int64_t)scalars_per_token + scalar_offset;
 }
 
 __device__ __forceinline__ int64_t page_buffer_offset_unilateral(
@@ -307,7 +307,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
 
     const int64_t vllm_offset = cross_layers_page_buffer_offset(
         k_or_v, slot_idx, i, scalars_per_token, page_buffer_size, page_size,
-        num_layers);
+        num_layers, layer_id);
 
     if (DIRECTION)  // 1 is paged buffer to LMCache
       key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];

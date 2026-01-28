@@ -376,11 +376,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.gpu_buffer.device == self.kvcaches.device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                logger.info(f"tmp_gpu_buffer: {tmp_gpu_buffer}")
-                logger.info(f"kv_cache_pointers: {kv_cache_pointers}")
-                logger.info(f"slot_mapping slice: {slot_mapping[start:end]}")
-                logger.info(f"page_buffer_size: {self.page_buffer_size}")
-                logger.info(f"use_mla: {self.use_mla}")
                 lmc_ops.multi_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
