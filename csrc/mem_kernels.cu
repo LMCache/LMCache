@@ -190,6 +190,22 @@ __device__ __forceinline__ int64_t page_buffer_offset(
          token_idx * scalars_per_token + scalar_offset;
 }
 
+__device__ __forceinline__ int64_t cross_layers_page_buffer_offset(
+    const int k_or_v, const int token_idx, const int scalar_offset,
+    const int scalars_per_token, const int page_buffer_size,
+    const int page_size, const int num_layers) {
+  const int page_id = (int)(slot_idx / page_size);
+  const int within = (int)(slot_idx % page_size);
+  const int64_t page_stride = (int64_t)num_layers * 2LL * (int64_t)page_size *
+                              (int64_t)scalars_per_token;
+  const int64_t layer_stride =
+      2LL * (int64_t)page_size * (int64_t)scalars_per_token;
+  const int64_t kv_stride = (int64_t)page_size * (int64_t)scalars_per_token;
+  return (int64_t)page_id * page_stride + (int64_t)layer_id * layer_stride +
+         (int64_t)k_or_v * kv_stride +
+         (int64_t)within * (int64_t)scalars_per_token + i;
+}
+
 __device__ __forceinline__ int64_t page_buffer_offset_unilateral(
     const int token_idx, const int scalar_offset, const int scalars_per_token) {
   return token_idx * scalars_per_token + scalar_offset;
@@ -277,33 +293,26 @@ __global__ void load_and_reshape_multi_layer_kernel(
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
-  scalar_t* base_ptr = paged_buffer_ptrs[0];
+  scalar_t* paged_buffer_ptr = paged_buffer_ptrs[0];
 
-  if (slot_idx < 0) return;
+  if (slot_idx < 0) {
+    return;
+  }
 
-  const int page_id = (int)(slot_idx / page_size);
-  const int within = (int)(slot_idx % page_size);
-
-  const int64_t page_stride = (int64_t)num_layers * 2LL * (int64_t)page_size *
-                              (int64_t)scalars_per_token;
-  const int64_t layer_stride =
-      2LL * (int64_t)page_size * (int64_t)scalars_per_token;
-  const int64_t kv_stride = (int64_t)page_size * (int64_t)scalars_per_token;
-
+  /** Copy the data from page buffer to key_value **/
   for (int i = tid; i < scalars_per_token; i += num_threads) {
     const int64_t lmcache_offset =
         key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
                          num_tokens, num_layers);
 
-    const int64_t vllm_offset =
-        (int64_t)page_id * page_stride + (int64_t)layer_id * layer_stride +
-        (int64_t)k_or_v * kv_stride +
-        (int64_t)within * (int64_t)scalars_per_token + i;
+    const int64_t vllm_offset = cross_layers_page_buffer_offset(
+        k_or_v, slot_idx, i, scalars_per_token, page_buffer_size, page_size,
+        num_layers);
 
-    if (DIRECTION)
-      key_value[lmcache_offset] = base_ptr[vllm_offset];
-    else
-      base_ptr[vllm_offset] = key_value[lmcache_offset];
+    if (DIRECTION)  // 1 is paged buffer to LMCache
+      key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
+    else  // 0 is LMCache to paged buffer
+      paged_buffer_ptr[vllm_offset] = key_value[lmcache_offset];
   }
 }
 
