@@ -269,7 +269,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
                                                 // scalars_per_token]
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
-    const int page_buffer_size) {
+    const int page_buffer_size, const int page_size) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
   const int k_or_v = blockIdx.z;
@@ -277,25 +277,33 @@ __global__ void load_and_reshape_multi_layer_kernel(
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
-  scalar_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
+  scalar_t* base_ptr = paged_buffer_ptrs[0];
 
-  if (slot_idx < 0) {
-    return;
-  }
+  if (slot_idx < 0) return;
 
-  /** Copy the data from page buffer to key_value **/
+  const int page_id = (int)(slot_idx / page_size);
+  const int within = (int)(slot_idx % page_size);
+
+  const int64_t page_stride = (int64_t)num_layers * 2LL * (int64_t)page_size *
+                              (int64_t)scalars_per_token;
+  const int64_t layer_stride =
+      2LL * (int64_t)page_size * (int64_t)scalars_per_token;
+  const int64_t kv_stride = (int64_t)page_size * (int64_t)scalars_per_token;
+
   for (int i = tid; i < scalars_per_token; i += num_threads) {
     const int64_t lmcache_offset =
         key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
                          num_tokens, num_layers);
 
-    const int64_t vllm_offset = page_buffer_offset(
-        k_or_v, slot_idx, i, scalars_per_token, page_buffer_size);
+    const int64_t vllm_offset =
+        (int64_t)page_id * page_stride + (int64_t)layer_id * layer_stride +
+        (int64_t)k_or_v * kv_stride +
+        (int64_t)within * (int64_t)scalars_per_token + i;
 
-    if (DIRECTION)  // 1 is paged buffer to LMCache
-      key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
-    else  // 0 is LMCache to paged buffer
-      paged_buffer_ptr[vllm_offset] = key_value[lmcache_offset];
+    if (DIRECTION)
+      key_value[lmcache_offset] = base_ptr[vllm_offset];
+    else
+      base_ptr[vllm_offset] = key_value[lmcache_offset];
   }
 }
 
@@ -407,7 +415,7 @@ void multi_layer_kv_transfer_templated(
     const torch::Tensor& key_value_ptrs,  // [num_layers]
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
-    const bool direction, const bool use_mla) {
+    const int page_size, const bool direction, const bool use_mla) {
   T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
   T** page_buffer_ptrs =
       get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
@@ -435,13 +443,13 @@ void multi_layer_kv_transfer_templated(
     lmc::load_and_reshape_multi_layer_kernel<T, false>
         <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
                                      slot_mapping_ptr, num_xwords, num_tokens,
-                                     num_layers, page_buffer_size);
+                                     num_layers, page_buffer_size, page_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
     lmc::load_and_reshape_multi_layer_kernel<T, true>
         <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
                                      slot_mapping_ptr, num_xwords, num_tokens,
-                                     num_layers, page_buffer_size);
+                                     num_layers, page_buffer_size, page_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 }
@@ -453,8 +461,8 @@ void multi_layer_kv_transfer(torch::Tensor& key_value,
                              const torch::Tensor& key_value_ptrs,
                              const torch::Tensor& slot_mapping,
                              const torch::Device& paged_memory_device,
-                             const int page_buffer_size, const bool direction,
-                             const bool use_mla) {
+                             const int page_buffer_size, const int page_size,
+                             const bool direction, const bool use_mla) {
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
@@ -462,7 +470,7 @@ void multi_layer_kv_transfer(torch::Tensor& key_value,
     do {                                                                \
       multi_layer_kv_transfer_templated<type>(                          \
           key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
-          page_buffer_size, direction, use_mla);                        \
+          page_buffer_size, page_size, direction, use_mla);             \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
@@ -513,9 +521,7 @@ void multi_layer_kv_transfer_unilateral(
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla) {
   if (use_mla) {
-    return multi_layer_kv_transfer(key_value, key_value_ptrs, slot_mapping,
-                                   paged_memory_device, page_buffer_size,
-                                   direction, use_mla);
+    TORCH_CHECK(false, "MLA not supported for unilateral path.");
   }
 
   int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);

@@ -330,7 +330,7 @@ class LMCacheManager:
 
         # Create GPU connector
         vllm_gpu_connector = self._create_gpu_connector(
-            role, use_mla, metadata, device, current_platform, cache_config.block_size
+            role, use_mla, metadata, device, current_platform
         )
 
         # Get tensor parallel group
@@ -428,14 +428,12 @@ class LMCacheManager:
 
         return device, torch_dev, dev_name
 
-    def _create_gpu_connector(
-        self, role, use_mla, metadata, device, current_platform, block_size
-    ):
+    def _create_gpu_connector(self, role, use_mla, metadata, device, current_platform):
         """Create the GPU connector based on configuration."""
         # First Party
         from lmcache.v1.gpu_connector import (
             VLLMBufferLayerwiseGPUConnector,
-            VLLMCrossLayersGPUConnector,
+            VLLMPagedMemGPUConnectorV2,
             VLLMPagedMemGPUConnectorV3,
             VLLMPagedMemLayerwiseGPUConnector,
         )
@@ -462,8 +460,8 @@ class LMCacheManager:
                     metadata, use_gpu, device
                 )
             else:  # TODO (Shaoting): Design an entrypoint
-                return VLLMCrossLayersGPUConnector.from_metadata(
-                    metadata, block_size, use_gpu, device
+                return VLLMPagedMemGPUConnectorV2.from_metadata(
+                    metadata, use_gpu, device
                 )
         elif current_platform.is_xpu():
             return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)

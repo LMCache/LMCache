@@ -191,15 +191,13 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
-        self.kv_cache_pointers = torch.empty(
-            num_layers, dtype=torch.int64, device="cpu"
-        )
+        self.kv_cache_pointers = torch.empty(1, dtype=torch.int64, device="cpu")
         # Not sure we need a dict here. Maybe a single GPU connector always
         # works with a single device?
         self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
 
-        self.kvcaches: Optional[List[torch.Tensor]] = None
+        self.kvcaches: Optional[torch.Tensor] = None
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
@@ -254,25 +252,25 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             use_mla=metadata.use_mla,
         )
 
-    def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        self.device = kv_caches[0].device
+    def _initialize_pointers(self, kv_caches: torch.Tensor) -> torch.Tensor:
+        self.device = kv_caches.device
         assert self.device.type == "cuda", "The device should be CUDA."
         idx = self.device.index
         if idx in self.kv_cache_pointers_on_gpu:
             return self.kv_cache_pointers_on_gpu[idx]
-        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+        self.kv_cache_pointers[0] = kv_caches.data_ptr()
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-            self.num_layers, dtype=torch.int64, device=self.device
+            1, dtype=torch.int64, device=self.device
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         if self.use_mla:
-            # kv_caches[0].shape: [num_pages, page_size, head_size]
-            assert kv_caches[0].dim() == 3
-            self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
+            raise NotImplementedError("MLA not supported for cross-layer yet.")
         else:
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
-            assert kv_caches[0].dim() == 5
-            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+            # kv_caches.shape: [num_pages, num_layers, 2, page_size,
+            # num_heads, head_size]
+            assert kv_caches.dim() == 6
+            self.page_buffer_size = kv_caches.shape[0] * kv_caches.shape[3]
+            self.page_size = kv_caches.shape[3]
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -303,11 +301,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
 
         if self.use_mla:
-            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
-                raise ValueError(
-                    "The memory object should be in KV_MLA_FMT format in"
-                    " order to be processed by VLLMPagedMemGPUConnector"
-                )
+            raise NotImplementedError("MLA not supported for cross-layer yet.")
         else:
             if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
                 raise ValueError(
@@ -328,6 +322,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             slot_mapping[start:end],
             self.device,
             self.page_buffer_size,
+            self.page_size,
             False,
             self.use_mla,
         )
@@ -371,21 +366,28 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     memory_obj.tensor,
                     kv_cache_pointers,
                     slot_mapping[start:end],
-                    self.kvcaches[0].device,
+                    self.kvcaches.device,
                     self.page_buffer_size,
+                    self.page_size,
                     True,
                     self.use_mla,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
-                assert self.gpu_buffer.device == self.kvcaches[0].device
+                assert self.gpu_buffer.device == self.kvcaches.device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+                logger.info(f"tmp_gpu_buffer: {tmp_gpu_buffer}")
+                logger.info(f"kv_cache_pointers: {kv_cache_pointers}")
+                logger.info(f"slot_mapping slice: {slot_mapping[start:end]}")
+                logger.info(f"page_buffer_size: {self.page_buffer_size}")
+                logger.info(f"use_mla: {self.use_mla}")
                 lmc_ops.multi_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
                     slot_mapping[start:end],
-                    self.kvcaches[0].device,
+                    self.kvcaches.device,
                     self.page_buffer_size,
+                    self.page_size,
                     True,
                     self.use_mla,
                 )
@@ -398,7 +400,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.store_stream.synchronize()
 
         if self.use_mla:
-            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
+            raise NotImplementedError("MLA not supported for cross-layer yet.")
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
