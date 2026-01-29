@@ -209,6 +209,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
+    "pd_retrieve_locations": {"type": Optional[list[str]], "default": None},
+    "pd_store_location": {"type": Optional[str], "default": None},
     # Transfer-related configurations
     "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
     # Nixl-related configurations
@@ -523,11 +525,6 @@ def _validate_config(self):
         assert self.pd_role is not None
         assert self.pd_buffer_size is not None
         assert self.pd_buffer_device is not None
-
-        assert self.remote_url is None, "PD only supports remote_url=None"
-        assert self.save_decode_cache is False, (
-            "PD only supports save_decode_cache=False"
-        )
         assert self.enable_p2p is False, "PD only supports enable_p2p=False"
 
         # PD requires save_unfull_chunk=True for complete KV cache transfer
