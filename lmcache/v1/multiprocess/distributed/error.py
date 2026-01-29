@@ -26,7 +26,7 @@ class L1ObjectManagerError(enum.IntFlag):
     combining multiple error flags into a single value.
     """
 
-    SUCCESS = enum.auto()
+    SUCCESS = 0x00
     """ Operation succeeded. """
 
     KEYS_NOT_FOUND = enum.auto()

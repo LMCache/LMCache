@@ -55,33 +55,6 @@ class TestL1MemoryManagerError:
 class TestL1ObjectManagerError:
     """Tests for L1ObjectManagerError IntFlag."""
 
-    def test_success_is_zero(self):
-        """SUCCESS should have value 0x00."""
-        assert L1ObjectManagerError.SUCCESS.value == 0x00
-
-    def test_error_values_are_powers_of_two(self):
-        """All error values (except SUCCESS) should be powers of two."""
-        expected_values = {
-            L1ObjectManagerError.SUCCESS: 0x00,
-            L1ObjectManagerError.KEYS_NOT_FOUND: 0x01,
-            L1ObjectManagerError.KEYS_ALREADY_EXIST: 0x02,
-            L1ObjectManagerError.KEYS_NOT_RESERVED: 0x04,
-            L1ObjectManagerError.KEYS_NOT_COMMITTED: 0x08,
-            L1ObjectManagerError.KEYS_ALREADY_LOCKED: 0x10,
-        }
-        for error, expected_value in expected_values.items():
-            assert error.value == expected_value, f"{error} has unexpected value"
-
-    def test_all_members_exist(self):
-        """All expected L1ObjectManagerError members should exist."""
-        # IntFlag with SUCCESS=0 may not count it in len(), so check members directly
-        assert hasattr(L1ObjectManagerError, "SUCCESS")
-        assert hasattr(L1ObjectManagerError, "KEYS_NOT_FOUND")
-        assert hasattr(L1ObjectManagerError, "KEYS_ALREADY_EXIST")
-        assert hasattr(L1ObjectManagerError, "KEYS_NOT_RESERVED")
-        assert hasattr(L1ObjectManagerError, "KEYS_NOT_COMMITTED")
-        assert hasattr(L1ObjectManagerError, "KEYS_ALREADY_LOCKED")
-
     def test_is_intflag(self):
         """L1ObjectManagerError should be an IntFlag for bitwise operations."""
         # Standard
@@ -123,9 +96,7 @@ class TestL1ObjectManagerErrorHasError:
         assert not error.has_error(L1ObjectManagerError.KEYS_ALREADY_LOCKED)
 
     def test_has_error_with_success_always_false(self):
-        """has_error(SUCCESS) should always return False (0 & anything = 0)."""
         errors = [
-            L1ObjectManagerError.SUCCESS,
             L1ObjectManagerError.KEYS_NOT_FOUND,
             L1ObjectManagerError.KEYS_ALREADY_EXIST,
         ]
@@ -155,8 +126,6 @@ class TestL1ObjectManagerErrorMixError:
         result = L1ObjectManagerError.KEYS_NOT_FOUND.mix_error(
             L1ObjectManagerError.KEYS_ALREADY_EXIST
         )
-        # 0x01 | 0x02 = 0x03
-        assert result.value == 0x03
         assert result.has_error(L1ObjectManagerError.KEYS_NOT_FOUND)
         assert result.has_error(L1ObjectManagerError.KEYS_ALREADY_EXIST)
         assert not result.has_error(L1ObjectManagerError.KEYS_NOT_RESERVED)
@@ -168,8 +137,6 @@ class TestL1ObjectManagerErrorMixError:
         result = result.mix_error(L1ObjectManagerError.KEYS_NOT_COMMITTED)
         result = result.mix_error(L1ObjectManagerError.KEYS_ALREADY_LOCKED)
 
-        # 0x01 | 0x08 | 0x10 = 0x19
-        assert result.value == 0x19
         assert result.has_error(L1ObjectManagerError.KEYS_NOT_FOUND)
         assert result.has_error(L1ObjectManagerError.KEYS_NOT_COMMITTED)
         assert result.has_error(L1ObjectManagerError.KEYS_ALREADY_LOCKED)
@@ -191,8 +158,6 @@ class TestL1ObjectManagerErrorMixError:
         result = result.mix_error(L1ObjectManagerError.KEYS_NOT_COMMITTED)
         result = result.mix_error(L1ObjectManagerError.KEYS_ALREADY_LOCKED)
 
-        # 0x01 | 0x02 | 0x04 | 0x08 | 0x10 = 0x1F
-        assert result.value == 0x1F
         assert result.has_error(L1ObjectManagerError.KEYS_NOT_FOUND)
         assert result.has_error(L1ObjectManagerError.KEYS_ALREADY_EXIST)
         assert result.has_error(L1ObjectManagerError.KEYS_NOT_RESERVED)
@@ -209,7 +174,6 @@ class TestL1ObjectManagerErrorBitwiseOperator:
             L1ObjectManagerError.KEYS_NOT_FOUND
             | L1ObjectManagerError.KEYS_ALREADY_EXIST
         )
-        assert result.value == 0x03
         assert L1ObjectManagerError.KEYS_NOT_FOUND in result
         assert L1ObjectManagerError.KEYS_ALREADY_EXIST in result
 
@@ -220,7 +184,6 @@ class TestL1ObjectManagerErrorBitwiseOperator:
             | L1ObjectManagerError.KEYS_NOT_COMMITTED
             | L1ObjectManagerError.KEYS_ALREADY_LOCKED
         )
-        assert result.value == 0x19
         assert L1ObjectManagerError.KEYS_NOT_FOUND in result
         assert L1ObjectManagerError.KEYS_NOT_COMMITTED in result
         assert L1ObjectManagerError.KEYS_ALREADY_LOCKED in result

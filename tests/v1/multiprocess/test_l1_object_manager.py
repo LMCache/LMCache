@@ -41,9 +41,15 @@ from lmcache.v1.multiprocess.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.distributed.config import L1ObjectManagerConfig
 from lmcache.v1.multiprocess.distributed.error import L1ObjectManagerError, strerror
 from lmcache.v1.multiprocess.distributed.internal_api import L1OperationResult
-from lmcache.v1.multiprocess.distributed.object_manager import (
-    L1ObjectManager,
-)
+
+try:
+    # First Party
+    from lmcache.v1.multiprocess.distributed.object_manager import (
+        L1ObjectManager,
+    )
+except ImportError:
+    # Skip tests if L1ObjectManager cannot be imported (missing compilation)
+    pytest.skip("L1ObjectManager not available", allow_module_level=True)
 
 # =============================================================================
 # Mock Classes for Testing

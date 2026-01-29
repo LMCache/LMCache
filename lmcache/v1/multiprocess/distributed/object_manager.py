@@ -199,17 +199,14 @@ class L1ObjectManager:
         # TTL:
         self._lock_ttl = config.lock_ttl_seconds
 
-    def _has_key(self, key: ObjectKey) -> int:
+    def _has_key(self, key: ObjectKey) -> bool:
         """Thread-safe function to check if the key exists in either reserved
         or committed dicts.
 
         Args:
             key: The key to check.
         Returns:
-            0 if the key does not exist,
-            1 if the key exists in reserved dict,
-            2 if the key exists in committed dict.
-
+            True if the key exists, False otherwise.
         Note:
             This function will acquire both reserved and committed locks.
         """
@@ -322,7 +319,7 @@ class L1ObjectManager:
             if not result.is_successful():
                 # Rollback
                 for key in result.success_keys:
-                    self._reserved[key].memory_obj = None
+                    self._reserved[key] = L1ObjectEntry.new_empty()
 
         # This part does not need to be in the lock
         if not result.is_successful():
@@ -395,8 +392,6 @@ class L1ObjectManager:
 
         Args:
             keys: The keys to mark as "reserved".
-            force: Use "FORCED" error handling semantics if True. Otherwise, use
-                   "ALL OR NOTHING" semantics (default)
 
         Returns:
             L1OperationResult with:
