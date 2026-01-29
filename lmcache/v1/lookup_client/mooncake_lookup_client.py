@@ -20,7 +20,6 @@ class MooncakeLookupClient(LookupClientInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
-        master_addr: str,
     ):
         # Third Party
         from mooncake.store import MooncakeDistributedStore
@@ -34,9 +33,10 @@ class MooncakeLookupClient(LookupClientInterface):
         mooncake_config = MooncakeStoreConfig.load_from_lmcache_config(config)
 
         logger.info(
-            "MooncakeLookupClient using configuration: hostname=%s, protocol=%s",
+            "MooncakeLookupClient using configuration: hostname=%s, protocol=%s, master_server=%s",
             mooncake_config.local_hostname or "(auto-detect)",
             mooncake_config.protocol,
+            mooncake_config.master_server_address,
         )
 
         self.store = MooncakeDistributedStore()
@@ -47,7 +47,7 @@ class MooncakeLookupClient(LookupClientInterface):
             mooncake_config.local_buffer_size,
             mooncake_config.protocol,
             mooncake_config.device_name,
-            master_addr,
+            mooncake_config.master_server_address,
         )
 
         # Initialize token database for processing tokens

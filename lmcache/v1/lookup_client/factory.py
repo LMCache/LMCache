@@ -178,10 +178,15 @@ class LookupClientFactory:
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ) -> "MooncakeLookupClient":
-        """Create a MooncakeLookupClient instance."""
+        """Create a MooncakeLookupClient instance.
+
+        Note: master_address parameter is kept for backward compatibility with URI parsing,
+        but is no longer used. The master server address is now read from the config's
+        extra_config.master_server_address field for consistency with MooncakestoreConnector.
+        """
         # First Party
         from lmcache.v1.lookup_client.mooncake_lookup_client import (
             MooncakeLookupClient,
         )
 
-        return MooncakeLookupClient(config, metadata, master_address)
+        return MooncakeLookupClient(config, metadata)
