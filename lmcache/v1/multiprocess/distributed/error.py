@@ -26,23 +26,35 @@ class L1ObjectManagerError(enum.IntFlag):
     combining multiple error flags into a single value.
     """
 
-    SUCCESS = 0x00
+    SUCCESS = enum.auto()
     """ Operation succeeded. """
 
-    KEYS_NOT_FOUND = 0x01
+    KEYS_NOT_FOUND = enum.auto()
     """ Expected existing keys but found keys not found. """
 
-    KEYS_ALREADY_EXIST = 0x02
+    KEYS_ALREADY_EXIST = enum.auto()
     """ Expected non-exist keys but found keys existed. """
 
-    KEYS_NOT_RESERVED = 0x04
-    """ Expected non-reserved keys but found keys reserved. """
+    KEYS_NOT_RESERVED = enum.auto()
+    """ Expected reserved keys but found keys not reserved. """
 
-    KEYS_NOT_COMMITTED = 0x08
+    KEYS_NOT_COMMITTED = enum.auto()
     """ Expected committed keys but found keys not committed. """
 
-    KEYS_ALREADY_LOCKED = 0x10
+    KEYS_ALREADY_LOCKED = enum.auto()
     """ Expected unlocked keys but found keys already locked. """
+
+    KEYS_ARE_TEMPORARY = enum.auto()
+    """ Expected non-temporary keys but found keys are temporary. """
+
+    ENTRY_NOT_EMPTY = enum.auto()
+    """ Expected empty object entry but found entry not empty. """
+
+    ENTRY_IS_EMPTY = enum.auto()
+    """ Expected non-empty object entry but found entry is empty. """
+
+    SKIPPED = enum.auto()
+    """ Operation skipped due to prior conditions. """
 
     def has_error(self, error: "L1ObjectManagerError") -> bool:
         """Check if the error code has the specific error in it.
@@ -50,7 +62,7 @@ class L1ObjectManagerError(enum.IntFlag):
         Returns:
             bool: True if there is any error, False otherwise.
         """
-        return self & error != 0
+        return (self & error) != 0
 
     def mix_error(self, error: "L1ObjectManagerError") -> "L1ObjectManagerError":
         """Mix the current error code with another error code using bitwise OR.
@@ -85,21 +97,25 @@ def strerror(error: ErrorType) -> str:
         # Handle multiple errors combined with bitwise OR
         error_messages = []
         if error.has_error(L1ObjectManagerError.KEYS_NOT_FOUND):
-            error_messages.append("Expected existing keys but found keys not found.")
+            error_messages.append("Expected existing keys but have keys not found")
         if error.has_error(L1ObjectManagerError.KEYS_ALREADY_EXIST):
-            error_messages.append("Expected non-exist keys but found keys existed.")
+            error_messages.append("Expected non-exist keys but have keys existed")
         if error.has_error(L1ObjectManagerError.KEYS_NOT_RESERVED):
-            error_messages.append("Expected non-reserved keys but found keys reserved.")
+            error_messages.append("Expected non-reserved keys but have keys reserved")
         if error.has_error(L1ObjectManagerError.KEYS_NOT_COMMITTED):
-            error_messages.append(
-                "Expected committed keys but found keys not committed."
-            )
+            error_messages.append("Expected committed keys but have keys not committed")
         if error.has_error(L1ObjectManagerError.KEYS_ALREADY_LOCKED):
+            error_messages.append("Expected unlocked keys but have keys already locked")
+        if error.has_error(L1ObjectManagerError.KEYS_ARE_TEMPORARY):
+            error_messages.append("Expected non-temporary keys but have temporary keys")
+        if error.has_error(L1ObjectManagerError.ENTRY_NOT_EMPTY):
             error_messages.append(
-                "Expected unlocked keys but found keys already locked."
+                "Expected empty object entry but have entry not empty"
             )
+        if error.has_error(L1ObjectManagerError.SKIPPED):
+            error_messages.append("Operation skipped due to prior conditions")
 
         if error_messages:
-            return " ".join(error_messages)
+            return "; ".join(error_messages) + "."
 
     return "Unknown error."
