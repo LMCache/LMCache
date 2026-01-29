@@ -25,14 +25,28 @@ class MooncakeLookupClient(LookupClientInterface):
         # Third Party
         from mooncake.store import MooncakeDistributedStore
 
+        # First Party
+        from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
+            MooncakeStoreConfig,
+        )
+
+        # Load Mooncake configuration from LMCache config to avoid hardcoded values
+        mooncake_config = MooncakeStoreConfig.load_from_lmcache_config(config)
+
+        logger.info(
+            "MooncakeLookupClient using configuration: hostname=%s, protocol=%s",
+            mooncake_config.local_hostname or "(auto-detect)",
+            mooncake_config.protocol,
+        )
+
         self.store = MooncakeDistributedStore()
         self.store.setup(
-            "localhost",
-            "P2PHANDSHAKE",
-            0,
-            16 * 1024 * 1024,
-            "tcp",
-            "",
+            mooncake_config.local_hostname or "",
+            mooncake_config.metadata_server,
+            mooncake_config.global_segment_size,
+            mooncake_config.local_buffer_size,
+            mooncake_config.protocol,
+            mooncake_config.device_name,
             master_addr,
         )
 
