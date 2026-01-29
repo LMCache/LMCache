@@ -16,7 +16,6 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -27,6 +26,7 @@ from lmcache.v1.health_monitor.constants import (
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
@@ -35,11 +35,11 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
-    from lmcache.config import LMCacheEngineMetadata
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -87,7 +87,7 @@ class LMCacheManager:
 
         # Components (initialized later)
         self._lmcache_engine: Optional[LMCacheEngine] = None
-        self._lmcache_engine_metadata: Optional[LMCacheEngineMetadata] = None
+        self._lmcache_engine_metadata: Optional[LMCacheMetadata] = None
         self._lookup_client: Optional[LookupClientInterface] = None
         self._lookup_server: Optional[
             Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]
@@ -345,23 +345,19 @@ class LMCacheManager:
                 )
 
         # Create metadata
-        num_ranks = (
-            parallel_config.tensor_parallel_size
-            * parallel_config.pipeline_parallel_size
-        )
-        metadata = LMCacheEngineMetadata(
-            model_config.model,
-            parallel_config.world_size,
-            parallel_config.rank,
-            "vllm",
-            kv_dtype,
-            kv_shape,
-            use_mla,
-            role,
+        metadata = LMCacheMetadata(
+            model_name=model_config.model,
+            world_size=parallel_config.world_size,
+            local_world_size=parallel_config.world_size,
+            worker_id=parallel_config.rank,
+            local_worker_id=parallel_config.rank,
+            kv_dtype=kv_dtype,
+            kv_shape=kv_shape,
+            use_mla=use_mla,
+            role=role,
             served_model_name=model_config.served_model_name,
             chunk_size=self._config.chunk_size,
             engine_id=engine_id,
-            num_ranks=num_ranks,
             kv_connector_extra_config=kv_connector_extra_config,
         )
 
@@ -645,7 +641,7 @@ class LMCacheManager:
         return self._lmcache_engine
 
     @property
-    def lmcache_engine_metadata(self) -> Optional[LMCacheEngineMetadata]:
+    def lmcache_engine_metadata(self) -> Optional[LMCacheMetadata]:
         """Get the LMCache engine metadata."""
         return self._lmcache_engine_metadata
 

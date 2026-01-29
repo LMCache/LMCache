@@ -24,7 +24,6 @@ import sys
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes, lmcache_get_or_create_config
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
@@ -32,6 +31,7 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.standalone.manager import StandaloneLMCacheManager
 from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
@@ -198,7 +198,7 @@ class LMCacheStandaloneStarter:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         layer_groups: List[LayerGroupSpec],
         device: str = "cpu",
     ):
@@ -543,12 +543,6 @@ def parse_args() -> argparse.Namespace:
         help="Enable MLA (Multi-Level Attention)",
     )
     parser.add_argument(
-        "--fmt",
-        type=str,
-        default="vllm",
-        help="Cache format (default: vllm)",
-    )
-    parser.add_argument(
         "--device",
         type=str,
         default="cpu",
@@ -614,16 +608,17 @@ def main():
             kv_shape[4],
         )
 
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             model_name=args.model_name,
             world_size=args.world_size,
+            local_world_size=args.world_size,
             worker_id=args.worker_id,
+            local_worker_id=args.worker_id,
             fmt=args.fmt,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=args.use_mla,
             role="worker",
-            num_ranks=args.world_size,
         )
 
         starter = LMCacheStandaloneStarter(config, metadata, layer_groups, args.device)
