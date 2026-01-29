@@ -1,5 +1,5 @@
 sphinx>=6,<9
-sphinx-rtd-theme==3.0.2
+sphinx-rtd-theme==3.1.0
 sphinxcontrib-applehelp==2.0.0
 sphinxcontrib-devhelp==2.0.0
 sphinxcontrib-htmlhelp==2.1.0
