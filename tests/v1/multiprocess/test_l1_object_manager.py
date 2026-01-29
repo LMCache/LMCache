@@ -191,7 +191,7 @@ def create_mock_memory_objs(count: int) -> list[MockMemoryObj]:
 @pytest.fixture
 def config():
     """Create a basic L1ObjectManagerConfig for testing."""
-    return L1ObjectManagerConfig()
+    return L1ObjectManagerConfig(lock_ttl_seconds=60)
 
 
 @pytest.fixture

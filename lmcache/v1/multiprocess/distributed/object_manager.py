@@ -196,6 +196,9 @@ class L1ObjectManager:
         self._reserved_lock = threading.Lock()
         self._committed_lock = threading.Lock()
 
+        # TTL:
+        self._lock_ttl = config.lock_ttl_seconds
+
     def _has_key(self, key: ObjectKey) -> int:
         """Thread-safe function to check if the key exists in either reserved
         or committed dicts.
@@ -310,7 +313,7 @@ class L1ObjectManager:
                 # global _NON_EXISTENT_OBJECT_ENTRY instance.
                 self._reserved[key] = L1ObjectEntry(
                     memory_obj=obj,
-                    ttl_lock=TTLLock(),
+                    ttl_lock=TTLLock(self._lock_ttl),
                     dirty=True,
                     is_temporary=False,
                 )

@@ -33,4 +33,4 @@ class L1ObjectManagerConfig:
     Special config for the L1 Object/Key manager
     """
 
-    pass
+    lock_ttl_seconds: int = field(default=300)
