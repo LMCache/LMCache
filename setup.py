@@ -171,8 +171,34 @@ def rocm_extension() -> tuple[list, dict]:
 
 
 def source_dist_extension() -> tuple[list, dict]:
+    # Third Party
+    from torch.utils import cpp_extension  # Import here
+
     print("Not building CUDA/HIP extensions for sdist")
-    return [], {}
+    print("Building native_storage_ops (pure C++ extension)")
+
+    global ENABLE_CXX11_ABI
+    if ENABLE_CXX11_ABI:
+        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=1"
+    else:
+        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=0"
+
+    storage_manager_sources = [
+        "csrc/storage_manager/pybind.cpp",
+        "csrc/storage_manager/ttl_lock.cpp",
+    ]
+    ext_modules = [
+        cpp_extension.CppExtension(
+            "lmcache.native_storage_ops",
+            sources=storage_manager_sources,
+            include_dirs=["csrc/storage_manager"],
+            extra_compile_args={
+                "cxx": [flag_cxx_abi, "-O3"],
+            },
+        ),
+    ]
+    cmdclass = {"build_ext": cpp_extension.BuildExtension}
+    return ext_modules, cmdclass
 
 
 if __name__ == "__main__":
