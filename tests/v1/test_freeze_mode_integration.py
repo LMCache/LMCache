@@ -8,11 +8,11 @@ import requests
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
 from tests.v1.utils import (
     MockAdapter,
@@ -63,8 +63,14 @@ def test_freeze_with_real_cache_engine(autorelease_v1):
     # Create mock GPU connector that works on CPU
     connector = MockGPUConnector(kv_shape=kv_shape)
     # Use explicit metadata with worker_id=0 to control port offset
-    metadata = LMCacheEngineMetadata(
-        "test_model", 1, 0, "vllm", torch.bfloat16, kv_shape
+    metadata = LMCacheMetadata(
+        model_name="test_model",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
     )
 
     # Create engine
@@ -259,7 +265,7 @@ def test_freeze_direct_api(autorelease_v1):
     )
 
     connector = MockGPUConnector(kv_shape=kv_shape)
-    metadata = dumb_metadata("vllm", kv_shape)
+    metadata = dumb_metadata(kv_shape)
 
     engine = autorelease_v1(
         LMCacheEngineBuilder.get_or_create(

@@ -10,7 +10,6 @@ import torch
 import torch.distributed as dist
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import (
@@ -25,6 +24,7 @@ from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
     SGLangLayerwiseGPUConnector,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -88,13 +88,14 @@ def init_lmcache_engine(
     torch.cuda.device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     # Use global rank for metadata (tensor parallel rank)
-    metadata = LMCacheEngineMetadata(
-        model_config.model_path,
-        tp_size,
-        global_rank,
-        "sgl",
-        kv_dtype,
-        kv_shape,
+    metadata = LMCacheMetadata(
+        model_name=model_config.model_path,
+        world_size=tp_size,
+        local_world_size=tp_size,
+        worker_id=global_rank,
+        local_worker_id=local_rank,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
     )
 
     use_gpu = need_gpu_interm_buffer(config)

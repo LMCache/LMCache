@@ -10,11 +10,11 @@ removing vLLM dependencies and simplifying the initialization logic.
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.manager import LMCacheManager
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # Fir
@@ -34,7 +34,7 @@ class StandaloneLMCacheManager(LMCacheManager):
     def __init__(
         self,
         config: Any,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         gpu_connector: Any,
         broadcast_fn: Callable,
         broadcast_object_fn: Callable,
@@ -45,7 +45,7 @@ class StandaloneLMCacheManager(LMCacheManager):
 
         Args:
             config: LMCache engine configuration
-            metadata: Pre-constructed LMCacheEngineMetadata
+            metadata: Pre-constructed LMCacheMetadata
             gpu_connector: GPU connector instance
             broadcast_fn: Broadcast function for tensor parallel
             broadcast_object_fn: Broadcast function for objects
