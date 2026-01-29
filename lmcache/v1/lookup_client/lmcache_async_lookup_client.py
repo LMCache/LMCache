@@ -10,7 +10,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -20,6 +19,7 @@ from lmcache.v1.lookup_client.async_lookup_message import (
     LookupRequestMsg,
     LookupResponseMsg,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_rpc_path_lmcache,
@@ -49,7 +49,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         # lookup_id -> first lookup time
         # this helps us support timeout semantics
@@ -61,7 +61,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
         engine_id = metadata.engine_id
         assert engine_id is not None, "engine_id is required for RPC communication"
-        self.num_ranks = metadata.num_ranks
+        self.world_size = metadata.world_size
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -69,9 +69,9 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self.push_sockets = []
         if len(self.lookup_server_worker_ids) > 0:
             ranks = self.lookup_server_worker_ids
-            self.num_ranks = len(self.lookup_server_worker_ids)
+            self.world_size = len(self.lookup_server_worker_ids)
         else:
-            ranks = [i for i in range(self.num_ranks)]
+            ranks = [i for i in range(self.world_size)]
 
         for rank in ranks:
             worker_socket_path = get_zmq_rpc_path_lmcache(
@@ -214,7 +214,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # Serialize message using msgspec
         msg_buf = msgspec.msgpack.encode(msg)
 
-        for i in range(self.num_ranks):
+        for i in range(self.world_size):
             self.push_sockets[i].send(msg_buf, copy=False)
         time.sleep(self.lookup_backoff_time)
         return None
@@ -235,7 +235,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                         self.res_for_each_worker[lookup_id].append(res)
                     all_res = self.res_for_each_worker[lookup_id]
 
-                    if len(all_res) == self.num_ranks:
+                    if len(all_res) == self.world_size:
                         self.res_for_each_worker.pop(lookup_id)
 
                         # NOTE: it is possible that the number of hit
@@ -278,7 +278,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         msg = LookupCleanupMsg(lookup_id=lookup_id)
         msg_buf = msgspec.msgpack.encode(msg)
 
-        for i in range(self.num_ranks):
+        for i in range(self.world_size):
             self.push_sockets[i].send(msg_buf, copy=False)
         logger.debug("Sent cleanup message for lookup_id=%s", lookup_id)
 
@@ -306,7 +306,7 @@ class LMCacheAsyncLookupServer:
     def __init__(
         self,
         lmcache_engine: LMCacheEngine,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         kv_connector_extra_config = metadata.kv_connector_extra_config or {}
