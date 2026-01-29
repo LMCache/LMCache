@@ -20,7 +20,7 @@ import uvicorn
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import StorageKey
 from lmcache.v1.multiprocess.server import MPCacheEngine, run_cache_server
 
 logger = init_logger(__name__)
@@ -188,7 +188,7 @@ def search_keys_by_hash(
     model_name: str | None = None,
     world_size: int | None = None,
     worker_id: int | None = None,
-) -> list[IPCCacheEngineKey]:
+) -> list[StorageKey]:
     """
     Search for keys matching the given hash and optional filters.
 
@@ -199,7 +199,7 @@ def search_keys_by_hash(
         world_size: Optional world size filter
         worker_id: Optional worker ID filter
     Returns:
-        List of matching IPCCacheEngineKey objects
+        List of matching StorageKey objects
     """
     matching_keys = []
     with engine.lock:
@@ -221,7 +221,7 @@ def search_keys_by_hash(
 
 def get_memory_objects(
     engine: MPCacheEngine,
-    keys: list[IPCCacheEngineKey],
+    keys: list[StorageKey],
 ) -> list[MemoryObj]:
     """
     Get memory objects for the given keys without locking/unlocking.
@@ -309,7 +309,7 @@ async def get_kv_cache(
 
         if model_name is not None and world_size is not None and worker_id is not None:
             keys = [
-                IPCCacheEngineKey(
+                StorageKey(
                     model_name=model_name,
                     world_size=world_size,
                     worker_id=worker_id,
@@ -385,7 +385,7 @@ async def get_kv_cache_metadata(
 
         if model_name is not None and world_size is not None and worker_id is not None:
             keys = [
-                IPCCacheEngineKey(
+                StorageKey(
                     model_name=model_name,
                     world_size=world_size,
                     worker_id=worker_id,
@@ -458,7 +458,7 @@ async def download_kv_cache(
             and download_request.worker_id is not None
         ):
             keys = [
-                IPCCacheEngineKey(
+                StorageKey(
                     model_name=download_request.model_name,
                     world_size=download_request.world_size,
                     worker_id=download_request.worker_id,
@@ -557,7 +557,7 @@ async def set_kv_cache(
         # Resolve key metadata:
         # Prefer inference from existing key(s) for this hash
         # (guarantees correct metadata).
-        inferred_key: Optional[IPCCacheEngineKey] = None
+        inferred_key: Optional[StorageKey] = None
         keys = search_keys_by_hash(
             engine, chunk_hash_bytes, model_name, world_size, worker_id
         )
@@ -578,7 +578,7 @@ async def set_kv_cache(
                         "provide model_name/world_size/worker_id to create one."
                     ),
                 )
-            key = IPCCacheEngineKey(
+            key = StorageKey(
                 model_name=model_name,
                 world_size=world_size,
                 worker_id=worker_id,

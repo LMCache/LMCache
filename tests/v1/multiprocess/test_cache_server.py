@@ -296,7 +296,7 @@ def test_store_and_lookup(
     # Lookup - keys that exist
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [keys, False],
+        [[key.no_worker_id_version() for key in keys], False],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -307,7 +307,7 @@ def test_store_and_lookup(
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
     lookup_future2 = client.submit_request(
         RequestType.LOOKUP,
-        [non_existent_keys, False],
+        [[key.no_worker_id_version() for key in non_existent_keys], False],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
@@ -591,7 +591,7 @@ def test_multiple_store_operations(
     all_keys = keys1 + keys2
     lookup_result = client.submit_request(
         RequestType.LOOKUP,
-        [all_keys, False],
+        [[key.no_worker_id_version() for key in all_keys], False],
         get_response_class(RequestType.LOOKUP),
     ).result(timeout=DEFAULT_TIMEOUT)
 
