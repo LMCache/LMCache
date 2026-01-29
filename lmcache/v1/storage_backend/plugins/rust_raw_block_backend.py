@@ -453,9 +453,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 inflight = self._inflight.pop(key, None)
                 if inflight is not None:
                     if inflight.canceled:
-                        self._free_slots.append(
-                            int(inflight.offset // self.slot_bytes)
-                        )
+                        self._free_slots.append(int(inflight.offset // self.slot_bytes))
                     else:
                         self._index[key] = _Entry(
                             offset=inflight.offset,
