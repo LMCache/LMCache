@@ -101,6 +101,8 @@ class CudaIPCWrapper:
         return pickle.loads(data)
 
 
+# TODO: consider adding local_world_size and local_worker_id
+# for multi-node use cases
 @dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
     model_name: str

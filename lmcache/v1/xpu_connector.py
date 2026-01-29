@@ -19,10 +19,10 @@ from typing import List, Optional
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -80,11 +80,11 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemXPUConnectorV2":
-        """Create a connector from LMCacheEngineMetadata.
+        """Create a connector from LMCacheMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
