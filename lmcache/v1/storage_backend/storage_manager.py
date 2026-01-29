@@ -259,10 +259,9 @@ class StorageManager:
         self.pd_store_location = None
 
         if self.enable_pd:
-            if config.pd_retrieve_locations:
-                self.pd_retrieve_locations = config.pd_retrieve_locations
-            if config.pd_store_location:
-                self.pd_store_location = config.pd_store_location
+            # these para are only effective under PD
+            self.pd_retrieve_locations = config.pd_retrieve_locations
+            self.pd_store_location = config.pd_store_location
 
         self.allocator_backend = None
         if metadata.role != "scheduler":
