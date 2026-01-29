@@ -4,24 +4,20 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 
 
-def generate_kv_cache(num_tokens, fmt, device):
+def generate_kv_cache(num_tokens, device):
     ret = []
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = (
-        [num_tokens, num_heads, head_size]
-        if fmt == "vllm"
-        else [num_heads, num_tokens, head_size]
-    )
-    dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
+    shape = [num_tokens, num_heads, head_size]
+    dtype = torch.bfloat16
 
     for i in range(num_layers):
         k = torch.rand(shape, dtype=dtype, device=device)
@@ -43,59 +39,60 @@ def to_blob(kv_tuples):
     reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
 )
 def test_cachegen_encoder(chunk_size):
-    fmt = "vllm"
-    fmt2 = "huggingface"
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt=fmt,
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=None,
     )
-    metadata2 = LMCacheEngineMetadata(
-        model_name="mistralai/Mistral-7B-Instruct-v0.2",
-        world_size=1,
-        worker_id=0,
-        fmt=fmt2,
-        kv_dtype=torch.bfloat16,
-        kv_shape=None,
-    )
+    # metadata2 = LMCacheMetadata(
+    #     model_name="mistralai/Mistral-7B-Instruct-v0.2",
+    #     world_size=1,
+    #     local_world_size=1,
+    #     worker_id=0,
+    #     local_worker_id=0,
+    #     kv_dtype=torch.bfloat16,
+    #     kv_shape=None,
+    # )
     serializer = CacheGenSerializer(config, metadata)
-    serializer2 = CacheGenSerializer(config, metadata2)
+    # serializer2 = CacheGenSerializer(config, metadata2)
 
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size, "cuda"))
     output = serializer.to_bytes(kv)
-    kv2 = kv.permute([0, 1, 3, 2, 4])
-    output2 = serializer2.to_bytes(kv2)
+    # huggingface:
+    # kv2 = kv.permute([0, 1, 3, 2, 4])
+    # output2 = serializer2.to_bytes(kv2)
 
-    assert abs(len(output) - len(output2)) < 10
+    # assert abs(len(output) - len(output2)) < 10
     output_dict = CacheGenEncoderOutput.from_bytes(output)
     assert output_dict.num_heads == 8
     assert output_dict.head_size == 128
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
 )
-def test_cachegen_decoder(fmt, chunk_size):
+def test_cachegen_decoder(chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt=fmt,
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=None,
     )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size, fmt, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size, "cuda"))
     output = serializer.to_bytes(kv)
 
     decoded_kv = deserializer.from_bytes(output)
@@ -103,27 +100,26 @@ def test_cachegen_decoder(fmt, chunk_size):
     assert decoded_kv.mean() != 0
 
 
-@pytest.mark.parametrize("fmt", ["vllm", "huggingface"])
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
 )
-def test_cachegen_unmatched_size(fmt):
+def test_cachegen_unmatched_size():
     chunk_size = 256
-    fmt = "vllm"
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_name="mistralai/Mistral-7B-Instruct-v0.2",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt=fmt,
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=None,
     )
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size - 20, fmt, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size - 20, "cuda"))
     output = serializer.to_bytes(kv)
 
     decoded_kv = deserializer.from_bytes(output)

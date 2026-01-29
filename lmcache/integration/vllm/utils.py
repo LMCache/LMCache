@@ -154,7 +154,7 @@ def create_lmcache_metadata(
     role=None,
 ):
     """
-    Create LMCacheEngineMetadata from vLLM configuration.
+    Create LMCacheMetadata from vLLM configuration.
 
     This function extracts common metadata creation logic that was duplicated
     across multiple files.
@@ -167,7 +167,7 @@ def create_lmcache_metadata(
         cache_config: Cache configuration (alternative to vllm_config)
 
     Returns:
-        tuple: (LMCacheEngineMetadata, LMCacheEngineConfig)
+        tuple: (LMCacheMetadata, LMCacheEngineConfig)
     """
     # Third Party
     # Try to import from old location before merged https://github.com/vllm-project/vllm/pull/26908
@@ -178,7 +178,7 @@ def create_lmcache_metadata(
         # Third Party
         from vllm.utils import get_kv_cache_torch_dtype
     # First Party
-    from lmcache.config import LMCacheEngineMetadata
+    from lmcache.v1.metadata import LMCacheMetadata
 
     config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters
@@ -216,19 +216,18 @@ def create_lmcache_metadata(
             )
 
     # Create metadata
-    num_ranks = parallel_cfg.tensor_parallel_size * parallel_cfg.pipeline_parallel_size
-    metadata = LMCacheEngineMetadata(
-        model_cfg.model,
-        parallel_cfg.world_size,
-        parallel_cfg.rank,
-        "vllm",
-        kv_dtype,
-        kv_shape,
-        use_mla,
-        role,
+    metadata = LMCacheMetadata(
+        model_name=model_cfg.model,
+        world_size=parallel_cfg.world_size,
+        local_world_size=parallel_cfg.world_size,
+        worker_id=parallel_cfg.rank,
+        local_worker_id=parallel_cfg.rank,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
+        use_mla=use_mla,
+        role=role,
         served_model_name=model_cfg.served_model_name,
         engine_id=engine_id,
-        num_ranks=num_ranks,
         kv_connector_extra_config=kv_connector_extra_config,
     )
 
