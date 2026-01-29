@@ -130,6 +130,14 @@ class LMCacheMPSchedulerAdapter:
         # Request futures
         self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
 
+        # NOTE(Kuntai): Maintain a set of executing request ids.
+        # This is needed: vLLM currently has double-free issue when calling
+        # worker-side `get_finished`. We need to memorize the set of 
+        # executing requests to avoid such double free.
+        self.executing_request_ids: set[str] = set()
+        self.executing_request_ids_at_this_step: set[str] = set()
+
+
         self.model_name = model_name
         self.world_size = world_size
         self.worker_id = kv_rank
@@ -140,6 +148,37 @@ class LMCacheMPSchedulerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = self.chunk_size // vllm_block_size
+
+    @_lmcache_nvtx_annotate
+    def maybe_add_to_executing_request_ids(self, request_id: str):
+        """
+        Add a request id to the set of executing request ids.
+        """
+        if request_id in self.executing_request_ids:
+            return
+        self.executing_request_ids_at_this_step.add(request_id)
+        self.executing_request_ids.add(request_id)
+
+
+    @_lmcache_nvtx_annotate
+    def remove_from_executing_request_ids(self, request_id: str):
+        """
+        Remove a request id from the set of executing request ids.
+        """
+        if request_id not in self.executing_request_ids:
+            logger.warning("Request id %s is double-freed by `request_finished`")
+            return
+        self.executing_request_ids.remove(request_id)
+
+
+    @_lmcache_nvtx_annotate
+    def get_executing_request_ids_at_this_step(self) -> set[str]:
+        """
+        Clear the set of executing request ids for this step.
+        """
+        return_value = self.executing_request_ids_at_this_step.copy()
+        self.executing_request_ids_at_this_step.clear()
+        return return_value
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(self, request_id: str, block_hashes: list[bytes]):
@@ -269,6 +308,9 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+
+
+        self.executing_request_ids_worker: set[str] = set()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
@@ -468,6 +510,21 @@ class LMCacheMPWorkerAdapter:
         # Calculate the final finished stores
         ret_stores.update(self._update_and_get_finished_store())
 
+        # intersect with the executing request ids
+        # to prevent double-free
+
+        # Find those that will be discarded (not present in executing_request_ids_worker)
+        discarded = ret_stores.difference(self.executing_request_ids_worker)
+        if discarded:
+            for req_id in discarded:
+                logger.info(
+                    "Request id %s is called by `get_finished` twice. Avoid returning "
+                    "to prevent double-free",
+                    req_id,
+                )
+        ret_stores.intersection_update(self.executing_request_ids_worker)
+        self.executing_request_ids_worker.difference_update(ret_stores)
+
         return ret_stores, finished_retrieves
 
     def num_blocks_per_chunk(self) -> int:
@@ -487,6 +544,18 @@ class LMCacheMPWorkerAdapter:
         ).result()
 
         self.mq_client.close()
+
+
+    def add_new_executing_request_ids_at_this_step_worker(self, request_ids: set[str]):
+        """
+        Add new executing request ids to the internal state.
+        """
+        for req_id in request_ids:
+            logger.info(
+                "Request id %s is added to the executing request ids at this step",
+                req_id,
+            )
+        self.executing_request_ids_worker.update(request_ids)
 
     # Helper functions
     def _update_and_get_finished_store(
