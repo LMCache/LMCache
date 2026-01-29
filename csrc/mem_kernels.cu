@@ -196,11 +196,9 @@ __device__ __forceinline__ int64_t cross_layers_page_buffer_offset(
     const int page_size, const int num_layers, const int layer_id) {
   const int page_id = (int)(slot_idx / page_size);
   const int within = (int)(slot_idx % page_size);
-  const int64_t page_stride = (int64_t)num_layers * 2LL * (int64_t)page_size *
-                              (int64_t)scalars_per_token;
-  const int64_t layer_stride =
-      2LL * (int64_t)page_size * (int64_t)scalars_per_token;
   const int64_t kv_stride = (int64_t)page_size * (int64_t)scalars_per_token;
+  const int64_t layer_stride = 2LL * (int64_t)kv_stride;
+  const int64_t page_stride = (int64_t)num_layers * (int64_t)layer_stride;
   return (int64_t)page_id * page_stride + (int64_t)layer_id * layer_stride +
          (int64_t)k_or_v * kv_stride +
          (int64_t)within * (int64_t)scalars_per_token + scalar_offset;
@@ -280,9 +278,8 @@ template <typename scalar_t, bool DIRECTION>
 __global__ void load_and_reshape_multi_layer_kernel(
     scalar_t* __restrict__ key_value,           // [2, num_layer, num_tokens,
                                                 // scalars_per_token]
-    scalar_t** __restrict__ paged_buffer_ptrs,  // [num_layers] * [2,
-                                                // PAGE_BUFFER_SIZE,
-                                                // scalars_per_token]
+    scalar_t** __restrict__ paged_buffer_ptrs,  // [num_pages, num_layers, 2,
+                                                // page_size, scalars_per_token]
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
     const int page_buffer_size, const int page_size) {
