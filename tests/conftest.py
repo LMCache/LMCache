@@ -2,6 +2,7 @@
 # Standard
 from dataclasses import dataclass
 from unittest.mock import patch
+import importlib.util
 import random
 import shlex
 import socket
@@ -16,6 +17,12 @@ import torch
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
+
+if importlib.util.find_spec("pytest_benchmark") is None:
+
+    @pytest.fixture
+    def benchmark():
+        pytest.skip("pytest-benchmark is not installed")
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
