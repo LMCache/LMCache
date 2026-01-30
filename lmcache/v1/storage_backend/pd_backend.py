@@ -12,7 +12,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -25,6 +24,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel
@@ -83,7 +83,7 @@ class PDConfig:
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         tp_rank: int,
     ) -> "PDConfig":
         """Convert the LMCacheEngineConfig to PDConfig"""
@@ -143,7 +143,7 @@ class PDBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         self.running = True
 
@@ -206,7 +206,7 @@ class PDBackend(AllocatorBackendInterface):
         return self.__class__.__name__
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         # First Party
         from lmcache.v1.transfer_channel.transfer_utils import (

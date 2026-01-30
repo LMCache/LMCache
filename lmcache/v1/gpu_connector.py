@@ -7,7 +7,6 @@ import abc
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -15,6 +14,7 @@ from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 
 if torch.cuda.is_available():
     # First Party
@@ -226,11 +226,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV2":
-        """Create a connector from LMCacheEngineMetadata.
+        """Create a connector from LMCacheMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
@@ -490,7 +490,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     def __init__(
         self,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         device: torch.device,
         use_gpu: bool = False,
     ):
@@ -513,7 +513,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV3":
@@ -705,11 +705,11 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMBufferLayerwiseGPUConnector":
-        """Create a connector from LMCacheEngineMetadata.
+        """Create a connector from LMCacheMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
@@ -1109,11 +1109,11 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemLayerwiseGPUConnector":
-        """Create a connector from LMCacheEngineMetadata.
+        """Create a connector from LMCacheMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.

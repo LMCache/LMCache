@@ -57,7 +57,6 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
 )
 def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
     device = "cuda"
-    fmt = "vllm"
     num_tokens = 2000
     num_blocks = 1000
     block_size = 16
@@ -95,7 +94,7 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -133,7 +132,6 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
     check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping[:expected_count])
 
 
-@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
@@ -143,7 +141,7 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_retrieve_prefix(
-    fmt, chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
     url = None
     remote_serde = None
@@ -192,7 +190,7 @@ def test_paged_retrieve_prefix(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -252,7 +250,6 @@ def test_paged_retrieve_prefix(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
@@ -265,7 +262,7 @@ def test_paged_retrieve_prefix(
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_store_offset(
-    fmt, chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
     url = None
     if backend == "remote":
@@ -302,7 +299,7 @@ def test_paged_store_offset(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -362,7 +359,6 @@ def test_paged_store_offset(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128])  # , 256])
 @pytest.mark.parametrize(
     "backend",
@@ -376,9 +372,7 @@ def test_paged_store_offset(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
-def test_paged_mixed_retrieve(
-    fmt, chunk_size, backend, save_unfull_chunk, autorelease_v1
-):
+def test_paged_mixed_retrieve(chunk_size, backend, save_unfull_chunk, autorelease_v1):
     device = "cuda"
     num_tokens = 2000
     new_num_tokens = 1000
@@ -414,7 +408,7 @@ def test_paged_mixed_retrieve(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -522,13 +516,12 @@ def test_paged_mixed_retrieve(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
-def test_paged_store_kv_tensors_mask(fmt, save_unfull_chunk, autorelease_v1):
+def test_paged_store_kv_tensors_mask(save_unfull_chunk, autorelease_v1):
     device = "cuda"
     num_tokens = 1000
     new_num_tokens = 2000
@@ -563,7 +556,7 @@ def test_paged_store_kv_tensors_mask(fmt, save_unfull_chunk, autorelease_v1):
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -684,7 +677,6 @@ def test_paged_store_kv_tensors_mask(fmt, save_unfull_chunk, autorelease_v1):
         recover_engine_states(engine)
 
 
-@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128])
 @pytest.mark.parametrize(
     "backend",
@@ -707,7 +699,6 @@ def test_paged_store_kv_tensors_mask(fmt, save_unfull_chunk, autorelease_v1):
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_hierarchy_retrieve(
-    fmt,
     chunk_size,
     backend,
     retrieve_from,
@@ -757,7 +748,7 @@ def test_paged_hierarchy_retrieve(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -866,7 +857,6 @@ def test_paged_prefetch_retrieve(
     test_lookup_id = "test_lookup_id"
 
     chunk_size = 256
-    fmt = "vllm"
     kv_shape = (32, 2, chunk_size, 8, 128)
     connector = create_gpu_connector(1024, 32)
 
@@ -899,7 +889,7 @@ def test_paged_prefetch_retrieve(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -978,7 +968,6 @@ def test_paged_prefetch_retrieve(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
@@ -998,7 +987,7 @@ def test_paged_prefetch_retrieve(
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_mem_leak(
-    fmt, chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
     url = None
     if "remote" in backend:
@@ -1030,7 +1019,7 @@ def test_paged_mem_leak(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -1078,7 +1067,6 @@ def test_paged_mem_leak(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
-@pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
@@ -1094,7 +1082,7 @@ def test_paged_mem_leak(
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
 def test_paged_retrieve_after_eviction(
-    fmt, chunk_size, backend, save_unfull_chunk, autorelease_v1
+    chunk_size, backend, save_unfull_chunk, autorelease_v1
 ):
     device = "cuda"
     # NOTE: The default backend cache size is 2 GB.
@@ -1129,7 +1117,7 @@ def test_paged_retrieve_after_eviction(
         LMCacheEngineBuilder.get_or_create(
             "test",
             cfg,
-            dumb_metadata(fmt, kv_shape),
+            dumb_metadata(kv_shape),
             connector,
             mock_up_broadcast_fn,
             mock_up_broadcast_object_fn,
@@ -1240,7 +1228,6 @@ def test_builder(autorelease_v1):
 )
 def test_force_store_wait(autorelease_v1):
     device = "cuda"
-    fmt = "vllm"
     num_tokens = 10000
     num_blocks = 5000
     block_size = 16
@@ -1283,7 +1270,7 @@ def test_force_store_wait(autorelease_v1):
             LMCacheEngineBuilder.get_or_create(
                 "test",
                 cfg,
-                dumb_metadata(fmt, kv_shape),
+                dumb_metadata(kv_shape),
                 connector,
                 mock_up_broadcast_fn,
                 mock_up_broadcast_object_fn,

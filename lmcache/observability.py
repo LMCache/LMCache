@@ -12,10 +12,10 @@ from prometheus_client import REGISTRY
 import prometheus_client
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -839,7 +839,7 @@ class PrometheusLogger:
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, metadata: LMCacheEngineMetadata):
+    def __init__(self, metadata: LMCacheMetadata):
         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             default_dir = "/tmp/lmcache_prometheus"
@@ -1516,6 +1516,52 @@ class PrometheusLogger:
             ).labels(**self.labels)
             setattr(self, metric_name, gauge)
 
+        # PeriodicThread metrics
+        self.periodic_threads_total_count = self._gauge_cls(
+            name="lmcache:periodic_threads_total_count",
+            documentation="Total number of registered periodic threads",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.periodic_threads_running_count = self._gauge_cls(
+            name="lmcache:periodic_threads_running_count",
+            documentation="Number of running periodic threads",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.periodic_threads_active_count = self._gauge_cls(
+            name="lmcache:periodic_threads_active_count",
+            documentation="Number of active periodic threads (recently executed)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
+        # Per-level metrics for periodic threads
+        for level_name in ["critical", "high", "medium", "low"]:
+            total_gauge = self._gauge_cls(
+                name=f"lmcache:periodic_threads_{level_name}_total",
+                documentation=f"Total number of {level_name} level periodic threads",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, f"periodic_threads_{level_name}_total", total_gauge)
+
+            running_gauge = self._gauge_cls(
+                name=f"lmcache:periodic_threads_{level_name}_running",
+                documentation=f"Number of running {level_name} level periodic threads",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, f"periodic_threads_{level_name}_running", running_gauge)
+
+            active_gauge = self._gauge_cls(
+                name=f"lmcache:periodic_threads_{level_name}_active",
+                documentation=f"Number of active {level_name} level periodic threads",
+                labelnames=labelnames,
+                multiprocess_mode="livemostrecent",
+            ).labels(**self.labels)
+            setattr(self, f"periodic_threads_{level_name}_active", active_gauge)
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -1687,7 +1733,7 @@ class PrometheusLogger:
         )
 
     @staticmethod
-    def _metadata_to_labels(metadata: LMCacheEngineMetadata):
+    def _metadata_to_labels(metadata: LMCacheMetadata):
         labels = {
             "model_name": metadata.model_name,
             "worker_id": metadata.worker_id,
@@ -1700,7 +1746,7 @@ class PrometheusLogger:
     _instance = None
 
     @staticmethod
-    def GetOrCreate(metadata: LMCacheEngineMetadata) -> "PrometheusLogger":
+    def GetOrCreate(metadata: LMCacheMetadata) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
             PrometheusLogger._instance = PrometheusLogger(metadata)
         # assert PrometheusLogger._instance.metadata == metadata, \
@@ -1730,7 +1776,7 @@ class PrometheusLogger:
 
 
 class LMCacheStatsLogger:
-    def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
+    def __init__(self, metadata: LMCacheMetadata, log_interval: int):
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()
@@ -1740,7 +1786,9 @@ class LMCacheStatsLogger:
         # Event for interruptible sleep during shutdown
         self.shutdown_event = threading.Event()
 
-        self.thread = threading.Thread(target=self.log_worker, daemon=True)
+        self.thread = threading.Thread(
+            target=self.log_worker, daemon=True, name="stats-logger-thread"
+        )
         self.thread.start()
 
     def log_worker(self):

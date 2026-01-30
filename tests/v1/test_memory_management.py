@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import threading
 import time
 
 # Third Party
@@ -7,6 +8,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.observability import LMCStatsMonitor
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
     GPUMemoryAllocator,
@@ -19,6 +22,7 @@ from lmcache.v1.memory_management import (
     TensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.pin_monitor import PinMonitor
 
 
 def check_allocator(allocator, max_size):
@@ -332,14 +336,6 @@ def test_memory_obj_metadata_to_and_from_dict():
     ],
 )
 def test_pin_timeout(alloc_cls, custom_timeout, elapsed_time):
-    # Standard
-    import time
-
-    # First Party
-    from lmcache.observability import LMCStatsMonitor
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.pin_monitor import PinMonitor
-
     # Reset the singleton to ensure clean state
     LMCStatsMonitor.DestroyInstance()
     # Also reset the class variable to use the new singleton
@@ -399,13 +395,6 @@ def test_pin_timeout(alloc_cls, custom_timeout, elapsed_time):
 
 def test_pin_monitor_timeout():
     """Test that PinMonitor correctly detects and handles pin timeouts."""
-    # Standard
-    import threading
-    import time
-
-    # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.pin_monitor import PinMonitor
 
     # Create a mock memory object for testing
     class MockMemoryObjMetadata:
@@ -477,19 +466,16 @@ def test_pin_monitor_timeout():
 
 def test_pin_monitor_background_thread():
     """Test that PinMonitor background thread starts correctly."""
-    # Standard
-    import time
+    # Reset singleton and create with config
+    PinMonitor._instance = None
+    config = LMCacheEngineConfig.from_defaults()
+    pin_monitor = PinMonitor.GetOrCreate(config)
 
-    # First Party
-    from lmcache.v1.memory_management import PinMonitor
-
-    pin_monitor = PinMonitor.GetOrCreate()
-
-    # Test that monitoring can be started
-    pin_monitor.start_monitoring()
-    assert pin_monitor._running
-    assert pin_monitor._monitor_thread is not None
-    assert pin_monitor._monitor_thread.is_alive()
+    # PinMonitor auto-starts in __init__, so it should already be running
+    # PinMonitor now inherits from PeriodicThread, use is_running property
+    assert pin_monitor.is_running
+    assert pin_monitor._thread is not None
+    assert pin_monitor._thread.is_alive()
 
     # Give thread a moment to start
     time.sleep(0.1)
@@ -500,16 +486,6 @@ def test_pin_monitor_background_thread():
 
 def test_tensor_memory_obj_pin_monitor_integration():
     """Test integration between TensorMemoryObj and PinMonitor."""
-    # Third Party
-    import torch
-
-    # First Party
-    from lmcache.v1.memory_management import (
-        MemoryFormat,
-        MemoryObjMetadata,
-        TensorMemoryObj,
-    )
-    from lmcache.v1.pin_monitor import PinMonitor
 
     # Create a simple allocator for testing
     class MockAllocator:

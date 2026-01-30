@@ -13,9 +13,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.memory_management import MixedMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
@@ -505,12 +505,13 @@ def use_shared_allocator(request, monkeypatch, memory_allocator):
 
 @pytest.fixture(scope="function")
 def lmcache_engine_metadata(role="worker"):
-    """Create a fresh LMCacheEngineMetadata for each test."""
-    return LMCacheEngineMetadata(
+    """Create a fresh LMCacheMetadata for each test."""
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, 32, 128),
         use_mla=False,

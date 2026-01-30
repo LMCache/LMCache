@@ -14,11 +14,11 @@ import uuid
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 
 
 def recover_engine_states(engine):
@@ -29,18 +29,38 @@ def recover_gpu_connector_states(gpu_connector):
     gpu_connector.kv_cache_pointers_on_gpu = {}
 
 
-def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata(kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=3,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
-def dumb_metadata_with_model_name(
-    model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
-):
-    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata_with_model_name(model_name: str, kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name=model_name,
+        world_size=3,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
 def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
-    return CacheEngineKey("vllm", "test_model", 3, 123, id, torch.bfloat16)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=id,
+        dtype=torch.bfloat16,
+    )
 
 
 def random_string(N):
@@ -114,17 +134,13 @@ def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
     return ports
 
 
-def generate_kv_cache(num_tokens, fmt, device):
+def generate_kv_cache(num_tokens, device):
     ret = []
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = (
-        [num_tokens, num_heads, head_size]
-        if fmt == "vllm"
-        else [num_heads, num_tokens, head_size]
-    )
-    dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
+    shape = [num_tokens, num_heads, head_size]
+    dtype = torch.bfloat16
 
     for i in range(num_layers):
         k = torch.rand(shape, dtype=dtype, device=device)
@@ -244,8 +260,8 @@ def generate_tokens(num_tokens, device, fixed=False):
         return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
 
-def concatenate_kv_caches(kv_chunks, fmt):
-    dim = 1 if fmt == "huggingface" else 0
+def concatenate_kv_caches(kv_chunks):
+    dim = 0
     ret = []
     for kv_layer in zip(*kv_chunks, strict=False):
         klist, vlist = zip(*kv_layer, strict=False)
@@ -506,19 +522,18 @@ def create_test_metadata(
     world_size: int = 1,
     kv_shape: tuple = (4, 2, 256, 8, 128),
     engine_id: Optional[str] = "test_engine",
-    num_ranks: int = 1,
     kv_connector_extra_config: Optional[dict] = None,
-) -> LMCacheEngineMetadata:
+) -> LMCacheMetadata:
     """Create test metadata for LMCacheEngine."""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=world_size,
+        local_world_size=world_size,
         worker_id=worker_id,
-        fmt="vllm",
+        local_worker_id=worker_id,
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
         engine_id=engine_id,
-        num_ranks=num_ranks,
         kv_connector_extra_config=kv_connector_extra_config,
     )
 

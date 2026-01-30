@@ -10,7 +10,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
@@ -25,6 +24,7 @@ from lmcache.v1.memory_management import (
     PinMemoryAllocator,
     TensorMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 # Local
 from .utils import (
@@ -865,14 +865,15 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
 
 def _create_metadata(use_mla, kv_caches):
     num_heads = 1 if use_mla else 8
-    metadata = LMCacheEngineMetadata(
-        "test",
-        8,
-        0,
-        "vllm",
-        torch.bfloat16,
-        (32, 2, 256, num_heads, 128),
-        use_mla,
+    metadata = LMCacheMetadata(
+        model_name="test",
+        world_size=8,
+        local_world_size=8,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(32, 2, 256, num_heads, 128),
+        use_mla=use_mla,
     )
     metadata.kv_layer_groups_manager.build_kv_layer_groups(kv_caches)
     return metadata
