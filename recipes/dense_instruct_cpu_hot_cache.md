@@ -58,10 +58,22 @@ Create `recipes/dense_instruct_cpu_hot_cache.yaml`:
 ```yaml
 chunk_size: 256           # Default: 256. Smaller (128) enables partial prefix reuse
 local_cpu: true
-max_local_cpu_size: 12    # Size in GB. Should be >=1.5x your GPU KV cache budget
+# IMPORTANT: Size LMCache CPU buffer to be ~1.5x larger than vLLM's GPU KV cache budget
+# Example: If GPU has ~32GB for KV cache, set this to ~48GB
+max_local_cpu_size: 48
 use_layerwise: false      # Set to true to overlap KV load with computation (faster but may have stability issues)
 save_unfull_chunk: true   # Cache partial chunks for short/medium prompts
 ```
+
+> **⚠️ Critical Sizing Guidance**
+> 
+> For LMCache to be effective, the CPU cache **must be larger** than vLLM's GPU KV cache budget. 
+> 
+> **Recommended:** `max_local_cpu_size` = **1.5×** the GPU memory allocated to KV cache
+> 
+> **Why this matters:** If the CPU cache is too small, KV blocks will be evicted from CPU before they can be reused, eliminating the performance benefit. A small CPU cache cannot deliver good performance improvements.
+> 
+> **To estimate:** Check vLLM startup logs for "Available KV cache memory" and multiply by 1.5.
 
 If you hit `StopIteration` in `wait_for_save` on long prompts, disable layerwise:
 
@@ -70,9 +82,8 @@ use_layerwise: false
 ```
 
 Notes:
-- In practice, `max_local_cpu_size` should be **>= 1.5×** the GPU KV cache budget to see consistent gains.
 - Use vLLM startup logs to estimate the GPU KV cache budget; scale `max_local_cpu_size` accordingly.
-- If CPU RAM is tight, reduce `max_local_cpu_size`, but expect smaller LMCache benefits.
+- If CPU RAM is tight, reduce `max_local_cpu_size`, but expect significantly smaller LMCache benefits.
 - If you do not need persistence, remove the disk tier and keep CPU only.
 
 ## 5. Launching the vLLM Server (with LMCache)
@@ -431,7 +442,7 @@ vllm bench serve --model Qwen/Qwen3-4B-Instruct-2507 \
 |---------|--------------|-----|
 | No cache hits | Prompt tokens differ | Ensure identical tokenization |
 | No hits on short prompts | Chunk not filled | Enable `save_unfull_chunk` |
-| Warm runs still slow | CPU cache too small | Increase `max_local_cpu_size` (>=1.5× GPU KV cache budget) |
+| Warm runs still slow / Poor cache hit rate | **CPU cache too small** | **Increase `max_local_cpu_size` to 1.5× GPU KV cache budget** ⚠️ Small CPU cache cannot deliver good performance |
 | CPU OOM | Pinned pool too large | Reduce size or enable lazy allocator |
 | `StopIteration` in `wait_for_save` | Known issue | Disable `use_layerwise` |
 | Config mismatch in logs | Wrong config loaded | Check `LMCACHE_CONFIG_FILE` |
