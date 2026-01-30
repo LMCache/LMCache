@@ -1,0 +1,16 @@
+local_cpu: False
+local_disk: False
+
+enable_pd: True
+transfer_channel: "nixl"
+pd_role: "sender"
+
+# Use node IP for multi-node
+pd_proxy_host: "<proxy-node-ip>"  # IP of proxy server node
+pd_proxy_port: 7500
+
+pd_buffer_size: 2147483648  # 2GB for multi-node
+pd_buffer_device: "cuda"
+
+# Multi-node NIXL configuration
+nixl_backends: [UCX, TCP]  # TCP for cross-node
