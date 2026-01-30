@@ -1,0 +1,7 @@
+chunk_size: 256
+local_cpu: false          # Disable CPU cache for this pure-disk recipe
+local_disk: true          # Enable disk backend
+local_disk_path: "/var/lib/lmcache/kv_cache"  # Persisted cache location
+max_local_disk_size: 100  # GB - adjust based on your disk capacity
+use_layerwise: false      # Disable for stability with disk I/O
+save_unfull_chunk: true   # Cache partial chunks
