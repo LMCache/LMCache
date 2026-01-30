@@ -539,8 +539,10 @@ class LMCacheConnectorV1Impl:
                 )
             )
         )
-        self.kv_caches: dict[str, torch.Tensor] = {}
-        self.cross_layers_kv_caches: torch.Tensor = None
+        if self.use_cross_layers:
+            self.cross_layers_kv_caches: torch.Tensor = None
+        else:
+            self.kv_caches: dict[str, torch.Tensor] = {}
         self._block_size = vllm_config.cache_config.block_size
         self.load_specs: dict[str, LoadSpec] = {}
         self.kv_cache_manager: Optional["KVCacheManager"] = None
@@ -762,19 +764,19 @@ class LMCacheConnectorV1Impl:
         """
         self.current_layer = 0
 
-        if len(self.kv_caches) == 0 and not self.use_cross_layers:
-            logger.warning(
-                "Please update LMCacheConnector, "
-                "use register_kv_caches to init kv_caches"
-            )
-            self._init_kv_caches_from_forward_context(forward_context)
-
         metadata = self._parent._get_connector_metadata()
         assert isinstance(metadata, LMCacheConnectorMetadata)
 
         if self.use_cross_layers:
+            assert self.cross_layers_kv_caches is not None
             kvcaches = self.cross_layers_kv_caches
         else:
+            if len(self.kv_caches) == 0:
+                logger.warning(
+                    "Please update LMCacheConnector, "
+                    "use register_kv_caches to init kv_caches"
+                )
+                self._init_kv_caches_from_forward_context(forward_context)
             assert len(self.kv_caches) > 0
             kvcaches = list(self.kv_caches.values())
 
