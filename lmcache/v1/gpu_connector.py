@@ -204,6 +204,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         # works with a single device?
         self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
+        self.page_size = 0
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
