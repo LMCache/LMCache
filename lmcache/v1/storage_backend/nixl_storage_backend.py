@@ -89,10 +89,14 @@ class NixlStorageConfig:
     enable_presence_cache: bool
     enable_async_put: bool
     use_direct_io: bool
+<<<<<<< HEAD
     path: str
     use_hugepages: bool
     enable_prog_thread: bool
     sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
+=======
+    path: Union[str, List[str]] 
+>>>>>>> 3f608db3 (Address feedback: add validate_nixl_path helper function and update NixlFilePool path handling)
     path_sharding: str
 
     @staticmethod
@@ -104,6 +108,18 @@ class NixlStorageConfig:
             return device == "cpu"
         else:
             return False
+
+    @staticmethod
+    def validate_nixl_path(path: Union[str, List[str]], path_sharding: str) -> str:
+        assert path is not None, "nixl_path cannot be None"
+        assert path_sharding == "by_gpu", "Unsupported path_sharding. Only 'by_gpu' is supported currently."
+    
+        paths = [path] if isinstance(path, str) else path
+        assert len(paths) > 0, "nixl_path cannot be an empty list."
+        
+        device_id = torch.cuda.current_device()
+        return paths[device_id % len(paths)]
+        
 
     @staticmethod
     def from_cache_engine_config(
@@ -152,6 +168,7 @@ class NixlStorageConfig:
             )
         path = extra_config.get("nixl_path")
 <<<<<<< HEAD
+<<<<<<< HEAD
         enable_prog_thread = extra_config.get("nixl_enable_prog_thread", True)
         sync_mode_str = extra_config.get("nixl_sync_mode", None)
         if sync_mode_str is not None and not _NIXL_SYNC_MODE_SUPPORTED:
@@ -174,6 +191,9 @@ class NixlStorageConfig:
 =======
         path_sharding = extra_config.get("nixl_path_sharding") # {by_gpu}
 >>>>>>> a39143ef ([Core] Add multipath KV-cache offloading support in LMCache NIXL backend)
+=======
+        path_sharding = extra_config.get("nixl_path_sharding", "by_gpu")
+>>>>>>> 3f608db3 (Address feedback: add validate_nixl_path helper function and update NixlFilePool path handling)
 
         assert pool_size is not None
         assert backend is not None
@@ -255,7 +275,7 @@ class NixlDescPool(ABC):
 
 
 class NixlFilePool(NixlDescPool):
-    def __init__(self, size: int, path: str, use_direct_io: bool, path_sharding: str):
+    def __init__(self, size: int, path: Union[str, List[str]], use_direct_io: bool, path_sharding: str):
         super().__init__(size)
         self.fds: List[int] = []
 
@@ -271,13 +291,8 @@ class NixlFilePool(NixlDescPool):
                     "use_direct_io is True, but O_DIRECT is not available on "
                     "this system. Falling back to buffered I/O."
                 )
-        base_path = path
-        if path_sharding == "by_gpu":
-            if isinstance(path, str):
-                path = [path]
-            device_id = torch.cuda.current_device()
-            base_path = path[device_id % len(path)]
-
+        base_path = NixlStorageConfig.validate_nixl_path(path, path_sharding)
+        
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
             tmp_path = os.path.join(base_path, filename)
