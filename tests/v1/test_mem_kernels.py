@@ -237,7 +237,9 @@ def test_multi_layer_kernel(num_tokens):
             slot_mapping_temp,
             kv_cache[0].device,
             page_buffer_size,
+            0,
             True,
+            False,
             False,
         )
         memory_obj_new_list.append(memory_obj_new)
@@ -272,6 +274,8 @@ def test_multi_layer_kernel(num_tokens):
             slot_mapping_temp,
             kv_cache_new[0].device,
             page_buffer_size,
+            0,
+            False,
             False,
             False,
         )
@@ -355,8 +359,10 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             slot_mapping_temp,
             kv_cache[0].device,
             0,
+            0,
             True,
             True,
+            False,
         )
         memory_obj_new_list.append(memory_obj_new)
 
@@ -396,8 +402,10 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             slot_mapping_temp,
             kv_cache_new[0].device,
             0,
+            0,
             False,
             True,
+            False,
         )
 
     for left_kv, right_kv in zip(kv_cache, kv_cache_new, strict=False):

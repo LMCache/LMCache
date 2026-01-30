@@ -591,8 +591,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 slot_mapping[start:end],
                 self.device,
                 self.page_buffer_size,
+                0,  # TODO (Shaoting): Support cross-layer KV cache layout
                 False,
                 self.use_mla,
+                False,  # TODO (Shaoting): Support cross-layer KV cache layout
             )
 
     @_lmcache_nvtx_annotate
@@ -619,8 +621,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
+                        0,  # TODO (Shaoting): Support cross-layer KV cache layout
                         True,
                         self.use_mla,
+                        False,  # TODO (Shaoting): Support cross-layer KV cache layout
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -635,8 +639,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
+                        0,  # TODO (Shaoting): Support cross-layer KV cache layout
                         True,
                         self.use_mla,
+                        False,  # TODO (Shaoting): Support cross-layer KV cache layout
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None

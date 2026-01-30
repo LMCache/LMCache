@@ -338,8 +338,10 @@ class MPCacheEngine:
                         slot_mapping,
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
+                        0,  # TODO (Shaoting): Support cross-layer KV cache layout
                         True,
                         gpu_context.is_mla,
+                        False,  # TODO (Shaoting): Support cross-layer KV cache layout
                     )
 
                     assert memory_obj.tensor is not None
@@ -423,8 +425,10 @@ class MPCacheEngine:
                         slot_mapping,
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
+                        0,  # TODO (Shaoting): Support cross-layer KV cache layout
                         False,
                         gpu_context.is_mla,
+                        False,  # TODO (Shaoting): Support cross-layer KV cache layout
                     )
 
         with (
