@@ -1,0 +1,12 @@
+chunk_size: 256
+# Disable local storage to demonstrate pure remote caching
+local_cpu: false
+local_disk: false
+# Enable Redis remote backend
+remote_url: "redis://localhost:6379"  # Adjust host/port as needed
+# For Redis with authentication:
+# remote_url: "redis://:password@localhost:6379"
+# For Redis with specific DB:
+# remote_url: "redis://localhost:6379/0"
+use_layerwise: false
+save_unfull_chunk: true
