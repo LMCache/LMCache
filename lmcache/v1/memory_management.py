@@ -447,6 +447,10 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+
+        # Layer Group Assumption:
+        # 1. Last three dimensions are LTD or LDT
+        # 2. Layers in a layer group are adjacent
         # Calculate the prefix sum of the group sizes
         # If there are two groups, the prefix sum will be
         # [0, size_of_group_1, size_of_group_1 + size_of_group_2]

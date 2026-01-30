@@ -11,7 +11,7 @@ import torch
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PinMemoryAllocator
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.metadata import GPUKVFormat, LMCacheMetadata
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
@@ -406,7 +406,7 @@ def _get_metadata(use_mla: bool):
         local_worker_id=0,
         kv_dtype=dtype,
         kv_shape=kv_shape,
-        use_mla=use_mla,
+        gpu_kv_format=GPUKVFormat(use_mla=use_mla),
     )
     return metadata
 

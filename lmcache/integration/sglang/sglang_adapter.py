@@ -19,12 +19,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import (
-    GPUConnectorInterface,
-    SGLangGPUConnector,
-    SGLangLayerwiseGPUConnector,
-)
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.metadata import GPUKVFormat, LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -96,32 +91,23 @@ def init_lmcache_engine(
         local_worker_id=local_rank,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
+        gpu_kv_format=GPUKVFormat(kv_packed=False),
     )
 
     use_gpu = need_gpu_interm_buffer(config)
 
     hidden_dim_size = num_kv_head * head_dim
 
-    gpu_connector: GPUConnectorInterface
-
-    if config.use_layerwise:
-        gpu_connector = SGLangLayerwiseGPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
-    else:
-        gpu_connector = SGLangGPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
+    gpu_connector = LMCacheEngineBuilder._Create_gpu_connector(
+        config=config,
+        metadata=metadata,
+        hidden_dim_size=hidden_dim_size,
+        num_layers=num_layer,
+        use_gpu=use_gpu,
+        chunk_size=chunk_size,
+        dtype=kv_dtype,
+        device=device,
+    )
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         config,

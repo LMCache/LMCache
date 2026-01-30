@@ -514,6 +514,5 @@ def lmcache_engine_metadata(role="worker"):
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, 32, 128),
-        use_mla=False,
         role=role,
     )

@@ -26,7 +26,7 @@ from lmcache.v1.health_monitor.constants import (
 )
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.metadata import GPUKVFormat, LMCacheMetadata
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
@@ -353,7 +353,7 @@ class LMCacheManager:
             local_worker_id=parallel_config.rank,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
-            use_mla=use_mla,
+            gpu_kv_format=GPUKVFormat(use_mla=use_mla),
             role=role,
             served_model_name=model_config.served_model_name,
             chunk_size=self._config.chunk_size,
@@ -362,9 +362,7 @@ class LMCacheManager:
         )
 
         # Create GPU connector
-        vllm_gpu_connector = self._create_gpu_connector(
-            role, use_mla, metadata, device, current_platform
-        )
+        vllm_gpu_connector = self._create_gpu_connector(role, use_mla, metadata, device)
 
         # Get tensor parallel group
         if role == "scheduler":
@@ -461,45 +459,19 @@ class LMCacheManager:
 
         return device, torch_dev, dev_name
 
-    def _create_gpu_connector(self, role, use_mla, metadata, device, current_platform):
+    def _create_gpu_connector(self, role, use_mla, metadata, device):
         """Create the GPU connector based on configuration."""
-        # First Party
-        from lmcache.v1.gpu_connector import (
-            VLLMBufferLayerwiseGPUConnector,
-            VLLMPagedMemGPUConnectorV2,
-            VLLMPagedMemGPUConnectorV3,
-            VLLMPagedMemLayerwiseGPUConnector,
-        )
-        from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
-
         use_gpu = self._need_gpu_interm_buffer()
 
         if role == "scheduler":
             return None
 
-        if self._config.use_layerwise:
-            if self._config.enable_blending:
-                return VLLMBufferLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-
-        if current_platform.is_cuda_alike():
-            if self._config.use_gpu_connector_v3:
-                return VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
-                )
-        elif current_platform.is_xpu():
-            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
-        else:
-            raise RuntimeError("No supported connector found for the current platform.")
+        return LMCacheEngineBuilder._Create_gpu_connector(
+            self._config,
+            metadata,
+            use_gpu=use_gpu,
+            device=device,
+        )
 
     def _need_gpu_interm_buffer(self) -> bool:
         """Check if GPU intermediate buffer is needed."""

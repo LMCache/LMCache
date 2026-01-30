@@ -1834,6 +1834,110 @@ class LMCacheEngineBuilder:
         )
 
     @staticmethod
+    def _Create_gpu_connector(
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
+        **kwargs,
+    ) -> GPUConnectorInterface:
+        if config.use_layerwise:
+            if not metadata.gpu_kv_format.kv_packed:
+                # recommended rename: Layerwise_2_L_B_GPUConnector
+                # First Party
+                from lmcache.v1.gpu_connector import SGLangLayerwiseGPUConnector
+
+                assert "hidden_dim_size" in kwargs, "hidden_dim_size should be provided"
+                assert "num_layers" in kwargs, "num_layers should be provided"
+                assert "use_gpu" in kwargs, "use_gpu should be provided"
+                assert "chunk_size" in kwargs, "chunk_size should be provided"
+                assert "dtype" in kwargs, "dtype should be provided"
+                assert "device" in kwargs, "device should be provided"
+                return SGLangLayerwiseGPUConnector(
+                    hidden_dim_size=kwargs["hidden_dim_size"],
+                    num_layers=kwargs["num_layers"],
+                    use_gpu=kwargs["use_gpu"],
+                    chunk_size=kwargs["chunk_size"],
+                    dtype=kwargs["dtype"],
+                    device=kwargs["device"],
+                )
+            else:
+                if config.enable_blending:
+                    # recommended rename: Blend_L_B_GPUConnector
+                    # First Party
+                    from lmcache.v1.gpu_connector import VLLMBufferLayerwiseGPUConnector
+
+                    assert "chunk_size" in kwargs, "chunk_size should be provided"
+                    assert "device" in kwargs, "device should be provided"
+                    return VLLMBufferLayerwiseGPUConnector.from_metadata(
+                        metadata, use_gpu=kwargs["use_gpu"], device=kwargs["device"]
+                    )
+                else:
+                    # recommended rename: Layerwise_L_B_GPUConnector
+                    # First Party
+                    from lmcache.v1.gpu_connector import (
+                        VLLMPagedMemLayerwiseGPUConnector,
+                    )
+
+                    assert "use_gpu" in kwargs, "use_gpu should be provided"
+                    assert "device" in kwargs, "device should be provided"
+                    return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
+                        metadata, use_gpu=kwargs["use_gpu"], device=kwargs["device"]
+                    )
+        else:
+            if not metadata.gpu_kv_format.kv_packed:
+                # recommended rename: 2_L_B_GPUConnector
+                # First Party
+                from lmcache.v1.gpu_connector import SGLangGPUConnector
+
+                assert "hidden_dim_size" in kwargs, "hidden_dim_size should be provided"
+                assert "num_layers" in kwargs, "num_layers should be provided"
+                assert "use_gpu" in kwargs, "use_gpu should be provided"
+                assert "chunk_size" in kwargs, "chunk_size should be provided"
+                assert "dtype" in kwargs, "dtype should be provided"
+                assert "device" in kwargs, "device should be provided"
+                return SGLangGPUConnector(
+                    **kwargs,
+                )
+            else:
+                # Third Party
+                from vllm.platforms import current_platform
+
+                if current_platform.is_cuda_alike():
+                    if config.use_gpu_connector_v3:
+                        # recommended rename: L_L_B_GPUConnector
+                        # First Party
+                        from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV3
+
+                        assert "use_gpu" in kwargs, "use_gpu should be provided"
+                        assert "device" in kwargs, "device should be provided"
+                        return VLLMPagedMemGPUConnectorV3.from_metadata(
+                            metadata, use_gpu=kwargs["use_gpu"], device=kwargs["device"]
+                        )
+                    else:
+                        # recommended rename: L_B_GPUConnector
+                        # First Party
+                        from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+
+                        assert "use_gpu" in kwargs, "use_gpu should be provided"
+                        assert "device" in kwargs, "device should be provided"
+                        return VLLMPagedMemGPUConnectorV2.from_metadata(
+                            metadata, use_gpu=kwargs["use_gpu"], device=kwargs["device"]
+                        )
+                elif current_platform.is_xpu():
+                    # recommended rename: XPU_L_B_GPUConnector
+                    # First Party
+                    from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
+
+                    assert "use_gpu" in kwargs, "use_gpu should be provided"
+                    assert "device" in kwargs, "device should be provided"
+                    return VLLMPagedMemXPUConnectorV2.from_metadata(
+                        metadata, use_gpu=kwargs["use_gpu"], device=kwargs["device"]
+                    )
+                else:
+                    raise RuntimeError(
+                        "No supported connector found for the current platform."
+                    )
+
+    @staticmethod
     def _Create_token_database(
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,

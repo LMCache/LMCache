@@ -14,14 +14,28 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class LMCacheMetadata:
+class GPUKVFormat:
     """
-    LMCacheMetadata should be extracted from the northbound
-    serving engine configuration and wrap the extraction of
-    attributes (e.g. model name, tp rank, etc.)
+    Format attributes of the GPU to select
+    and initialize GPUConnector
     """
 
+    """ whether use MLA"""
+    use_mla: bool = False
+    """ Manager for groups of layers with identical KV cache structure """
+    kv_layer_groups_manager: KVLayerGroupsManager = field(
+        default_factory=KVLayerGroupsManager
+    )
+    """ K and V stacked into one tensor """
+    kv_packed: bool = True
+    """ Layers stacked into one tensor """
+    layers_packed: bool = False
+
+
+@dataclass
+class LMCacheMetadata:
     """name of the LLM model"""
+
     model_name: str
     """ global world size when running under a distributed setting 
     (total number of workers)"""
@@ -46,8 +60,6 @@ class LMCacheMetadata:
     # (Deprecated) Will be replaced by kv_layer_groups_manager in the future
     """ (num_layer, 2, chunk_size, num_kv_head, head_size) """
     kv_shape: tuple[int, int, int, int, int]
-    """ whether use MLA"""
-    use_mla: bool = False
     """ the role of the current instance (e.g., 'scheduler', 'worker') """
     role: Optional[str] = None
     """ the first rank of the distributed setting """
@@ -56,14 +68,16 @@ class LMCacheMetadata:
     served_model_name: Optional[str] = None
     """chunk size"""
     chunk_size: int = 256
-    """ Manager for groups of layers with identical KV cache structure """
-    kv_layer_groups_manager: KVLayerGroupsManager = field(
-        default_factory=KVLayerGroupsManager
-    )
     """ engine_id for RPC path (used by lookup client/server) """
     engine_id: Optional[str] = None
     """ extra config from kv_connector (e.g., lmcache_rpc_port) """
     kv_connector_extra_config: Optional[dict] = None
+    """ GPU KV format """
+    gpu_kv_format: GPUKVFormat = field(default_factory=GPUKVFormat)
+
+    @property
+    def use_mla(self) -> bool:
+        return self.gpu_kv_format.use_mla
 
     def is_first_rank(self) -> bool:
         """Check if the current worker is the first rank"""
@@ -71,20 +85,20 @@ class LMCacheMetadata:
 
     # TODO(chunxiaozheng): some uts do not `build_kv_layer_groups`
     def get_dtypes(self) -> list[torch.dtype]:
-        if self.kv_layer_groups_manager.kv_layer_groups:
-            return [
-                group.dtype for group in self.kv_layer_groups_manager.kv_layer_groups
-            ]
+        kv_layer_groups_manager = self.gpu_kv_format.kv_layer_groups_manager
+        if kv_layer_groups_manager.kv_layer_groups:
+            return [group.dtype for group in kv_layer_groups_manager.kv_layer_groups]
         return [self.kv_dtype]
 
     def get_shapes(self, num_tokens: Optional[int] = None) -> list[torch.Size]:
         """Get the shapes of the KV cache in LMCache"""
         if num_tokens is None:
             num_tokens = self.chunk_size
-        if self.kv_layer_groups_manager.kv_layer_groups:
+        kv_layer_groups_manager = self.gpu_kv_format.kv_layer_groups_manager
+        if kv_layer_groups_manager.kv_layer_groups:
             shapes = []
             kv_size = 1 if self.use_mla else 2
-            for group in self.kv_layer_groups_manager.kv_layer_groups:
+            for group in kv_layer_groups_manager.kv_layer_groups:
                 shapes.append(
                     torch.Size(
                         [
@@ -109,6 +123,8 @@ class LMCacheMetadata:
             ]
 
     def get_num_groups(self) -> int:
-        if self.kv_layer_groups_manager.kv_layer_groups:
-            return self.kv_layer_groups_manager.num_groups
+        kv_layer_groups_manager = self.gpu_kv_format.kv_layer_groups_manager
+        assert kv_layer_groups_manager is not None
+        if kv_layer_groups_manager.kv_layer_groups:
+            return kv_layer_groups_manager.num_groups
         return 1

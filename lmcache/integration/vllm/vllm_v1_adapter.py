@@ -698,7 +698,7 @@ class LMCacheConnectorV1Impl:
         if self.lmcache_engine is not None:
             assert len(self.kv_caches) > 0
             kv_layer_groups_manager = (
-                self.lmcache_engine.metadata.kv_layer_groups_manager
+                self.lmcache_engine.metadata.gpu_kv_format.kv_layer_groups_manager
             )
             kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
 

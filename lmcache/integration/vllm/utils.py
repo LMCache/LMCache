@@ -18,6 +18,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+from lmcache.v1.metadata import GPUKVFormat
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -224,7 +225,7 @@ def create_lmcache_metadata(
         local_worker_id=parallel_cfg.rank,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
-        use_mla=use_mla,
+        gpu_kv_format=GPUKVFormat(use_mla=use_mla),
         role=role,
         served_model_name=model_cfg.served_model_name,
         engine_id=engine_id,

@@ -24,7 +24,7 @@ from lmcache.v1.memory_management import (
     PinMemoryAllocator,
     TensorMemoryAllocator,
 )
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.metadata import GPUKVFormat, LMCacheMetadata
 
 # Local
 from .utils import (
@@ -873,7 +873,9 @@ def _create_metadata(use_mla, kv_caches):
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(32, 2, 256, num_heads, 128),
-        use_mla=use_mla,
+        gpu_kv_format=GPUKVFormat(use_mla=use_mla),
     )
-    metadata.kv_layer_groups_manager.build_kv_layer_groups(kv_caches)
+    kv_layer_groups_manager = metadata.gpu_kv_format.kv_layer_groups_manager
+    assert kv_layer_groups_manager is not None
+    kv_layer_groups_manager.build_kv_layer_groups(kv_caches)
     return metadata

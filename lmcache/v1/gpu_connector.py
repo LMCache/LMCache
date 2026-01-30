@@ -167,13 +167,22 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
 
 class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
     """
-    The GPU KV cache should be a nested tuple of K and V tensors.
-    More specifically, we have:
-    - GPUTensor = Tuple[KVLayer, ...]
-    - KVLayer = Tuple[Tensor, Tensor]
-    - Tensor: [num_blocks, block_size, num_heads, head_size]
+    TODO:
+    Recommended Renaming: L_B_GPUConnector
 
-    It will produce / consume memory object with KV_2LTD format
+    GPU connector for vLLM with multi-layer batch transfer.
+
+
+    GPU KV Cache Structure (per layer):
+    - Flash Attention: [2, num_blocks, block_size, num_heads, head_size] (5D)
+    - Flash Infer: [num_blocks, 2, block_size, num_heads, head_size] (5D)
+    - MLA: [num_blocks, block_size, head_size] (3D)
+
+    LMCache Memory Object Format:
+    - Standard: [2, num_layers, num_tokens, hidden_dim_size] (KV_2LTD)
+    - MLA: [1, num_layers, num_tokens, hidden_dim_size] (KV_MLA_FMT)
+
+    Transfer mode: Multi-layer (all layers transferred in one kernel call).
     """
 
     def __init__(
@@ -203,6 +212,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        self.vllm_two_major: Optional[bool] = None  # Detect Flash Attn vs Flash Infer
         if use_gpu:
             assert "chunk_size" in kwargs, (
                 "chunk_size should be provided to create a GPU buffer."
@@ -266,33 +276,41 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         if self.use_mla:
-            # kv_caches[0].shape: [num_pages, page_size, head_size]
+            # kv_caches[0].shape: [num_blocks, block_size, head_size]
             assert kv_caches[0].dim() == 3
             self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
+            self.vllm_two_major = False  # MLA doesn't need this
         else:
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            # Flash Attention: [2, num_blocks, block_size, num_heads, head_size]
+            # Flash Infer: [num_blocks, 2, block_size, num_heads, head_size]
             assert kv_caches[0].dim() == 5
-            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+            self.vllm_two_major = kv_caches[0].shape[0] == 2
+
+            if self.vllm_two_major:
+                # Flash Attention: dim 0 is K/V
+                num_blocks = kv_caches[0].shape[1]
+            else:
+                # Flash Infer: dim 1 is K/V
+                num_blocks = kv_caches[0].shape[0]
+            block_size = kv_caches[0].shape[2]
+            self.page_buffer_size = num_blocks * block_size
 
         return self.kv_cache_pointers_on_gpu[idx]
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
-        The kvcaches should correspond to the "WHOLE token sequence".
+        """Load KV cache from LMCache memory object to vLLM's paged GPU memory.
 
-        Note:
-          1. This function expects the 'slot_mapping' is a "full slot mapping"
-             where it's length is the same as the whole token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
-             with -1s until the end of the matched prefix. The start and end
-             should NEVER overlap with the prefix caching (which means the
-             underlying CUDA kernel will never see -1 in slot_mapping)
+        Args:
+            memory_obj: LMCache memory object containing KV cache data
+            start: Starting token index in the sequence
+            end: Ending token index in the sequence
+            **kwargs: Must include:
+                - kvcaches: List[torch.Tensor] (one per layer)
+                - slot_mapping: torch.Tensor mapping tokens to page slots
 
-
-        :raises ValueError: If 'kvcaches' is not provided in kwargs.
+        :raises ValueError: If 'kvcaches' or 'slot_mapping' not provided in kwargs.
         :raises AssertionError: If the memory object does not have a tensor.
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
         assert memory_obj.tensor is not None
 
@@ -334,22 +352,20 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
-        The kvcaches should correspond to the "WHOLE token sequence".
+        """Store KV cache from vLLM's paged GPU memory to LMCache memory object.
 
-        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
+        Sets the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD or KV_MLA_FMT.
 
-        Note:
-          1. This function expects the 'slot_mapping' is a "full slot mapping"
-             where it's length is the same as the whole token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
-             with -1s until the end of the matched prefix. The start and end
-             should NEVER overlap with the prefix caching (which means the
-             underlying CUDA kernel will never see -1 in slot_mapping)
+        Args:
+            memory_obj: LMCache memory object to store KV cache data
+            start: Starting token index in the sequence
+            end: Ending token index in the sequence
+            **kwargs: Must include:
+                - kvcaches: List[torch.Tensor] (one per layer)
+                - slot_mapping: torch.Tensor mapping tokens to page slots
 
-        :raises ValueError: If 'kvcaches' is not provided in kwargs,
+        :raises ValueError: If 'kvcaches' or 'slot_mapping' not provided in kwargs.
         :raises AssertionError: If the memory object does not have a tensor.
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
         assert memory_obj.tensor is not None
 
@@ -418,6 +434,23 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
 
 class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
+    """
+    TODO:
+    Recommended Renaming: L_L_B_GPUConnector
+
+    Each layer group can have different shape and dtype.
+    GPU KV Cache Structure (per layer):
+    - Flash Attention: [2, num_blocks, block_size, num_heads, head_size] (5D)
+    - Flash Infer: [num_blocks, 2, block_size, num_heads, head_size] (5D)
+    - MLA: [num_blocks, block_size, head_size] (3D)
+
+    iterate through layer groups, each layer group is a list of tensors
+    LMCache Memory Object Format:
+    - Standard: [2, num_layers, num_tokens, hidden_dim_size] (KV_2LTD)
+    - MLA: [1, num_layers, num_tokens, hidden_dim_size] (KV_MLA_FMT)
+
+    """
+
     def __init__(
         self,
         metadata: LMCacheMetadata,
@@ -432,6 +465,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.use_gpu = use_gpu
         self.kvcaches: Optional[List[torch.Tensor]] = None
         self.page_buffer_size = 0
+        self.vllm_two_major: Optional[bool] = None  # Detect Flash Attn vs Flash Infer
 
         self.init = False
         self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
@@ -453,7 +487,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     def _initialize_kv_cache_pointers(self):
         if self.init:
             return
-        assert self.metadata.kv_layer_groups_manager.kv_layer_groups
+        kv_layer_groups_manager = self.metadata.gpu_kv_format.kv_layer_groups_manager
+        assert kv_layer_groups_manager.kv_layer_groups
         if self.use_gpu:
             # init tmp buffer
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
@@ -466,7 +501,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 )
             ]
         self.group_kv_cache_pointers_on_gpu = []
-        for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
+        for group in kv_layer_groups_manager.kv_layer_groups:
             # init kv cache pointers
             num_layers = group.num_layers
             kv_cache_pointers = torch.empty(num_layers, dtype=torch.int64, device="cpu")
@@ -482,17 +517,26 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
         if self.use_mla:
-            # kvcaches[0].shape: [num_pages, page_size, head_size]
+            # kvcaches[0].shape: [num_blocks, block_size, head_size]
             assert self.kvcaches[0].dim() == 3
             self.page_buffer_size = (
                 self.kvcaches[0].shape[0] * self.kvcaches[0].shape[1]
             )
+            self.vllm_two_major = False  # MLA doesn't need this
         else:
-            # kvcaches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            # Flash Attention: [2, num_blocks, block_size, num_heads, head_size]
+            # Flash Infer: [num_blocks, 2, block_size, num_heads, head_size]
             assert self.kvcaches[0].dim() == 5
-            self.page_buffer_size = (
-                self.kvcaches[0].shape[1] * self.kvcaches[0].shape[2]
-            )
+            self.vllm_two_major = self.kvcaches[0].shape[0] == 2
+
+            if self.vllm_two_major:
+                # Flash Attention: dim 0 is K/V
+                num_blocks = self.kvcaches[0].shape[1]
+            else:
+                # Flash Infer: dim 1 is K/V
+                num_blocks = self.kvcaches[0].shape[0]
+            block_size = self.kvcaches[0].shape[2]
+            self.page_buffer_size = num_blocks * block_size
         self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
 
@@ -511,12 +555,12 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
-        for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
+        for i, kv_cache_pointers in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
             lmc_ops.multi_layer_kv_transfer(
                 memory_obj_tensor,
-                kv_cache_pointer,
+                kv_cache_pointers,
                 slot_mapping[start:end],
                 self.device,
                 self.page_buffer_size,
@@ -537,14 +581,14 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.group_kv_cache_pointers_on_gpu is not None
         with torch.cuda.stream(self.store_stream):
             if not self.use_gpu or end - start != self.chunk_size:
-                for i, kv_cache_pointer in enumerate(
+                for i, kv_cache_pointers in enumerate(
                     self.group_kv_cache_pointers_on_gpu
                 ):
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
                     lmc_ops.multi_layer_kv_transfer(
                         memory_obj_tensor,
-                        kv_cache_pointer,
+                        kv_cache_pointers,
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
@@ -554,13 +598,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             else:
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.group_tmp_buffer is not None
-                for i, kv_cache_pointer in enumerate(
+                for i, kv_cache_pointers in enumerate(
                     self.group_kv_cache_pointers_on_gpu
                 ):
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer,
-                        kv_cache_pointer,
+                        kv_cache_pointers,
                         slot_mapping[start:end],
                         self.device,
                         self.page_buffer_size,
@@ -595,6 +639,17 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
 
 
 class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
+    """
+    TODO:
+    Recommended Renaming: Blend_L_B_GPUConnector
+
+    GPU connector for CacheBlend
+
+    Requires GPU KV Cache Structure (one tensor per layer):
+    - Flash Attention: list[2, num_blocks, block_size, num_heads, head_size]
+    - Flash Infer: list[num_blocks, 2, block_size, num_heads, head_size]
+    """
+
     def __init__(
         self,
         hidden_dim_size: int,
@@ -732,7 +787,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         cache of layer i from CPU -> GPU buffer, (2) recovers the positional
         encoding of the layer i-1's KV cache in the GPU buffer, and (3)
         moves the KV cache of layer i-2 from GPU buffer to paged GPU memory.
-        In total, this the generator will yield num_layers + 2 times.
+        In total, this generator will yield num_layers + 2 times.
 
         :param starts: The starting indices of the KV cache in the corresponding
             token sequence.
@@ -1002,7 +1057,22 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
 
 class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
-    """ """
+    """
+    TODO
+    Recommended Renaming: Layerwise_L_B_GPUConnector
+    GPU connector for vLLM with layer-by-layer paged memory transfer.
+
+    GPU KV Cache Structure (per layer):
+    - MLA: [num_blocks, block_size, head_size] (3D)
+    - Flash Attention: [2, num_blocks, block_size, num_heads, head_size] (5D)
+    - Flash Infer: [num_blocks, 2, block_size, num_heads, head_size] (5D)
+
+    LMCache Memory Object Format (per layer):
+    - MLA: [num_tokens, hidden_dim_size]
+    - Standard: [num_tokens, 2, hidden_dim_size]
+
+    Transfer mode: Layer-by-layer with GPU buffer allocator for pipelining.
+    """
 
     def __init__(
         self,
@@ -1384,6 +1454,8 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
 
 class SGLangGPUConnector(GPUConnectorInterface):
     """
+    TODO:
+    RecommendedRenaming: 2_L_B_GPUConnector
     The GPU KV cache should be a list of tensors, one for each layer,
     with separate key and value pointers.
     More specifically, we have:
@@ -1447,21 +1519,19 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
-        The kvcaches should correspond to the "WHOLE token sequence".
+        """Load KV cache from LMCache memory object to SGLang's paged GPU memory.
 
-        Note:
-          1. This function expects the 'slot_mapping' is a "partial slot mapping"
-             where its length is the same as the uncached token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
-             with -1s until the end of the matched prefix. The start and end
-             should NEVER overlap with the prefix caching (which means the
-             underlying CUDA kernel will never see -1 in slot_mapping)
+        Args:
+            memory_obj: LMCache memory object containing KV cache data
+            start: Starting token index in the sequence
+            end: Ending token index in the sequence
+            **kwargs: Must include:
+                - kvcaches: List[torch.Tensor] (flat list: K layers + V layers)
+                - slot_mapping: torch.Tensor mapping tokens to page slots
+                - offset: Optional starting offset (default 0)
 
-
-        :raises ValueError: If 'kvcaches' is not provided in kwargs.
+        :raises ValueError: If required kwargs are not provided.
         :raises AssertionError: If the memory object does not have a tensor.
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
         assert memory_obj.tensor is not None
 
@@ -1502,22 +1572,20 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
-        The kvcaches should correspond to the "WHOLE token sequence".
+        """Store KV cache from SGLang's paged GPU memory to LMCache memory object.
 
-        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
+        Sets the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
 
-        Note:
-          1. This function expects the 'slot_mapping' is a "partial slot mapping"
-             where its length is the same as the uncached token sequence.
-          2. In the case that there is prefix caching, slot_mapping will starts
-             with -1s until the end of the matched prefix. The start and end
-             should NEVER overlap with the prefix caching (which means the
-             underlying CUDA kernel will never see -1 in slot_mapping)
+        Args:
+            memory_obj: LMCache memory object to store KV cache data
+            start: Starting token index in the sequence
+            end: Ending token index in the sequence
+            **kwargs: Must include:
+                - kvcaches: List[torch.Tensor] (flat list: K layers + V layers)
+                - slot_mapping: torch.Tensor mapping tokens to page slots
 
-        :raises ValueError: If 'kvcaches' is not provided in kwargs,
+        :raises ValueError: If required kwargs are not provided.
         :raises AssertionError: If the memory object does not have a tensor.
-        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
         assert memory_obj.tensor is not None
 
@@ -1582,17 +1650,21 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
 class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
     """
-    The GPU KV cache should be a list of tensors, one for each layer,
-    with separate key and value pointers.
-    More specifically, we have:
-    - kvcaches: Tuple[List[Tensor], List[Tensor]]
-      - The first element is a list of key tensors, one per layer.
-      - The second element is a list of value tensors, one per layer.
-    - Each tensor: [page_buffer_size, head_num, head_size]
+    TODO:
+    Recommended Renaming: Layerwise_2_L_B_GPUConnector
+    GPU connector for SGLang with layer-by-layer transfer.
 
-    The connector manages the transfer of KV cache data between CPU and GPU
-    memory for SGLang using pointer arrays for efficient access.
-    It will produce/consume memory objects with KV_2LTD format.
+    GPU KV Cache Structure:
+    - kvcaches: List[List[torch.Tensor]] - nested structure:
+      - kvcaches[0]: List of K tensors (one per layer)
+      - kvcaches[1]: List of V tensors (one per layer)
+    - Each tensor shape: [page_buffer_size, num_heads, head_size]
+      where page_buffer_size = num_pages * page_size
+
+    LMCache Memory Object Format (per layer):
+    - [num_tokens, 2, hidden_dim_size]
+
+    Transfer mode: Layer-by-layer with GPU buffer for pipelining.
     """
 
     def __init__(

@@ -13,7 +13,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.metadata import GPUKVFormat, LMCacheMetadata
 from lmcache.v1.storage_backend.connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -64,7 +64,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
         model_name="test-model",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
-        use_mla=True,
+        gpu_kv_format=GPUKVFormat(use_mla=True),
         world_size=4,
         local_world_size=4,
         worker_id=2,
@@ -74,7 +74,7 @@ def test_remote_mla_worker_id_as0(mock_stream):
         model_name="test-model",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
-        use_mla=True,
+        gpu_kv_format=GPUKVFormat(use_mla=True),
         world_size=4,
         local_world_size=4,
         worker_id=0,

@@ -31,7 +31,7 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.metadata import GPUKVFormat, LMCacheMetadata
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.standalone.manager import StandaloneLMCacheManager
 from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
@@ -617,7 +617,7 @@ def main():
             fmt=args.fmt,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
-            use_mla=args.use_mla,
+            gpu_kv_format=GPUKVFormat(use_mla=args.use_mla),
             role="worker",
         )
 
