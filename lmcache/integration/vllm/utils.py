@@ -18,6 +18,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+from lmcache.v1.kvcache_format import build_dense_format_single_group
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -203,6 +204,17 @@ def create_lmcache_metadata(
     num_kv_head = model_cfg.get_num_kv_heads(parallel_cfg)
     head_size = model_cfg.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
+    hidden_dim = head_size if use_mla else num_kv_head * head_size
+
+    kv_format = build_dense_format_single_group(
+        num_layers=num_layer,
+        dtype=kv_dtype,
+        hidden_dim=hidden_dim,
+        block_size=chunk_size,
+        use_mla=use_mla,
+        separation="packed",
+        format_version="v1",
+    )
 
     # Extract engine_id and kv_connector_extra_config from vllm_config if available
     engine_id = None
@@ -229,6 +241,7 @@ def create_lmcache_metadata(
         served_model_name=model_cfg.served_model_name,
         engine_id=engine_id,
         kv_connector_extra_config=kv_connector_extra_config,
+        kv_format=kv_format,
     )
 
     return metadata, config

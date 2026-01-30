@@ -23,14 +23,31 @@ from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 def _get_default_metadata(model: str) -> LMCacheMetadata:
     """Get default metadata for testing"""
+    # First Party
+    from lmcache.v1.kvcache_format import build_dense_format_single_group
+
+    kv_dtype = torch.bfloat16
+    kv_shape = (8, 2, 16, 8, 16)
+    hidden_dim = kv_shape[3] * kv_shape[4]
+    kv_format = build_dense_format_single_group(
+        num_layers=kv_shape[0],
+        dtype=kv_dtype,
+        hidden_dim=hidden_dim,
+        block_size=kv_shape[2],
+        use_mla=False,
+        separation="packed",
+    )
+
     return LMCacheMetadata(
         model_name=model,
         world_size=8,
         local_world_size=8,
         worker_id=0,
         local_worker_id=0,
-        kv_dtype=torch.bfloat16,
-        kv_shape=(8, 2, 16, 8, 16),
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
+        kv_format=kv_format,
+        chunk_size=kv_shape[2],
     )
 
 

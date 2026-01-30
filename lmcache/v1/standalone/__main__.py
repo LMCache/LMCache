@@ -608,17 +608,30 @@ def main():
             kv_shape[4],
         )
 
+        # First Party
+        from lmcache.v1.kvcache_format import build_dense_format_single_group
+
+        hidden_dim = kv_shape[3] * kv_shape[4]
+        kv_format = build_dense_format_single_group(
+            num_layers=kv_shape[0],
+            dtype=kv_dtype,
+            hidden_dim=hidden_dim,
+            block_size=kv_shape[2],
+            use_mla=args.use_mla,
+            separation="packed",
+        )
+
         metadata = LMCacheMetadata(
             model_name=args.model_name,
             world_size=args.world_size,
             local_world_size=args.world_size,
             worker_id=args.worker_id,
             local_worker_id=args.worker_id,
-            fmt=args.fmt,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=args.use_mla,
             role="worker",
+            kv_format=kv_format,
         )
 
         starter = LMCacheStandaloneStarter(config, metadata, layer_groups, args.device)

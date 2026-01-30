@@ -88,6 +88,19 @@ def init_lmcache_engine(
     torch.cuda.device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     # Use global rank for metadata (tensor parallel rank)
+    hidden_dim_size = num_kv_head * head_dim
+
+    # Describe the KV format so LMCache core stays engine-agnostic.
+    # First Party
+    from lmcache.v1.kvcache_format import build_dense_format_single_group
+
+    kv_format = build_dense_format_single_group(
+        block_size=chunk_size,
+        hidden_dim=hidden_dim_size,
+        num_layers=num_layer,
+        dtype=kv_dtype,
+    )
+
     metadata = LMCacheMetadata(
         model_name=model_config.model_path,
         world_size=tp_size,
@@ -96,11 +109,11 @@ def init_lmcache_engine(
         local_worker_id=local_rank,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
+        chunk_size=chunk_size,
+        kv_format=kv_format,
     )
 
     use_gpu = need_gpu_interm_buffer(config)
-
-    hidden_dim_size = num_kv_head * head_dim
 
     gpu_connector: GPUConnectorInterface
 

@@ -345,6 +345,17 @@ class LMCacheManager:
                 )
 
         # Create metadata
+        # First Party
+        from lmcache.v1.kvcache_format import build_dense_format_single_group
+
+        kv_format = build_dense_format_single_group(
+            num_layers=num_layer,
+            dtype=kv_dtype,
+            hidden_dim=num_kv_head * head_size,
+            block_size=chunk_size,
+            use_mla=use_mla,
+            separation="packed",
+        )
         metadata = LMCacheMetadata(
             model_name=model_config.model,
             world_size=parallel_config.world_size,
@@ -359,6 +370,7 @@ class LMCacheManager:
             chunk_size=self._config.chunk_size,
             engine_id=engine_id,
             kv_connector_extra_config=kv_connector_extra_config,
+            kv_format=kv_format,
         )
 
         # Create GPU connector
