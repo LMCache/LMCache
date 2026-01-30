@@ -1,0 +1,8 @@
+chunk_size: 256
+# Disable local storage to demonstrate pure remote caching
+local_cpu: false
+local_disk: false
+# Enable LMCache Server remote backend
+remote_url: "lm://localhost:65432"
+use_layerwise: false
+save_unfull_chunk: true
