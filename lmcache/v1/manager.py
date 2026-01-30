@@ -459,7 +459,7 @@ class LMCacheManager:
                 return VLLMPagedMemGPUConnectorV3.from_metadata(
                     metadata, use_gpu, device
                 )
-            else:  # TODO (Shaoting): Design an entrypoint
+            else:
                 return VLLMPagedMemGPUConnectorV2.from_metadata(
                     metadata, use_gpu, device
                 )

@@ -191,13 +191,19 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """
         self.hidden_dim_size = hidden_dim_size
         self.num_layers = num_layers
-        self.kv_cache_pointers = torch.empty(1, dtype=torch.int64, device="cpu")
+        self.cross_layers = "cross_layers" in kwargs and kwargs["cross_layers"]
+        if self.cross_layers:
+            self.kv_cache_pointer = torch.empty(1, dtype=torch.int64, device="cpu")
+            self.cross_layers_kvcaches: Optional[torch.Tensor] = None
+        else:
+            self.kv_cache_pointers = torch.empty(
+                num_layers, dtype=torch.int64, device="cpu"
+            )
+            self.kvcaches: Optional[List[torch.Tensor]] = None
         # Not sure we need a dict here. Maybe a single GPU connector always
         # works with a single device?
         self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
         self.page_buffer_size = 0
-
-        self.kvcaches: Optional[torch.Tensor] = None
 
         self.gpu_buffer: Optional[torch.Tensor] = None
         self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
@@ -241,6 +247,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         num_kv_head = metadata.kv_shape[3]
         head_size = metadata.kv_shape[4]
         hidden_dim_size = num_kv_head * head_size
+        if metadata.kv_connector_extra_config:
+            cross_layers = metadata.kv_connector_extra_config.get(
+                "enable_cross_layers_blocks", False
+            )
+        else:
+            cross_layers = False
 
         return cls(
             hidden_dim_size=hidden_dim_size,
@@ -250,19 +262,44 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             dtype=metadata.kv_dtype,
             device=device,
             use_mla=metadata.use_mla,
+            cross_layers=cross_layers,
         )
 
-    def _initialize_pointers(self, kv_caches: torch.Tensor) -> torch.Tensor:
+    def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
+        self.device = kv_caches[0].device
+        assert self.device.type == "cuda", "The device should be CUDA."
+        idx = self.device.index
+        if idx in self.kv_cache_pointers_on_gpu:
+            return self.kv_cache_pointers_on_gpu[idx]
+        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+        self.kv_cache_pointers_on_gpu[idx] = torch.empty(
+            self.num_layers, dtype=torch.int64, device=self.device
+        )
+        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
+        if self.use_mla:
+            # kv_caches[0].shape: [num_pages, page_size, head_size]
+            assert kv_caches[0].dim() == 3
+            self.page_buffer_size = kv_caches[0].shape[0] * kv_caches[0].shape[1]
+        else:
+            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            assert kv_caches[0].dim() == 5
+            self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+
+        return self.kv_cache_pointers_on_gpu[idx]
+
+    def _initialize_cross_layers_pointers(
+        self, kv_caches: torch.Tensor
+    ) -> torch.Tensor:
         self.device = kv_caches.device
         assert self.device.type == "cuda", "The device should be CUDA."
         idx = self.device.index
         if idx in self.kv_cache_pointers_on_gpu:
             return self.kv_cache_pointers_on_gpu[idx]
-        self.kv_cache_pointers[0] = kv_caches.data_ptr()
+        self.kv_cache_pointer[0] = kv_caches.data_ptr()
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
             1, dtype=torch.int64, device=self.device
         )
-        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
+        self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointer)
         if self.use_mla:
             # kv_caches.shape: [num_pages, num_layers, page_size,
             # head_size]
@@ -300,10 +337,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         self.initialize_kvcaches_ptr(**kwargs)
 
-        assert self.kvcaches is not None, (
-            "kvcaches should be provided in kwargs or initialized beforehand."
-        )
-
         if self.use_mla:
             if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
                 raise ValueError(
@@ -322,7 +355,18 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+        if self.cross_layers:
+            assert self.cross_layers_kvcaches is not None, (
+                "kvcaches should be provided in kwargs or initialized beforehand."
+            )
+            kv_cache_pointers = self._initialize_cross_layers_pointers(
+                self.cross_layers_kvcaches
+            )
+        else:
+            assert self.kvcaches is not None, (
+                "kvcaches should be provided in kwargs or initialized beforehand."
+            )
+            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
@@ -333,7 +377,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.page_size,
             False,
             self.use_mla,
-            True,
+            self.cross_layers,
         )
 
     @_lmcache_nvtx_annotate
@@ -358,16 +402,26 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         assert memory_obj.tensor is not None
 
         self.initialize_kvcaches_ptr(**kwargs)
-        assert self.kvcaches is not None, (
-            "kvcaches should be provided in kwargs or initialized beforehand."
-        )
 
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+        if self.cross_layers:
+            assert self.cross_layers_kvcaches is not None, (
+                "kvcaches should be provided in kwargs or initialized beforehand."
+            )
+            kv_cache_pointers = self._initialize_cross_layers_pointers(
+                self.cross_layers_kvcaches
+            )
+            device = self.cross_layers_kvcaches.device
+        else:
+            assert self.kvcaches is not None, (
+                "kvcaches should be provided in kwargs or initialized beforehand."
+            )
+            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+            device = self.kvcaches[0].device
 
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
@@ -375,27 +429,27 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     memory_obj.tensor,
                     kv_cache_pointers,
                     slot_mapping[start:end],
-                    self.kvcaches.device,
+                    device,
                     self.page_buffer_size,
                     self.page_size,
                     True,
                     self.use_mla,
-                    True,
+                    self.cross_layers,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
-                assert self.gpu_buffer.device == self.kvcaches.device
+                assert self.gpu_buffer.device == device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
                 lmc_ops.multi_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
                     slot_mapping[start:end],
-                    self.kvcaches.device,
+                    device,
                     self.page_buffer_size,
                     self.page_size,
                     True,
                     self.use_mla,
-                    True,
+                    self.cross_layers,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -423,6 +477,14 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
     def get_shape(self, num_tokens: int) -> torch.Size:
         kv_size = 1 if self.use_mla else 2
         return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    def initialize_kvcaches_ptr(self, **kwargs):
+        """Initialize the kvcaches pointers if not already initialized."""
+        if "kvcaches" in kwargs:
+            if self.cross_layers:
+                self.cross_layers_kvcaches = kwargs["kvcaches"]
+            else:
+                self.kvcaches = kwargs["kvcaches"]
 
 
 class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):

@@ -532,7 +532,13 @@ class LMCacheConnectorV1Impl:
         # Legacy compatibility check
         self._check_legacy_register_kv_caches()
 
-        self.use_cross_layers = False
+        self.use_cross_layers = bool(
+            str(
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "enable_cross_layers_blocks", "False"
+                )
+            )
+        )
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.cross_layers_kv_caches: torch.Tensor = None
         self._block_size = vllm_config.cache_config.block_size
@@ -736,13 +742,10 @@ class LMCacheConnectorV1Impl:
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
-    def register_cross_layers_kv_cache(
-        self, cross_layers_kv_cache: torch.Tensor, cross_layers_attn_backend: Any
-    ):
+    def register_cross_layers_kv_cache(self, cross_layers_kv_cache: torch.Tensor):
         assert not self.cross_layers_kv_caches and cross_layers_kv_cache is not None
         self.cross_layers_kv_caches = cross_layers_kv_cache
         self._manager.post_init()
-        self.use_cross_layers = True
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
