@@ -12,7 +12,7 @@ import torch
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper, IPCCacheEngineHashKey
 from lmcache.v1.multiprocess.mq import (
     MessageQueueClient,
     MessageQueueServer,
@@ -412,7 +412,7 @@ def test_mq_store():
     """
     # Create test keys
     keys = [
-        IPCCacheEngineKey.from_int_hash(
+        IPCCacheEngineHashKey.from_int_hash(
             model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
         )
         for i in range(3)
@@ -442,7 +442,7 @@ def test_mq_retrieve():
     """
     # Create test keys
     keys = [
-        IPCCacheEngineKey.from_int_hash(
+        IPCCacheEngineHashKey.from_int_hash(
             model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
         )
         for i in range(3)
@@ -474,7 +474,7 @@ def test_mq_lookup():
     """
     # Create test keys
     keys = [
-        IPCCacheEngineKey.from_int_hash(
+        IPCCacheEngineHashKey.from_int_hash(
             model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
         )
         for i in range(4)
@@ -504,7 +504,7 @@ def test_mq_lookup_with_none_lock():
     """
     # Create test keys
     keys = [
-        IPCCacheEngineKey.from_int_hash(
+        IPCCacheEngineHashKey.from_int_hash(
             model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
         )
         for i in range(3)

@@ -13,7 +13,7 @@ import zmq
 # First Party
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheEngineHashKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -100,11 +100,11 @@ class ClientContext:
         return self.gpu_kv_caches[layer][:, start_page : start_page + num_pages]
 
 
-def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
+def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineHashKey:
     """
     Create a cache key for testing.
     """
-    return IPCCacheEngineKey.from_int_hash(model, 1, 0, index)
+    return IPCCacheEngineHashKey.from_int_hash(model, 1, 0, index)
 
 
 def server_process_runner(

@@ -26,7 +26,11 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.gpu_connector import lmcache_memcpy_async_d2h, lmcache_memcpy_async_h2d
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineHashKey,
+    IPCCacheEngineKey,
+    KVCache,
+)
 from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
@@ -34,6 +38,8 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -212,6 +218,7 @@ class MPCacheEngine:
         chunk_size: int = 256,
         cpu_buffer_size: float = 5.0,
         disable_lazy_alloc: bool = False,
+        hash_algorithm: str = "builtin",
     ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
@@ -224,6 +231,12 @@ class MPCacheEngine:
 
         # storage manager
         self.storage_manager = MPStorageManager(cpu_buffer_size, disable_lazy_alloc)
+
+        # Token hasher and session manager for token-based operations
+        self.token_hasher = TokenHasher(
+            chunk_size=chunk_size, hash_algorithm=hash_algorithm
+        )
+        self.session_manager = SessionManager(self.token_hasher)
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -256,18 +269,18 @@ class MPCacheEngine:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
     @_lmcache_nvtx_annotate
-    def store(
+    def _store_by_hash(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[IPCCacheEngineHashKey],
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
         """
-        Stores the GPU KV cache blocks to CPU.
+        Stores the GPU KV cache blocks to CPU (internal, hash-based keys).
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            keys (list[IPCCacheEngineHashKey]): The hash keys for the KV cache blocks.
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to store.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -348,18 +361,18 @@ class MPCacheEngine:
         return event.ipc_handle(), True
 
     @_lmcache_nvtx_annotate
-    def retrieve(
+    def _retrieve_by_hash(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[IPCCacheEngineHashKey],
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, list[bool]]:
         """
-        Retrieves the CPU KV cache and put into GPU blocks.
+        Retrieves the CPU KV cache and put into GPU blocks (internal, hash-based keys).
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            keys (list[IPCCacheEngineHashKey]): The hash keys for the KV cache blocks.
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -369,7 +382,6 @@ class MPCacheEngine:
                 that signals the completion of the retrieve operation. The second
                 element is a list indicating whether each key was successfully
                 retrieved.
-
 
         Notes:
             - The caller must ensure that all keys are present in the storage (i.e.,
@@ -386,7 +398,7 @@ class MPCacheEngine:
 
         gpu_context = self.gpu_contexts[instance_id]
 
-        def _retrieve_loop(keys: list[IPCCacheEngineKey], memory_objs: list[MemoryObj]):
+        def _retrieve_loop(keys: list[IPCCacheEngineHashKey], memory_objs: list[MemoryObj]):
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
             ):
@@ -450,17 +462,16 @@ class MPCacheEngine:
         """
         return self.chunk_size
 
-    def lookup(
+    def _lookup_by_hash(
         self,
-        keys: list[IPCCacheEngineKey],
+        keys: list[IPCCacheEngineHashKey],
         lock: bool | None = None,
     ) -> list[bool]:
         """
-        Looks up the presence of keys in the storage. The keys
-        should belongs to a single request (same prompt).
+        Looks up the presence of keys in the storage (internal, hash-based keys).
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys to look up.
+            keys (list[IPCCacheEngineHashKey]): The hash keys to look up.
             lock (bool | None): Whether to lock the found keys.
 
         Returns:
@@ -472,17 +483,23 @@ class MPCacheEngine:
                 requires that the keys are from the same request and
                 are in order.
         """
-        # NOTE: we are doing per-request lookup, the caller need
-        # to be aware of this! We need to add this to the doc!
         if not lock:
             logger.warning(
-                "MPCacheEngine.lookup called with lock=False, this is "
+                "MPCacheEngine._lookup_by_hash called with lock=False, this is "
                 "not recommended and may cause memory object being pinned "
                 "for 5 minutes"
             )
 
         found_count = self.storage_manager.lookup(keys)
         return [True] * found_count + [False] * (len(keys) - found_count)
+
+    def end_session(self, request_id: str) -> None:
+        """Remove the session for a finished request.
+
+        Args:
+            request_id: The request ID whose session should be removed.
+        """
+        self.session_manager.remove(request_id)
 
     def debug(self) -> str:
         return "OK"
@@ -495,6 +512,178 @@ class MPCacheEngine:
             self.storage_manager.memcheck()
             self.storage_manager.clear()
             self.storage_manager.memcheck()
+
+    # --- Public handlers (token-based) ---
+
+    def lookup(
+        self,
+        request_id: str,
+        key: IPCCacheEngineKey,
+    ) -> int:
+        """Lookup using token IDs.
+
+        Creates/updates session with key.token_ids, computes all chunk hashes,
+        converts to IPCCacheEngineHashKeys, and delegates to _lookup_by_hash().
+
+        Args:
+            request_id: Unique request identifier for session tracking.
+            key: Token-based key containing full token sequence.
+
+        Returns:
+            Number of matched chunks (prefix match count).
+        """
+        session = self.session_manager.get_or_create(request_id)
+        session.compute_all_hashes(list(key.token_ids), self.token_hasher)
+
+        hash_keys = key.to_hash_keys(self.token_hasher)
+        if not hash_keys:
+            return 0
+
+        results = self._lookup_by_hash(hash_keys, lock=True)
+        return sum(results)
+
+    def store(
+        self,
+        request_ids: list[str],
+        keys: list[IPCCacheEngineKey],
+        instance_id: int,
+        gpu_block_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        """Store using token IDs (batched).
+
+        Iterates over request_ids/keys, computes hashes via sessions,
+        combines all hash keys, then delegates to _store_by_hash().
+
+        Args:
+            request_ids: Unique request identifiers for session tracking.
+            keys: Token-based keys, one per request (each contains one chunk's tokens).
+            instance_id: GPU instance ID.
+            gpu_block_ids: Flattened GPU block IDs.
+            event_ipc_handle: IPC handle of the event to wait on.
+
+        Returns:
+            Tuple of (event IPC handle, combined success bool).
+        """
+        combined_hash_keys: list[IPCCacheEngineHashKey] = []
+
+        for request_id, key in zip(request_ids, keys):
+            session = self.session_manager.get_or_create(request_id)
+            new_hashes = session.append_tokens_and_hash(
+                list(key.token_ids), self.token_hasher
+            )
+
+            hash_keys = [
+                IPCCacheEngineHashKey(
+                    model_name=key.model_name,
+                    world_size=key.world_size,
+                    worker_id=key.worker_id,
+                    chunk_hash=TokenHasher.hash_to_bytes(h),
+                )
+                for h in new_hashes
+            ]
+            combined_hash_keys.extend(hash_keys)
+
+        if not combined_hash_keys:
+            logger.warning(
+                "store: no complete chunks from any request "
+                "(num_requests=%d)",
+                len(request_ids),
+            )
+            assert instance_id in self.gpu_contexts
+            gpu_context = self.gpu_contexts[instance_id]
+            with (
+                torch.cuda.device(gpu_context.device),
+                torch.cuda.stream(gpu_context.stream),
+            ):
+                event = torch.cuda.Event(interprocess=True)
+                event.record()
+            return event.ipc_handle(), False
+
+        return self._store_by_hash(
+            combined_hash_keys, instance_id, gpu_block_ids, event_ipc_handle
+        )
+
+    def retrieve(
+        self,
+        request_ids: list[str],
+        keys: list[IPCCacheEngineKey],
+        instance_id: int,
+        gpu_block_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, list[bool]]:
+        """Retrieve using token IDs (batched).
+
+        Iterates over request_ids/keys, computes hashes via sessions,
+        combines all hash keys, then delegates to _retrieve_by_hash().
+
+        Args:
+            request_ids: Unique request identifiers for session tracking.
+            keys: Token-based keys, one per request (each contains all matched tokens).
+            instance_id: GPU instance ID.
+            gpu_block_ids: Flattened GPU block IDs.
+            event_ipc_handle: IPC handle of the event to wait on.
+
+        Returns:
+            Tuple of (event IPC handle, combined per-chunk bools).
+        """
+        combined_hash_keys: list[IPCCacheEngineHashKey] = []
+
+        for request_id, key in zip(request_ids, keys):
+            session = self.session_manager.get_or_create(request_id)
+            session.compute_all_hashes(list(key.token_ids), self.token_hasher)
+
+            hash_keys = key.to_hash_keys(self.token_hasher)
+            combined_hash_keys.extend(hash_keys)
+
+        if not combined_hash_keys:
+            logger.warning(
+                "retrieve: no complete chunks from any request "
+                "(num_requests=%d)",
+                len(request_ids),
+            )
+            assert instance_id in self.gpu_contexts
+            gpu_context = self.gpu_contexts[instance_id]
+            with (
+                torch.cuda.device(gpu_context.device),
+                torch.cuda.stream(gpu_context.stream),
+            ):
+                event = torch.cuda.Event(interprocess=True)
+                event.record()
+            return event.ipc_handle(), []
+
+        return self._retrieve_by_hash(
+            combined_hash_keys, instance_id, gpu_block_ids, event_ipc_handle
+        )
+
+
+def _start_session_cleanup_timer(
+    session_manager: SessionManager, interval: float = 60.0
+) -> threading.Timer:
+    """Start a daemon timer thread for periodic session cleanup.
+
+    Args:
+        session_manager: The SessionManager to clean up.
+        interval: Cleanup interval in seconds.
+
+    Returns:
+        The started Timer thread.
+    """
+
+    def _cleanup():
+        try:
+            session_manager.cleanup_expired()
+        except Exception:
+            logger.exception("Error during session cleanup")
+        # Re-schedule
+        timer = threading.Timer(interval, _cleanup)
+        timer.daemon = True
+        timer.start()
+
+    timer = threading.Timer(interval, _cleanup)
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 def add_handler_helper(
@@ -518,6 +707,7 @@ def run_cache_server(
     max_workers: int = 1,
     disable_lazy_alloc: bool = False,
     return_engine: bool = False,
+    hash_algorithm: str = "builtin",
 ):
     """
     Run the LMCache cache server with ZMQ message queue.
@@ -530,13 +720,16 @@ def run_cache_server(
         max_workers: Maximum number of worker threads for ZMQ server
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
+        hash_algorithm: Hash algorithm for token-based operations
 
     Returns:
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
     # Initialize the engine
-    engine = MPCacheEngine(chunk_size, cpu_buffer_size, disable_lazy_alloc)
+    engine = MPCacheEngine(
+        chunk_size, cpu_buffer_size, disable_lazy_alloc, hash_algorithm
+    )
 
     # Initialize the message queue server
     context = zmq.Context.instance()
@@ -554,7 +747,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
+    add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
+
+    # Start periodic session cleanup
+    _start_session_cleanup_timer(engine.session_manager)
 
     logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
     # Start the ZMQ server
@@ -598,6 +795,12 @@ def parse_args():
     parser.add_argument(
         "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
     )
+    parser.add_argument(
+        "--hash-algorithm",
+        type=str,
+        default="builtin",
+        help="Hash algorithm for token-based operations (e.g., builtin, sha256_cbor)",
+    )
     return parser.parse_args()
 
 
@@ -610,4 +813,5 @@ if __name__ == "__main__":
         cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
         disable_lazy_alloc=args.disable_lazy_alloc,
+        hash_algorithm=args.hash_algorithm,
     )

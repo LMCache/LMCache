@@ -8,7 +8,7 @@ import enum
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
 
 """
-Main RPC protocol for the LMCache core server and clients. The following 
+Main RPC protocol for the LMCache core server and clients. The following
 functions are supported:
 
 - REGISTER_KV_CACHE:
@@ -18,20 +18,23 @@ functions are supported:
 - UNREGISTER_KV_CACHE:
     instance_id: int
 
-- STORE: 
+- STORE:
+    request_ids: list[str]
     keys: list[KeyType]
     instance_id: int
     gpu_block_ids: list[int]
+    event_ipc_handle: bytes
 
 - RETRIEVE:
+    request_ids: list[str]
     keys: list[KeyType]
     instance_id: int
     gpu_block_ids: list[int]
-    enable_layerwise: Optional[bool]
+    event_ipc_handle: bytes
 
 - LOOKUP:
-    keys: list[KeyType]
-    lock: Optional[bool]
+    request_id: str
+    key: KeyType (token-based)
 """
 
 # Identifier for different vLLM instances
@@ -55,6 +58,9 @@ class RequestType(enum.Enum):
 
     # For configuration read commands (vllm integration)
     GET_CHUNK_SIZE = enum.auto()
+
+    # Session management
+    END_SESSION = enum.auto()
 
     # For debug, could be used as heartbeats
     NOOP = enum.auto()
@@ -118,36 +124,37 @@ _PROTOCOL_DEFINTIONS = {
         response_class=None,
         handler_type=HandlerType.SYNC,
     ),
-    # Store
-    # - keys: list[KeyType]
+    # Store (token-based, batched)
+    # - request_ids: list[str]
+    # - keys: list[KeyType] (token-based)
     # - instance_id: int
-    # - gpu_block_ids: list[int]
+    # - gpu_block_ids: list[int] (flattened)
     # - event_ipc_handle: bytes
     # Returns: cuda event handle, bool (success)
     RequestType.STORE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int], bytes],
+        payload_classes=[list[str], list[KeyType], int, list[int], bytes],
         response_class=tuple[bytes, bool],
         handler_type=HandlerType.BLOCKING,
     ),
-    # Retrieve
-    # - keys: list[KeyType]
+    # Retrieve (token-based, batched)
+    # - request_ids: list[str]
+    # - keys: list[KeyType] (token-based)
     # - instance_id: int
-    # - gpu_block_ids: list[int]
+    # - gpu_block_ids: list[int] (flattened)
     # - event_ipc_handle: bytes
     # Returns: cuda event handle, list[bool]
-    # NOTE: no layerwise support for now
     RequestType.RETRIEVE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int], bytes],
+        payload_classes=[list[str], list[KeyType], int, list[int], bytes],
         response_class=tuple[bytes, list[bool]],
         handler_type=HandlerType.BLOCKING,
     ),
-    # Lookup
-    # - keys: list[KeyType]
-    # - lock: Optional[bool]
-    # Returns: list[bool] (found or not for each key)
+    # Lookup (token-based)
+    # - request_id: str
+    # - key: KeyType (token_ids = full token sequence)
+    # Returns: int (number of matched chunks)
     RequestType.LOOKUP: ProtocolDefinition(
-        payload_classes=[list[KeyType], Optional[bool]],
-        response_class=list[bool],
+        payload_classes=[str, KeyType],
+        response_class=int,
         handler_type=HandlerType.BLOCKING,
     ),
     # Clear (all caches)
@@ -161,6 +168,14 @@ _PROTOCOL_DEFINTIONS = {
     RequestType.GET_CHUNK_SIZE: ProtocolDefinition(
         payload_classes=[],
         response_class=int,
+        handler_type=HandlerType.SYNC,
+    ),
+    # End session (remove session by request_id)
+    # - request_id: str
+    # Returns: None
+    RequestType.END_SESSION: ProtocolDefinition(
+        payload_classes=[str],
+        response_class=None,
         handler_type=HandlerType.SYNC,
     ),
     # Debug commands

@@ -102,7 +102,9 @@ class CudaIPCWrapper:
 
 
 @dataclass(order=True, frozen=True)
-class IPCCacheEngineKey:
+class IPCCacheEngineHashKey:
+    """Internal hash-based cache key used by the server storage layer."""
+
     model_name: str
     world_size: int
     worker_id: int
@@ -121,7 +123,7 @@ class IPCCacheEngineKey:
     @classmethod
     def from_int_hash(
         cls, model_name: str, world_size: int, worker_id: int, chunk_hash: int
-    ) -> "IPCCacheEngineKey":
+    ) -> "IPCCacheEngineHashKey":
         # NOTE: this is only used by tests
         return cls(
             model_name=model_name,
@@ -129,6 +131,49 @@ class IPCCacheEngineKey:
             worker_id=worker_id,
             chunk_hash=cls.IntHash2Bytes(chunk_hash),
         )
+
+    @staticmethod
+    def Serialize(obj: "IPCCacheEngineHashKey") -> bytes:
+        return msgspec.msgpack.encode(obj)
+
+    @staticmethod
+    def Deserialize(data: bytes) -> "IPCCacheEngineHashKey":
+        return msgspec.msgpack.decode(data, type=IPCCacheEngineHashKey)
+
+
+@dataclass(order=True, frozen=True)
+class IPCCacheEngineKey:
+    """Token-based cache key. The server computes chunk_hash from token_ids
+    and converts to IPCCacheEngineHashKey for storage operations.
+
+    This key type:
+    - Is sent by the client over ZMQ (serialized via msgspec)
+    - Contains token_ids instead of chunk_hash
+    - Server calls to_hash_keys(hasher) to convert to storage-compatible
+      IPCCacheEngineHashKey instances
+    - Uses tuple[int, ...] (not list) so it's frozen/hashable
+    """
+
+    model_name: str
+    world_size: int
+    worker_id: int
+    token_ids: tuple[int, ...]  # frozen tuple for hashability
+
+    def to_hash_keys(self, hasher: "TokenHasher") -> list[IPCCacheEngineHashKey]:
+        """Compute chunk hashes and return one IPCCacheEngineHashKey per chunk."""
+        # Import here to avoid circular import at module level
+        from lmcache.v1.multiprocess.token_hasher import TokenHasher as _TokenHasher
+
+        chunk_hashes = hasher.compute_chunk_hashes(list(self.token_ids))
+        return [
+            IPCCacheEngineHashKey(
+                model_name=self.model_name,
+                world_size=self.world_size,
+                worker_id=self.worker_id,
+                chunk_hash=_TokenHasher.hash_to_bytes(h),
+            )
+            for h in chunk_hashes
+        ]
 
     @staticmethod
     def Serialize(obj: "IPCCacheEngineKey") -> bytes:
