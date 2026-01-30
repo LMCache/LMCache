@@ -1,0 +1,7 @@
+chunk_size: 256
+local_cpu: true
+# IMPORTANT: Size LMCache CPU buffer to be ~1.5x larger than SGLang's GPU KV cache budget
+# Example: If GPU has ~32GB for KV cache, set this to ~48GB
+max_local_cpu_size: 48
+use_layerwise: false
+save_unfull_chunk: true
