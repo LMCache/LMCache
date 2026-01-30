@@ -333,6 +333,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.page_size,
             False,
             self.use_mla,
+            True,
         )
 
     @_lmcache_nvtx_annotate
@@ -379,6 +380,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_size,
                     True,
                     self.use_mla,
+                    True,
                 )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -393,6 +395,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     self.page_size,
                     True,
                     self.use_mla,
+                    True,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
