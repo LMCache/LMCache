@@ -264,7 +264,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         if self.use_mla:
-            raise NotImplementedError("MLA not supported for cross-layer yet.")
+            # kv_caches.shape: [num_pages, num_layers, page_size,
+            # head_size]
+            assert kv_caches.dim() == 4
+            self.page_buffer_size = kv_caches.shape[0] * kv_caches.shape[2]
+            self.page_size = kv_caches.shape[2]
         else:
             # kv_caches.shape: [num_pages, num_layers, 2, page_size,
             # num_heads, head_size]
@@ -301,7 +305,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
 
         if self.use_mla:
-            raise NotImplementedError("MLA not supported for cross-layer yet.")
+            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                raise ValueError(
+                    "The memory object should be in KV_MLA_FMT format in"
+                    " order to be processed by VLLMPagedMemGPUConnector"
+                )
         else:
             if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
                 raise ValueError(
@@ -395,7 +403,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
             self.store_stream.synchronize()
 
         if self.use_mla:
-            raise NotImplementedError("MLA not supported for cross-layer yet.")
+            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
