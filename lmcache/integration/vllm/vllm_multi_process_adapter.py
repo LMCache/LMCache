@@ -130,14 +130,6 @@ class LMCacheMPSchedulerAdapter:
         # Request futures
         self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
 
-        # Track request IDs to prevent double-free in async scheduling.
-        # tracked_reqs: all currently executing requests (added on start,
-        # removed on finish)
-        # new_reqs_this_step: requests newly added this scheduler step
-        # (cleared each step)
-        self.tracked_reqs: set[str] = set()
-        self.new_reqs_this_step: set[str] = set()
-
         self.model_name = model_name
         self.world_size = world_size
         self.worker_id = kv_rank
@@ -148,26 +140,6 @@ class LMCacheMPSchedulerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = self.chunk_size // vllm_block_size
-
-    @_lmcache_nvtx_annotate
-    def track_request(self, request_id: str):
-        """Start tracking a request. Idempotent - ignores already-tracked requests."""
-        if request_id in self.tracked_reqs:
-            return
-        self.new_reqs_this_step.add(request_id)
-        self.tracked_reqs.add(request_id)
-
-    @_lmcache_nvtx_annotate
-    def untrack_request(self, request_id: str):
-        """Stop tracking a request (called when request finishes)."""
-        self.tracked_reqs.discard(request_id)
-
-    @_lmcache_nvtx_annotate
-    def pop_new_reqs_this_step(self) -> set[str]:
-        """Return and clear the set of newly tracked requests this step."""
-        result = self.new_reqs_this_step.copy()
-        self.new_reqs_this_step.clear()
-        return result
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(self, request_id: str, block_hashes: list[bytes]):
