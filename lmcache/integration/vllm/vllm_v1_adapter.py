@@ -532,13 +532,14 @@ class LMCacheConnectorV1Impl:
         # Legacy compatibility check
         self._check_legacy_register_kv_caches()
 
-        self.use_cross_layers = bool(
-            str(
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "enable_cross_layers_blocks", "False"
-                )
-            )
+        val = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "enable_cross_layers_blocks", False
         )
+        if isinstance(val, str):
+            self.use_cross_layers = val.lower() in ("true", "1", "yes")
+        else:
+            self.use_cross_layers = bool(val)
+
         if self.use_cross_layers:
             self.cross_layers_kv_caches: torch.Tensor = None
         else:
