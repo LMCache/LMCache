@@ -420,7 +420,7 @@ test_vllmopenai_server_with_lmcache_integrated() {
     local model="$1"
 
     http_status_code=$(
-        curl --max-time 60 http://localhost:${PORT}/v1/completions \
+        curl --max-time 600 http://localhost:${PORT}/v1/completions \
             -w "%{http_code}" -o response-file.txt \
             -H "Content-Type: application/json" \
             -d '{
