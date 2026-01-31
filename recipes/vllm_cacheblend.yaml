@@ -1,0 +1,16 @@
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 48
+
+# Enable CacheBlend
+enable_blending: true
+
+# Blending threshold - minimum matching ratio to trigger blending
+# Range: 0.0 to 1.0 (default: 0.5)
+blending_min_match_ratio: 0.5
+
+# Recompute ratio for non-matching segments
+# Range: 0.0 to 1.0 (default: 0.3)
+recompute_ratio: 0.3
+
+save_unfull_chunk: true
