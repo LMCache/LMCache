@@ -28,9 +28,16 @@ class L1MemoryManagerConfig:
 
 
 @dataclass
-class L1ObjectManagerConfig:
+class L1ManagerConfig:
     """
     Special config for the L1 Object/Key manager
     """
 
-    pass
+    memory_config: L1MemoryManagerConfig
+    """ The memory manager configuration for L1 cache. """
+
+    write_ttl_seconds: int = field(default=600)
+    """ Time to live for each object's write lock. Default is 600s (10 minutes). """
+
+    read_ttl_seconds: int = field(default=300)
+    """ Time to live for each object's read lock. Default is 300s (5 minutes). """
