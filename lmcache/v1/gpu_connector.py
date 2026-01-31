@@ -353,6 +353,8 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         """
         assert memory_obj.tensor is not None
 
+        logger.info("Line 356.")
+
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
@@ -363,7 +365,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
+        logger.info("Line 368.")
+
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+
+        logger.info("Line 372.")
 
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
@@ -389,7 +395,12 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     True,
                     self.use_mla,
                 )
+
+                logger.info("Line 398.")
+
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+
+        logger.info("Line 403.")
 
         if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
