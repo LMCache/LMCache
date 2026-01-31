@@ -284,6 +284,16 @@ engine.store(tokens, kv_cache)
 retrieved = engine.retrieve(tokens)
 ```
 
+### Controller API
+
+`lmcache_controller` exposes a REST API (default port 9000) for orchestration:
+- `POST /move`
+- `POST /compress`
+- `POST /decompress`
+- `POST /health`
+- `POST /query_worker_info`
+- `POST /check_finish`
+
 ### Storage Backends
 
 Storage backends implement `StorageBackendInterface`:

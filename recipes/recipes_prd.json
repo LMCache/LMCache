@@ -294,8 +294,8 @@
         "Includes health check validation"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Not started. P2 priority - enterprise control plane."
+      "passes": true,
+      "notes": "Recipe files: vllm_controller_routing.md, vllm_controller_instance_a.yaml, vllm_controller_instance_b.yaml\nCompleted: 2026-01-31. Controller API move/health ops with NIXL P2P transfer."
     },
     {
       "id": "R-021",
@@ -339,8 +339,8 @@
         "Includes recommended configurations for different scenarios"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Not started. P2 priority - PD optimization. Can be section in R-021/R-022."
+      "passes": true,
+      "notes": "Recipe files: vllm_pd_tuning.md, vllm_pd_tuning.yaml\nCompleted: 2026-01-31. Buffer device and size tuning guidance with benchmarks."
     },
     {
       "id": "R-024",
@@ -480,21 +480,21 @@
   ],
   "metadata": {
     "totalRecipes": 32,
-    "completed": 20,
+    "completed": 22,
     "inProgress": 0,
-    "notStarted": 12,
+    "notStarted": 10,
     "lastUpdated": "2026-01-31",
     "categories": {
       "A - Core enable LMCache": {"total": 5, "completed": 5},
       "B - Storage Mode backends": {"total": 12, "completed": 9},
-      "C - Multi-instance sharing": {"total": 3, "completed": 2},
-      "D - Transport Mode (PD)": {"total": 3, "completed": 2},
+      "C - Multi-instance sharing": {"total": 3, "completed": 3},
+      "D - Transport Mode (PD)": {"total": 3, "completed": 3},
       "E - Optimizations": {"total": 5, "completed": 0},
       "F - Common end-to-end combinations": {"total": 4, "completed": 2}
     },
     "priorityBreakdown": {
       "P1": {"total": 12, "completed": 12, "ids": ["R-001","R-002","R-006","R-007","R-010","R-014","R-018","R-021","R-022","R-024","R-029","R-030"]},
-      "P2": {"total": 16, "completed": 10, "ids": ["R-003","R-004","R-005","R-011","R-012","R-013","R-015","R-016","R-017","R-019","R-020","R-023","R-025","R-026","R-027","R-028","R-031","R-032"]},
+      "P2": {"total": 16, "completed": 12, "ids": ["R-003","R-004","R-005","R-011","R-012","R-013","R-015","R-016","R-017","R-019","R-020","R-023","R-025","R-026","R-027","R-028","R-031","R-032"]},
       "P3": {"total": 4, "completed": 0, "ids": ["R-008","R-009"]}
     },
     "consolidationOpportunities": [

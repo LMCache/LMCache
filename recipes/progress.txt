@@ -43,6 +43,8 @@
 - MooncakeStore uses `mooncakestore://host:port` plus required extra_config fields
 - InfiniStore uses `infinistore://host:port?device=...` and `infinistore_link_type`
 - P2P sharing requires `enable_p2p` + `enable_controller` with unique init/lookup ports
+- Controller API provides `/move` and `/health` endpoints for orchestration
+- PD tuning uses `pd_buffer_device` and `pd_buffer_size` as primary stability knobs
 
 ---
 
@@ -345,4 +347,28 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - P2P needs unique init/lookup ports per instance
   - Controller pull/reply ports must be reachable by workers
   - NIXL requires UCX configuration (`UCX_TLS=rc`) for RDMA
+---
+
+## 2026-01-31 - R-020
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created controller ops recipe: vllm_controller_routing.md
+- Added controller YAML configs: vllm_controller_instance_a.yaml, vllm_controller_instance_b.yaml
+- Documented controller API move and health operations
+- Included tokenization step and move validation
+- **Learnings for future iterations:**
+  - Controller uses pull/reply ports separate from API port 9000
+  - Move operations require token ids from `/tokenize`
+  - P2P + NIXL is required for KV movement across peers
+---
+
+## 2026-01-31 - R-023
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created PD tuning recipe: vllm_pd_tuning.md
+- Added PD tuning YAML config: vllm_pd_tuning.yaml
+- Documented buffer device selection and size formula
+- Included TTFT/ITL comparison table for tuned buffers
+- **Learnings for future iterations:**
+  - `pd_buffer_device` and `pd_buffer_size` are the primary PD stability knobs
+  - CUDA buffers are fastest but may cause GPU OOM
+  - Larger buffers reduce transfer timeouts for long prompts
 ---
