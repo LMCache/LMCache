@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Iterable, List, Optional
 import uuid
 
 # Third Party
@@ -10,10 +10,13 @@ import torch
 import torch.distributed as dist
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
+from lmcache.utils import (
+    CacheStoreEvent,
+    mock_up_broadcast_fn,
+    mock_up_broadcast_object_fn,
+)
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import (
@@ -21,6 +24,7 @@ from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
     SGLangLayerwiseGPUConnector,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -84,13 +88,14 @@ def init_lmcache_engine(
     torch.cuda.device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     # Use global rank for metadata (tensor parallel rank)
-    metadata = LMCacheEngineMetadata(
-        model_config.model_path,
-        tp_size,
-        global_rank,
-        "sgl",
-        kv_dtype,
-        kv_shape,
+    metadata = LMCacheMetadata(
+        model_name=model_config.model_path,
+        world_size=tp_size,
+        local_world_size=tp_size,
+        worker_id=global_rank,
+        local_worker_id=local_rank,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
     )
 
     use_gpu = need_gpu_interm_buffer(config)
@@ -213,6 +218,11 @@ class LMCacheConnector:
             offset=offset,
         )
 
+    def get_kv_events(self) -> Iterable[CacheStoreEvent]:
+        if self.lmcache_engine is not None:
+            return self.lmcache_engine.get_kv_events()
+        return []
+
     def chunk_size(self):
         return self.lmcache_engine.config.chunk_size
 
@@ -294,6 +304,15 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             retrieve_token_num, self.tp_group, torch.device(f"cuda:{self.rank}")
         )
 
+        # No new tokens to retrieve from LMCache
+        if retrieve_token_num <= offset:
+            self.lmcache_engine.lookup_unpin(lookup_id)
+            logger.info(
+                f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
+                f"offset={offset}, no new tokens to retrieve"
+            )
+            return 0
+
         layerwise_retriever = self.lmcache_engine.retrieve_layer(
             token_ids[:retrieve_token_num],
             mask=load_mask[:retrieve_token_num],
@@ -306,15 +325,18 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         # Load First Layer
         next(layerwise_retriever)
 
-        if retrieve_token_num is None:
-            return 0
-
         self.layerwise_retrievers.append(layerwise_retriever)
         self.layer_load_layer.append(1)
 
         self.lookup_id_list.append(lookup_id)
 
-        return retrieve_token_num - offset
+        num_new_tokens = retrieve_token_num - offset
+        logger.info(
+            f"LMCache retrieve started: lookup={retrieve_token_num}, "
+            f"offset={offset}, retrieve {num_new_tokens} new tokens"
+        )
+
+        return num_new_tokens
 
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         slot_mapping = store_metadata.kv_indices.to(torch.int64).cuda()

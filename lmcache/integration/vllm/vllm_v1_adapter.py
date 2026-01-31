@@ -827,7 +827,6 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                     req_id=request.req_id,
-                    skip_contains_check=True,
                 )
 
                 # Check the result
@@ -1035,7 +1034,7 @@ class LMCacheConnectorV1Impl:
                 store_mask = torch.ones(len(token_ids), dtype=torch.bool)
                 store_mask[:skip_leading_tokens] = False
 
-                logger.info(
+                logger.debug(
                     "Storing KV cache for %d out of %d tokens "
                     "(skip_leading_tokens=%d) for request %s",
                     len(token_ids) - skip_leading_tokens,
@@ -1127,7 +1126,7 @@ class LMCacheConnectorV1Impl:
             store_mask = torch.ones(len(token_ids), dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
 
-            logger.info(
+            logger.debug(
                 "Storing KV cache for %d out of %d tokens "
                 "(skip_leading_tokens=%d) for request %s",
                 len(token_ids) - skip_leading_tokens,

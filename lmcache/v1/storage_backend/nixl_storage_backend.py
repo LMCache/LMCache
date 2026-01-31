@@ -16,7 +16,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Set, Union, cast
+from typing import Any, Callable, List, Optional, Sequence, Set, Union, cast
 from urllib.parse import quote as url_quote
 import asyncio
 import os
@@ -35,7 +35,6 @@ from nixl._api import (
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -48,6 +47,7 @@ from lmcache.v1.memory_management import (
     _allocate_gpu_memory,
     _free_cpu_memory,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
@@ -85,7 +85,7 @@ class NixlStorageConfig:
 
     @staticmethod
     def from_cache_engine_config(
-        config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ):
         assert config.nixl_buffer_size is not None
         assert config.nixl_buffer_device is not None
@@ -491,7 +491,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         self,
         nixl_config: NixlStorageConfig,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
     ):
         """
@@ -513,7 +513,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> PagedTensorMemoryAllocator:
         extra_config = config.extra_config
         enable_nixl_storage = extra_config is not None and extra_config.get(
@@ -590,6 +590,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         pass
 
@@ -626,7 +627,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
     def CreateNixlStorageBackend(
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         """
         Create a Nixl backend with the given configuration.
@@ -650,7 +651,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         self,
         nixl_config: NixlStorageConfig,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
     ):
         super().__init__(nixl_config, config, metadata, loop)
@@ -814,7 +815,12 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        :param on_complete_callback: Optional callback (not yet supported for
+            NixlCacheBackend async operations).
+        """
         with self.key_lock:
             available_descs = self.pool.get_num_available_descs()
             num_evict = len(keys) - available_descs
@@ -838,6 +844,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         asyncio.run_coroutine_threadsafe(
             self.mem_to_storage(keys, memory_objs), self.loop
         )
+        # TODO: Add callback support for async NIXL operations
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -933,7 +940,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self,
         nixl_config: NixlStorageConfig,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         cache_policy: Optional[PresenceCache] = None,
     ):
@@ -991,7 +998,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
     def init_chunk_meta(
         self,
-        metadata: Optional[LMCacheEngineMetadata],
+        metadata: Optional[LMCacheMetadata],
     ) -> None:
         """Initialize chunk metadata similar to base_connector.init_chunk_meta()"""
         if metadata is None:
@@ -1281,7 +1288,12 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        :param on_complete_callback: Optional callback invoked once per key
+            after transfer completes. Only supported in sync mode (async_mode=False).
+        """
         with self.progress_lock:
             for key in keys:
                 self.progress_set.add(key)
@@ -1292,11 +1304,22 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             asyncio.run_coroutine_threadsafe(
                 self.mem_to_storage(keys, memory_objs), self.loop
             )
+            # Note: callback not supported in async mode
         else:
             future = asyncio.run_coroutine_threadsafe(
                 self.mem_to_storage(keys, memory_objs), self.loop
             )
             future.result()
+
+            # Call completion callback for sync mode
+            if on_complete_callback is not None:
+                for key in keys:
+                    try:
+                        on_complete_callback(key)
+                    except Exception as e:
+                        logger.warning(
+                            f"on_complete_callback failed for key {key}: {e}"
+                        )
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """

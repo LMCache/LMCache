@@ -9,18 +9,26 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import StorageKey
 from lmcache.v1.multiprocess.mp_storage_manager import (
     MemoryExhaustedError,
     MPStorageManager,
 )
 
 
+def should_disable_lazy_alloc():
+    """Determine if lazy allocation should be disabled based on CUDA availability."""
+    return True if not torch.cuda.is_available() else False
+
+
 # Fixtures
 @pytest.fixture
 def storage_manager():
     """Create a storage manager with 1GB buffer for testing."""
-    manager = MPStorageManager(cpu_buffer_size=1.0)
+    disable_lazy_alloc = should_disable_lazy_alloc()
+    manager = MPStorageManager(
+        cpu_buffer_size=1.0, disable_lazy_alloc=disable_lazy_alloc
+    )
     yield manager
     # Cleanup after test
     manager.close()
@@ -29,7 +37,11 @@ def storage_manager():
 @pytest.fixture
 def small_storage_manager():
     """Create a storage manager with very small buffer to test memory exhaustion."""
-    manager = MPStorageManager(cpu_buffer_size=0.001)  # 1MB
+    disable_lazy_alloc = should_disable_lazy_alloc()
+    manager = MPStorageManager(
+        cpu_buffer_size=0.0625,  # 64MB
+        disable_lazy_alloc=disable_lazy_alloc,
+    )
     yield manager
     # Cleanup after test
     manager.close()
@@ -38,7 +50,7 @@ def small_storage_manager():
 @pytest.fixture
 def test_keys():
     """Create a list of test keys."""
-    return [IPCCacheEngineKey.from_int_hash("model1", 1, 0, i) for i in range(10)]
+    return [StorageKey.from_int_hash("model1", 1, 0, i) for i in range(10)]
 
 
 @pytest.fixture
@@ -63,7 +75,9 @@ def test_format():
 class TestInit:
     def test_initialization(self):
         """Test that storage manager initializes correctly."""
-        manager = MPStorageManager(cpu_buffer_size=1.0)
+        manager = MPStorageManager(
+            cpu_buffer_size=1.0, disable_lazy_alloc=should_disable_lazy_alloc()
+        )
         assert manager is not None
         manager.close()
 
@@ -71,7 +85,9 @@ class TestInit:
         """Test initialization with various buffer sizes."""
         sizes = [0.1, 0.5, 1.0, 2.0]
         for size in sizes:
-            manager = MPStorageManager(cpu_buffer_size=size)
+            manager = MPStorageManager(
+                cpu_buffer_size=size, disable_lazy_alloc=should_disable_lazy_alloc()
+            )
             assert manager is not None
             manager.close()
 
@@ -200,8 +216,8 @@ class TestReserve:
         self, small_storage_manager, test_keys, test_shape, test_dtype, test_format
     ):
         # Try to reserve and commit a lot of small tensors (total size is large)
-        large_shape = torch.Size([2, 50, 50, 256])  # Moderate size
-        small_shape = torch.Size([2, 5, 50, 256])  # Small size (1/10 of large)
+        large_shape = torch.Size([2, 50, 1500, 256])  # Moderate size
+        small_shape = torch.Size([2, 5, 1500, 256])  # Small size (1/10 of large)
 
         # First, reserve a single key with large shape should fail
         with pytest.raises(MemoryExhaustedError):
@@ -340,7 +356,7 @@ class TestLookup:
         self, small_storage_manager, test_keys, test_shape, test_dtype, test_format
     ):
         """Test that lookup locks the objects so they cannot be evicted."""
-        small_shape = torch.Size([2, 4, 50, 256])  # Small size
+        small_shape = torch.Size([2, 5, 1500, 256])  # Small size
         # Reserve and commit multiple small tensors to fill up memory
         target_keys = test_keys[:1]
         handle, _ = small_storage_manager.reserve(
@@ -493,12 +509,16 @@ class TestPrefetch:
 class TestClose:
     def test_close_basic(self):
         """Test that close can be called successfully."""
-        manager = MPStorageManager(cpu_buffer_size=0.5)
+        manager = MPStorageManager(
+            cpu_buffer_size=0.5, disable_lazy_alloc=should_disable_lazy_alloc()
+        )
         manager.close()
 
     def test_close_after_operations(self, test_keys, test_dtype, test_format):
         """Test that close works after performing operations."""
-        manager = MPStorageManager(cpu_buffer_size=1.0)
+        manager = MPStorageManager(
+            cpu_buffer_size=1.0, disable_lazy_alloc=should_disable_lazy_alloc()
+        )
         shape = torch.Size([2, 16, 16, 128])
 
         # Perform some operations
@@ -576,7 +596,7 @@ class TestThreadSafety:
 
         def reserve_keys(thread_id):
             keys = [
-                IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
+                StorageKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
                 for i in range(keys_per_thread)
             ]
             handle, reserved_dict = storage_manager.reserve(
@@ -608,7 +628,7 @@ class TestThreadSafety:
 
         def reserve_and_commit(thread_id):
             keys = [
-                IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
+                StorageKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
                 for i in range(5)
             ]
             handle, reserved_dict = storage_manager.reserve(
@@ -698,7 +718,7 @@ class TestThreadSafety:
         def thread_operation(thread_id):
             # Create unique keys for this thread
             keys = [
-                IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
+                StorageKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
                 for i in range(3)
             ]
 
@@ -740,7 +760,7 @@ class TestThreadSafety:
         def perform_operations(thread_id):
             for i in range(operations_per_thread):
                 keys = [
-                    IPCCacheEngineKey.from_int_hash(
+                    StorageKey.from_int_hash(
                         "model1", 1, 0, thread_id * 1000 + i * 10 + j
                     )
                     for j in range(3)
@@ -777,7 +797,7 @@ class TestThreadSafety:
         shape = torch.Size([2, 10, 16, 32])
 
         def get_handle(thread_id):
-            keys = [IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id)]
+            keys = [StorageKey.from_int_hash("model1", 1, 0, thread_id)]
             handle, _ = storage_manager.reserve(keys, shape, test_dtype, test_format)
             return handle
 

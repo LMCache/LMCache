@@ -6,7 +6,6 @@ from typing import List, Optional
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenConfig,
@@ -16,6 +15,7 @@ from lmcache.storage_backend.serde.cachegen_basics import (
 from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 
 if torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops
@@ -121,14 +121,13 @@ class CacheGenDeserializer(Deserializer):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         dtype,
     ):
         self.dtype = dtype
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
         self.output_buffer: Optional[torch.Tensor] = None
-        self.fmt = metadata.fmt
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
@@ -202,14 +201,11 @@ class CacheGenDeserializer(Deserializer):
                 encoder_output.head_size,
             )
         )
-        match self.fmt:
-            case "vllm":
-                return blob.permute((1, 0, 2, 3, 4)).to(
-                    self.dtype
-                )  # [nlayers, 2, ntokens, num_heads, head_size]
-            case "huggingface":
-                return blob.permute((1, 0, 3, 2, 4)).to(
-                    self.dtype
-                )  # [nlayers, 2, num_heads, ntokens, head_size]
-            case _:
-                raise RuntimeError("Unknown format %s" % self.fmt)
+
+        return blob.permute((1, 0, 2, 3, 4)).to(
+            self.dtype
+        )  # [nlayers, 2, ntokens, num_heads, head_size]
+        # huggingface
+        # return blob.permute((1, 0, 3, 2, 4)).to(
+        #     self.dtype
+        # )  # [nlayers, 2, num_heads, ntokens, head_size]

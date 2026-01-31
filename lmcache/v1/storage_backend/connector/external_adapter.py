@@ -66,8 +66,10 @@ class ExternalConnectorAdapter(ConnectorAdapter):
             logger.info(f"Loaded external connector: {module_path}.{connector_name}")
             return connector
         except ImportError as e:
-            raise ImportError(f"Could not import module '{module_path}'") from e
+            raise ImportError(
+                f"Could not import module '{module_path}', error: {e}"
+            ) from e
         except AttributeError as e:
             raise AttributeError(
-                f"Module '{module_path}' has no class '{connector_name}'"
+                f"Module '{module_path}' has no class '{connector_name}', error: {e}"
             ) from e

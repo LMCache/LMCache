@@ -166,7 +166,8 @@ class LMCacheMPSchedulerAdapter:
             return
 
         s = striding_block_hashes(block_hashes, self.blocks_in_chunk)
-        keys = [self._create_key(block_hash) for block_hash in s]
+        # NOTE(Kuntai): remove worker_id from the key for lookup requests.
+        keys = [self._create_key(block_hash).no_worker_id_version() for block_hash in s]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
