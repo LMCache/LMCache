@@ -1,0 +1,20 @@
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 48
+
+# Enable async loading
+enable_async: true
+
+# Prefetch configuration
+# Number of chunks to prefetch ahead of current position
+prefetch_distance: 2
+
+# Async store queue size
+# Maximum number of store operations to queue
+async_queue_size: 16
+
+# Worker threads for async operations
+# Number of background threads handling cache I/O
+async_workers: 4
+
+save_unfull_chunk: true
