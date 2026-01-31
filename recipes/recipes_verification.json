@@ -1,0 +1,410 @@
+{
+  "project": "LMCache-Recipes-Verification",
+  "branchName": "dense-instruct-cpu-hot-cache",
+  "description": "Verification and validation tracking for LMCache recipe library. Tracks testing status, hardware requirements, and notes for each recipe.",
+  "lastUpdated": "2026-01-31",
+  "verificationStatus": {
+    "totalRecipes": 32,
+    "validated": 0,
+    "skipped": 8,
+    "pending": 24
+  },
+  "userStories": [
+    {
+      "id": "R-001",
+      "title": "vLLM + LMCache (Storage Mode, single node) - CPU hot cache",
+      "category": "A - Core enable LMCache",
+      "recipeFile": "dense_instruct_cpu_hot_cache.md",
+      "configFiles": ["dense_instruct_cpu_hot_cache.yaml"],
+      "hardwareRequirements": ["GPU", "CPU RAM"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node recipe. Can be validated on single GPU machine. Entry point for all users."
+    },
+    {
+      "id": "R-002",
+      "title": "SGLang + LMCache (Storage Mode, single node)",
+      "category": "A - Core enable LMCache",
+      "recipeFile": "sglang_cpu_hot_cache.md",
+      "configFiles": ["sglang_cpu_hot_cache.yaml"],
+      "hardwareRequirements": ["GPU", "CPU RAM"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node recipe. Requires SGLang installation. Similar to R-001 but for SGLang engine."
+    },
+    {
+      "id": "R-003",
+      "title": "vLLM Production Stack + LMCache (enterprise deployment)",
+      "category": "A - Core enable LMCache",
+      "recipeFile": "vllm_production_stack.md",
+      "configFiles": ["vllm_production_stack.yaml"],
+      "hardwareRequirements": ["GPU", "Kubernetes"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires Kubernetes cluster. Marked as skipped - cannot validate without K8s infrastructure."
+    },
+    {
+      "id": "R-004",
+      "title": "KServe runtime + LMCache",
+      "category": "A - Core enable LMCache",
+      "recipeFile": "kserve_vllm_lmcache.md",
+      "configFiles": ["kserve_vllm_lmcache.yaml"],
+      "hardwareRequirements": ["GPU", "Kubernetes", "KServe"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires KServe on Kubernetes. Marked as skipped - cannot validate without K8s + KServe."
+    },
+    {
+      "id": "R-005",
+      "title": "llm-d + LMCache",
+      "category": "A - Core enable LMCache",
+      "recipeFile": "llm_d_lmcache.md",
+      "configFiles": ["llm_d_lmcache.yaml"],
+      "hardwareRequirements": ["GPU", "Kubernetes", "llm-d"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires llm-d daemon on Kubernetes. Marked as skipped - cannot validate without K8s + llm-d."
+    },
+    {
+      "id": "R-006",
+      "title": "CPU RAM backend (pinned memory)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "dense_instruct_cpu_hot_cache.md",
+      "configFiles": ["dense_instruct_cpu_hot_cache.yaml"],
+      "hardwareRequirements": ["GPU", "CPU RAM"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Covered in R-001. Core feature, can be validated on single node with sufficient CPU RAM."
+    },
+    {
+      "id": "R-007",
+      "title": "Local disk backend (POSIX)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_disk_persistence.md",
+      "configFiles": ["vllm_disk_persistence.yaml"],
+      "hardwareRequirements": ["GPU", "NVMe/SSD"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node recipe. Requires local NVMe/SSD storage. Can validate with local disk."
+    },
+    {
+      "id": "R-008",
+      "title": "GDS backend (NVMe via GPUDirect Storage)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_gds_backend.md",
+      "configFiles": ["vllm_gds_backend.yaml"],
+      "hardwareRequirements": ["Ampere+ GPU", "NVMe with GPUDirect", "CUDA 11.4+"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Requires specific hardware: Ampere+ GPU and NVMe with GPUDirect support. Can validate on single node with compatible hardware."
+    },
+    {
+      "id": "R-009",
+      "title": "NIXL as a storage backend (non-PD)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_nixl_storage.md",
+      "configFiles": ["vllm_nixl_posix.yaml", "vllm_nixl_gds.yaml"],
+      "hardwareRequirements": ["GPU", "NIXL library"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node recipe. Requires NIXL library installation. Can validate on single node."
+    },
+    {
+      "id": "R-010",
+      "title": "Redis remote backend (single instance)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_redis_remote.md",
+      "configFiles": ["vllm_redis_remote.yaml"],
+      "hardwareRequirements": ["GPU", "Redis server"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Can validate on single node with Redis running locally or in Docker. Foundation for multi-instance recipes."
+    },
+    {
+      "id": "R-011",
+      "title": "Redis Sentinel (HA)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_redis_sentinel.md",
+      "configFiles": ["vllm_redis_sentinel.yaml"],
+      "hardwareRequirements": ["GPU", "Redis Sentinel cluster"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires Redis Sentinel setup (3+ nodes for quorum). Marked as skipped - needs multi-node Redis infrastructure."
+    },
+    {
+      "id": "R-012",
+      "title": "Redis Cluster (sharded)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_redis_cluster.md",
+      "configFiles": ["vllm_redis_cluster.yaml"],
+      "hardwareRequirements": ["GPU", "Redis Cluster"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires Redis Cluster (6+ nodes recommended). Marked as skipped - needs multi-node Redis infrastructure."
+    },
+    {
+      "id": "R-013",
+      "title": "Valkey remote backend",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_valkey_remote.md",
+      "configFiles": ["vllm_valkey_remote.yaml"],
+      "hardwareRequirements": ["GPU", "Valkey server"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Similar to R-010. Can validate on single node with Valkey running locally or in Docker."
+    },
+    {
+      "id": "R-014",
+      "title": "LMCache Server lm:// remote",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_lmcache_server.md",
+      "configFiles": ["vllm_lmcache_server.yaml"],
+      "hardwareRequirements": ["GPU"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node recipe. LMCache server runs as separate process on same node. No external dependencies."
+    },
+    {
+      "id": "R-015",
+      "title": "S3 remote backend (cold tier)",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_s3_remote.md",
+      "configFiles": ["vllm_s3_remote.yaml"],
+      "hardwareRequirements": ["GPU", "S3 bucket"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Requires S3 bucket (or MinIO). Can validate with local MinIO instance. Works on single node."
+    },
+    {
+      "id": "R-016",
+      "title": "Mooncake remote backend",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_mooncake_remote.md",
+      "configFiles": ["vllm_mooncake_remote.yaml"],
+      "hardwareRequirements": ["GPU", "MooncakeStore", "RDMA/InfiniBand"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires MooncakeStore cluster with RDMA. Marked as skipped - needs specialized hardware and multi-node setup."
+    },
+    {
+      "id": "R-017",
+      "title": "InfiniStore remote backend",
+      "category": "B - Storage Mode backends",
+      "recipeFile": "vllm_infinistore_remote.md",
+      "configFiles": ["vllm_infinistore_remote.yaml"],
+      "hardwareRequirements": ["GPU", "InfiniStore", "RDMA/InfiniBand"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires InfiniStore with RDMA. Marked as skipped - needs specialized hardware and multi-node setup."
+    },
+    {
+      "id": "R-018",
+      "title": "Two vLLM instances share KV via remote store",
+      "category": "C - Multi-instance sharing",
+      "recipeFile": "vllm_multi_instance_sharing.md",
+      "configFiles": ["vllm_multi_instance.yaml"],
+      "hardwareRequirements": ["GPU", "Redis", "Load balancer"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires multiple vLLM instances + load balancer. Marked as skipped - needs multi-instance setup on multiple nodes."
+    },
+    {
+      "id": "R-019",
+      "title": "P2P KV sharing (controller-mediated, NIXL channel)",
+      "category": "C - Multi-instance sharing",
+      "recipeFile": "vllm_p2p_sharing.md",
+      "configFiles": ["vllm_p2p_instance_a.yaml", "vllm_p2p_instance_b.yaml"],
+      "hardwareRequirements": ["GPU", "NIXL", "RDMA/InfiniBand"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires P2P setup with controller and NIXL. Marked as skipped - needs multi-node network configuration."
+    },
+    {
+      "id": "R-020",
+      "title": "Controller-based routing + cache operations",
+      "category": "C - Multi-instance sharing",
+      "recipeFile": "vllm_controller_routing.md",
+      "configFiles": ["vllm_controller_instance_a.yaml", "vllm_controller_instance_b.yaml"],
+      "hardwareRequirements": ["GPU", "Controller", "NIXL"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires controller + multiple workers. Marked as skipped - needs multi-instance orchestration."
+    },
+    {
+      "id": "R-021",
+      "title": "PD on single node (vLLM v1 + NIXL)",
+      "category": "D - Transport Mode (PD)",
+      "recipeFile": "vllm_pd_single_node.md",
+      "configFiles": ["vllm_pd_prefiller.yaml", "vllm_pd_decoder.yaml"],
+      "hardwareRequirements": ["Multi-GPU", "NIXL"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node recipe. Requires multiple GPUs on same node for prefill/decode separation. Can validate on multi-GPU node."
+    },
+    {
+      "id": "R-022",
+      "title": "PD across nodes (prefill pool → decode pool)",
+      "category": "D - Transport Mode (PD)",
+      "recipeFile": "vllm_pd_multi_node.md",
+      "configFiles": ["vllm_pd_multinode_prefiller.yaml", "vllm_pd_multinode_decoder.yaml"],
+      "hardwareRequirements": ["Multi-GPU", "NIXL", "RDMA/InfiniBand"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires separate prefill and decode pools across nodes. Marked as skipped - needs multi-node GPU cluster."
+    },
+    {
+      "id": "R-023",
+      "title": "PD tuning recipe: buffer device + buffer size",
+      "category": "D - Transport Mode (PD)",
+      "recipeFile": "vllm_pd_tuning.md",
+      "configFiles": ["vllm_pd_tuning.yaml"],
+      "hardwareRequirements": ["Multi-GPU", "NIXL"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Applies to both single-node and multi-node PD. Can validate tuning on single multi-GPU node."
+    },
+    {
+      "id": "R-024",
+      "title": "Layerwise KV transfer",
+      "category": "E - Optimizations",
+      "recipeFile": "vllm_layerwise_storage.md",
+      "configFiles": ["vllm_layerwise.yaml"],
+      "hardwareRequirements": ["GPU"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node optimization. Works with any backend. Can validate on single GPU. NEW: Created standalone recipe."
+    },
+    {
+      "id": "R-025",
+      "title": "CacheGen compression (remote serde)",
+      "category": "E - Optimizations",
+      "recipeFile": "vllm_cachegen_remote.md",
+      "configFiles": ["vllm_cachegen_remote.yaml"],
+      "hardwareRequirements": ["GPU", "Remote storage"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Works on single node with remote backend. Can validate with local Redis or LMCache Server."
+    },
+    {
+      "id": "R-026",
+      "title": "CacheBlend (non-prefix reuse) for RAG reorder",
+      "category": "E - Optimizations",
+      "recipeFile": "vllm_cacheblend_rag.md",
+      "configFiles": ["vllm_cacheblend.yaml"],
+      "hardwareRequirements": ["GPU"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node feature. Can validate on single GPU with RAG use case."
+    },
+    {
+      "id": "R-027",
+      "title": "Async loading optimization",
+      "category": "E - Optimizations",
+      "recipeFile": "vllm_async_loading.md",
+      "configFiles": ["vllm_async_loading.yaml"],
+      "hardwareRequirements": ["GPU"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node optimization. Can validate on single GPU with high concurrency."
+    },
+    {
+      "id": "R-028",
+      "title": "Multiprocess mode",
+      "category": "E - Optimizations",
+      "recipeFile": "vllm_multiprocess_mode.md",
+      "configFiles": ["vllm_multiprocess.yaml"],
+      "hardwareRequirements": ["GPU"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node feature. Can validate on single GPU. Uses separate storage process."
+    },
+    {
+      "id": "R-029",
+      "title": "Single node perf tiering",
+      "category": "F - Common end-to-end combinations",
+      "recipeFile": "vllm_tiered_storage.md",
+      "configFiles": ["vllm_tiered_storage.yaml"],
+      "hardwareRequirements": ["GPU", "NVMe/SSD"],
+      "multiNode": false,
+      "status": "pending",
+      "notes": "Single-node recipe. Combines CPU + disk. Can validate on single node with local storage."
+    },
+    {
+      "id": "R-030",
+      "title": "Multi-node shared cache",
+      "category": "F - Common end-to-end combinations",
+      "recipeFile": "vllm_multi_node_shared_cache.md",
+      "configFiles": ["vllm_multi_node_shared_cache.yaml"],
+      "hardwareRequirements": ["GPU", "Redis", "Multiple nodes"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires multiple nodes with shared Redis. Marked as skipped - needs multi-node cluster."
+    },
+    {
+      "id": "R-031",
+      "title": "Enterprise platform path",
+      "category": "F - Common end-to-end combinations",
+      "recipeFile": "vllm_enterprise_platform.md",
+      "configFiles": ["vllm_enterprise_values.yaml"],
+      "hardwareRequirements": ["GPU", "Kubernetes", "Redis Cluster"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires full Kubernetes stack. Marked as skipped - needs enterprise K8s infrastructure."
+    },
+    {
+      "id": "R-032",
+      "title": "Ultimate separation path",
+      "category": "F - Common end-to-end combinations",
+      "recipeFile": "vllm_ultimate_separation.md",
+      "configFiles": ["vllm_ultimate_prefill.yaml", "vllm_ultimate_decode.yaml"],
+      "hardwareRequirements": ["Multi-GPU", "NIXL", "RDMA/InfiniBand", "Controller"],
+      "multiNode": true,
+      "status": "skipped",
+      "notes": "Requires multi-zone deployment with RDMA. Marked as skipped - needs large-scale infrastructure."
+    }
+  ],
+  "metadata": {
+    "totalRecipes": 32,
+    "byStatus": {
+      "pending": 24,
+      "skipped": 8,
+      "validated": 0
+    },
+    "byCategory": {
+      "A - Core enable LMCache": {"total": 5, "pending": 3, "skipped": 2},
+      "B - Storage Mode backends": {"total": 12, "pending": 9, "skipped": 3},
+      "C - Multi-instance sharing": {"total": 3, "pending": 0, "skipped": 3},
+      "D - Transport Mode (PD)": {"total": 3, "pending": 2, "skipped": 1},
+      "E - Optimizations": {"total": 5, "pending": 5, "skipped": 0},
+      "F - Common end-to-end combinations": {"total": 4, "pending": 1, "skipped": 3}
+    },
+    "multiNodeRecipes": [
+      "R-003", "R-004", "R-005", "R-011", "R-012", "R-016", "R-017",
+      "R-018", "R-019", "R-020", "R-022", "R-030", "R-031", "R-032"
+    ],
+    "singleNodeRecipes": [
+      "R-001", "R-002", "R-006", "R-007", "R-008", "R-009", "R-010",
+      "R-013", "R-014", "R-015", "R-021", "R-023", "R-024", "R-025",
+      "R-026", "R-027", "R-028", "R-029"
+    ]
+  },
+  "validationCriteria": {
+    "recipeStructure": [
+      "Introduction",
+      "When to Use",
+      "Prerequisites",
+      "Installing",
+      "Configuration",
+      "Launching",
+      "Validation",
+      "Inference",
+      "Benchmarking",
+      "Optimizing",
+      "Troubleshooting",
+      "Additional Resources"
+    ],
+    "yamlValidation": "All YAML configs must pass syntax validation",
+    "hardwareRequirements": "Must document minimum hardware requirements",
+    "multiNodeFlag": "Must mark multi-node recipes appropriately"
+  }
+}

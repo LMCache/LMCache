@@ -355,7 +355,7 @@
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Covered in R-001. Can be extracted as standalone optimization recipe."
+      "notes": "Recipe files: vllm_layerwise_storage.md, vllm_layerwise.yaml\nStandalone recipe created for layerwise optimization. Works with all backends."
     },
     {
       "id": "R-025",
@@ -494,8 +494,8 @@
     },
     "priorityBreakdown": {
       "P1": {"total": 12, "completed": 12, "ids": ["R-001","R-002","R-006","R-007","R-010","R-014","R-018","R-021","R-022","R-024","R-029","R-030"]},
-      "P2": {"total": 16, "completed": 13, "ids": ["R-003","R-004","R-005","R-011","R-012","R-013","R-015","R-016","R-017","R-019","R-020","R-023","R-025","R-026","R-027","R-028","R-031","R-032"]},
-      "P3": {"total": 4, "completed": 0, "ids": ["R-008","R-009"]}
+      "P2": {"total": 16, "completed": 16, "ids": ["R-003","R-004","R-005","R-011","R-012","R-013","R-015","R-016","R-017","R-019","R-020","R-023","R-025","R-026","R-027","R-028","R-031","R-032"]},
+      "P3": {"total": 4, "completed": 4, "ids": ["R-008","R-009"]}
     },
     "consolidationOpportunities": [
       "R-010, R-011, R-012, R-013 could be combined into single 'Redis/Valkey backends' recipe with subsections",
