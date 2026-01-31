@@ -15,10 +15,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     RustRawBlockBackend,
@@ -70,11 +70,12 @@ def test_rust_raw_block_backend_put_get_roundtrip(memory_allocator, loop_in_thre
             "rust_raw_block.block_align": 4096,
             "rust_raw_block.header_bytes": 4096,
         }
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             model_name="test_model",
             world_size=1,
+            local_world_size=1,
             worker_id=0,
-            fmt="vllm",
+            local_worker_id=0,
             kv_dtype=torch.bfloat16,
             kv_shape=(4, 2, 256, 8, 128),
         )
@@ -94,7 +95,7 @@ def test_rust_raw_block_backend_put_get_roundtrip(memory_allocator, loop_in_thre
         )
 
         try:
-            key = CacheEngineKey("vllm", "test_model", 1, 0, 12345, torch.bfloat16)
+            key = CacheEngineKey("test_model", 1, 0, 12345, torch.bfloat16)
             allocator = AdHocMemoryAllocator(device="cpu")
             obj = allocator.allocate(
                 [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
@@ -139,11 +140,12 @@ def test_rust_raw_block_backend_eviction_lru(memory_allocator, loop_in_thread):
             "rust_raw_block.header_bytes": 4096,
             "rust_raw_block.slot_bytes": 4 * 1024 * 1024,
         }
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             model_name="test_model",
             world_size=1,
+            local_world_size=1,
             worker_id=0,
-            fmt="vllm",
+            local_worker_id=0,
             kv_dtype=torch.bfloat16,
             kv_shape=(4, 2, 256, 8, 128),
         )
@@ -165,9 +167,9 @@ def test_rust_raw_block_backend_eviction_lru(memory_allocator, loop_in_thread):
         try:
             alloc = AdHocMemoryAllocator(device="cpu")
 
-            k1 = CacheEngineKey("vllm", "test_model", 1, 0, 1, torch.bfloat16)
-            k2 = CacheEngineKey("vllm", "test_model", 1, 0, 2, torch.bfloat16)
-            k3 = CacheEngineKey("vllm", "test_model", 1, 0, 3, torch.bfloat16)
+            k1 = CacheEngineKey("test_model", 1, 0, 1, torch.bfloat16)
+            k2 = CacheEngineKey("test_model", 1, 0, 2, torch.bfloat16)
+            k3 = CacheEngineKey("test_model", 1, 0, 3, torch.bfloat16)
 
             o1 = alloc.allocate(
                 [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
@@ -231,11 +233,12 @@ def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thr
             "rust_raw_block.header_bytes": 4096,
             "rust_raw_block.manifest_path": manifest_path,
         }
-        metadata = LMCacheEngineMetadata(
+        metadata = LMCacheMetadata(
             model_name="test_model",
             world_size=1,
+            local_world_size=1,
             worker_id=0,
-            fmt="vllm",
+            local_worker_id=0,
             kv_dtype=torch.bfloat16,
             kv_shape=(4, 2, 256, 8, 128),
         )
@@ -254,7 +257,7 @@ def test_rust_raw_block_backend_manifest_roundtrip(memory_allocator, loop_in_thr
             dst_device="cpu",
         )
         alloc = AdHocMemoryAllocator(device="cpu")
-        k1 = CacheEngineKey("vllm", "test_model", 1, 0, 111, torch.bfloat16)
+        k1 = CacheEngineKey("test_model", 1, 0, 111, torch.bfloat16)
         o1 = alloc.allocate(
             [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
         )
