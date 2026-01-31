@@ -1,0 +1,10 @@
+chunk_size: 256
+# IMPORTANT: All instances must use the same chunk_size
+local_cpu: true
+# Size local CPU cache to ~1.5x GPU KV cache budget per instance
+max_local_cpu_size: 48
+local_disk: false
+# Shared Redis tier (centralized KV cache)
+remote_url: "redis://redis.lmcache.svc.cluster.local:6379"
+use_layerwise: false
+save_unfull_chunk: true

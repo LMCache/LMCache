@@ -1,0 +1,8 @@
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 48
+local_disk: false
+# Redis Sentinel (HA)
+remote_url: "redis-sentinel://sentinel-1:26379,sentinel-2:26379,sentinel-3:26379/mymaster"
+use_layerwise: false
+save_unfull_chunk: true

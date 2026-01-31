@@ -1,0 +1,10 @@
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 48
+local_disk: false
+# InfiniStore remote backend (RDMA)
+remote_url: "infinistore://infinistore-master:12345?device=mlx5_0"
+use_layerwise: false
+save_unfull_chunk: true
+extra_config:
+  infinistore_link_type: "LINK_ETHERNET"
