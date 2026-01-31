@@ -15,7 +15,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_controller.message import (
@@ -27,6 +26,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
@@ -195,11 +195,12 @@ def create_test_config(
 
 def create_test_metadata(worker_id: int = 0):
     """Create test metadata"""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=2,
+        local_world_size=2,
         worker_id=worker_id,
-        fmt="vllm",
+        local_worker_id=worker_id,
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
     )
@@ -208,7 +209,12 @@ def create_test_metadata(worker_id: int = 0):
 def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey"""
     return CacheEngineKey(
-        "vllm", "test_model", 2, 0, hash(key_id), torch.bfloat16, None
+        model_name="test_model",
+        world_size=2,
+        worker_id=0,
+        chunk_hash=hash(key_id),
+        dtype=torch.bfloat16,
+        request_configs=None,
     )
 
 

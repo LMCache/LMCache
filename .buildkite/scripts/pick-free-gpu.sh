@@ -6,8 +6,8 @@ MIN_FREE_MEM="${1:-10000}"    # in MiB (default: 10 GB)
 REQUESTED_GPU_COUNT="${2:-1}" # number of GPUs to select (default: 1)
 MAX_UTIL=20                   # hardcoded utilization threshold (%)
 GPU_LIMIT=4                   # reserves GPU 0-3 for CI/Build
-# 30 minutes
-TIMEOUT_SECONDS=1800
+# 60 minutes
+TIMEOUT_SECONDS=3600
 INTERVAL=10
 
 start_time=$(date +%s)

@@ -11,9 +11,9 @@ import threading
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -60,23 +60,25 @@ def test_remote_mla_worker_id_as0(mock_stream):
         extra_config={"remote_enable_mla_worker_id_as0": True},
     )
 
-    metadata = LMCacheEngineMetadata(
+    metadata = LMCacheMetadata(
         model_name="test-model",
-        fmt="vllm",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,
         world_size=4,
+        local_world_size=4,
         worker_id=2,
+        local_worker_id=2,
     )
-    metadata0 = LMCacheEngineMetadata(
+    metadata0 = LMCacheMetadata(
         model_name="test-model",
-        fmt="vllm",
         kv_dtype=torch.float16,
         kv_shape=(32, 1, 256, 64, 128),
         use_mla=True,
         world_size=4,
+        local_world_size=4,
         worker_id=0,
+        local_worker_id=0,
     )
 
     # Create memory allocator and local backend
@@ -103,7 +105,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
 
     # Create key
     key = CacheEngineKey(
-        fmt="vllm",
         model_name="test-model",
         world_size=4,
         worker_id=2,
@@ -123,7 +124,6 @@ def test_remote_mla_worker_id_as0(mock_stream):
     backend0.connection = backend.connection
     # Create key
     key0 = CacheEngineKey(
-        fmt="vllm",
         model_name="test-model",
         world_size=4,
         worker_id=0,
