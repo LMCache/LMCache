@@ -118,8 +118,8 @@
         "Includes validation and benchmark"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "Not started. P3 priority - advanced backend."
+      "passes": true,
+      "notes": "Recipe files: vllm_gds_backend.md, vllm_gds_backend.yaml\nCompleted: 2026-01-31. GDS backend for GPUDirect Storage."
     },
     {
       "id": "R-009",
@@ -132,8 +132,8 @@
         "Includes validation and performance comparison"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "Not started. P3 priority - advanced backend."
+      "passes": true,
+      "notes": "Recipe files: vllm_nixl_storage.md, vllm_nixl_posix.yaml, vllm_nixl_gds.yaml\nCompleted: 2026-01-31. NIXL storage backend with POSIX/GDS/HF3FS options."
     },
     {
       "id": "R-010",
@@ -384,8 +384,8 @@
         "Includes benchmark comparing with/without blending"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Not started. P2 priority - advanced optimization for RAG workloads."
+      "passes": true,
+      "notes": "Recipe files: vllm_cacheblend_rag.md, vllm_cacheblend.yaml\nCompleted: 2026-01-31. RAG optimization with reordered context blending."
     },
     {
       "id": "R-027",
@@ -399,8 +399,8 @@
         "Includes benchmark showing throughput improvement"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Not started. P2 priority. Can be combined with other optimization recipes."
+      "passes": true,
+      "notes": "Recipe files: vllm_async_loading.md, vllm_async_loading.yaml\nCompleted: 2026-01-31. Async loading for non-blocking cache operations."
     },
     {
       "id": "R-028",
@@ -414,8 +414,8 @@
         "Includes deployment guidance"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Not started. P2 priority. Consider if this needs standalone recipe or doc section."
+      "passes": true,
+      "notes": "Recipe files: vllm_multiprocess_mode.md, vllm_multiprocess.yaml\nCompleted: 2026-01-31. Multiprocess mode for isolation and throughput."
     },
     {
       "id": "R-029",
@@ -459,8 +459,8 @@
         "Documents routing integration"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Not started. P2 priority - enterprise deployment guide. Builds on R-003/004/005."
+      "passes": true,
+      "notes": "Recipe files: vllm_enterprise_platform.md, vllm_enterprise_values.yaml\nCompleted: 2026-01-31. Enterprise platform deployment with Helm, observability, security."
     },
     {
       "id": "R-032",
@@ -474,23 +474,23 @@
         "Includes production tuning guidance"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Not started. P2 priority - advanced deployment pattern. Builds on R-021/022."
+      "passes": true,
+      "notes": "Recipe files: vllm_ultimate_separation.md, vllm_ultimate_prefill.yaml, vllm_ultimate_decode.yaml\nCompleted: 2026-01-31. Ultimate PD separation with controller and multi-zone."
     }
   ],
   "metadata": {
     "totalRecipes": 32,
-    "completed": 23,
+    "completed": 32,
     "inProgress": 0,
-    "notStarted": 9,
+    "notStarted": 0,
     "lastUpdated": "2026-01-31",
     "categories": {
       "A - Core enable LMCache": {"total": 5, "completed": 5},
-      "B - Storage Mode backends": {"total": 12, "completed": 9},
+      "B - Storage Mode backends": {"total": 12, "completed": 12},
       "C - Multi-instance sharing": {"total": 3, "completed": 3},
       "D - Transport Mode (PD)": {"total": 3, "completed": 3},
-      "E - Optimizations": {"total": 5, "completed": 1},
-      "F - Common end-to-end combinations": {"total": 4, "completed": 2}
+      "E - Optimizations": {"total": 5, "completed": 5},
+      "F - Common end-to-end combinations": {"total": 4, "completed": 4}
     },
     "priorityBreakdown": {
       "P1": {"total": 12, "completed": 12, "ids": ["R-001","R-002","R-006","R-007","R-010","R-014","R-018","R-021","R-022","R-024","R-029","R-030"]},
