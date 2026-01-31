@@ -45,6 +45,7 @@
 - P2P sharing requires `enable_p2p` + `enable_controller` with unique init/lookup ports
 - Controller API provides `/move` and `/health` endpoints for orchestration
 - PD tuning uses `pd_buffer_device` and `pd_buffer_size` as primary stability knobs
+- CacheGen compression is enabled via `remote_serde: "cachegen"` for remote backends
 
 ---
 
@@ -371,4 +372,16 @@ Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
   - `pd_buffer_device` and `pd_buffer_size` are the primary PD stability knobs
   - CUDA buffers are fastest but may cause GPU OOM
   - Larger buffers reduce transfer timeouts for long prompts
+---
+
+## 2026-01-31 - R-025
+Thread: https://ampcode.com/threads/$AMP_CURRENT_THREAD_ID
+- Created CacheGen compression recipe: vllm_cachegen_remote.md
+- Added CacheGen YAML config: vllm_cachegen_remote.yaml
+- Documented lossy compression tradeoffs and remote serde usage
+- Included bandwidth/TTFT comparison guidance
+- **Learnings for future iterations:**
+  - CacheGen is enabled via `remote_serde: "cachegen"`
+  - Best impact is on remote tiers with network bottlenecks
+  - Expect small numerical differences in KV after decompression
 ---
