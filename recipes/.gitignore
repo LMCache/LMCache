@@ -1,0 +1,20 @@
+# Validation/temporary files
+*_validation*.json
+*_verification*.json
+verification*.txt
+VALIDATION_*.md
+test_benchmark.sh
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Temp files
+*.tmp
+*.bak
+*.swp
+*~
