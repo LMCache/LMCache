@@ -1,0 +1,22 @@
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 48
+
+# Enable GDS backend
+local_disk: true
+disk_backend_type: "gds"  # Use GDS instead of POSIX
+local_disk_path: "/mnt/nvme0/lmcache"
+max_local_disk_size: 500  # GB
+
+# GDS-specific settings
+gds:
+  # I/O mode: "CUFILE_IO_TYPE_READWRITE" or "CUFILE_IO_TYPE_WRITETHROUGH"
+  io_mode: "CUFILE_IO_TYPE_READWRITE"
+  
+  # Buffer pool size for GDS
+  buffer_pool_size: 1073741824  # 1GB
+  
+  # Enable bounce buffer for unaligned I/O
+  use_bounce_buffer: true
+
+save_unfull_chunk: true
