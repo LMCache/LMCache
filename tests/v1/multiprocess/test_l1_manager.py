@@ -48,7 +48,15 @@ from lmcache.v1.multiprocess.distributed.config import (
     L1MemoryManagerConfig,
 )
 from lmcache.v1.multiprocess.distributed.error import L1Error
-from lmcache.v1.multiprocess.distributed.l1_manager import L1Manager
+
+try:
+    # First Party
+    from lmcache.v1.multiprocess.distributed.l1_manager import L1Manager
+except ImportError:
+    # Skip tests if L1Manager cannot be imported
+    pytest.skip(
+        "Skipping because L1 manager cannot be imported", allow_module_level=True
+    )
 
 # Skip all tests in this module if CUDA is not available
 pytestmark = pytest.mark.skipif(
