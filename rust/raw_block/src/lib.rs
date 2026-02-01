@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Raw block device I/O extension for LMCache.
-//! Provides direct block device access with O_DIRECT support.
+//! Provides direct block device access with optional O_DIRECT support.
+//!
+//! Design notes (for reviewers unfamiliar with Rust / Linux I/O):
+//! - This module exposes a very small surface to Python via PyO3.
+//! - We wrap Linux `pread` / `pwrite` on a file descriptor opened from a
+//!   block device (e.g., /dev/nvmeXnY) or a regular file (for tests).
+//! - When O_DIRECT is enabled, Linux requires aligned offsets and I/O sizes.
+//!   Python buffers are not guaranteed to be aligned, so we use a bounce buffer
+//!   (aligned via `posix_memalign`) to safely perform the I/O.
 
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -12,29 +20,34 @@ use std::slice;
 
 // Linux ioctl for block device size in bytes.
 // Defined in <linux/fs.h>: BLKGETSIZE64 _IOR(0x12,114,size_t)
-const BLKGETSIZE64: libc::c_ulong = 0x8008_1272;
+const BLKGETSIZE64: libc::c_ulong = 0x8008_1272; // ioctl op to query block size
 
 // Buffer protocol flags (from CPython C-API).
-const PYBUF_WRITABLE: i32 = 0x0001;
-const PYBUF_ND: i32 = 0x0008;
-const PYBUF_STRIDES: i32 = 0x0010 | PYBUF_ND;
-const PYBUF_ANY_CONTIGUOUS: i32 = 0x0080 | PYBUF_STRIDES;
+const PYBUF_WRITABLE: i32 = 0x0001; // buffer must be writable
+const PYBUF_ND: i32 = 0x0008; // request N-dimensional buffer
+const PYBUF_STRIDES: i32 = 0x0010 | PYBUF_ND; // request strides info
+const PYBUF_ANY_CONTIGUOUS: i32 = 0x0080 | PYBUF_STRIDES; // accept any contiguous layout
 
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
 #[allow(clippy::manual_div_ceil)]
+// Small helper used to align sizes for O_DIRECT I/O.
 fn round_up(x: usize, align: usize) -> usize {
     (x + align - 1) / align * align
 }
 
+// Fetch errno for the last libc call on this thread.
 fn errno() -> i32 {
     // SAFETY: libc call.
     unsafe { *libc::__errno_location() }
 }
 
+// Convert errno to a Python OSError with a message.
 fn os_err(msg: &str) -> PyErr {
     PyOSError::new_err((errno(), msg.to_string()))
 }
 
+// Low-level write loop that retries until all bytes are written.
+// This isolates the raw syscalls from Python-facing logic.
 fn pwrite_from_ptr(
     fd: RawFd,
     mut offset: u64,
@@ -66,6 +79,8 @@ fn pwrite_from_ptr(
     Ok(())
 }
 
+// Low-level read loop that retries until all bytes are read.
+// We treat EOF as an error because the caller expects a full read.
 fn pread_into(fd: RawFd, offset: u64, mut dst: *mut u8, mut size: usize) -> Result<(), PyErr> {
     let mut off = offset;
     while size > 0 {
@@ -88,6 +103,7 @@ fn pread_into(fd: RawFd, offset: u64, mut dst: *mut u8, mut size: usize) -> Resu
     Ok(())
 }
 
+// Determine file/device size in bytes (ioctl for block device, fstat fallback).
 fn fd_size_bytes(fd: RawFd) -> Result<u64, PyErr> {
     // Try ioctl first (block device / loop device).
     let mut size: u64 = 0;
@@ -106,7 +122,9 @@ fn fd_size_bytes(fd: RawFd) -> Result<u64, PyErr> {
     Ok(st.st_size as u64)
 }
 
-/// Aligned buffer for O_DIRECT I/O (automatically freed on drop).
+/// Aligned buffer for O_DIRECT I/O.
+/// Allocated with posix_memalign so the pointer satisfies alignment requirements.
+/// Automatically freed on drop.
 struct AlignedBuf {
     ptr: *mut u8,
     #[allow(dead_code)]
@@ -116,6 +134,7 @@ struct AlignedBuf {
 }
 
 impl AlignedBuf {
+    // Allocate an aligned buffer suitable for O_DIRECT.
     fn new(len: usize, align: usize) -> Result<Self, PyErr> {
         let mut p: *mut libc::c_void = std::ptr::null_mut();
         // SAFETY: posix_memalign writes to p.
@@ -135,10 +154,12 @@ impl AlignedBuf {
         })
     }
 
+    // Mutable pointer for read/write syscalls.
     fn as_mut_ptr(&self) -> *mut u8 {
         self.ptr
     }
 
+    // Const pointer for write syscalls.
     fn as_ptr(&self) -> *const u8 {
         self.ptr as *const u8
     }
@@ -155,6 +176,7 @@ impl Drop for AlignedBuf {
     }
 }
 
+// Acquire a Python buffer view with the requested mutability.
 fn get_pybuffer<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
@@ -176,6 +198,7 @@ fn get_pybuffer<'py>(
     }
 }
 
+// Release a buffer view previously acquired by get_pybuffer.
 fn release_pybuffer(mut view: pyo3::ffi::Py_buffer) {
     // SAFETY: view was created by PyObject_GetBuffer.
     unsafe {
@@ -184,13 +207,15 @@ fn release_pybuffer(mut view: pyo3::ffi::Py_buffer) {
 }
 
 /// Single-FD synchronous raw block device interface.
+/// This is intentionally minimal: open -> pread/pwrite -> close.
+/// Higher-level policies (slotting, manifests, etc.) live in Python.
 #[pyclass]
 struct RawBlockDevice {
-    fd: RawFd,
-    size: u64,
-    closed: bool,
-    use_odirect: bool,
-    alignment: usize,
+    fd: RawFd,        // raw file descriptor
+    size: u64,        // cached device size in bytes
+    closed: bool,     // avoid double-close
+    use_odirect: bool, // enforce alignment + bypass page cache
+    alignment: usize, // required alignment in bytes
 }
 
 #[pymethods]
@@ -222,11 +247,14 @@ impl RawBlockDevice {
         })
     }
 
+    // Expose cached size to Python.
     fn size_bytes(&self) -> PyResult<u64> {
         Ok(self.size)
     }
 
-    /// Zero-copy write: write the bytes from any Python buffer object.
+    /// Write bytes from any Python buffer object into the device.
+    /// If O_DIRECT is enabled, we must use an aligned bounce buffer
+    /// because Python-provided buffers are not guaranteed to be aligned.
     #[pyo3(signature=(offset, data, payload_len=None, total_len=None))]
     fn pwrite_from_buffer(
         &self,
@@ -274,8 +302,9 @@ impl RawBlockDevice {
             }
         }
 
-        // If padding is requested (total_len > payload_len), always use bounce.
-        // For O_DIRECT we also always use bounce (Python buffer alignment is not guaranteed).
+        // If padding is requested (total_len > payload_len), we must write
+        // zeros for the tail so on-disk layout is deterministic.
+        // For O_DIRECT we always use a bounce buffer because alignment is strict.
         let ptr_usize = ptr as usize;
         let res = py.allow_threads(move || {
             let src = ptr_usize as *const u8;
@@ -306,7 +335,9 @@ impl RawBlockDevice {
         Ok(())
     }
 
-    /// Zero-copy read: read exactly `size` bytes into a writable Python buffer.
+    /// Read exactly `payload_len` bytes into a writable Python buffer.
+    /// If O_DIRECT is enabled or padding is requested, read into a bounce
+    /// buffer first, then copy the payload into the Python buffer.
     #[pyo3(signature=(offset, out, payload_len, total_len=None))]
     fn pread_into(
         &self,
@@ -381,6 +412,7 @@ impl RawBlockDevice {
         Ok(())
     }
 
+    // Explicit close from Python. Drop also closes if needed.
     fn close(&mut self) -> PyResult<()> {
         if !self.closed {
             // SAFETY: close fd once.
