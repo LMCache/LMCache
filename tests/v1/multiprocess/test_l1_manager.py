@@ -10,28 +10,35 @@ interface docstrings. The tests focus on:
    - Returns KEY_NOT_READABLE if key exists but is write-locked
    - Returns SUCCESS and MemoryObj if key is readable
 
-2. finish_read() - Finish read access for given keys
+2. unsafe_read() - Unsafe read without acquiring new read locks
+   - Returns KEY_NOT_EXIST if key does not exist
+   - Returns KEY_NOT_READABLE if key is not read-locked
+   - Returns SUCCESS and MemoryObj if key is read-locked
+
+3. finish_read() - Finish read access for given keys
    - Returns KEY_NOT_EXIST if key does not exist
    - Returns KEY_IN_WRONG_STATE if key is write-locked or non-read-locked
    - Returns SUCCESS on successful unlock
    - Deletes temporary objects when read count reaches zero
 
-3. reserve_write() - Reserve write access for given keys
+4. reserve_write() - Reserve write access for given keys
    - Returns KEY_NOT_WRITABLE if key exists but cannot be written
    - Returns OUT_OF_MEMORY if allocation fails
    - Returns SUCCESS and MemoryObj on success
 
-4. finish_write() - Finish write access for given keys
+5. finish_write() - Finish write access for given keys
    - Returns KEY_NOT_EXIST if key does not exist
    - Returns KEY_IN_WRONG_STATE if not write-locked or read-locked
    - Returns SUCCESS on successful unlock
 
-5. delete() - Delete keys from L1 cache
+6. delete() - Delete keys from L1 cache
    - Returns KEY_NOT_EXIST if key does not exist
    - Returns KEY_IS_LOCKED if key is locked
    - Returns SUCCESS on successful deletion
 
-6. get_object_state() - Debugging API to get internal state
+7. get_object_state() - Debugging API to get internal state
+
+8. close() - Close the L1Manager and free all resources
 """
 
 # Standard
@@ -171,6 +178,8 @@ class TestReserveRead:
         assert error == L1Error.KEY_NOT_EXIST
         assert mem_obj is None
 
+        manager.close()
+
     def test_reserve_read_write_locked_key_returns_key_not_readable(
         self, basic_l1_config, basic_layout
     ):
@@ -189,6 +198,8 @@ class TestReserveRead:
         error, mem_obj = read_result[key]
         assert error == L1Error.KEY_NOT_READABLE
         assert mem_obj is None
+
+        manager.close()
 
     def test_reserve_read_ready_key_returns_success(
         self, basic_l1_config, basic_layout
@@ -211,6 +222,8 @@ class TestReserveRead:
         assert error == L1Error.SUCCESS
         assert mem_obj is not None
         assert mem_obj.is_valid()
+
+        manager.close()
 
     def test_reserve_read_multiple_keys(self, basic_l1_config, basic_layout):
         """Test reserve_read with multiple keys in a single call."""
@@ -236,6 +249,8 @@ class TestReserveRead:
         assert result[key2][1] is None
         assert result[key3][0] == L1Error.KEY_NOT_READABLE
         assert result[key3][1] is None
+
+        manager.close()
 
     def test_reserve_read_can_be_called_multiple_times(
         self, basic_l1_config, basic_layout
@@ -263,6 +278,218 @@ class TestReserveRead:
         # Check via available_for_read (should still be true since
         # read-locked is readable)
         assert state.available_for_read() is True
+
+        manager.close()
+
+
+# =============================================================================
+# Tests for L1Manager.unsafe_read()
+# =============================================================================
+
+
+class TestUnsafeRead:
+    """
+    Tests for L1Manager.unsafe_read() method.
+
+    Per the docstring:
+    - This method does not acquire read locks.
+    - Caller must ensure unsafe_read is called between reserve_read and finish_read.
+    - KEY_NOT_EXIST: The key does not exist.
+    - KEY_NOT_READABLE: The key is not readable (not read-locked).
+    - Returns (L1Error, Optional[MemoryObj]) for each key.
+    """
+
+    def test_unsafe_read_non_existing_key_returns_key_not_exist(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that unsafe_read returns KEY_NOT_EXIST for non-existing keys."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        result = manager.unsafe_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.KEY_NOT_EXIST
+        assert mem_obj is None
+
+        manager.close()
+
+    def test_unsafe_read_non_read_locked_returns_key_not_readable(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that unsafe_read returns KEY_NOT_READABLE if not read-locked."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create ready object (not read-locked)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        # Try unsafe_read without reserve_read
+        result = manager.unsafe_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.KEY_NOT_READABLE
+        assert mem_obj is None
+
+        manager.close()
+
+    def test_unsafe_read_write_locked_returns_key_not_readable(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that unsafe_read returns KEY_NOT_READABLE for write-locked keys."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create write-locked object
+        manager.reserve_write([key], [False], basic_layout)
+
+        # Try unsafe_read on write-locked key
+        result = manager.unsafe_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.KEY_NOT_READABLE
+        assert mem_obj is None
+
+        manager.close()
+
+    def test_unsafe_read_read_locked_returns_success(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that unsafe_read returns SUCCESS for read-locked keys."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create ready object and reserve read
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        reserve_result = manager.reserve_read([key])
+        assert reserve_result[key][0] == L1Error.SUCCESS
+
+        # unsafe_read should succeed on read-locked key
+        result = manager.unsafe_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.SUCCESS
+        assert mem_obj is not None
+        assert mem_obj.is_valid()
+
+        manager.close()
+
+    def test_unsafe_read_returns_same_memory_obj_as_reserve_read(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that unsafe_read returns the same MemoryObj as reserve_read."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create ready object
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        # Reserve read and get memory object
+        reserve_result = manager.reserve_read([key])
+        assert reserve_result[key][0] == L1Error.SUCCESS
+        reserved_mem_obj = reserve_result[key][1]
+
+        # unsafe_read should return the same memory object
+        unsafe_result = manager.unsafe_read([key])
+        assert unsafe_result[key][0] == L1Error.SUCCESS
+        unsafe_mem_obj = unsafe_result[key][1]
+
+        # Should be the same object
+        assert reserved_mem_obj is unsafe_mem_obj
+
+        manager.close()
+
+    def test_unsafe_read_multiple_times_without_adding_read_count(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test that multiple unsafe_reads don't add to read lock count."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create temporary object
+        manager.reserve_write([key], [True], basic_layout)
+        manager.finish_write([key])
+
+        # Reserve read once
+        manager.reserve_read([key])
+
+        # Multiple unsafe_reads
+        for _ in range(5):
+            result = manager.unsafe_read([key])
+            assert result[key][0] == L1Error.SUCCESS
+
+        # Single finish_read should release the lock and delete temp object
+        manager.finish_read([key])
+
+        # Object should be deleted (only 1 read lock was held, not 6)
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_unsafe_read_multiple_keys(self, basic_l1_config, basic_layout):
+        """Test unsafe_read with multiple keys in a single call."""
+        manager = L1Manager(basic_l1_config)
+        key1 = make_object_key(1)
+        key2 = make_object_key(2)
+        key3 = make_object_key(3)
+
+        # key1: read-locked
+        manager.reserve_write([key1], [False], basic_layout)
+        manager.finish_write([key1])
+        manager.reserve_read([key1])
+
+        # key2: does not exist
+
+        # key3: ready but not read-locked
+        manager.reserve_write([key3], [False], basic_layout)
+        manager.finish_write([key3])
+
+        # unsafe_read on all three
+        result = manager.unsafe_read([key1, key2, key3])
+
+        assert result[key1][0] == L1Error.SUCCESS
+        assert result[key1][1] is not None
+        assert result[key2][0] == L1Error.KEY_NOT_EXIST
+        assert result[key2][1] is None
+        assert result[key3][0] == L1Error.KEY_NOT_READABLE
+        assert result[key3][1] is None
+
+        manager.close()
+
+    def test_unsafe_read_between_reserve_and_finish(
+        self, basic_l1_config, basic_layout
+    ):
+        """Test proper usage: unsafe_read between reserve_read and finish_read."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create ready object
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        # Proper workflow: reserve_read -> unsafe_read -> finish_read
+        reserve_result = manager.reserve_read([key])
+        assert reserve_result[key][0] == L1Error.SUCCESS
+
+        unsafe_result = manager.unsafe_read([key])
+        assert unsafe_result[key][0] == L1Error.SUCCESS
+        assert unsafe_result[key][1] is not None
+
+        finish_result = manager.finish_read([key])
+        assert finish_result[key] == L1Error.SUCCESS
+
+        # After finish_read, unsafe_read should fail (not read-locked)
+        result = manager.unsafe_read([key])
+        assert result[key][0] == L1Error.KEY_NOT_READABLE
+
+        manager.close()
 
 
 # =============================================================================
@@ -292,6 +519,8 @@ class TestFinishRead:
         assert key in result
         assert result[key] == L1Error.KEY_NOT_EXIST
 
+        manager.close()
+
     def test_finish_read_success(self, basic_l1_config, basic_layout):
         """Test that finish_read returns SUCCESS after proper read reservation."""
         manager = L1Manager(basic_l1_config)
@@ -306,6 +535,8 @@ class TestFinishRead:
         result = manager.finish_read([key])
 
         assert result[key] == L1Error.SUCCESS
+
+        manager.close()
 
     def test_finish_read_non_read_locked_returns_wrong_state(
         self, basic_l1_config, basic_layout
@@ -323,6 +554,8 @@ class TestFinishRead:
 
         assert result[key] == L1Error.KEY_IN_WRONG_STATE
 
+        manager.close()
+
     def test_finish_read_write_locked_returns_wrong_state(
         self, basic_l1_config, basic_layout
     ):
@@ -337,6 +570,8 @@ class TestFinishRead:
         result = manager.finish_read([key])
 
         assert result[key] == L1Error.KEY_IN_WRONG_STATE
+
+        manager.close()
 
     def test_finish_read_temporary_object_deleted_when_count_zero(
         self, basic_l1_config, basic_layout
@@ -362,6 +597,8 @@ class TestFinishRead:
         # Verify object is deleted
         assert manager.get_object_state(key) is None
 
+        manager.close()
+
     def test_finish_read_multiple_reads_count_down(self, basic_l1_config, basic_layout):
         """Test that multiple finish_reads count down properly."""
         manager = L1Manager(basic_l1_config)
@@ -384,6 +621,8 @@ class TestFinishRead:
         # Finish read third time - temporary object should be deleted
         manager.finish_read([key])
         assert manager.get_object_state(key) is None
+
+        manager.close()
 
 
 # =============================================================================
@@ -414,6 +653,8 @@ class TestReserveWrite:
         assert mem_obj is not None
         assert mem_obj.is_valid()
 
+        manager.close()
+
     def test_reserve_write_write_locked_key_returns_not_writable(
         self, basic_l1_config, basic_layout
     ):
@@ -430,6 +671,8 @@ class TestReserveWrite:
 
         assert result2[key][0] == L1Error.KEY_NOT_WRITABLE
         assert result2[key][1] is None
+
+        manager.close()
 
     def test_reserve_write_read_locked_key_returns_not_writable(
         self, basic_l1_config, basic_layout
@@ -451,6 +694,8 @@ class TestReserveWrite:
         assert result[key][0] == L1Error.KEY_NOT_WRITABLE
         assert result[key][1] is None
 
+        manager.close()
+
     def test_reserve_write_temporary_key_returns_not_writable(
         self, basic_l1_config, basic_layout
     ):
@@ -467,6 +712,8 @@ class TestReserveWrite:
 
         assert result[key][0] == L1Error.KEY_NOT_WRITABLE
 
+        manager.close()
+
     def test_reserve_write_multiple_keys(self, basic_l1_config, basic_layout):
         """Test reserve_write with multiple keys in a single call."""
         manager = L1Manager(basic_l1_config)
@@ -481,6 +728,8 @@ class TestReserveWrite:
             assert error == L1Error.SUCCESS
             assert mem_obj is not None
 
+        manager.close()
+
     def test_reserve_write_out_of_memory(self, small_l1_config, large_layout):
         """Test that reserve_write returns OUT_OF_MEMORY when allocation fails."""
         manager = L1Manager(small_l1_config)
@@ -494,6 +743,68 @@ class TestReserveWrite:
         for key in keys:
             assert result[key][0] == L1Error.OUT_OF_MEMORY
             assert result[key][1] is None
+
+        manager.close()
+
+    def test_reserve_write_new_mode(self, basic_l1_config, basic_layout):
+        """Test that reserve_write returns KEY_NOT_WRITABLE for existing keys."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(5)]
+        is_temporary = [False] * 5
+
+        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="new")
+
+        for key in keys:
+            assert result[key][0] == L1Error.SUCCESS
+            assert result[key][1] is not None
+
+        # Commit the write
+        result = manager.finish_write(keys)
+        for key in keys:
+            assert result[key] == L1Error.SUCCESS
+
+        # Now try to reserve write again with mode="new"
+        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="new")
+        for key in keys:
+            assert result[key][0] == L1Error.KEY_NOT_WRITABLE
+            assert result[key][1] is None
+
+        manager.close()
+
+    def test_reserve_write_update_mode(self, basic_l1_config, basic_layout):
+        """Test that reserve_write returns KEY_NOT_WRITABLE for new keys."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(5)]
+        is_temporary = [False] * 5
+
+        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="update")
+        for key in keys:
+            assert result[key][0] == L1Error.KEY_NOT_WRITABLE
+            assert result[key][1] is None
+
+        # Cannot finish write in update mode because keys not exist
+        result = manager.finish_write(keys)
+        for key in keys:
+            assert result[key] == L1Error.KEY_NOT_EXIST
+
+        # Now try to reserve write again with mode="new"
+        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="new")
+        for key in keys:
+            assert result[key][0] == L1Error.SUCCESS
+            assert result[key][1] is not None
+
+        # Commit the write
+        result = manager.finish_write(keys)
+        for key in keys:
+            assert result[key] == L1Error.SUCCESS
+
+        # Now try to reserve write again with mode="update"
+        result = manager.reserve_write(keys, is_temporary, basic_layout, mode="update")
+        for key in keys:
+            assert result[key][0] == L1Error.SUCCESS
+            assert result[key][1] is not None
+
+        manager.close()
 
 
 # =============================================================================
@@ -522,6 +833,8 @@ class TestFinishWrite:
         assert key in result
         assert result[key] == L1Error.KEY_NOT_EXIST
 
+        manager.close()
+
     def test_finish_write_success(self, basic_l1_config, basic_layout):
         """Test that finish_write returns SUCCESS after proper write reservation."""
         manager = L1Manager(basic_l1_config)
@@ -541,6 +854,8 @@ class TestFinishWrite:
         assert state.available_for_read() is True
         assert state.available_for_write() is True
 
+        manager.close()
+
     def test_finish_write_non_write_locked_returns_wrong_state(
         self, basic_l1_config, basic_layout
     ):
@@ -556,6 +871,8 @@ class TestFinishWrite:
         result = manager.finish_write([key])
 
         assert result[key] == L1Error.KEY_IN_WRONG_STATE
+
+        manager.close()
 
 
 # =============================================================================
@@ -584,6 +901,8 @@ class TestDelete:
         assert key in result
         assert result[key] == L1Error.KEY_NOT_EXIST
 
+        manager.close()
+
     def test_delete_success(self, basic_l1_config, basic_layout):
         """Test that delete returns SUCCESS for unlocked keys."""
         manager = L1Manager(basic_l1_config)
@@ -602,6 +921,8 @@ class TestDelete:
         assert result[key] == L1Error.SUCCESS
         assert manager.get_object_state(key) is None
 
+        manager.close()
+
     def test_delete_write_locked_returns_key_is_locked(
         self, basic_l1_config, basic_layout
     ):
@@ -616,6 +937,8 @@ class TestDelete:
         result = manager.delete([key])
 
         assert result[key] == L1Error.KEY_IS_LOCKED
+
+        manager.close()
 
     def test_delete_read_locked_returns_key_is_locked(
         self, basic_l1_config, basic_layout
@@ -635,6 +958,8 @@ class TestDelete:
         result = manager.delete([key])
 
         assert result[key] == L1Error.KEY_IS_LOCKED
+
+        manager.close()
 
     def test_delete_multiple_keys(self, basic_l1_config, basic_layout):
         """Test delete with multiple keys in a single call."""
@@ -657,6 +982,8 @@ class TestDelete:
         assert result[key1] == L1Error.SUCCESS
         assert result[key2] == L1Error.KEY_NOT_EXIST
         assert result[key3] == L1Error.KEY_IS_LOCKED
+
+        manager.close()
 
 
 # =============================================================================
@@ -683,6 +1010,8 @@ class TestGetObjectState:
 
         assert state is None
 
+        manager.close()
+
     def test_get_object_state_existing_returns_state(
         self, basic_l1_config, basic_layout
     ):
@@ -701,6 +1030,8 @@ class TestGetObjectState:
         assert state.available_for_read() is True
         assert state.available_for_write() is True
 
+        manager.close()
+
     def test_get_object_state_write_locked(self, basic_l1_config, basic_layout):
         """Test get_object_state for write-locked objects."""
         manager = L1Manager(basic_l1_config)
@@ -714,6 +1045,8 @@ class TestGetObjectState:
         assert state is not None
         assert state.available_for_read() is False
         assert state.available_for_write() is False
+
+        manager.close()
 
     def test_get_object_state_read_locked(self, basic_l1_config, basic_layout):
         """Test get_object_state for read-locked objects."""
@@ -732,6 +1065,59 @@ class TestGetObjectState:
         assert state.available_for_read() is True
         # But not writable
         assert state.available_for_write() is False
+
+        manager.close()
+
+
+# =============================================================================
+# Tests for L1Manager.close()
+# =============================================================================
+
+
+class TestClose:
+    """
+    Tests for L1Manager.close() method.
+
+    Per the docstring:
+    - Close the L1Manager and free all resources.
+    """
+
+    def test_close_empty_manager(self, basic_l1_config):
+        """Test that close works on an empty manager."""
+        manager = L1Manager(basic_l1_config)
+
+        # Should not raise any exceptions
+        manager.close()
+
+    def test_close_with_objects(self, basic_l1_config, basic_layout):
+        """Test that close frees all objects in the manager."""
+        manager = L1Manager(basic_l1_config)
+
+        # Create multiple objects
+        keys = [make_object_key(i) for i in range(5)]
+        manager.reserve_write(keys, [False] * 5, basic_layout)
+
+        # Close should free all objects
+        manager.close()
+
+    def test_close_clears_objects(self, basic_l1_config, basic_layout):
+        """Test that close clears all objects from the manager."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create object
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        # Verify object exists before close
+        assert manager.get_object_state(key) is not None
+
+        # Close
+        manager.close()
+
+        # After close, get_object_state should return None
+        # (objects dict should be cleared)
+        assert manager.get_object_state(key) is None
 
 
 # =============================================================================
@@ -781,6 +1167,35 @@ class TestStateMachineTransitions:
         assert state.available_for_read() is True
         assert state.available_for_write() is True
 
+        manager.close()
+
+    def test_full_write_read_with_unsafe_read(self, basic_l1_config, basic_layout):
+        """Test cycle with unsafe_read between reserve_read and finish_read."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create ready object
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        # Reserve read
+        reserve_result = manager.reserve_read([key])
+        assert reserve_result[key][0] == L1Error.SUCCESS
+
+        # Multiple unsafe_reads should all succeed
+        for _ in range(3):
+            unsafe_result = manager.unsafe_read([key])
+            assert unsafe_result[key][0] == L1Error.SUCCESS
+
+        # Finish read
+        finish_result = manager.finish_read([key])
+        assert finish_result[key] == L1Error.SUCCESS
+
+        # Object should still exist (not temporary)
+        assert manager.get_object_state(key) is not None
+
+        manager.close()
+
     def test_delete_from_ready_state(self, basic_l1_config, basic_layout):
         """Test deletion from ready state."""
         manager = L1Manager(basic_l1_config)
@@ -794,6 +1209,8 @@ class TestStateMachineTransitions:
         result = manager.delete([key])
         assert result[key] == L1Error.SUCCESS
         assert manager.get_object_state(key) is None
+
+        manager.close()
 
     def test_temporary_object_lifecycle(self, basic_l1_config, basic_layout):
         """Test temporary object lifecycle: deleted after last read."""
@@ -810,6 +1227,31 @@ class TestStateMachineTransitions:
 
         # Object should be deleted
         assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_temporary_object_with_unsafe_read(self, basic_l1_config, basic_layout):
+        """Test temporary object with unsafe_read doesn't affect deletion."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create temporary object
+        manager.reserve_write([key], [True], basic_layout)
+        manager.finish_write([key])
+
+        # Reserve read
+        manager.reserve_read([key])
+
+        # Multiple unsafe_reads
+        for _ in range(5):
+            result = manager.unsafe_read([key])
+            assert result[key][0] == L1Error.SUCCESS
+
+        # Single finish_read should delete the object
+        manager.finish_read([key])
+        assert manager.get_object_state(key) is None
+
+        manager.close()
 
 
 # =============================================================================
@@ -853,6 +1295,8 @@ class TestThreadSafety:
             for key in keys:
                 assert result[key][0] == L1Error.SUCCESS
 
+        manager.close()
+
     def test_concurrent_read_same_key(self, basic_l1_config, basic_layout):
         """Test concurrent reads on the same key."""
         manager = L1Manager(basic_l1_config)
@@ -882,6 +1326,40 @@ class TestThreadSafety:
         for result in results:
             assert result[key][0] == L1Error.SUCCESS
 
+        manager.close()
+
+    def test_concurrent_unsafe_read_same_key(self, basic_l1_config, basic_layout):
+        """Test concurrent unsafe_reads on the same read-locked key."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create ready object and reserve read
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key])
+
+        num_threads = 10
+        results = []
+        lock = threading.Lock()
+
+        def worker():
+            result = manager.unsafe_read([key])
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All unsafe_reads should succeed
+        assert len(results) == num_threads
+        for result in results:
+            assert result[key][0] == L1Error.SUCCESS
+
+        manager.close()
+
     def test_concurrent_read_write_mixed_operations(
         self, basic_l1_config, basic_layout
     ):
@@ -902,9 +1380,12 @@ class TestThreadSafety:
                     if write_result[key][0] == L1Error.SUCCESS:
                         manager.finish_write([key])
 
-                        # Read cycle
+                        # Read cycle with unsafe_read
                         read_result = manager.reserve_read([key])
                         if read_result[key][0] == L1Error.SUCCESS:
+                            # Do some unsafe_reads
+                            manager.unsafe_read([key])
+                            manager.unsafe_read([key])
                             manager.finish_read([key])
 
                         # Delete
@@ -923,3 +1404,5 @@ class TestThreadSafety:
 
         # No exceptions should have occurred
         assert len(errors) == 0, f"Thread safety errors: {errors}"
+
+        manager.close()

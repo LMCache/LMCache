@@ -5,6 +5,7 @@ Managing objects and memory for L1 cache
 
 # Standard
 from dataclasses import dataclass
+from typing import Literal
 import threading
 
 # First Party
@@ -166,6 +167,44 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
+    def unsafe_read(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Unsafe read the read-locked objects without adding new read locks.
+
+        This method does not acquire read locks. Therefore, the caller need
+        to make sure the `unsafe_read` is called between `reserve_read` and
+        `finish_read` calls.
+
+        Args:
+            keys: The list of object keys to read.
+
+        Returns:
+            A dictionary mapping each object key to a tuple of
+            (L1Error, Optional[MemoryObj]).
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_NOT_READABLE: The key is not readable (in this case, not read-locked).
+        """
+        ret: dict[ObjectKey, L1OperationResult] = {}
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                continue
+
+            if not entry.read_lock.is_locked():
+                ret[key] = (L1Error.KEY_NOT_READABLE, None)
+                continue
+
+            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+
+        return ret
+
+    @l1_mgr_synchronized
     def finish_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -231,6 +270,7 @@ class L1Manager:
         keys: list[ObjectKey],
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
+        mode: Literal["new", "update", "all"] = "all",
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve write access for the given keys.
 
@@ -240,6 +280,10 @@ class L1Manager:
                 temporary.
             shape_spec: The memory layout description for the objects to be
                 allocated.
+            mode (Literal["new", "update", "all"]): Reservation mode.
+            - "new": Reserve only new objects that do not exist.
+            - "update": Reserve only existing objects for update.
+            - "all": Reserve all writable objects regardless of existence.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -258,6 +302,10 @@ class L1Manager:
                 need_to_allocate.append((key, is_temp))
                 continue
 
+            if mode == "new":
+                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
+                continue
+
             if not entry.available_for_write():
                 ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
                 continue
@@ -267,6 +315,12 @@ class L1Manager:
 
         # Early return if no allocation is needed
         if len(need_to_allocate) == 0:
+            return ret
+
+        # Don't allow allocation in "update" mode
+        if mode == "update":
+            for key, _ in need_to_allocate:
+                ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
             return ret
 
         err, allocated_objs = self._memory_manager.allocate(
@@ -379,6 +433,15 @@ class L1Manager:
 
         self._memory_manager.free(need_to_free)
         return ret
+
+    def close(self) -> None:
+        """Close the L1Manager and free all resources."""
+        with self._lock:
+            all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            self._memory_manager.free(all_memory_objs)
+            self._objects.clear()
+
+        self._memory_manager.close()
 
     # Debugging APIs
     @l1_mgr_synchronized
