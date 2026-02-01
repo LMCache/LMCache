@@ -1,8 +1,0 @@
-chunk_size: 256
-local_cpu: true
-max_local_cpu_size: 48
-local_disk: false
-remote_url: "redis://redis.lmcache.svc.cluster.local:6379"
-remote_serde: "cachegen"
-use_layerwise: false
-save_unfull_chunk: true
