@@ -123,3 +123,7 @@ lmcache/experimental/tests
 
 # Ignore all log files
 *.log
+# Personal tracking files
+recipes/progress.txt
+recipes/prompt.md
+recipes/recipes_prd.json
