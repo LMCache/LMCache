@@ -211,11 +211,11 @@ fn release_pybuffer(mut view: pyo3::ffi::Py_buffer) {
 /// Higher-level policies (slotting, manifests, etc.) live in Python.
 #[pyclass]
 struct RawBlockDevice {
-    fd: RawFd,        // raw file descriptor
-    size: u64,        // cached device size in bytes
-    closed: bool,     // avoid double-close
+    fd: RawFd,         // raw file descriptor
+    size: u64,         // cached device size in bytes
+    closed: bool,      // avoid double-close
     use_odirect: bool, // enforce alignment + bypass page cache
-    alignment: usize, // required alignment in bytes
+    alignment: usize,  // required alignment in bytes
 }
 
 #[pymethods]
