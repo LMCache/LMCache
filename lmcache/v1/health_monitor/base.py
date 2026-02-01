@@ -16,6 +16,12 @@ from lmcache.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
     FallbackPolicy,
 )
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    PeriodicThreadRegistry,
+    ThreadLevel,
+    ThreadRunSummary,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -136,7 +142,7 @@ class HealthCheck(ABC):
         pass
 
 
-class HealthMonitor:
+class HealthMonitor(PeriodicThread):
     """
     Health monitor for the entire LMCache system.
 
@@ -180,6 +186,14 @@ class HealthMonitor:
         manager: "LMCacheManager",
         ping_interval: float = DEFAULT_PING_INTERVAL,
     ):
+        # Initialize PeriodicThread base class
+        super().__init__(
+            name="health-monitor-thread",
+            interval=ping_interval,
+            level=ThreadLevel.CRITICAL,
+            init_wait=0.0,
+        )
+
         self._manager = manager
         self._health_checks: List[HealthCheck] = []
 
@@ -187,11 +201,7 @@ class HealthMonitor:
         self._healthy = True
         self._health_lock = threading.RLock()
 
-        # Monitor thread control
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
-        # Configuration
+        # Configuration (also stored in base class)
         self._ping_interval = ping_interval
 
         # Track which backends are currently bypassed due to health check failures
@@ -209,6 +219,9 @@ class HealthMonitor:
 
         # Auto-discover and instantiate health checks
         self._discover_health_checks()
+
+        # Register with the global registry
+        PeriodicThreadRegistry.get_instance().register(self)
 
     def _discover_health_checks(self) -> None:
         """
@@ -505,47 +518,70 @@ class HealthMonitor:
         active_checks = [c for c in self._health_checks if not c.should_skip()]
         if not active_checks:
             logger.info("No active health checks to monitor, skipping monitor thread")
+            # Set last_summary even when not starting
+            self._last_summary = ThreadRunSummary(
+                success=True,
+                message="No active health checks to monitor, thread not started",
+                extra_info={
+                    "total_checks": str(len(self._health_checks)),
+                    "active_checks": "0",
+                    "skipped": "true",
+                },
+            )
+            self._level = ThreadLevel.LOW
             return None
 
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            daemon=True,
-            name="health-monitor-thread",
-        )
-        self._thread.start()
-        logger.info(
-            f"Started health monitor thread with {len(active_checks)} active checks, "
-            f"interval: {self._ping_interval}s"
-        )
-        return self._thread
+        # Use the base class start method
+        thread = super().start()
+        if thread is not None:
+            logger.info(
+                f"Started health monitor thread with "
+                f"{len(active_checks)} active checks, "
+                f"interval: {self._ping_interval}s"
+            )
+        return thread
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
         """Stop the health monitor thread"""
-        self._stop_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=5.0)
-            if self._thread.is_alive():
-                logger.warning("Health monitor thread did not terminate within timeout")
+        # Unregister from the global registry
+        PeriodicThreadRegistry.get_instance().unregister(self.name)
+        # Use base class stop method
+        super().stop(timeout)
 
-    def _run_loop(self) -> None:
-        """Main monitoring loop"""
-        logger.info(
-            f"Starting health monitor loop with interval {self._ping_interval}s"
-        )
+    def _execute(self) -> ThreadRunSummary:
+        """
+        Execute one health check cycle.
 
-        while not self._stop_event.is_set():
-            # Sleep with interruptible wait
-            if self._stop_event.wait(timeout=self._ping_interval):
-                break
+        This method is called by the PeriodicThread base class.
 
-            try:
-                # Run all health checks
-                is_healthy = self._run_all_checks()
-                self._set_healthy(is_healthy)
-            except IrrecoverableException as e:
-                logger.error(f"Irrecoverable error in health monitor, stopping: {e}")
-                self._set_healthy(False)
-                break
+        Returns:
+            ThreadRunSummary: Summary of the health check cycle
+        """
+        try:
+            # Run all health checks
+            is_healthy = self._run_all_checks()
+            self._set_healthy(is_healthy)
 
-        logger.info("Health monitor loop stopped")
+            # Build summary
+            failed_checks = [
+                name
+                for name, healthy in self._previous_check_status.items()
+                if not healthy
+            ]
+
+            return ThreadRunSummary(
+                success=is_healthy,
+                message="All checks passed"
+                if is_healthy
+                else f"Failed checks: {failed_checks}",
+                extra_info={
+                    "total_checks": str(len(self._health_checks)),
+                    "failed_checks": str(len(failed_checks)),
+                    "bypassed_backends": str(len(self._bypassed_backends)),
+                },
+            )
+        except IrrecoverableException as e:
+            logger.error(f"Irrecoverable error in health monitor: {e}")
+            self._set_healthy(False)
+            # Re-raise to stop the thread
+            raise

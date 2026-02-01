@@ -21,10 +21,10 @@ from transformers import AutoTokenizer
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -50,7 +50,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     def __init__(
         self,
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ):
         global NONE_HASH
 
@@ -212,7 +212,6 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # collapse the CacheEngineKey.world_size to 1 so that cache keys
         # become world-size agnostic across compatible deployments.
         return CacheEngineKey(
-            self.metadata.fmt,
             self.metadata.model_name,
             self.metadata.world_size if not self.save_only_first_rank else 1,
             self.metadata.worker_id,
@@ -244,7 +243,7 @@ class ChunkedTokenDatabase(TokenDatabase):
     def __init__(
         self,
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ):
         super(ChunkedTokenDatabase, self).__init__(config, metadata)
 
@@ -397,7 +396,7 @@ class SegmentTokenDatabase(TokenDatabase):
     In the future, we might need to implement a fast substring match.
     """
 
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         super(SegmentTokenDatabase, self).__init__(config, metadata)
 
         self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)

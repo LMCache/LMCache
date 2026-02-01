@@ -9,7 +9,7 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import StorageKey
 from lmcache.v1.multiprocess.mp_storage_manager import (
     MemoryExhaustedError,
     MPStorageManager,
@@ -50,7 +50,7 @@ def small_storage_manager():
 @pytest.fixture
 def test_keys():
     """Create a list of test keys."""
-    return [IPCCacheEngineKey.from_int_hash("model1", 1, 0, i) for i in range(10)]
+    return [StorageKey.from_int_hash("model1", 1, 0, i) for i in range(10)]
 
 
 @pytest.fixture
@@ -596,7 +596,7 @@ class TestThreadSafety:
 
         def reserve_keys(thread_id):
             keys = [
-                IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
+                StorageKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
                 for i in range(keys_per_thread)
             ]
             handle, reserved_dict = storage_manager.reserve(
@@ -628,7 +628,7 @@ class TestThreadSafety:
 
         def reserve_and_commit(thread_id):
             keys = [
-                IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
+                StorageKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
                 for i in range(5)
             ]
             handle, reserved_dict = storage_manager.reserve(
@@ -718,7 +718,7 @@ class TestThreadSafety:
         def thread_operation(thread_id):
             # Create unique keys for this thread
             keys = [
-                IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
+                StorageKey.from_int_hash("model1", 1, 0, thread_id * 100 + i)
                 for i in range(3)
             ]
 
@@ -760,7 +760,7 @@ class TestThreadSafety:
         def perform_operations(thread_id):
             for i in range(operations_per_thread):
                 keys = [
-                    IPCCacheEngineKey.from_int_hash(
+                    StorageKey.from_int_hash(
                         "model1", 1, 0, thread_id * 1000 + i * 10 + j
                     )
                     for j in range(3)
@@ -797,7 +797,7 @@ class TestThreadSafety:
         shape = torch.Size([2, 10, 16, 32])
 
         def get_handle(thread_id):
-            keys = [IPCCacheEngineKey.from_int_hash("model1", 1, 0, thread_id)]
+            keys = [StorageKey.from_int_hash("model1", 1, 0, thread_id)]
             handle, _ = storage_manager.reserve(keys, shape, test_dtype, test_format)
             return handle
 
