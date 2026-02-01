@@ -27,9 +27,15 @@ import torch
 from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.multiprocess.distributed.error import L1Error
-from lmcache.v1.multiprocess.distributed.memory_manager import (
-    L1MemoryManager,
-)
+
+try:
+    # First Party
+    from lmcache.v1.multiprocess.distributed.memory_manager import (
+        L1MemoryManager,
+    )
+except ImportError:
+    # Skip the tests if the L1MemoryManager cannot be imported
+    pytest.skip("L1MemoryManager could not be imported", allow_module_level=True)
 
 # Skip all tests in this module if CUDA is not available
 pytestmark = pytest.mark.skipif(
