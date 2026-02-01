@@ -87,7 +87,7 @@ class L1Manager:
           |  None  | <---------------------------------------+
           +--------+                                         |
             |   ^                                            |
-            |   | (write lock expired, not supported yet)    | delete()
+            |   | (write lock expired)                       | delete()
             |   |                                            |
     reserve |   +----------------------+                     |
     write() |                          |                     |
