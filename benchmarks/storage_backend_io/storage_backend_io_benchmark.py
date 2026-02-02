@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Benchmark LocalDiskBackend vs RustRawBlockBackend under high write concurrency."""
 
+# Future
 from __future__ import annotations
 
+# Standard
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 import argparse
 import asyncio
 import json
@@ -10,11 +14,11 @@ import os
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
+# Third Party
 import torch
 
+# First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat
@@ -58,7 +62,11 @@ def _make_memory_objs(num_ops: int) -> list:
     allocator = AdHocMemoryAllocator(device="cpu")
     objs = []
     for _ in range(num_ops):
-        obj = allocator.allocate([DEFAULT_SHAPE], [DEFAULT_DTYPE], fmt=MemoryFormat.KV_T2D)
+        obj = allocator.allocate(
+            [DEFAULT_SHAPE],
+            [DEFAULT_DTYPE],
+            fmt=MemoryFormat.KV_T2D,
+        )
         assert obj is not None
         assert obj.tensor is not None
         obj.tensor.fill_(7)
@@ -258,7 +266,9 @@ def _bench_rust_raw_block(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark LocalDiskBackend vs RustRawBlockBackend under high write concurrency."
+        description=(
+            "Benchmark LocalDiskBackend vs RustRawBlockBackend under high write concurrency."
+        )
     )
     parser.add_argument("--num-ops", type=int, default=256, help="Total put ops")
     parser.add_argument(
@@ -345,9 +355,7 @@ def main() -> None:
         output_path = args.output_json
         if output_path.endswith(os.sep) or os.path.isdir(output_path):
             ts = time.strftime("%Y%m%d_%H%M%S")
-            output_path = os.path.join(
-                output_path, f"storage_backend_io_{ts}.json"
-            )
+            output_path = os.path.join(output_path, f"storage_backend_io_{ts}.json")
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"Wrote results to {output_path}")
