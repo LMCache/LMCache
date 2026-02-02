@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 import pickle
+import threading
 
 # Third Party
 import msgspec
@@ -15,6 +16,48 @@ communications.
 
 
 class CudaIPCWrapper:
+    _discovered_device_mapping: dict[str, int] = {}
+    _device_mapping_lock = threading.Lock()
+
+    @staticmethod
+    def _get_device_uuid(device_index: int) -> str:
+        """Get the UUID of a GPU device given its index."""
+        return str(torch.cuda.get_device_properties(device_index).uuid)
+
+    @staticmethod
+    def _discover_gpu_devices():
+        """Discover all available GPU devices and map their UUIDs to
+        the physical device ordinals.
+        """
+        if not torch.cuda.is_available():
+            return
+
+        num_devices = torch.cuda.device_count()
+        with CudaIPCWrapper._device_mapping_lock:
+            if CudaIPCWrapper._discovered_device_mapping:
+                return  # Already discovered
+
+            for i in range(num_devices):
+                device_uuid = CudaIPCWrapper._get_device_uuid(i)
+                CudaIPCWrapper._discovered_device_mapping[device_uuid] = i
+
+    @staticmethod
+    def _get_device_index_from_uuid(device_uuid: str) -> int:
+        """Get the physical device ordinal from its UUID."""
+        CudaIPCWrapper._discover_gpu_devices()
+
+        with CudaIPCWrapper._device_mapping_lock:
+            device_index = CudaIPCWrapper._discovered_device_mapping.get(
+                device_uuid, None
+            )
+
+        if device_index is None:
+            raise RuntimeError(
+                f"Device UUID {device_uuid} not found in the discovered devices."
+                "Please make sure the process can see all the GPU devices"
+            )
+        return device_index
+
     def __init__(self, tensor: torch.Tensor):
         assert tensor.storage_offset() == 0
         assert tensor.is_contiguous()
@@ -24,7 +67,8 @@ class CudaIPCWrapper:
         self.handle = handle
         self.dtype = tensor.dtype
         self.shape = tensor.shape
-        self.device = tensor.device.index  # Explicit device ordinal
+        device_index = tensor.device.index
+        self.device_uuid = CudaIPCWrapper._get_device_uuid(device_index)
 
     def to_tensor(self):
         """
@@ -32,8 +76,8 @@ class CudaIPCWrapper:
             This function may break if torch cuda is not initialized.
             We should call `torch.cuda.init()` before using this function.
         """
-        device = self.handle[0]
-        storage = torch.UntypedStorage._new_shared_cuda(*self.handle)
+        device = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
+        storage = torch.UntypedStorage._new_shared_cuda(device, *self.handle[1:])
         t = torch.tensor(0, device=device, dtype=self.dtype)
         t.set_(storage)
         return t.view(self.shape)
@@ -45,7 +89,7 @@ class CudaIPCWrapper:
             self.handle == other.handle
             and self.dtype == other.dtype
             and self.shape == other.shape
-            and self.device == other.device
+            and self.device_uuid == other.device_uuid
         )
 
     @staticmethod
@@ -57,11 +101,15 @@ class CudaIPCWrapper:
         return pickle.loads(data)
 
 
+# TODO: consider adding local_world_size and local_worker_id
+# for multi-node use cases
 @dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
     model_name: str
     world_size: int
-    worker_id: int
+
+    # NOTE(Kuntai): worker_id will be None for scheduler and int for worker
+    worker_id: int | None
     chunk_hash: bytes
 
     @staticmethod
@@ -74,9 +122,19 @@ class IPCCacheEngineKey:
         # NOTE: this is only used by tests
         return int.from_bytes(chunk_hash, byteorder="big") & ((1 << 64) - 1)
 
+    def no_worker_id_version(self) -> "IPCCacheEngineKey":
+        # NOTE(Kuntai): this is for constructing lookup keys
+        # current lookup requests require worker_id to be None.
+        return IPCCacheEngineKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=None,
+            chunk_hash=self.chunk_hash,
+        )
+
     @classmethod
     def from_int_hash(
-        cls, model_name: str, world_size: int, worker_id: int, chunk_hash: int
+        cls, model_name: str, world_size: int, worker_id: int | None, chunk_hash: int
     ) -> "IPCCacheEngineKey":
         # NOTE: this is only used by tests
         return cls(
@@ -93,6 +151,39 @@ class IPCCacheEngineKey:
     @staticmethod
     def Deserialize(data: bytes) -> "IPCCacheEngineKey":
         return msgspec.msgpack.decode(data, type=IPCCacheEngineKey)
+
+
+@dataclass(order=True, frozen=True)
+class StorageKey:
+    model_name: str
+    world_size: int
+
+    # NOTE(Kuntai): worker_id must always be an int (not None).
+    # This is different from IPCCacheEngineKey which can have worker_id == None.
+    worker_id: int
+    chunk_hash: bytes
+
+    @staticmethod
+    def IntHash2Bytes(chunk_hash: int) -> bytes:
+        # NOTE: this is only used by tests
+        return chunk_hash.to_bytes(4, byteorder="big")
+
+    @staticmethod
+    def Bytes2IntHash(chunk_hash: bytes) -> int:
+        # NOTE: this is only used by tests
+        return int.from_bytes(chunk_hash, byteorder="big") & ((1 << 64) - 1)
+
+    @classmethod
+    def from_int_hash(
+        cls, model_name: str, world_size: int, worker_id: int, chunk_hash: int
+    ) -> "StorageKey":
+        # NOTE: this is only used by tests
+        return cls(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=worker_id,
+            chunk_hash=cls.IntHash2Bytes(chunk_hash),
+        )
 
 
 # Type exports
@@ -135,3 +226,61 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
+
+
+def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageKey]:
+    """
+    Converts a list of IPCCacheEngineKeys to a list of StorageKeys.
+
+    When scheduler calls `lookup`, the corresponding IPCCacheEngineKey will have
+    worker_id = None. In this case, this means "lookup the given model name and chunk
+    hash for ALL workers".
+
+    When worker calls `store` or `retrieve`, the corresponding IPCCacheEngineKey will
+    have worker_id != None. In this case, this means "store/retrieve the given model
+    name and chunk hash for the given worker".
+
+    Args:
+        ipc_keys: List of IPC cache engine keys to convert
+
+    Returns:
+        List of storage keys. If any IPC key has worker_id=None, it will be expanded
+        to one storage key per worker (based on world_size).
+
+    Raises:
+        ValueError: If IPC keys have inconsistent world_size values
+    """
+    if not ipc_keys:
+        return []
+
+    # Validate that all keys have the same world_size
+    world_size = ipc_keys[0].world_size
+    if not all(ipc_key.world_size == world_size for ipc_key in ipc_keys):
+        raise ValueError(
+            "All IPC keys must have the same world_size. Found world_size values:"
+            f" {set(ipc_key.world_size for ipc_key in ipc_keys)}"
+        )
+
+    storage_keys = []
+    for ipc_key in ipc_keys:
+        if ipc_key.worker_id is None:
+            for worker_id in range(ipc_key.world_size):
+                storage_keys.append(
+                    StorageKey(
+                        model_name=ipc_key.model_name,
+                        world_size=ipc_key.world_size,
+                        worker_id=worker_id,
+                        chunk_hash=ipc_key.chunk_hash,
+                    )
+                )
+        else:
+            storage_keys.append(
+                StorageKey(
+                    model_name=ipc_key.model_name,
+                    world_size=ipc_key.world_size,
+                    worker_id=ipc_key.worker_id,
+                    chunk_hash=ipc_key.chunk_hash,
+                )
+            )
+
+    return storage_keys

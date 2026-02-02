@@ -27,7 +27,7 @@ if [[ $1 == "prefiller" ]]; then
         LMCACHE_CONFIG_FILE=$prefill_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=4 \
+        CUDA_VISIBLE_DEVICES=${PREFILLER_DEVICE_ID:-0} \
         vllm serve $MODEL \
         --port 7100 \
         --disable-log-requests \
@@ -47,7 +47,7 @@ elif [[ $1 == "decoder" ]]; then
         LMCACHE_CONFIG_FILE=$decode_config_file \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=5 \
+        CUDA_VISIBLE_DEVICES=${DECODER_DEVICE_ID:-1} \
         vllm serve $MODEL \
         --port 7200 \
         --disable-log-requests \

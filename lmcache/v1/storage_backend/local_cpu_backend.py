@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -9,14 +9,12 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
-from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
+from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -24,7 +22,9 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.system_detection import NUMADetector, SystemMemoryDetector
 
@@ -45,7 +45,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
@@ -85,6 +85,21 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # assumption: only one request is looked up at a time
         # (only one worker per cache engine)
         self.keys_in_request: List[CacheEngineKey] = []
+
+        # Batched message sender for controller communication
+        self.batched_msg_sender: Optional[BatchedMessageSender] = None
+
+        # Initialize batched message sender
+        if lmcache_worker and metadata is not None:
+            self.batched_msg_sender = BatchedMessageSender(
+                metadata=metadata,
+                config=config,
+                location=str(self),  # Backend location
+                lmcache_worker=lmcache_worker,
+            )
+        else:
+            logger.warning("Controller message sender is not initialized")
+
         self._setup_metrics()
 
     def _setup_metrics(self):
@@ -124,12 +139,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return False
 
     def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Optional[Future]:
         """
         Synchronously put the MemoryObj into the local cpu backend.
-        """
 
+        :param on_complete_callback: Optional callback invoked after the
+            synchronous put completes. Callback exceptions are caught and logged.
+        """
+        stored = False
         with self.cpu_lock:
             if key in self.hot_cache:
                 return None
@@ -139,14 +160,21 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             self.cache_policy.update_on_put(key)
 
-            # TODO(Jiayi): optimize this with batching?
-            # push kv admit msg
-            if self.lmcache_worker is not None:
-                self.lmcache_worker.put_msg(
-                    KVAdmitMsg(
-                        self.instance_id, key.worker_id, key.chunk_hash, str(self)
-                    )
+            # Push kv admit msg with batching
+            if self.batched_msg_sender is not None:
+                self.batched_msg_sender.add_kv_op(
+                    op_type=OpType.ADMIT,
+                    key=key.chunk_hash,
                 )
+            stored = True
+
+        # Call callback after put completes (outside lock)
+        if stored and on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
+
         return None
 
     def batched_submit_put_task(
@@ -154,16 +182,22 @@ class LocalCPUBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's put completes (not once per batch).
         """
         if not self.use_hot:
             return
 
         # TODO(Jiayi): optimize this with batching
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
 
     def get_blocking(
         self,
@@ -243,9 +277,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
             self.cache_policy.update_on_force_evict(key)
             self.cpu_lock.release()
 
-        if self.lmcache_worker is not None:
-            self.lmcache_worker.put_msg(
-                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.EVICT,
+                key=key.chunk_hash,
             )
         # NOTE (Jiayi): This `return True` might not accurately reflect
         # whether the key is removed from the actual memory because
@@ -256,7 +291,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         configured_cpu_size: float,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> float:
         """
         Calculate the effective CPU memory size based on system available memory
@@ -311,7 +346,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
 
@@ -340,18 +375,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
             # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
             # For now, keep the original P2P implementation
             assert metadata is not None
-            meta_shape = torch.Size(metadata.kv_shape)
-            # TODO(Jiayi): remove this hardcode
-            new_shape = torch.Size(
-                [
-                    meta_shape[1],
-                    meta_shape[0],
-                    meta_shape[2],
-                    meta_shape[3] * meta_shape[4],
-                ]
-            )
+            shapes = metadata.get_shapes()
+            dtypes = metadata.get_dtypes()
+
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-            chunk_size_bytes = get_size_bytes(new_shape, metadata.kv_dtype)
+            chunk_size_bytes = get_size_bytes(shapes, dtypes)
             origin_cpu_size_bytes = int(cpu_size * 1024**3)
             align_cpu_size_bytes = (
                 origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
@@ -362,8 +390,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             paged_mem_allocator.init_cpu_memory_allocator(
                 align_cpu_size_bytes,
-                shape=new_shape,
-                dtype=metadata.kv_dtype,
+                shapes=shapes,
+                dtypes=dtypes,
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 numa_mapping=numa_mapping,
             )
@@ -376,41 +404,30 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
             if use_lazy:
+                logger.warning(
+                    "LazyMixedMemoryAllocator is temporarily unavailable; "
+                    "falling back to MixedMemoryAllocator with full allocation. "
+                    "Disable enable_lazy_memory_allocator or reduce "
+                    "max_local_cpu_size to avoid large pinned allocations."
+                )
+            elif config.enable_lazy_memory_allocator:
                 logger.info(
-                    f"Using LazyMixedMemoryAllocator with "
-                    f"initial_ratio={config.lazy_memory_initial_ratio}, "
-                    f"expand_trigger_ratio="
-                    f"{config.lazy_memory_expand_trigger_ratio}, "
-                    f"step_ratio={config.lazy_memory_step_ratio}"
+                    f"LazyMixedMemoryAllocator is disabled because "
+                    f"cpu_size ({cpu_size:.2f} GB) does not exceed "
+                    f"lazy_memory_safe_size "
+                    f"({config.lazy_memory_safe_size:.2f} GB). "
+                    f"Using MixedMemoryAllocator instead."
                 )
-                return LazyMixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
-                    config=config,
-                    numa_mapping=numa_mapping,
-                    memory_limit_callback=lambda: int(
-                        self._calculate_effective_cpu_size(cpu_size, config, metadata)
-                        * 1024**3
-                    ),
-                )
-            else:
-                if config.enable_lazy_memory_allocator:
-                    logger.info(
-                        f"LazyMixedMemoryAllocator is disabled because "
-                        f"cpu_size ({cpu_size:.2f} GB) does not exceed "
-                        f"lazy_memory_safe_size "
-                        f"({config.lazy_memory_safe_size:.2f} GB). "
-                        f"Using MixedMemoryAllocator instead."
-                    )
-                return MixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
-                    numa_mapping=numa_mapping,
-                )
+            return MixedMemoryAllocator(
+                int(cpu_size * 1024**3),
+                numa_mapping=numa_mapping,
+            )
 
     @_lmcache_nvtx_annotate
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -420,6 +437,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict if necessary. Storage manager should always call
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
+
+        busy_loop should only be used for retrieve
+        the reasoning is that:
+
+        1. synchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - one retrieve at a time (okay to busy loop because stores will clear)
+
+        2. asynchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - many retrieves happen concurrently
+        (we use the async serializer to handle this)
         """
         logger.debug(
             f"Allocating memory in local cpu backend with busy loop: {busy_loop}"
@@ -433,7 +462,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             else:
                 fmt = MemoryFormat.KV_2LTD
 
-        memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
+        memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
         if memory_obj is not None or not eviction:
             return memory_obj
 
@@ -484,7 +513,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 # do not hold the lock during sleep
                 time.sleep(time_to_wait)
 
-            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
+            memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
             if memory_obj is not None:
                 break
 
@@ -500,8 +529,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
     @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: Optional[MemoryFormat] = None,
         eviction: bool = True,
@@ -512,6 +541,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict if necessary. Storage manager should always call
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
+
+        busy_loop should only be used for retrieve
+        the reasoning is that:
+
+        1. synchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - one retrieve at a time (okay to busy loop because stores will clear)
+
+        2. asynchronous case
+        - many stores happen concurrently (if they busy_loop, deadlock happens)
+        - many retrieves happen concurrently
+        (we use the async serializer to handle this)
         """
         logger.debug(
             f"Batched allocating memory in local cpu backend"
@@ -527,7 +568,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 fmt = MemoryFormat.KV_2LTD
 
         memory_objs = self.memory_allocator.batched_allocate(
-            shape, dtype, batch_size, fmt
+            shapes, dtypes, batch_size, fmt
         )
 
         if memory_objs is not None or not eviction:
@@ -597,7 +638,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 time.sleep(time_to_wait)
 
             memory_objs = self.memory_allocator.batched_allocate(
-                shape, dtype, batch_size, fmt
+                shapes, dtypes, batch_size, fmt
             )
             if memory_objs:
                 break
@@ -610,20 +651,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 
-    def calculate_chunk_budget(self) -> int:
-        """
-        Calculate the maximum number of chunks that can be allocated concurrently
-        without causing memory deadlocks in the async loading system.
-
-        Returns:
-            int: The estimated chunk budget for concurrent allocations
-        """
-        logger.debug("Attempting to calculate chunk budget for async loading")
+    def get_full_chunk_size(self) -> int:
+        logger.info("Calculating the size of a single LMCache chunk")
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
         )
 
-        total_memory = int(self.config.max_local_cpu_size * 1024**3)
         chunk_tokens = self.config.chunk_size
         # already accounted for parallelism
         kv_shape = (
@@ -631,6 +664,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         )  # [num_layers, kv_size, chunk_size, num_heads, head_size]
         num_layers = kv_shape[0]
         kv_size = kv_shape[1]  # 1 for MLA, 2 for regular
+        # per gpu
         num_heads = kv_shape[3]
         head_size = kv_shape[4]
         hidden_dim = num_heads * head_size
@@ -649,6 +683,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
             f"hidden_dim={hidden_dim}"
         )
         logger.debug(f"Calculated bytes per chunk per rank: {chunk_bytes}")
+        return chunk_bytes
+
+    def calculate_chunk_budget(self) -> int:
+        """
+        Calculate the maximum number of chunks that can be allocated concurrently
+        without causing memory deadlocks in the async loading system.
+
+        Returns:
+            int: The estimated chunk budget for concurrent allocations
+        """
+        total_memory = int(self.config.max_local_cpu_size * 1024**3)
+        chunk_bytes = self.get_full_chunk_size()
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         assert hasattr(self.memory_allocator, "align_bytes")
@@ -696,5 +742,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return self.memory_allocator
 
     def close(self) -> None:
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.close()
         self.memory_allocator.close()
         self.clear()

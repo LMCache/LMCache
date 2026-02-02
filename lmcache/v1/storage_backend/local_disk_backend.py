@@ -14,10 +14,12 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
-from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
+from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
@@ -100,6 +102,7 @@ class LocalDiskBackend(StorageBackendInterface):
         local_cpu_backend: LocalCPUBackend,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ):
         if torch.cuda.is_available():
             super().__init__(dst_device)
@@ -150,6 +153,20 @@ class LocalDiskBackend(StorageBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+
+        # Batched message sender for controller communication
+        self.batched_msg_sender: Optional[BatchedMessageSender] = None
+
+        # Initialize batched message sender
+        if lmcache_worker and metadata is not None:
+            self.batched_msg_sender = BatchedMessageSender(
+                metadata=metadata,
+                config=config,
+                location=str(self),
+                lmcache_worker=lmcache_worker,
+            )
+        else:
+            logger.warning("Controller message sender is not initialized")
 
     def __str__(self):
         return "LocalDiskBackend"
@@ -233,10 +250,11 @@ class LocalDiskBackend(StorageBackendInterface):
             self.cache_policy.update_on_force_evict(key)
             self.disk_lock.release()
 
-        # push kv evict msg
-        if self.lmcache_worker is not None:
-            self.lmcache_worker.put_msg(
-                KVEvictMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+        # Push kv evict msg with batching
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.EVICT,
+                key=key.chunk_hash,
             )
 
         return True
@@ -263,17 +281,28 @@ class LocalDiskBackend(StorageBackendInterface):
                     path, size, shape, dtype, cached_positions, fmt, 0
                 )
 
-        # push kv admit msg
-        if self.lmcache_worker is not None and not has_stored:
-            self.lmcache_worker.put_msg(
-                KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, str(self))
+        # Push kv admit msg with batching
+        if self.batched_msg_sender is not None and not has_stored:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.ADMIT,
+                key=key.chunk_hash,
             )
 
     def submit_put_task(
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ):
+        """
+        Submit a single put task to store KV cache to disk asynchronously.
+
+        :param key: The cache key for this KV chunk.
+        :param memory_obj: The memory object containing the KV data.
+        :param on_complete_callback: Optional callback invoked once per key
+            after the disk write completes. Callback exceptions are caught
+            and logged.
+        """
         assert memory_obj.tensor is not None
 
         # skip repeated save
@@ -320,6 +349,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.async_save_bytes_to_disk,
                 key=key,
                 memory_obj=memory_obj,
+                on_complete_callback=on_complete_callback,
             ),
             self.loop,
         )
@@ -330,9 +360,22 @@ class LocalDiskBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        Submit batched put tasks to store KV caches to disk asynchronously.
+
+        :param keys: The cache keys for the KV chunks.
+        :param memory_objs: The memory objects containing the KV data.
+        :param transfer_spec: Optional transfer specification (unused).
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's disk write completes (not once per batch).
+            Callback exceptions are caught and logged.
+        """
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
 
     def get_blocking(
         self,
@@ -439,9 +482,14 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Convert KV to bytes and async store bytes to disk.
+
+        :param on_complete_callback: Optional callback invoked after the disk
+            write completes for this key. Callback exceptions are caught and
+            logged.
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
@@ -471,6 +519,13 @@ class LocalDiskBackend(StorageBackendInterface):
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
 
         self.disk_worker.remove_put_task(key)
+
+        # Call the completion callback if provided
+        if on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     def batched_async_load_bytes_from_disk(
         self,
@@ -575,4 +630,6 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.close()
         self.disk_worker.close()

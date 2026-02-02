@@ -10,9 +10,9 @@ import inspect
 import pkgutil
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
@@ -113,7 +113,7 @@ class ConnectorContext:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
+        metadata: Optional[LMCacheMetadata],
     ):
         self.url = url
         self.loop = loop
@@ -126,6 +126,14 @@ class ConnectorContext:
         )
         self.config = config
         self.metadata = metadata
+
+    def get_full_chunk_size(self) -> int:
+        """
+        return the number of bytes in a full chunk
+        useful for S3Connector where we need to preallocate filesystem buffers
+        in ramfs for zero-copy transfers
+        """
+        return self.local_cpu_backend.get_full_chunk_size()
 
 
 class ConnectorAdapter(ABC):
@@ -159,7 +167,7 @@ class ConnectorManager:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> None:
         logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
@@ -211,9 +219,8 @@ class ConnectorManager:
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
             if adapter.can_parse(self.context.url):
+                logger.info(f"Creating connector for URL: {self.context.url}")
                 connector = adapter.create_connector(self.context)
-                connector.init_chunk_meta(self.context.config, self.context.metadata)
-                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")
@@ -224,7 +231,7 @@ def CreateConnector(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: Optional[LocalCPUBackend],
     config: Optional[LMCacheEngineConfig] = None,
-    metadata: Optional[LMCacheEngineMetadata] = None,
+    metadata: Optional[LMCacheMetadata] = None,
 ) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.

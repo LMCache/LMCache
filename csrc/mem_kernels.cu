@@ -11,6 +11,20 @@
   #include <cuda_fp8.h>
 #endif
 
+#ifndef CHECK_CUDA_CALL
+  #define CHECK_CUDA_CALL(call)                                             \
+    do {                                                                    \
+      cudaError_t err = call;                                               \
+      if (err != cudaSuccess) {                                             \
+        fprintf(stderr, "CUDA error in file '%s' in line %i : %s.\n",       \
+                __FILE__, __LINE__, cudaGetErrorString(err));               \
+        throw std::runtime_error(                                           \
+            std::string("CUDA error in file '") + __FILE__ + "' in line " + \
+            std::to_string(__LINE__) + " : " + cudaGetErrorString(err));    \
+      }                                                                     \
+    } while (0)
+#endif
+
 namespace lmc {
 
 template <typename scalar_t>
@@ -263,7 +277,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
-  int64_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
+  scalar_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
 
   if (slot_idx < 0) {
     return;
@@ -305,8 +319,8 @@ __global__ void load_and_reshape_multi_layer_kernel_unilateral(
   const int num_threads = blockDim.x;
 
   const int64_t slot_idx = slot_mapping[token_id];
-  int64_t* key_ptr = paged_buffer_ptrs[layer_id];
-  int64_t* value_ptr = paged_buffer_ptrs[layer_id + num_layers];
+  scalar_t* key_ptr = paged_buffer_ptrs[layer_id];
+  scalar_t* value_ptr = paged_buffer_ptrs[layer_id + num_layers];
 
   if (slot_idx < 0) {
     return;
@@ -381,7 +395,8 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  *  - direction: false  means LMCache to PagedBuffer, true  means PagedBuffer to
  * LMCache
  */
-void multi_layer_kv_transfer(
+template <typename T>
+void multi_layer_kv_transfer_templated(
     torch::Tensor&
         key_value,  // key/value must be on gpu/pinned cpu.
                     // [2, num_layer, num_tokens, num_heads*head_size] for
@@ -393,17 +408,17 @@ void multi_layer_kv_transfer(
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla) {
-  int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
-  int64_t** page_buffer_ptrs =
-      get_kernel_ptr<int64_t*, const torch::Tensor>(key_value_ptrs);
+  T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
+  T** page_buffer_ptrs =
+      get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
   const int64_t* slot_mapping_ptr =
       get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
 
   int num_layers = key_value.size(1);
   int num_tokens = slot_mapping.size(0);
   int num_origin_elements = key_value.size(3);
-  int elements_per_qword = 8 / key_value.element_size();
-  int num_qwords = num_origin_elements / elements_per_qword;
+  int elements_per_xword = sizeof(T) / key_value.element_size();
+  int num_xwords = num_origin_elements / elements_per_xword;
 
   int k_or_v_size = 2;
   if (use_mla) {
@@ -411,24 +426,55 @@ void multi_layer_kv_transfer(
   }
 
   dim3 grid(key_value.size(2), num_layers, k_or_v_size);
-  dim3 block(std::min(num_qwords, 128));
+  dim3 block(std::min(num_xwords, 128));
 
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (not direction) {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, false>
+    lmc::load_and_reshape_multi_layer_kernel<T, false>
         <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     slot_mapping_ptr, num_xwords, num_tokens,
                                      num_layers, page_buffer_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
-    lmc::load_and_reshape_multi_layer_kernel<int64_t, true>
+    lmc::load_and_reshape_multi_layer_kernel<T, true>
         <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,
-                                     slot_mapping_ptr, num_qwords, num_tokens,
+                                     slot_mapping_ptr, num_xwords, num_tokens,
                                      num_layers, page_buffer_size);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
+}
+
+/**
+ * @see multi_layer_kv_transfer_templated
+ */
+void multi_layer_kv_transfer(torch::Tensor& key_value,
+                             const torch::Tensor& key_value_ptrs,
+                             const torch::Tensor& slot_mapping,
+                             const torch::Device& paged_memory_device,
+                             const int page_buffer_size, const bool direction,
+                             const bool use_mla) {
+  int num_origin_elements = key_value.size(3);
+  int copy_size = num_origin_elements * key_value.element_size();
+#ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
+  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                          \
+    do {                                                                \
+      multi_layer_kv_transfer_templated<type>(                          \
+          key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
+          page_buffer_size, direction, use_mla);                        \
+    } while (0)
+#endif
+  if (copy_size % 8 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int64_t);
+  } else if (copy_size % 4 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int32_t);
+  } else if (copy_size % 2 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int16_t);
+  } else {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER(int8_t);
+  }
+#undef LAUNCH_MULTI_LAYER_KV_TRANSFER
 }
 
 /**
@@ -798,4 +844,51 @@ void single_layer_kv_transfer_sgl(
       lmc_key_value_cache_ptr, sgl_key_cache_ptr, sgl_value_cache_ptr,
       slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
       num_heads, head_size_in_64bit, block_size, direction);
+}
+
+/**
+ * Perform asynchronous memory copy between lmcache host buffer (memory obj)
+ * and a device buffer.
+ * The copy will be performed asynchronously on the current CUDA stream.
+ * They copy will be split into multiple smaller copies based on the host buffer
+ * offset and host buffer alignment requirements.
+ *
+ * @param dest Destination pointer (device or host)
+ * @param src Source pointer (device or host)
+ * @param nbytes Number of bytes to copy
+ * @param direction H2D or D2H
+ * @param host_buffer_offset the virtual offset in the lmcache memory allocator
+ * @param host_buffer_alignments the alignment (i.e., cudaHostRegister
+ * granularity) requirement of the host buffer. Must be power of two.
+ */
+void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
+                          TransferDirection direction,
+                          size_t host_buffer_offset,
+                          size_t host_buffer_alignments) {
+  // Check that host_buffer_alignments is power of two
+  TORCH_CHECK((host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
+              "host_buffer_alignments must be power of two");
+
+  size_t offset = 0;
+  const size_t mask = host_buffer_alignments - 1;
+  cudaMemcpyKind kind = (direction == TransferDirection::H2D)
+                            ? cudaMemcpyHostToDevice
+                            : cudaMemcpyDeviceToHost;
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  while (offset < nbytes) {
+    size_t current_src = src + offset;
+    size_t current_dest = dest + offset;
+
+    size_t aligned_area_end =
+        ((offset + host_buffer_offset) & ~mask) + host_buffer_alignments;
+    size_t real_end = min(host_buffer_offset + nbytes, aligned_area_end);
+    size_t max_nbytes = real_end - offset - host_buffer_offset;
+
+    CHECK_CUDA_CALL(cudaMemcpyAsync(reinterpret_cast<void*>(current_dest),
+                                    reinterpret_cast<const void*>(current_src),
+                                    max_nbytes, kind, stream));
+
+    offset += max_nbytes;
+  }
 }

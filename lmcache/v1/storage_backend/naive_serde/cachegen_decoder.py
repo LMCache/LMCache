@@ -6,7 +6,6 @@ from typing import Optional
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenGPUEncoderOutput,
@@ -24,6 +23,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.naive_serde.cachegen_basics import CacheGenConfig
 from lmcache.v1.storage_backend.naive_serde.serde import Deserializer
 
@@ -31,12 +31,11 @@ logger = init_logger(__name__)
 
 
 class CacheGenDeserializer(Deserializer):
-    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata):
+    def __init__(self, config: LMCacheEngineConfig, metadata: LMCacheMetadata):
         self.dtype = metadata.kv_dtype
         self.cachegen_config = CacheGenConfig.from_model_name(metadata.model_name)
         self.chunk_size = config.chunk_size
         self.output_buffer: Optional[torch.Tensor] = None
-        self.fmt = metadata.fmt
         self.key_bins = self.make_key_bins(self.cachegen_config)
         self.value_bins = self.make_value_bins(self.cachegen_config)
 
@@ -114,14 +113,11 @@ class CacheGenDeserializer(Deserializer):
                 encoder_output.head_size,
             )
         )
-        match self.fmt:
-            case "vllm":
-                hidden_dim = blob.shape[-1] * blob.shape[-2]
-                kv_chunk = blob.reshape(*blob.shape[:-2], hidden_dim).to(
-                    self.dtype
-                )  # [nlayers, 2, ntokens, num_heads, head_size]
-            case _:
-                raise RuntimeError("Unknown format %s" % self.fmt)
+
+        hidden_dim = blob.shape[-1] * blob.shape[-2]
+        kv_chunk = blob.reshape(*blob.shape[:-2], hidden_dim).to(
+            self.dtype
+        )  # [nlayers, 2, ntokens, num_heads, head_size]
 
         memory_obj = TensorMemoryObj(
             raw_data=kv_chunk,

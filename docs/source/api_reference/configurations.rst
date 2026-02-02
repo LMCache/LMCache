@@ -57,7 +57,7 @@ Basic cache settings that control the core functionality of LMCache.
      - Hash algorithm for prefix-caching. Default: "builtin"
    * - save_unfull_chunk
      - LMCACHE_SAVE_UNFULL_CHUNK
-     - Whether to save unfull chunks. Values: true/false. Default: true
+     - Whether to save unfull chunks. Values: true/false. Default: false
    * - blocking_timeout_secs
      - LMCACHE_BLOCKING_TIMEOUT_SECS
      - Timeout for blocking operations in seconds. Default: 10
@@ -330,9 +330,6 @@ Settings for different storage backends and paths.
    * - YAML Config Name
      - Environment Variable
      - Description
-   * - weka_path
-     - LMCACHE_WEKA_PATH
-     - Path for Weka storage backend
    * - gds_path
      - LMCACHE_GDS_PATH
      - Path for GDS backend

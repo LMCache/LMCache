@@ -14,6 +14,7 @@ from lmcache.v1.gpu_connector import (
     SGLangGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemGPUConnectorV3,
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.memory_management import (
@@ -23,6 +24,7 @@ from lmcache.v1.memory_management import (
     PinMemoryAllocator,
     TensorMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 # Local
 from .utils import (
@@ -52,17 +54,17 @@ def patch_pin_allocator():
         self.buffer = torch.empty(size, dtype=torch.uint8, pin_memory=True)
 
         if use_paging:
-            assert "shape" in kwargs, (
-                "shape must be specified for paged memory allocator"
+            assert "shapes" in kwargs, (
+                "shapes must be specified for paged memory allocator"
             )
-            assert "dtype" in kwargs, (
-                "dtype must be specified for paged memory allocator"
+            assert "dtypes" in kwargs, (
+                "dtypes must be specified for paged memory allocator"
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
             self.allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
-                shape=kwargs["shape"],
-                dtype=kwargs["dtype"],
+                shapes=kwargs["shapes"],
+                dtypes=kwargs["dtypes"],
                 fmt=kwargs["fmt"],
             )
         else:
@@ -182,6 +184,133 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
         check_paged_kv_cache_equal(
             gpu_kv_src, gpu_kv_dst, slot_mapping, num_heads, head_size
         )
+    allocator.close()
+
+
+@pytest.mark.parametrize("use_gpu", [True, False])
+@pytest.mark.parametrize("use_mla", [True, False])
+@pytest.mark.parametrize("num_groups", [1, 2, 3])
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV3",
+)
+def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, use_mla, num_groups):
+    head_sizes = [64, 66, 66]
+    dtypes = [torch.uint8, torch.bfloat16, torch.uint8]
+    num_blocks = 100
+    block_size = 16
+    num_heads = 1 if use_mla else 8
+    device = "cuda"
+    num_tokens = 800
+    chunk_size = 256
+
+    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+
+    # generate kv cache tensors
+    src_kv_groups: list[list] = []
+    dst_kv_groups: list[list] = []
+    src_kv_caches: dict[str, torch.Tensor] = {}
+    dst_kv_caches: dict[str, torch.Tensor] = {}
+    for i in range(num_groups):
+        for groups, kv_caches in [
+            (src_kv_groups, src_kv_caches),
+            (dst_kv_groups, dst_kv_caches),
+        ]:
+            kv_group = generate_kv_cache_paged_list_tensors(
+                num_blocks=num_blocks,
+                device=device,
+                block_size=block_size,
+                use_mla=use_mla,
+                dtype=dtypes[i],
+                num_layers=8,
+                head_size=head_sizes[i],
+            )
+            groups.append(kv_group)
+            for j, layer_tensor in enumerate(kv_group):
+                kv_caches[f"{i}-{j}"] = layer_tensor
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device, dtype=torch.int64)
+
+    # Check the kv group is not the same before copying
+    with pytest.raises(AssertionError):
+        for i in range(num_groups):
+            if use_mla:
+                check_paged_kv_cache_equal_with_mla(
+                    src_kv_groups[i], dst_kv_groups[i], slot_mapping, head_sizes[i]
+                )
+            else:
+                check_paged_kv_cache_equal(
+                    src_kv_groups[i],
+                    dst_kv_groups[i],
+                    slot_mapping,
+                    num_heads,
+                    head_sizes[i],
+                )
+
+    # create metadata and init kv layer groups
+    metadata = _create_metadata(use_mla, src_kv_caches)
+    metadata2 = _create_metadata(use_mla, dst_kv_caches)
+
+    # connector will copy with src_kv_groups
+    connector = VLLMPagedMemGPUConnectorV3(
+        metadata=metadata,
+        use_gpu=use_gpu,
+        device=slot_mapping.device,
+    )
+    # connector2 will copy with dst_kv_groups
+    connector2 = VLLMPagedMemGPUConnectorV3(
+        metadata=metadata2,
+        use_gpu=use_gpu,
+        device=slot_mapping.device,
+    )
+    assert connector.use_mla == use_mla
+    assert connector2.use_mla == use_mla
+
+    # copy from src_kv_groups to memory_obj,
+    # and then copy from memory_obj to dst_kv_groups
+    for start in range(0, num_tokens, chunk_size):
+        end = min(start + chunk_size, num_tokens)
+        memory_obj = allocator.allocate(
+            metadata.get_shapes(end - start), metadata.get_dtypes()
+        )
+        connector.from_gpu(
+            memory_obj,
+            start,
+            end,
+            kvcaches=list(src_kv_caches.values()),
+            slot_mapping=slot_mapping,
+            offset=0,
+        )
+        if use_mla:
+            assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT
+        else:
+            assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
+        connector2.to_gpu(
+            memory_obj,
+            start,
+            end,
+            kvcaches=list(dst_kv_caches.values()),
+            slot_mapping=slot_mapping,
+            offset=0,
+        )
+        allocator.free(memory_obj)
+        assert allocator.memcheck()
+
+    # Check the kv group is same after copying
+    for i in range(num_groups):
+        if use_mla:
+            check_paged_kv_cache_equal_with_mla(
+                src_kv_groups[i], dst_kv_groups[i], slot_mapping, head_sizes[i]
+            )
+        else:
+            check_paged_kv_cache_equal(
+                src_kv_groups[i],
+                dst_kv_groups[i],
+                slot_mapping,
+                num_heads,
+                head_sizes[i],
+            )
     allocator.close()
 
 
@@ -732,3 +861,19 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         )
 
     allocator.close()
+
+
+def _create_metadata(use_mla, kv_caches):
+    num_heads = 1 if use_mla else 8
+    metadata = LMCacheMetadata(
+        model_name="test",
+        world_size=8,
+        local_world_size=8,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(32, 2, 256, num_heads, 128),
+        use_mla=use_mla,
+    )
+    metadata.kv_layer_groups_manager.build_kv_layer_groups(kv_caches)
+    return metadata

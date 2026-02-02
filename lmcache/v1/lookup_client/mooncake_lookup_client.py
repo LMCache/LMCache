@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 # Third Party
 import torch
@@ -10,10 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -21,7 +18,8 @@ logger = init_logger(__name__)
 class MooncakeLookupClient(LookupClientInterface):
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
         master_addr: str,
     ):
         # Third Party
@@ -39,11 +37,6 @@ class MooncakeLookupClient(LookupClientInterface):
         )
 
         # Initialize token database for processing tokens
-        # First Party
-        from lmcache.integration.vllm.utils import create_lmcache_metadata
-
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed."
         )

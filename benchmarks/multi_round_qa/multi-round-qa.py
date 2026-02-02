@@ -45,6 +45,9 @@ class WorkloadConfig:
     # Whether strictly cap active sessions at num_users
     enforce_strict_concurrent_users: bool = False
 
+    # Whether to disable ramp up during the uphill stage
+    disable_ramp_up: bool = False
+
 
 @dataclass
 class UserConfig:
@@ -371,7 +374,7 @@ class UserSessionManager:
         self.session_summaries: list[pd.DataFrame] = []
         self.start_time: float | None = None
 
-        self.need_ramp_up = True
+        self.need_ramp_up = not workload_config.disable_ramp_up
 
         self.use_sharegpt = use_sharegpt
         if self.use_sharegpt:
@@ -549,7 +552,6 @@ class UserSessionManager:
         pending_queries = len([s for s in self.sessions if s.has_unfinished_request])
         assert self.start_time is not None
         start_time = max(self.start_time, start_time)
-        end_time = min(end_time, df["finish_time"].max())
         qps = self.workload_config.qps
 
         df = UserSessionManager.ProcessSummary(
@@ -661,6 +663,11 @@ def parse_arguments():
         action="store_true",
         help="Strictly enforce concurrent users count to match --num-users",
     )
+    parser.add_argument(
+        "--disable-ramp-up",
+        action="store_true",
+        help="Disable the initial ramp-up phase, allowing users to join gradually",
+    )
     args = parser.parse_args()
     return args
 
@@ -715,6 +722,7 @@ def main():
         model=args.model,
         enable_user_id=args.request_with_user_id,
         enforce_strict_concurrent_users=args.enforce_strict_concurrent_users,
+        disable_ramp_up=args.disable_ramp_up,
     )
 
     manager = UserSessionManager(

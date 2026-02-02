@@ -2,7 +2,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -12,7 +12,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -25,6 +24,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel
@@ -83,7 +83,7 @@ class PDConfig:
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         tp_rank: int,
     ) -> "PDConfig":
         """Convert the LMCacheEngineConfig to PDConfig"""
@@ -143,7 +143,7 @@ class PDBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         self.running = True
 
@@ -206,7 +206,7 @@ class PDBackend(AllocatorBackendInterface):
         return self.__class__.__name__
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         # First Party
         from lmcache.v1.transfer_channel.transfer_utils import (
@@ -223,8 +223,8 @@ class PDBackend(AllocatorBackendInterface):
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         paged_mem_allocator.init_gpu_memory_allocator(
             config.pd_buffer_size,
-            torch.Size(metadata.kv_shape),
-            metadata.kv_dtype,
+            [torch.Size(metadata.kv_shape)],
+            [metadata.kv_dtype],
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
             corrected_device,
         )
@@ -239,8 +239,8 @@ class PDBackend(AllocatorBackendInterface):
 
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -249,15 +249,15 @@ class PDBackend(AllocatorBackendInterface):
             fmt = MemoryFormat.KV_2LTD
         # NOTE: no eviction and busy_loop in PD
         return self.memory_allocator.allocate(
-            shape=shape, dtype=dtype, fmt=fmt, allocator_type="gpu"
+            shapes, dtypes, fmt=fmt, allocator_type="gpu"
         )
 
     # TODO(Jiayi): Please implement batched allocate to reduce memory
     # allocation overhead.
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: Optional[torch.dtype],
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -266,7 +266,7 @@ class PDBackend(AllocatorBackendInterface):
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
         return self.memory_allocator.batched_allocate(
-            shape, dtype, batch_size, fmt, allocator_type="gpu"
+            shapes, dtypes, batch_size, fmt, allocator_type="gpu"
         )
 
     # NOTE(Jiayi): If two requests have overlapped keys, will
@@ -372,7 +372,14 @@ class PDBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        Submit batched put tasks to transfer KV caches to peer.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after the transfer completes. Callback exceptions are caught and logged.
+        """
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
@@ -432,6 +439,14 @@ class PDBackend(AllocatorBackendInterface):
             notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
             notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
             self.proxy_side_channel.send(notif_msg_bytes)
+
+        # Call completion callback for all keys after transfer completes
+        if on_complete_callback is not None:
+            for key in keys:
+                try:
+                    on_complete_callback(key)
+                except Exception as e:
+                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     ############################################################
     # Prefiller functions end
