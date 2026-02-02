@@ -42,6 +42,15 @@ Run parameters:
 | local_disk      | 0.258       | 1985.24 |
 | rust_raw_block  | 0.123       | 4167.19 |
 
+Sanity run (output directory path):
+- num_ops: 128
+- concurrency: 16
+
+| Backend         | Elapsed (s) | Ops/sec |
+|-----------------|-------------|---------|
+| local_disk      | 0.065       | 1979.01 |
+| rust_raw_block  | 0.041       | 3106.64 |
+
 > Results are machine- and device-dependent. Use real block devices and O_DIRECT for production-grade comparison.
 
 ## Output
