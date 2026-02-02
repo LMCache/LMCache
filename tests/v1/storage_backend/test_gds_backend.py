@@ -2,6 +2,7 @@
 # Standard
 from unittest import mock
 import asyncio
+import ctypes
 import os
 import shutil
 import sys
@@ -19,6 +20,26 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from tests.v1.utils import create_test_memory_obj
+
+
+def has_cufile() -> bool:
+    """
+    True only when NVIDIA cuFile is available:
+    - python package `cufile` importable
+    - dynamic library `libcufile.so` loadable
+    """
+    try:
+        # Third Party
+        import cufile  # noqa: F401
+    except Exception:
+        return False
+
+    try:
+        ctypes.CDLL("libcufile.so")
+    except OSError:
+        return False
+
+    return True
 
 
 def create_test_config(gds_path: str):
@@ -91,6 +112,11 @@ def gds_backend(temp_gds_path, async_loop):
     not torch.cuda.is_available(),
     reason="Requires CUDA for TestGdsBackend",
 )
+@pytest.mark.skipif(
+    not has_cufile(),
+    reason="Requires NVIDIA cuFile (libcufile.so). "
+    "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
+)
 @pytest.mark.skipif(sys.platform != "linux", reason="TestGdsBackend runs only on Linux")
 class TestGdsBackend:
     def test_init(self, temp_gds_path, async_loop):
@@ -143,6 +169,11 @@ class TestGdsBackend:
     @pytest.mark.skipif(
         not torch.cuda.is_available(),
         reason="Requires CUDA for GdsBackend get_blocking",
+    )
+    @pytest.mark.skipif(
+        not has_cufile(),
+        reason="Requires NVIDIA cuFile (libcufile.so). "
+        "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
     )
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
         key = create_test_key(0)

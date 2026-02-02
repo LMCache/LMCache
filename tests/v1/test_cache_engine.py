@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from copy import deepcopy
+import ctypes
 import os
 import random
 import shlex
@@ -31,6 +32,26 @@ from .utils import (
     generate_tokens,
     recover_engine_states,
 )
+
+
+def has_cufile() -> bool:
+    """
+    True only when NVIDIA cuFile is available:
+    - python package `cufile` importable
+    - dynamic library `libcufile.so` loadable
+    """
+    try:
+        # Third Party
+        import cufile  # noqa: F401
+    except Exception:
+        return False
+
+    try:
+        ctypes.CDLL("libcufile.so")
+    except OSError:
+        return False
+
+    return True
 
 
 def get_expected_count(token_len, save_unfull_chunk, chunk_size):
@@ -1405,6 +1426,11 @@ def test_builder_destroy_multiple_instances(autorelease_v1):
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Requires CUDA for test_multi_device_backends",
+)
+@pytest.mark.skipif(
+    not has_cufile(),
+    reason="Requires NVIDIA cuFile (libcufile.so). "
+    "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
 )
 def test_multi_device_backends(save_unfull_chunk, autorelease_v1):
     """Test running GPU-related backend with local CPU backends
