@@ -2,7 +2,6 @@
 # Standard
 from unittest import mock
 import asyncio
-import ctypes
 import os
 import shutil
 import sys
@@ -19,27 +18,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
-from tests.v1.utils import create_test_memory_obj
-
-
-def has_cufile() -> bool:
-    """
-    True only when NVIDIA cuFile is available:
-    - python package `cufile` importable
-    - dynamic library `libcufile.so` loadable
-    """
-    try:
-        # Third Party
-        import cufile  # noqa: F401
-    except Exception:
-        return False
-
-    try:
-        ctypes.CDLL("libcufile.so")
-    except OSError:
-        return False
-
-    return True
+from tests.v1.utils import create_test_memory_obj, has_cufile
 
 
 def create_test_config(gds_path: str):

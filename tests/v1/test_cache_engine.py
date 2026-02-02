@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from copy import deepcopy
-import ctypes
 import os
 import random
 import shlex
@@ -30,28 +29,9 @@ from .utils import (
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
+    has_cufile,
     recover_engine_states,
 )
-
-
-def has_cufile() -> bool:
-    """
-    True only when NVIDIA cuFile is available:
-    - python package `cufile` importable
-    - dynamic library `libcufile.so` loadable
-    """
-    try:
-        # Third Party
-        import cufile  # noqa: F401
-    except Exception:
-        return False
-
-    try:
-        ctypes.CDLL("libcufile.so")
-    except OSError:
-        return False
-
-    return True
 
 
 def get_expected_count(token_len, save_unfull_chunk, chunk_size):
