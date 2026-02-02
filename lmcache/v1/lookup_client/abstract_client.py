@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import abc
 
 # Third Party
 import torch
-
-if TYPE_CHECKING:
-    # Third Party
-    pass
 
 
 class LookupClientInterface(metaclass=abc.ABCMeta):
@@ -20,6 +16,11 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
 
         Args:
             lookup_id: The lookup ID to lookup
+
+        Returns:
+            -1 means not found;
+            None means ongoing; (this semantic is not supported in sync lookup clients)
+            int >= 0 means number of hit tokens
         """
         return None
 
@@ -32,6 +33,11 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
     ) -> Optional[int]:
         """
         Perform lookup for the given token IDs.
+        Should be called for first lookup and pinning. Subsequent lookups for the same
+        request should call lookup_cache instead.
+
+        Caller should handle overlaps between tokens that exist in LMCache
+        and tokens that are already computed by the caller.
 
         Args:
             token_ids: The token IDs to lookup
@@ -42,7 +48,7 @@ class LookupClientInterface(metaclass=abc.ABCMeta):
             includes tags and the other configs
 
         Returns:
-            The number of tokens that can be loaded from cache.
+            The number of tokens that exist inside LMCache.
             None indicates the lookup/prefetch is in progress.
         """
         raise NotImplementedError

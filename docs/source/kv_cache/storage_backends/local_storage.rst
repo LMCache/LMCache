@@ -16,8 +16,6 @@ Two ways to configure LMCache Disk Offloading:
 
 **1. Environment Variables:**
 
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
-
 .. code-block:: bash
 
     # 256 Tokens per KV Chunk
@@ -26,7 +24,7 @@ Two ways to configure LMCache Disk Offloading:
     # Otherwise, enable by setting the directory where LMCache will
     # create files for each KV cache chunks
     # (this directory does NOT need to exist beforehand)
-    export LMCACHE_LOCAL_DISK="file://local/disk_test/local_disk/"
+    export LMCACHE_LOCAL_DISK="file:///local/disk_test/local_disk/"
     # 5GB of Disk
     export LMCACHE_MAX_LOCAL_DISK_SIZE=5.0
 
@@ -38,14 +36,12 @@ Two ways to configure LMCache Disk Offloading:
 
 Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
 
-``LMCACHE_USE_EXPERIMENTAL`` MUST be set by environment variable directly.
-
 .. code-block:: yaml
 
     # 256 Tokens per KV Chunk
     chunk_size: 256
     # Enable Disk backend
-    local_disk: "file://local/disk_test/local_disk/"
+    local_disk: "file:///local/disk_test/local_disk/"
     # 5GB of Disk memory
     max_local_disk_size: 5.0
 
@@ -68,6 +64,105 @@ backends have asynchronous put() operations so that the IO latency will not slow
 The local disk backend also has a prefetch() operation that will preemptively move KV caches from the disk to CPU RAM offloading storage
 (i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM <./cpu_ram>`) for specified tokens (these KV caches are also still kept in the disk).
 
+
+Architecture Overview
+---------------------
+
+The following diagram shows the overall architecture of the Local Disk Backend:
+
+.. mermaid::
+
+    %%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '18px', 'fontFamily': 'arial', 'primaryColor': '#e3f2fd', 'primaryTextColor': '#000', 'primaryBorderColor': '#1976d2', 'lineColor': '#424242', 'secondaryColor': '#f5f5f5', 'tertiaryColor': '#ffffff', 'background': '#ffffff', 'clusterBkg': '#f8f9fa', 'clusterBorder': '#495057' }}}%%
+    flowchart TB
+        subgraph Engine["<b>LMCache Engine</b>"]
+            E["<b>Request Save/Load Operations</b>"]
+        end
+
+        subgraph LDB["<b>LocalDiskBackend</b>"]
+            subgraph Meta["<b>Metadata Dictionary</b>"]
+                Dict["<b>self.dict: CacheEngineKey → DiskCacheMetadata</b>
+                (path, size, shape, dtype, pinned, positions)"]
+            end
+            
+            subgraph Policy["<b>Cache Policy</b>"]
+                CP["<b>Configurable Policy</b>
+                (LRU, LFU, FIFO, MRU)
+                Decides what to evict"]
+            end
+            
+            subgraph Worker["<b>LocalDiskWorker</b>"]
+                PQ["<b>Priority Queue Executor (4 workers)</b>"]
+                P0["<b>Priority 0: PREFETCH</b>"]
+                P1["<b>Priority 1: DELETE</b>"]
+                P2["<b>Priority 2: PUT</b>"]
+            end
+            
+            CPU["<b>LocalCPUBackend</b>
+            (memory allocator)"]
+        end
+
+        subgraph Disk["<b>Local Filesystem</b>"]
+            Files["/cache/vllm@model@...@abc.pt
+            /cache/vllm@model@...@def.pt
+            /cache/vllm@model@...@ghi.pt"]
+        end
+
+        E --> Dict
+        Dict --> CP
+        CP --> PQ
+        PQ --> P0
+        PQ --> P1
+        PQ --> P2
+        Worker --> Files
+        CPU -.-> Worker
+
+**Key Components:**
+
+- **Metadata Dictionary**: Maps each ``CacheEngineKey`` to its disk metadata (file path, size, shape, dtype, pin status)
+- **Cache Policy**: Configurable eviction policy (LRU, LFU, FIFO, or MRU) that tracks access patterns and decides which entries to evict when space is needed
+- **LocalDiskWorker**: Async task executor with priority queue - prefetch tasks run first (priority 0), then deletes (priority 1), then saves (priority 2)
+- **Local Disk**: Filesystem where KV cache chunks are stored as individual ``.pt`` files
+
+
+Save Flow (PUT)
+~~~~~~~~~~~~~~~
+
+.. mermaid::
+
+    %%{init: {'theme': 'base', 'flowchart': {'useMaxWidth': false, 'htmlLabels': true, 'nodeSpacing': 30, 'rankSpacing': 30}, 'themeVariables': { 'fontSize': '18px', 'fontFamily': 'arial', 'primaryColor': '#e3f2fd', 'primaryTextColor': '#000', 'primaryBorderColor': '#1976d2', 'lineColor': '#424242', 'secondaryColor': '#f5f5f5', 'tertiaryColor': '#ffffff', 'background': '#ffffff', 'clusterBkg': '#f8f9fa', 'clusterBorder': '#495057' }}}%%
+    flowchart LR
+        A["<b>MemoryObj</b><br/>(KV cache in CPU memory)"] --> B{<b>Disk space<br/>available?</b>}
+        B -->|"No"| C["<b>Evict via policy</b><br/>Delete .pt files"]
+        C --> B
+        B -->|"Yes"| D["<b>Track in put_tasks</b><br/>Queue async write<br/>(Priority 2 - lowest)"]
+        D --> E["<b>LocalDiskWorker</b><br/>write_file()"]
+        E --> F[("<b>Disk</b><br/>.pt file")]
+        F --> G["<b>Add to metadata dict</b>"]
+
+        style A fill:#e1f5fe
+        style F fill:#c8e6c9
+        style C fill:#ffcdd2
+
+Load Flow (GET)
+~~~~~~~~~~~~~~~
+
+.. mermaid::
+
+    %%{init: {'theme': 'base', 'flowchart': {'useMaxWidth': false, 'htmlLabels': true, 'nodeSpacing': 30, 'rankSpacing': 30}, 'themeVariables': { 'fontSize': '18px', 'fontFamily': 'arial', 'primaryColor': '#e3f2fd', 'primaryTextColor': '#000', 'primaryBorderColor': '#1976d2', 'lineColor': '#424242', 'secondaryColor': '#f5f5f5', 'tertiaryColor': '#ffffff', 'background': '#ffffff', 'clusterBkg': '#f8f9fa', 'clusterBorder': '#495057' }}}%%
+    flowchart LR
+        A["<b>Request</b><br/>(CacheEngineKey)"] --> B{<b>Key exists<br/>in dict?</b>}
+        B -->|"No"| C["<b>Return None</b><br/>(cache miss)"]
+        B -->|"Yes"| D["<b>Update policy</b><br/>Mark as accessed"]
+        D --> E["<b>Allocate buffer</b><br/>via LocalCPUBackend"]
+        E --> F["<b>Read from disk</b><br/>read_file()"]
+        F --> G[("<b>Disk</b><br/>.pt file")]
+        G --> F
+        F --> H["<b>MemoryObj</b><br/>(KV cache ready)"]
+
+        style A fill:#e1f5fe
+        style H fill:#c8e6c9
+        style C fill:#ffcdd2
+        
 .. _local-storage-online-inference-example:
 
 Online Inference Example
@@ -129,7 +224,7 @@ Example ``config.yaml``:
     chunk_size: 256
     local_cpu: false
     max_local_cpu_size: 5.0
-    local_disk: "file://local/disk_test/local_disk/"
+    local_disk: "file:///local/disk_test/local_disk/"
     max_local_disk_size: 5.0
 
 If you don't want to use a config file, uncomment the first five environment variables
@@ -140,10 +235,9 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_CHUNK_SIZE=256 \
     # LMCACHE_LOCAL_CPU=False \
     # LMCACHE_MAX_LOCAL_CPU_SIZE=5.0 \
-    # LMCACHE_LOCAL_DISK="file://local/disk_test/local_disk/" \
+    # LMCACHE_LOCAL_DISK="file:///local/disk_test/local_disk/" \
     # LMCACHE_MAX_LOCAL_DISK_SIZE=5.0 \
     LMCACHE_CONFIG_FILE="disk-offload.yaml" \
-    LMCACHE_USE_EXPERIMENTAL=True \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 16384 \

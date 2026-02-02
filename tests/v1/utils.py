@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import Optional
+from unittest.mock import MagicMock
 import asyncio
 import inspect
 import random
+import socket
 import string
 import threading
+import uuid
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 
 
 def recover_engine_states(engine):
@@ -23,18 +29,38 @@ def recover_gpu_connector_states(gpu_connector):
     gpu_connector.kv_cache_pointers_on_gpu = {}
 
 
-def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata(kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=3,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
-def dumb_metadata_with_model_name(
-    model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
-):
-    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata_with_model_name(model_name: str, kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name=model_name,
+        world_size=3,
+        local_world_size=3,
+        worker_id=1,
+        local_worker_id=1,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
 def dumb_cache_engine_key(id: int = 0) -> CacheEngineKey:
-    return CacheEngineKey("vllm", "test_model", 3, 123, id, torch.bfloat16)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=id,
+        dtype=torch.bfloat16,
+    )
 
 
 def random_string(N):
@@ -50,22 +76,71 @@ def init_asyncio_loop():
 
 def close_asyncio_loop(async_loop, async_thread):
     if async_loop.is_running():
+        # First, cancel all pending tasks
+        try:
+            # Get all tasks and cancel them
+            pending = asyncio.all_tasks(async_loop)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+        except Exception as e:
+            print(f"Error during close pending tasks: - {e}")
+
+        # Then stop the loop
         async_loop.call_soon_threadsafe(async_loop.stop)
+
     if async_thread.is_alive():
-        async_thread.join()
+        async_thread.join(timeout=2.0)
+
+    # Close the loop to release resources
+    if not async_loop.is_closed():
+        async_loop.close()
+
+    # Set event loop to None
+    asyncio.set_event_loop(None)
 
 
-def generate_kv_cache(num_tokens, fmt, device):
+def get_available_port(host: str = "127.0.0.1") -> int:
+    """
+    Get an available port dynamically by binding to port 0.
+
+    Args:
+        host: The host address to bind to. Default is "127.0.0.1".
+
+    Returns:
+        An available port number.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
+
+
+def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
+    """
+    Get multiple available ports dynamically.
+
+    Args:
+        count: Number of ports to get.
+        host: The host address to bind to. Default is "127.0.0.1".
+
+    Returns:
+        A list of available port numbers.
+    """
+    ports = []
+    for _ in range(count):
+        ports.append(get_available_port(host))
+    return ports
+
+
+def generate_kv_cache(num_tokens, device):
     ret = []
     num_layers = 32
     num_heads = 8
     head_size = 128
-    shape = (
-        [num_tokens, num_heads, head_size]
-        if fmt == "vllm"
-        else [num_heads, num_tokens, head_size]
-    )
-    dtype = torch.bfloat16 if fmt == "vllm" else torch.float16
+    shape = [num_tokens, num_heads, head_size]
+    dtype = torch.bfloat16
 
     for i in range(num_layers):
         k = torch.rand(shape, dtype=dtype, device=device)
@@ -76,16 +151,20 @@ def generate_kv_cache(num_tokens, fmt, device):
 
 
 def generate_kv_cache_paged_list_tensors(
-    num_blocks, device, block_size=16, dtype=torch.bfloat16, use_mla=False
+    num_blocks,
+    device,
+    block_size=16,
+    dtype=torch.bfloat16,
+    use_mla=False,
+    num_layers=32,
+    head_size=128,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
     where KV are in the same tensor
     """
     ret = []
-    num_layers = 32
     num_heads = 1 if use_mla else 8
-    head_size = 128
     shape = (
         [num_blocks, block_size, head_size]
         if use_mla
@@ -93,7 +172,11 @@ def generate_kv_cache_paged_list_tensors(
     )
 
     for i in range(num_layers):
-        kv = torch.rand(shape, dtype=dtype, device=device)
+        # TODO(chunxiaozheng): support more dtypes
+        if dtype == torch.uint8:
+            kv = torch.randint(0, 256, shape, dtype=dtype, device=device)
+        else:
+            kv = torch.rand(shape, dtype=dtype, device=device)
         ret.append(kv)
 
     return ret
@@ -134,13 +217,17 @@ def generate_sglang_kv_cache_paged_list_tensors(
 
 
 def generate_mla_kv_cache_paged_list_tensors(
-    num_blocks, device, block_size=64, dtype=torch.bfloat16, num_layers=32
+    num_blocks,
+    device,
+    block_size=64,
+    dtype=torch.bfloat16,
+    num_layers=32,
+    head_size=576,
 ):
     """
     return KV cache of MLA
     """
     ret = []
-    head_size = 576
     shape = [num_blocks, block_size, head_size]
 
     for i in range(num_layers):
@@ -173,8 +260,8 @@ def generate_tokens(num_tokens, device, fixed=False):
         return torch.randint(0, 10000, size=[num_tokens]).to(device)
 
 
-def concatenate_kv_caches(kv_chunks, fmt):
-    dim = 1 if fmt == "huggingface" else 0
+def concatenate_kv_caches(kv_chunks):
+    dim = 0
     ret = []
     for kv_layer in zip(*kv_chunks, strict=False):
         klist, vlist = zip(*kv_layer, strict=False)
@@ -418,3 +505,104 @@ class DummyLMCacheAsyncLookupServer:
         retrieved_length: int,
     ) -> None:
         pass
+
+
+class MockAdapter:
+    """
+    Mock adapter to provide config and lmcache_engine to InternalAPIServer.
+    """
+
+    def __init__(self, engine, config):
+        self.lmcache_engine = engine
+        self.config = config
+
+
+def create_test_metadata(
+    worker_id: int = 0,
+    world_size: int = 1,
+    kv_shape: tuple = (4, 2, 256, 8, 128),
+    engine_id: Optional[str] = "test_engine",
+    kv_connector_extra_config: Optional[dict] = None,
+) -> LMCacheMetadata:
+    """Create test metadata for LMCacheEngine."""
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=world_size,
+        local_world_size=world_size,
+        worker_id=worker_id,
+        local_worker_id=worker_id,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+        engine_id=engine_id,
+        kv_connector_extra_config=kv_connector_extra_config,
+    )
+
+
+def create_test_config(
+    chunk_size: int = 256,
+    local_cpu: bool = True,
+    max_local_cpu_size: float = 1.0,
+    rpc_port: int = 0,
+    extra_config: Optional[dict] = None,
+    instance_id: Optional[str] = None,
+) -> LMCacheEngineConfig:
+    """Create test configuration for LMCacheEngine."""
+    if instance_id is None:
+        instance_id = f"test_instance_{uuid.uuid4().hex[:8]}"
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=chunk_size,
+        local_cpu=local_cpu,
+        max_local_cpu_size=max_local_cpu_size,
+        lmcache_instance_id=instance_id,
+    )
+    config.extra_config = extra_config.copy() if extra_config else {}
+    config.extra_config["lmcache_rpc_port"] = rpc_port
+    return config
+
+
+def create_mock_vllm_config(
+    rank: int = 0, world_size: int = 1, rpc_port: int = 0
+) -> MagicMock:
+    """Create a mock VllmConfig for testing."""
+    vllm_config = MagicMock()
+
+    # Mock model_config
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.model = "test_model"
+    vllm_config.model_config.dtype = torch.bfloat16
+    vllm_config.model_config.get_num_layers = MagicMock(return_value=4)
+    vllm_config.model_config.get_num_kv_heads = MagicMock(return_value=8)
+    vllm_config.model_config.get_head_size = MagicMock(return_value=128)
+    vllm_config.model_config.hf_config = MagicMock()
+    vllm_config.model_config.hf_config.model_type = "llama"
+
+    # Mock parallel_config
+    vllm_config.parallel_config = MagicMock()
+    vllm_config.parallel_config.rank = rank
+    vllm_config.parallel_config.world_size = world_size
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+    vllm_config.parallel_config.pipeline_parallel_size = 1
+
+    # Mock cache_config
+    vllm_config.cache_config = MagicMock()
+    vllm_config.cache_config.cache_dtype = torch.bfloat16
+
+    # Mock kv_transfer_config with engine_id
+    vllm_config.kv_transfer_config = MagicMock()
+    vllm_config.kv_transfer_config.engine_id = "test_engine"
+    vllm_config.kv_transfer_config.get_from_extra_config = MagicMock(
+        side_effect=lambda key, default: (
+            rpc_port if key == "lmcache_rpc_port" else default
+        )
+    )
+
+    return vllm_config
+
+
+def create_test_memory_obj(shape=None, dtype=torch.bfloat16, device="cpu") -> MemoryObj:
+    """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
+    if shape is None:
+        shape = torch.Size([2, 16, 8, 128])
+    allocator = AdHocMemoryAllocator(device=device)
+    memory_obj = allocator.allocate([shape], [dtype], fmt=MemoryFormat.KV_T2D)
+    return memory_obj

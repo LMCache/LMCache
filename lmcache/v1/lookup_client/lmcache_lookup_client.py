@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import namedtuple
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import json
 import threading
 
@@ -11,19 +11,16 @@ import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_rpc_path_lmcache,
     get_zmq_socket,
 )
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -45,19 +42,17 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
     ):
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         self.encoder = msgspec.msgpack.Encoder()
         self.ctx = get_zmq_context(use_asyncio=False)
         self.config = config
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
-        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        engine_id = metadata.engine_id
+        assert engine_id is not None, "engine_id is required for RPC communication"
+        self.world_size = metadata.world_size
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -65,16 +60,16 @@ class LMCacheLookupClient(LookupClientInterface):
         self.sockets = []
         if len(self.lookup_server_worker_ids) > 0:
             ranks = self.lookup_server_worker_ids
-            self.num_ranks = len(self.lookup_server_worker_ids)
+            self.world_size = len(self.lookup_server_worker_ids)
         else:
-            ranks = [i for i in range(self.num_ranks)]
+            ranks = [i for i in range(self.world_size)]
 
         # Store socket creation parameters for recreation
         SocketParams = namedtuple("SocketParams", ["socket_path", "rank"])
         self.socket_params = [
             SocketParams(
                 socket_path=get_zmq_rpc_path_lmcache(
-                    vllm_config, "lookup", rpc_port, rank
+                    engine_id, "lookup", rpc_port, rank
                 ),
                 rank=rank,
             )
@@ -125,7 +120,7 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def _recreate_socket(self) -> None:
         """Recreate all sockets."""
-        for rank_idx in range(self.num_ranks):
+        for rank_idx in range(self.world_size):
             # Close old socket
             old_socket = self.sockets[rank_idx]
             if old_socket is not None:
@@ -162,7 +157,12 @@ class LMCacheLookupClient(LookupClientInterface):
             self.sockets[rank_idx] = new_socket
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        return self.reqs_status.get(lookup_id, None)
+        """
+        "-1 means not found;
+        None means ongoing; (this semantic is not supported in sync lookup client)
+        int >= 0 means number of hit tokens
+        """
+        return self.reqs_status.get(lookup_id, -1)
 
     def lookup(
         self,
@@ -181,11 +181,20 @@ class LMCacheLookupClient(LookupClientInterface):
         if not self.enable_blending:
             hashes = []
             offsets = []
+
+            # We already have hashes here so we can skip the chunks that are already
+            # in GPU cache. Don't pass num_computed_tokens to lookup server.
+
             for start, end, key in self.token_database.process_tokens(
                 token_ids, make_key=False
             ):
                 hashes.append(key)
                 offsets.append(end - start)
+
+            # if the token database returns no hashes, return 0
+            if not hashes:
+                return 0
+
             hash_buf = self.encoder.encode(hashes)
             offset_buf = self.encoder.encode(offsets)
             msg_buf = [
@@ -206,12 +215,12 @@ class LMCacheLookupClient(LookupClientInterface):
         results = []
         failed_rank = -1
         try:
-            for i in range(self.num_ranks):
+            for i in range(self.world_size):
                 failed_rank = i
                 self.sockets[i].send_multipart(msg_buf, copy=False)
 
             # TODO(Jiayi): we can use zmq poll to optimize a bit
-            for i in range(self.num_ranks):
+            for i in range(self.world_size):
                 failed_rank = i
                 resp = self.sockets[i].recv()
                 result = int.from_bytes(resp, "big")
@@ -233,7 +242,7 @@ class LMCacheLookupClient(LookupClientInterface):
             self._recreate_socket()
             return 0
 
-        assert len(results) == self.num_ranks
+        assert len(results) == self.world_size
         if len(set(results)) > 1:
             logger.warning(
                 "Lookup results (number of hit tokens) differ "
@@ -255,6 +264,13 @@ class LMCacheLookupClient(LookupClientInterface):
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
         return True
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def close(self):
         for socket in self.sockets:
             try:
@@ -272,22 +288,30 @@ class LMCacheLookupClient(LookupClientInterface):
 class LMCacheLookupServer:
     """ZMQ-based lookup server that handles lookup requests using LMCacheEngine."""
 
-    def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
+    def __init__(
+        self,
+        lmcache_engine: LMCacheEngine,
+        metadata: LMCacheMetadata,
+    ):
         self.decoder = msgspec.msgpack.Decoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
         )
         socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup", rpc_port, vllm_config.parallel_config.rank
+            metadata.engine_id, "lookup", rpc_port, metadata.worker_id
         )
         self.socket = get_zmq_socket(
             self.ctx,
             socket_path,
             "ipc",
-            zmq.REP,  # type: ignore[attr-defined]
+            zmq.ROUTER,  # type: ignore[attr-defined]
             "bind",
         )
+        # Set socket timeout to allow periodic check of running flag
+        self.socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout
 
         self.lmcache_engine = lmcache_engine
         self.running = True
@@ -296,15 +320,27 @@ class LMCacheLookupServer:
 
         def process_request():
             while self.running:
-                frames = self.socket.recv_multipart(copy=False)
-                lookup_id = frames[-2].bytes.decode("utf-8")
-                request_configs_str = frames[-1].bytes.decode("utf-8")
-                request_configs = None
-                if request_configs_str != "":
-                    request_configs = json.loads(request_configs_str)
+                try:
+                    frames = self.socket.recv_multipart(copy=False)
+                except zmq.Again:
+                    # Timeout occurred, check running flag and continue
+                    continue
+                # ROUTER socket prepends identity frame and empty delimiter
+                # frames[0] = identity, frames[1] = empty delimiter, frames[2:] = data
+                identity = frames[0].bytes
+                # frames[1] is the empty delimiter frame from REQ socket
+                data_frames = frames[2:]
+                if len(data_frames) < 2:
+                    logger.warning("Malformed request received: not enough frames.")
+                    continue
+                lookup_id = data_frames[-2].bytes.decode("utf-8")
+                request_configs_str = data_frames[-1].bytes.decode("utf-8")
+                request_configs = (
+                    json.loads(request_configs_str) if request_configs_str else None
+                )
                 if not self.enable_blending:
-                    hash_frames = frames[0]
-                    offset_frames = frames[1]
+                    hash_frames = data_frames[0]
+                    offset_frames = data_frames[1]
                     hashes = self.decoder.decode(hash_frames)
                     offsets = self.decoder.decode(offset_frames)
                     result = self.lmcache_engine.lookup(
@@ -315,7 +351,7 @@ class LMCacheLookupServer:
                         request_configs=request_configs,
                     )
                 else:
-                    token_frames = frames[0]
+                    token_frames = data_frames[0]
                     tokens = self.decoder.decode(token_frames)
                     result = self.lmcache_engine.lookup(
                         tokens=tokens,
@@ -324,12 +360,32 @@ class LMCacheLookupServer:
                         request_configs=request_configs,
                     )
                 response = result.to_bytes(4, "big")
-                self.socket.send(response)
+                # ROUTER requires identity frame and empty delimiter for reply
+                self.socket.send_multipart([identity, b"", response])
 
         logger.info("lmcache lookup server start on %s", socket_path)
-        self.thread = threading.Thread(target=process_request, daemon=True)
+        self.thread = threading.Thread(
+            target=process_request, daemon=True, name="lookup-server-thread"
+        )
         self.thread.start()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def close(self):
+        # Stop the processing thread first
+        self.running = False
+
+        # Wait for thread to finish with timeout
+        # Thread will exit within 1 second due to socket RCVTIMEO
+        if self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+            if self.thread.is_alive():
+                logger.warning("Lookup server thread did not terminate gracefully")
+
+        # Close the socket after thread is stopped
         self.socket.close(linger=0)
-        # TODO: close the thread!

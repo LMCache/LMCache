@@ -9,13 +9,12 @@ import torch
 # First Party
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, OpType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from tests.v1.utils import create_test_memory_obj
 
 
 class MockLookupServer:
@@ -33,9 +32,11 @@ class MockLookupServer:
 class MockLMCacheWorker:
     def __init__(self):
         self.messages = []
+        self._lock = threading.Lock()
 
     def put_msg(self, msg):
-        self.messages.append(msg)
+        with self._lock:
+            self.messages.append(msg)
 
 
 def create_test_config(
@@ -54,28 +55,45 @@ def create_test_config(
 
 def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey."""
-    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), torch.bfloat16)
-
-
-def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
-    """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
-    allocator = AdHocMemoryAllocator(device="cpu")
-    memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-    return memory_obj
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=0,
+        chunk_hash=hash(key_id),
+        dtype=torch.bfloat16,
+    )
 
 
 @pytest.fixture
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = create_test_config()
-    return LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    # Initialize PinMonitor before creating backend
+    PinMonitor.GetOrCreate(config)
+
+    backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    yield backend
+
+    # Cleanup: destroy PinMonitor after test
+    PinMonitor.DestroyInstance()
 
 
 @pytest.fixture
 def local_cpu_backend_disabled(memory_allocator):
     """Create a LocalCPUBackend with local_cpu disabled."""
     config = create_test_config(local_cpu=False)
-    return LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    # Initialize PinMonitor before creating backend
+    PinMonitor.GetOrCreate(config)
+
+    backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
+
+    yield backend
+
+    # Cleanup: destroy PinMonitor after test
+    PinMonitor.DestroyInstance()
 
 
 class TestLocalCPUBackend:
@@ -178,8 +196,8 @@ class TestLocalCPUBackend:
     def test_submit_put_task_reinsert(self, local_cpu_backend):
         """Test submit_put_task() with reinsertion."""
         key = create_test_key("test_key")
-        memory_obj1 = create_test_memory_obj(shape=(2, 16, 8, 128))
-        memory_obj2 = create_test_memory_obj(shape=(2, 32, 8, 128))
+        memory_obj1 = create_test_memory_obj(shape=torch.Size([2, 16, 8, 128]))
+        memory_obj2 = create_test_memory_obj(shape=torch.Size([2, 32, 8, 128]))
 
         # First insertion
         local_cpu_backend.submit_put_task(key, memory_obj1)
@@ -300,12 +318,14 @@ class TestLocalCPUBackend:
 
         local_cpu_backend.memory_allocator.close()
 
-    def test_remove_with_worker(self, memory_allocator):
+    def test_remove_with_worker(self, memory_allocator, lmcache_engine_metadata):
         """Test remove() with LMCacheWorker."""
         config = create_test_config()
         lmcache_worker = MockLMCacheWorker()
+
         backend = LocalCPUBackend(
             config=config,
+            metadata=lmcache_engine_metadata,
             memory_allocator=memory_allocator,
             lmcache_worker=lmcache_worker,
         )
@@ -319,13 +339,35 @@ class TestLocalCPUBackend:
         # Remove the key
         backend.remove(key)
 
-        # Check that evict message was sent
-        assert len(lmcache_worker.messages) == 2  # 1 admit + 1 evict
-        # First Party
-        from lmcache.v1.cache_controller.message import KVAdmitMsg, KVEvictMsg
+        # Manually flush to ensure messages are sent for testing
+        if backend.batched_msg_sender is not None:
+            backend.batched_msg_sender.flush()
 
-        assert any(isinstance(msg, KVAdmitMsg) for msg in lmcache_worker.messages)
-        assert any(isinstance(msg, KVEvictMsg) for msg in lmcache_worker.messages)
+        # Check that we have batched messages
+        batched_msgs = [
+            msg
+            for msg in lmcache_worker.messages
+            if isinstance(msg, BatchedKVOperationMsg)
+        ]
+        assert len(batched_msgs) >= 1, "Should have at least one batched message"
+
+        # Collect all operations from all batches
+        all_admit_ops = []
+        all_evict_ops = []
+        for msg in batched_msgs:
+            for op in msg.operations:
+                if op.op_type == OpType.ADMIT:
+                    all_admit_ops.append(op)
+                elif op.op_type == OpType.EVICT:
+                    all_evict_ops.append(op)
+
+        # Verify we have exactly one ADMIT and one EVICT operation
+        assert len(all_admit_ops) == 1, "Should have exactly one ADMIT operation"
+        assert len(all_evict_ops) == 1, "Should have exactly one EVICT operation"
+
+        # Verify the operations are for the correct key
+        assert all_admit_ops[0].key == key.chunk_hash
+        assert all_evict_ops[0].key == key.chunk_hash
 
         memory_allocator.close()
 

@@ -13,7 +13,7 @@ See https://aws.amazon.com/ec2/ for configuring your own EC2 compute instance. Y
 
 ## Step 2: Fill out `example.yaml`
 
-Please fill out the `BUCKET_NAME`, `AZ_ID`, `REGION` and `FILE_PREFIX` in the `example.yaml`. `FILE_PREFIX` is optional and can be dropped. 
+Please fill out the `BUCKET_NAME`, `AZ_ID`, and `REGION` in the `example.yaml`. 
 
 ## Step 3: Start an vLLM engine with LMCache
 

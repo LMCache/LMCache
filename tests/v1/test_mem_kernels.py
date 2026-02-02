@@ -11,7 +11,7 @@ import torch
 from lmcache.v1.memory_management import PinMemoryAllocator
 
 pytest.importorskip(
-    "lmc_ops",
+    "lmcache.c_ops",
     reason="TODO: require non CUDA implementations for CUDA enhanced functions",
 )
 
@@ -94,7 +94,7 @@ def test_extract_and_load_back(num_tokens):
     kv_blob = _tuple_kv_to_blob(kv_tuple_list)
     kv_chunked = _slice_kv_at(0, kv_blob, chunk_size)
     for chunk_id, chunk in enumerate(kv_chunked):
-        mem_obj_shape = [2, 32, chunk.shape[2], num_heads * head_size]
+        mem_obj_shape = torch.Size([2, 32, chunk.shape[2], num_heads * head_size])
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         chunk = chunk.contiguous()
@@ -118,7 +118,9 @@ def test_extract_and_load_back(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(32):
@@ -184,12 +186,6 @@ def test_multi_layer_kernel(num_tokens):
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
 
-    # lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
-    #                                kv_cache_pointers, # TODO: initialize this
-    #                                slot_mapping_temp,
-    #                                kv_cache[0].device,
-    #                                len(slot_mapping_temp), True)
-
     # layer by layer extract
     memory_obj_old_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -197,7 +193,9 @@ def test_multi_layer_kernel(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(32):
@@ -228,7 +226,9 @@ def test_multi_layer_kernel(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -286,17 +286,17 @@ def test_multi_layer_kernel(num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_multi_layer_kernel_use_mla(num_tokens):
+@pytest.mark.parametrize("head_size", [576, 66])  # Use 68 for dsv32 (132x int8)
+def test_multi_layer_kernel_use_mla(num_tokens, head_size):
     device = "cuda"
 
     num_blocks = 1000
     block_size = 64
-    head_size = 576
     chunk_size = 256
     dtype = torch.bfloat16
     num_layers = 32
     kv_cache = generate_mla_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype, num_layers
+        num_blocks, device, block_size, dtype, num_layers, head_size
     )
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -312,7 +312,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
 
         for layer_id in range(num_layers):
@@ -346,7 +346,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [1, num_layers, len(slot_mapping_temp), head_size]
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_mapping_temp), head_size])
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -379,7 +379,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 
     # Generate new paged kv_cache
     kv_cache_new = generate_mla_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype, num_layers
+        num_blocks, device, block_size, dtype, num_layers, head_size
     )
 
     kv_cache_pointers_new = torch.empty(
@@ -454,6 +454,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             True,
             token_major,
             True,
+            False,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -462,6 +463,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             False,
             token_major,
             True,
+            False,
         )
 
     check_paged_kv_cache_equal(
@@ -469,3 +471,118 @@ def test_single_layer_kernel(num_tokens, token_major):
         kv_cache_new,
         slot_mapping,
     )
+
+
+def test_lmcache_memcpy_async():
+    # Register 4 memory regions and try to launch copy
+    chunk_size = 1 << 26
+    num_chunks = 4
+    dtype = torch.bfloat16
+    elements_per_chunk = chunk_size // dtype.itemsize
+
+    big_cpu_tensor = torch.rand(
+        elements_per_chunk * num_chunks, dtype=dtype, device="cpu"
+    )
+    big_gpu_tensor = torch.rand(
+        elements_per_chunk * num_chunks, dtype=dtype, device="cuda"
+    )
+
+    def check_gpu_and_cpu_equal(
+        gpu_tensor: torch.Tensor,
+        cpu_tensor: torch.Tensor,
+    ):
+        cpu_tensor_from_gpu = gpu_tensor.to("cpu")
+        assert torch.allclose(cpu_tensor_from_gpu, cpu_tensor, atol=1e-5)
+
+    rt = torch.cuda.cudart()
+
+    # Register the cpu memory
+    ptr = big_cpu_tensor.data_ptr()
+    for i in range(num_chunks):
+        rt.cudaHostRegister(ptr + i * chunk_size, chunk_size, 0)
+
+    # Launch default cuda copy
+    with pytest.raises(RuntimeError):
+        big_gpu_tensor.copy_(big_cpu_tensor, non_blocking=True)
+        torch.cuda.synchronize()
+
+    # Launc default cuda copy for a small page
+    big_gpu_tensor[: elements_per_chunk // 2].copy_(
+        big_cpu_tensor[: elements_per_chunk // 2], non_blocking=True
+    )
+    torch.cuda.synchronize()
+
+    check_gpu_and_cpu_equal(
+        big_gpu_tensor[: elements_per_chunk // 2],
+        big_cpu_tensor[: elements_per_chunk // 2],
+    )
+
+    # Positions to copy
+    # - 0.25 chunk -- 0.75 chunk
+    # - 0.75 chunk -- 1.25 chunk
+    # - 1.75 chunk -- 3.25 chunk
+    # - whole 4 chunks
+    starts = [chunk_size // 4, (3 * chunk_size) // 4, (7 * chunk_size) // 4, 0]
+    ends = [
+        (3 * chunk_size) // 4,
+        (5 * chunk_size) // 4,
+        (13 * chunk_size) // 4,
+        chunk_size * num_chunks,
+    ]
+
+    # H2D copy
+    for start, end in zip(starts, ends, strict=False):
+        # should not be equal before copy
+        with pytest.raises(AssertionError):
+            check_gpu_and_cpu_equal(
+                big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            )
+
+        lmc_ops.lmcache_memcpy_async(
+            big_gpu_tensor.data_ptr() + start,
+            big_cpu_tensor.data_ptr() + start,
+            end - start,
+            lmc_ops.TransferDirection.H2D,
+            start,
+            chunk_size,
+        )
+        torch.cuda.synchronize()
+
+        check_gpu_and_cpu_equal(
+            big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+        )
+
+    # Reset the data in gpu
+    big_gpu_tensor = torch.rand(
+        elements_per_chunk * num_chunks, dtype=dtype, device="cuda"
+    )
+    # D2H copy
+    for start, end in zip(starts, ends, strict=False):
+        # copy from gpu to cpu
+        with pytest.raises(AssertionError):
+            check_gpu_and_cpu_equal(
+                big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+                big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            )
+
+        lmc_ops.lmcache_memcpy_async(
+            big_cpu_tensor.data_ptr() + start,
+            big_gpu_tensor.data_ptr() + start,
+            end - start,
+            lmc_ops.TransferDirection.D2H,
+            start,
+            chunk_size,
+        )
+        torch.cuda.synchronize()
+
+        check_gpu_and_cpu_equal(
+            big_gpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+            big_cpu_tensor[start // dtype.itemsize : end // dtype.itemsize],
+        )
+
+    # Unregister the cpu memory
+    ptr = big_cpu_tensor.data_ptr()
+    for i in range(num_chunks):
+        rt.cudaHostUnregister(ptr + i * chunk_size)

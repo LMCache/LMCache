@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 import threading
 import time
 
@@ -10,23 +10,21 @@ import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.utils import create_lmcache_metadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.async_lookup_message import (
+    LookupCleanupMsg,
     LookupRequestMsg,
     LookupResponseMsg,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_rpc_path_lmcache,
     get_zmq_socket,
 )
-
-if TYPE_CHECKING:
-    # Third Party
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -50,22 +48,20 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
     ):
-        metadata, config = create_lmcache_metadata(vllm_config)
-
         # lookup_id -> first lookup time
         # this helps us support timeout semantics
         self.first_lookup_time: dict[str, float] = {}
         self.timeout_ms = config.lookup_timeout_ms
 
         self.ctx = get_zmq_context(use_asyncio=False)
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
-        )
-        self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
-        self.num_ranks = self.tensor_parallel_size * self.pipeline_parallel_size
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        engine_id = metadata.engine_id
+        assert engine_id is not None, "engine_id is required for RPC communication"
+        self.world_size = metadata.world_size
         self.lookup_server_worker_ids = config.get_lookup_server_worker_ids(
             metadata.use_mla, metadata.world_size
         )
@@ -73,17 +69,18 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         self.push_sockets = []
         if len(self.lookup_server_worker_ids) > 0:
             ranks = self.lookup_server_worker_ids
-            self.num_ranks = len(self.lookup_server_worker_ids)
+            self.world_size = len(self.lookup_server_worker_ids)
         else:
-            ranks = [i for i in range(self.num_ranks)]
+            ranks = [i for i in range(self.world_size)]
 
         for rank in ranks:
             worker_socket_path = get_zmq_rpc_path_lmcache(
-                vllm_config, "lookup_worker", rpc_port, rank
+                engine_id, "lookup_worker", rpc_port, rank
             )
             logger.info(
-                f"lmcache lookup client connect to rank {rank} "
-                f"with worker socket path {worker_socket_path}"
+                "lmcache lookup client connect to rank %s with worker socket path %s",
+                rank,
+                worker_socket_path,
             )
 
             push_socket = get_zmq_socket(
@@ -97,7 +94,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             self.push_sockets.append(push_socket)
 
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup_scheduler", rpc_port, 0
+            engine_id, "lookup_scheduler", rpc_port, 0
         )
         self.pull_socket = get_zmq_socket(
             self.ctx,
@@ -107,8 +104,8 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             "bind",
         )
         logger.info(
-            f"lmcache lookup client connect to scheduler "
-            f"with socket path {scheduler_socket_path}"
+            "lmcache lookup client connect to scheduler with socket path %s",
+            scheduler_socket_path,
         )
 
         # First Party
@@ -140,10 +137,15 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # The two parts are [lookup_id (i.e., req_id), num_hit_tokens]
         self.num_parts = 2
 
+        # Track lookup_ids that have been aborted for cleanup
+        self.aborted_lookups: set[str] = set()
+
         self.running = True
 
         self.thread = threading.Thread(
-            target=self.process_responses_from_workers, daemon=True
+            target=self.process_responses_from_workers,
+            daemon=True,
+            name="async-lookup-client-thread",
         )
         self.thread.start()
 
@@ -155,20 +157,19 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             )
 
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
-        with self.lock:
-            return self.reqs_status.get(lookup_id, None)
+        """
+        -1 means not found;
+        None means ongoing;
+        int >= 0 means number of hit tokens
+        """
+        # Check if any aborted lookups are finished, send cleanup messages
+        self._cleanup_finished_aborted_lookups()
 
-    # TODO(Jiayi): Consider batching here
-    def lookup(
-        self,
-        token_ids: Union[torch.Tensor, list[int]],
-        lookup_id: str,
-        request_configs: Optional[dict] = None,
-    ) -> Optional[int]:
         with self.lock:
-            # -1 indicates not found; None indicates ongoing.
-            req_status = self.reqs_status.get(lookup_id, -1)
-            if req_status is None:
+            if (req_status := self.reqs_status.get(lookup_id, -1)) == -1:
+                self.reqs_status[lookup_id] = None
+                self.first_lookup_time[lookup_id] = time.time()
+            elif req_status is None:
                 time.sleep(self.lookup_backoff_time)
                 if (
                     time.time() - self.first_lookup_time[lookup_id]
@@ -185,14 +186,16 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                     self.first_lookup_time.pop(lookup_id, None)
                     return 0
 
-                return None
-            elif req_status != -1:
-                return req_status
-            self.reqs_status[lookup_id] = None
-            self.first_lookup_time[lookup_id] = time.time()
+            return req_status
 
+    # TODO(Jiayi): Consider batching here
+    def lookup(
+        self,
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
+    ) -> Optional[int]:
         hashes: list[int] = []
-
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False
@@ -211,7 +214,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # Serialize message using msgspec
         msg_buf = msgspec.msgpack.encode(msg)
 
-        for i in range(self.num_ranks):
+        for i in range(self.world_size):
             self.push_sockets[i].send(msg_buf, copy=False)
         time.sleep(self.lookup_backoff_time)
         return None
@@ -232,7 +235,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                         self.res_for_each_worker[lookup_id].append(res)
                     all_res = self.res_for_each_worker[lookup_id]
 
-                    if len(all_res) == self.num_ranks:
+                    if len(all_res) == self.world_size:
                         self.res_for_each_worker.pop(lookup_id)
 
                         # NOTE: it is possible that the number of hit
@@ -242,12 +245,42 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                         self.reqs_status[lookup_id] = min(all_res)
 
             except Exception as e:
-                logger.error(f"Error processing response from worker: {e}")
+                logger.error("Error processing response from worker: %s", e)
 
     def clear_lookup_status(self, lookup_id: str) -> None:
         with self.lock:
             self.reqs_status.pop(lookup_id, None)
             self.first_lookup_time.pop(lookup_id, None)
+
+    def cancel_lookup(self, lookup_id: str) -> None:
+        """Mark lookup as aborted. Cleanup will happen after task finishes."""
+        self.aborted_lookups.add(lookup_id)
+
+    def _cleanup_finished_aborted_lookups(self) -> None:
+        """Check for finished aborted lookups and send cleanup messages to workers."""
+        # A lookup whose status is None is still loading.
+        # We wait for it to finish before cleanup.
+        finished_lookups = [
+            lookup_id
+            for lookup_id in self.aborted_lookups
+            if self.reqs_status.get(lookup_id) is not None
+        ]
+        if finished_lookups:
+            self.aborted_lookups.difference_update(finished_lookups)
+
+        # Tell the server to free the reserved memory buffers for each aborted lookup.
+        for lookup_id in finished_lookups:
+            self._send_cleanup_message(lookup_id)
+            self.clear_lookup_status(lookup_id)
+
+    def _send_cleanup_message(self, lookup_id: str) -> None:
+        """Send cleanup message to workers to release memory objects."""
+        msg = LookupCleanupMsg(lookup_id=lookup_id)
+        msg_buf = msgspec.msgpack.encode(msg)
+
+        for i in range(self.world_size):
+            self.push_sockets[i].send(msg_buf, copy=False)
+        logger.debug("Sent cleanup message for lookup_id=%s", lookup_id)
 
     def supports_producer_reuse(self) -> bool:
         """Return True as LMCacheLookupClient supports producer kvcache reuse"""
@@ -263,23 +296,29 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             self.pull_socket.close(linger=0)  # type: ignore[arg-type]
             self.ctx.term()
         except Exception as e:
-            logger.warning(f"Failed to join thread during close: {e}")
+            logger.warning("Failed to join thread during close: %s", e)
 
 
 class LMCacheAsyncLookupServer:
     """ZMQ-based async lookup server that handles lookup and prefetch
     requests using LMCacheEngine."""
 
-    def __init__(self, lmcache_engine: LMCacheEngine, vllm_config: "VllmConfig"):
+    def __init__(
+        self,
+        lmcache_engine: LMCacheEngine,
+        metadata: LMCacheMetadata,
+    ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        rpc_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache_rpc_port", 0
+        kv_connector_extra_config = metadata.kv_connector_extra_config or {}
+        rpc_port = kv_connector_extra_config.get("lmcache_rpc_port", 0)
+        assert metadata.engine_id is not None, (
+            "engine_id is required for RPC communication"
         )
         worker_socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup_worker", rpc_port, vllm_config.parallel_config.rank
+            metadata.engine_id, "lookup_worker", rpc_port, metadata.worker_id
         )
         scheduler_socket_path = get_zmq_rpc_path_lmcache(
-            vllm_config, "lookup_scheduler", rpc_port, 0
+            metadata.engine_id, "lookup_scheduler", rpc_port, 0
         )
         self.push_socket = get_zmq_socket(
             self.ctx,
@@ -301,11 +340,15 @@ class LMCacheAsyncLookupServer:
 
         logger.info(
             "lmcache lookup server start with"
-            f" scheduler socket path {scheduler_socket_path}, "
-            f"worker socket path {worker_socket_path}"
+            " scheduler socket path %s, "
+            "worker socket path %s",
+            scheduler_socket_path,
+            worker_socket_path,
         )
         self.thread = threading.Thread(
-            target=self.process_requests_from_scheduler, daemon=True
+            target=self.process_requests_from_scheduler,
+            daemon=True,
+            name="async-lookup-server-thread",
         )
         self.thread.start()
 
@@ -313,9 +356,11 @@ class LMCacheAsyncLookupServer:
         while self.running:
             try:
                 msg_buf = self.pull_socket.recv(copy=False)
+                # rely on msgspec to automatically discriminate
+                # between LookupRequestMsg and LookupCleanupMsg
                 msg = msgspec.msgpack.decode(
                     msg_buf,
-                    type=LookupRequestMsg,
+                    type=Union[LookupRequestMsg, LookupCleanupMsg],
                 )
 
                 if isinstance(msg, LookupRequestMsg):
@@ -327,11 +372,16 @@ class LMCacheAsyncLookupServer:
                         pin=True,
                         request_configs=msg.request_configs,
                     )
+
+                elif isinstance(msg, LookupCleanupMsg):
+                    # Handle cleanup request - release memory objects for aborted lookup
+                    self.lmcache_engine.cleanup_memory_objs(msg.lookup_id)
+
                 else:
-                    logger.warning(f"Unknown message type: {type(msg)}")
+                    logger.warning("Unknown message type: %s", type(msg))
 
             except Exception as e:
-                logger.error(f"Error processing request from scheduler: {e}")
+                logger.error("Error processing request from scheduler: %s", e)
 
     def send_response_to_scheduler(self, lookup_id: str, num_hit_tokens: int):
         # Create structured response message
@@ -349,9 +399,8 @@ class LMCacheAsyncLookupServer:
         try:
             if self.thread.is_alive():
                 self.thread.join(timeout=1.0)
-            for s in self.push_sockets:
-                s.close(linger=0)  # type: ignore[arg-type]
+            self.push_socket.close(linger=0)  # type: ignore[arg-type]
             self.pull_socket.close(linger=0)  # type: ignore[arg-type]
             self.ctx.term()
         except Exception as e:
-            logger.warning(f"Failed to join thread during close: {e}")
+            logger.warning("Failed to join thread during close: %s", e)

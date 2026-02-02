@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import abc
 import asyncio
 
@@ -9,7 +9,6 @@ import asyncio
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -17,6 +16,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party
@@ -73,12 +73,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Union[List[Future], None]:
         """
         An async function to put the MemoryObj into the storage backend.
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObjs.
         :param List[MemoryObj] objs: The MemoryObjs to be stored.
+        :param Any transfer_spec: Optional transfer specification.
+        :param on_complete_callback: Optional callback invoked once per key
+            after the backend finishes persisting the KV chunk for that key.
+            For batched puts, the callback is invoked separately for each key
+            when that key completes (not once per batch). Callback exceptions
+            are caught and logged. Backends that cannot use this callback may
+            ignore it.
 
         :return:  Union[List[Future], None]: A list of `Future` objects if the
         storage persistence operation is asynchronous and is successful.
@@ -96,9 +104,13 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         An async version of batched_submit_put_task.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after the backend finishes persisting the KV chunk for that key.
         """
         raise NotImplementedError
 
@@ -256,15 +268,11 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-    def support_batched_contains(self) -> bool:
-        return False
-
     def batched_contains(
         self,
         keys: List[CacheEngineKey],
         pin: bool = False,
-        stop_after_first_not_exits: bool = True,
-    ) -> List[bool]:
+    ) -> int:
         """
         Check whether the keys are in the storage backend.
 
@@ -274,12 +282,14 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
             If True, the corresponding KV cache will be
             pinned in the storage backend.
 
-        :param bool stop_after_first_not_exits: Stop when find the first not exists key,
-        all subsequent results will return False directly.
-
-        :return: Return a bool list, True if the key exists, False otherwise.
+        :return: Return hit chunks by prefix match.
         """
-        raise NotImplementedError
+        hit_chunks = 0
+        for key in keys:
+            if not self.contains(key, pin):
+                break
+            hit_chunks += 1
+        return hit_chunks
 
 
 class AllocatorBackendInterface(StorageBackendInterface):
@@ -290,7 +300,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
 
     @abc.abstractmethod
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> MemoryAllocatorInterface:
         """
         Create the correct memory allocator for the current storage backend
@@ -315,8 +325,8 @@ class AllocatorBackendInterface(StorageBackendInterface):
     @abc.abstractmethod
     def allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
         busy_loop: bool = True,
@@ -324,8 +334,10 @@ class AllocatorBackendInterface(StorageBackendInterface):
         """
         Allocates memory in the backend to hold a tensor of the given shape.
 
-        :param torch.Size shape: The shape of the tensor to allocate.
-        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param Union[torch.Size, list[torch.Size]] shapes:
+            The shape of the tensor to allocate.
+        :param Union[torch.dtype, list[torch.dtype]] dtypes:
+            The dtype of the tensor to allocate.
         :param MemoryFormat fmt: The format of the memory to allocate.
         :param bool eviction: whether to enable eviction when allocating.
         :param bool busy_loop: whether to enable a busy loop to wait
@@ -342,8 +354,8 @@ class AllocatorBackendInterface(StorageBackendInterface):
     @abc.abstractmethod
     def batched_allocate(
         self,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         eviction: bool = True,
@@ -354,8 +366,10 @@ class AllocatorBackendInterface(StorageBackendInterface):
         in a batched manner. The allocated memory objects will have the same
         shape, dtype, and format.
 
-        :param torch.Size shape: The shape of the tensor to allocate.
-        :param torch.dtype dtype: The dtype of the tensor to allocate.
+        :param Union[torch.Size, list[torch.Size]] shapes:
+            The shape of the tensor to allocate.
+        :param Union[torch.dtype, list[torch.dtype]] dtypes:
+            The dtype of the tensor to allocate.
         :param int batch_size: The number of memory objects to allocate.
         :param MemoryFormat fmt: The format of the memory to allocate.
         :param bool eviction: whether to enable eviction when allocating.
@@ -377,7 +391,7 @@ class AllocatorBackendInterface(StorageBackendInterface):
         raise NotImplementedError
 
 
-class ConfigurableStorageBackendInterface(StorageBackendInterface):
+class StoragePluginInterface(StorageBackendInterface):
     """The Configurable Storage Backend Interface needs to be implemented
     when you want to add a storage backend in a configurable or plug and play
     fashion."""
@@ -386,7 +400,7 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
         self,
         dst_device: str = "cuda",
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
@@ -398,7 +412,7 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
             (e.g., "cuda" or "cpu").
         :param LMCacheEngineConfig config: Optional configuration object for the
             cache engine.
-        :param LMCacheEngineMetadata metadata: Optional metadata describing the cache
+        :param LMCacheMetadata metadata: Optional metadata describing the cache
             engine state or version.
         :param LocalCPUBackend local_cpu_backend: Optional backend for local CPU-based
             inference or caching.
@@ -410,3 +424,7 @@ class ConfigurableStorageBackendInterface(StorageBackendInterface):
         self.metadata = metadata
         self.local_cpu_backend = local_cpu_backend
         self.loop = loop
+
+
+# TODO: Alias for backwards compatibility - remove when applicable
+ConfigurableStorageBackendInterface = StoragePluginInterface

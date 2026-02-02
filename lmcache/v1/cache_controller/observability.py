@@ -96,6 +96,40 @@ class PrometheusLogger:
             multiprocess_mode="livemostrecent",
         ).labels(**self.labels)
 
+        # Sequence number discontinuity metrics
+        self.kv_op_seq_discontinuity_count = self._gauge_cls(
+            name="lmcache:cache_controller_kv_op_seq_discontinuity_count",
+            documentation="Total count of KV operation sequence number discontinuities",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
+        # Full sync metrics
+        self.full_sync_workers_syncing = self._gauge_cls(
+            name="lmcache:cache_controller_full_sync_workers_syncing",
+            documentation="Number of workers currently in full sync",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.full_sync_workers_completed = self._gauge_cls(
+            name="lmcache:cache_controller_full_sync_workers_completed",
+            documentation="Number of workers that have completed full sync",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.full_sync_global_progress = self._gauge_cls(
+            name="lmcache:cache_controller_full_sync_global_progress",
+            documentation="Global full sync progress (0.0 to 1.0)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.full_sync_missing_batches_total = self._gauge_cls(
+            name="lmcache:cache_controller_full_sync_missing_batches_total",
+            documentation="Total count of missing batches across all syncing workers",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+
     @staticmethod
     def GetOrCreate(
         labels: dict,
@@ -168,5 +202,7 @@ class SocketMetricsContext:
             getattr(self.manager, self.active_attr) - self.message_count,
         )
         if exc_type is not None:
-            logger.error(f"Controller Manager error: {exc_val}")
+            logger.error(
+                "Controller Manager error", exc_info=(exc_type, exc_val, exc_tb)
+            )
         return False

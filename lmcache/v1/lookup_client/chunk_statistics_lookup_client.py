@@ -121,7 +121,11 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
         start_time = time.time()
-        result = self.actual_lookup_client.lookup(token_ids, lookup_id, request_configs)
+        result = self.actual_lookup_client.lookup(
+            token_ids,
+            lookup_id,
+            request_configs,
+        )
         lookup_elapsed = time.time() - start_time
         with self.lock:
             self.lookup_time += lookup_elapsed
