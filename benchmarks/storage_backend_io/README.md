@@ -24,7 +24,8 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 
 ### Notes
 
-- If `--raw-device` is not provided, the benchmark uses a temporary file. This is safe but **not** representative of true raw block performance.
+- If `--raw-device` is not provided, the benchmark creates `raw_block.bin` in the same `--local-disk-dir` so both backends use the same filesystem.
+- This is safe but **not** representative of true raw block performance.
 - `--raw-odirect` should only be used with a real block device that supports O_DIRECT.
 - Local disk backend uses its internal worker pool; completion is tracked via callbacks.
 
@@ -50,6 +51,15 @@ Sanity run (output directory path):
 |-----------------|-------------|---------|
 | local_disk      | 0.065       | 1979.01 |
 | rust_raw_block  | 0.041       | 3106.64 |
+
+Same-filesystem run (raw_block.bin inside local disk dir):
+- num_ops: 512
+- concurrency: 32
+
+| Backend         | Elapsed (s) | Ops/sec |
+|-----------------|-------------|---------|
+| local_disk      | 0.316       | 1622.73 |
+| rust_raw_block  | 0.096       | 5327.97 |
 
 > Results are machine- and device-dependent. Use real block devices and O_DIRECT for production-grade comparison.
 

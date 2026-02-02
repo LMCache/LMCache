@@ -161,6 +161,7 @@ def _bench_rust_raw_block(
     raw_device_size_gb: float,
     use_odirect: bool,
     alignment: int,
+    cleanup_raw_device: bool,
 ) -> dict:
     loop, t = _start_loop()
     metadata = _build_metadata()
@@ -171,11 +172,12 @@ def _bench_rust_raw_block(
         lmcache_instance_id="bench_rust_raw_block",
     )
 
-    # Create a temp backing file if raw_device not provided
+    # Create a backing file if raw_device not provided.
     temp_dir: Optional[str] = None
     if not raw_device:
         temp_dir = tempfile.mkdtemp(prefix="raw_block_bench_")
         raw_device = os.path.join(temp_dir, "raw_block.bin")
+    if raw_device:
         with open(raw_device, "wb") as f:
             f.truncate(int(raw_device_size_gb * 1024**3))
 
@@ -231,13 +233,17 @@ def _bench_rust_raw_block(
     backend.close()
     _stop_loop(loop, t)
 
-    # Best-effort cleanup for temp file
-    if temp_dir:
+    # Best-effort cleanup for temp file or requested cleanup.
+    if cleanup_raw_device or temp_dir:
         try:
             os.remove(raw_device)
-            os.rmdir(temp_dir)
         except Exception:
             pass
+        if temp_dir:
+            try:
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
 
     return {
         "backend": "rust_raw_block",
@@ -309,14 +315,21 @@ def main() -> None:
         )
 
     if args.backend in ("rust_raw_block", "both"):
+        raw_device = args.raw_device
+        cleanup_raw_device = False
+        if not raw_device:
+            # Use the same filesystem as local disk backend for apples-to-apples.
+            raw_device = os.path.join(args.local_disk_dir, "raw_block.bin")
+            cleanup_raw_device = True
         results.append(
             _bench_rust_raw_block(
                 num_ops=args.num_ops,
                 concurrency=args.concurrency,
-                raw_device=args.raw_device,
+                raw_device=raw_device,
                 raw_device_size_gb=args.raw_device_size_gb,
                 use_odirect=args.raw_odirect,
                 alignment=args.alignment,
+                cleanup_raw_device=cleanup_raw_device,
             )
         )
 
