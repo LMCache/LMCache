@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, no_type_check
 import asyncio
 import os
+import uuid
 
 # Third Party
 import aiofiles
@@ -135,10 +136,12 @@ class FSConnector(RemoteConnector):
         base_path = self._get_base_path(key)
         file_name = self._get_file_name(key)
         file_path = base_path / file_name
+        unique_suffix = f".tmp.{os.getpid()}.{uuid.uuid4().hex}"
+        tmp_name = f"{file_name}{unique_suffix}"
         if self.relative_tmp_dir is not None:
-            tmp_path = base_path / self.relative_tmp_dir / file_name
+            tmp_path = base_path / self.relative_tmp_dir / tmp_name
         else:
-            tmp_path = file_path.with_suffix(".tmp")
+            tmp_path = file_path.with_name(tmp_name)
         return file_path, tmp_path
 
     async def exists(self, key: CacheEngineKey) -> bool:

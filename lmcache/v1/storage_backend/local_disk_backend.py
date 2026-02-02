@@ -7,6 +7,7 @@ import asyncio
 import os
 import threading
 import time
+import uuid
 
 # Third Party
 import torch
@@ -142,6 +143,14 @@ class LocalDiskBackend(StorageBackendInterface):
             self.use_odirect = config.extra_config.get("use_odirect", False)
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
 
+        self.missing_recheck_ttl_sec = 1.0
+        if config.extra_config is not None:
+            self.missing_recheck_ttl_sec = float(
+                config.extra_config.get("local_disk_missing_recheck_ttl_sec", 1.0)
+            )
+        self.missing_recheck_ttl_sec = max(0.0, self.missing_recheck_ttl_sec)
+        self._missing_until: dict[CacheEngineKey, float] = {}
+
         self.disk_worker = LocalDiskWorker(loop)
 
         # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
@@ -182,9 +191,27 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> str:
         return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
 
+    def _tmp_path_for_path(self, path: str) -> str:
+        path_obj = Path(path)
+        tmp_name = f"{path_obj.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+        return str(path_obj.with_name(tmp_name))
+
+    def _is_temporarily_missing_locked(self, key: CacheEngineKey) -> bool:
+        if self.missing_recheck_ttl_sec <= 0:
+            return False
+        until = self._missing_until.get(key)
+        if until is None:
+            return False
+        if until <= time.time():
+            self._missing_until.pop(key, None)
+            return False
+        return True
+
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
             if key not in self.dict:
+                return False
+            if self._is_temporarily_missing_locked(key):
                 return False
             if pin:
                 self.dict[key].pin()
@@ -207,7 +234,7 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> bool:
         with self.disk_lock:
-            if key in self.dict:
+            if key in self.dict and not self._is_temporarily_missing_locked(key):
                 self.dict[key].pin()
                 return True
             else:
@@ -236,6 +263,7 @@ class LocalDiskBackend(StorageBackendInterface):
             if force:
                 self.disk_lock.release()
             return False
+        self._missing_until.pop(key, None)
 
         path = meta.path
         size = meta.size
@@ -277,6 +305,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         has_stored = False
         with self.disk_lock:
+            self._missing_until.pop(key, None)
             if key in self.dict:
                 # Update cache recency
                 self.cache_policy.update_on_hit(key, self.dict)
@@ -393,6 +422,9 @@ class LocalDiskBackend(StorageBackendInterface):
         if key not in self.dict:
             self.disk_lock.release()
             return None
+        if self._is_temporarily_missing_locked(key):
+            self.disk_lock.release()
+            return None
 
         # Update cache recency
         self.cache_policy.update_on_hit(key, self.dict)
@@ -474,6 +506,8 @@ class LocalDiskBackend(StorageBackendInterface):
         with self.disk_lock:
             for key in keys:
                 if key not in self.dict:
+                    return num_hit_counts
+                if self._is_temporarily_missing_locked(key):
                     return num_hit_counts
                 if pin:
                     self.dict[key].pin()
@@ -589,16 +623,35 @@ class LocalDiskBackend(StorageBackendInterface):
         lock_path = lock_path_for_file(Path(path))
         start_time = time.time()
         size = len(buffer)
+        tmp_path = self._tmp_path_for_path(path)
         with exclusive_flock(lock_path):
             if os.path.exists(path):
                 return
-            if size % self.os_disk_bs != 0 or not self.use_odirect:
-                with open(path, "wb") as f:
-                    f.write(buffer)
-            else:
-                fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-                os.write(fd, buffer)
-                os.close(fd)
+            try:
+                if size % self.os_disk_bs != 0 or not self.use_odirect:
+                    with open(tmp_path, "wb") as f:
+                        f.write(buffer)
+                else:
+                    fd = os.open(
+                        tmp_path,
+                        os.O_CREAT | os.O_WRONLY | os.O_DIRECT,
+                        0o644,
+                    )
+                    os.write(fd, buffer)
+                    os.close(fd)
+
+                try:
+                    os.replace(tmp_path, path)
+                except FileNotFoundError:
+                    if os.path.exists(path):
+                        return
+                    raise
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "
@@ -625,8 +678,12 @@ class LocalDiskBackend(StorageBackendInterface):
                     fdo.readinto(buffer)
         except FileNotFoundError:
             logger.warning(f"File not found on disk: {path}")
-            if self.dict.get(key, None):
-                self.dict.pop(key)
+            if self.missing_recheck_ttl_sec > 0:
+                with self.disk_lock:
+                    if key in self.dict:
+                        self._missing_until[key] = (
+                            time.time() + self.missing_recheck_ttl_sec
+                        )
             return
 
         disk_read_time = time.time() - start_time
