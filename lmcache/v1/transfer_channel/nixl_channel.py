@@ -369,7 +369,8 @@ class NixlChannel(BaseTransferChannel):
         if isinstance(objects[0], MemoryObj):
             for mem_obj in objects:
                 assert isinstance(mem_obj, MemoryObj)
-                local_indices.append(mem_obj.meta.address)
+                page_index = mem_obj.meta.address // self.nixl_wrapper.page_size
+                local_indices.append(page_index)
         elif isinstance(objects[0], bytes):
             raise NotImplementedError(
                 "Sending raw bytes is not supported in NIXL channel"
