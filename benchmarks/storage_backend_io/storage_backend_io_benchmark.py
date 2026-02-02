@@ -287,7 +287,12 @@ def main() -> None:
         help="Enable O_DIRECT for raw block backend",
     )
     parser.add_argument("--alignment", type=int, default=4096)
-    parser.add_argument("--output-json", type=str, default="")
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default="",
+        help="Output JSON file path or directory",
+    )
 
     args = parser.parse_args()
 
@@ -324,8 +329,15 @@ def main() -> None:
         )
 
     if args.output_json:
-        with open(args.output_json, "w") as f:
+        output_path = args.output_json
+        if output_path.endswith(os.sep) or os.path.isdir(output_path):
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(
+                output_path, f"storage_backend_io_{ts}.json"
+            )
+        with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
+        print(f"Wrote results to {output_path}")
 
 
 if __name__ == "__main__":
