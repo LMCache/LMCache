@@ -44,6 +44,13 @@ def _has_working_new_shared_cuda() -> bool:
         return False
 
 
+if not _has_working_new_shared_cuda():
+    pytest.skip(
+        "new_shared_cuda is not available or not working on this system",
+        allow_module_level=True,
+    )
+
+
 def initialize_kv_cache(
     device: torch.device,
     num_pages: int = 1024,
@@ -251,10 +258,6 @@ def test_server_running(server_process: mp.Process):
     not torch.cuda.is_available(),
     reason="Register/Unregister KV cache requires CUDA",
 )
-@pytest.mark.skipif(
-    not _has_working_new_shared_cuda(),
-    reason="new_shared_cuda is not available or not working on this system",
-)
 def test_register_unregister_kv_cache(
     client: MessageQueueClient, client_context: ClientContext
 ):
@@ -285,10 +288,6 @@ def test_register_unregister_kv_cache(
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Store and Lookup require CUDA",
-)
-@pytest.mark.skipif(
-    not _has_working_new_shared_cuda(),
-    reason="new_shared_cuda is not available or not working on this system",
 )
 def test_store_and_lookup(
     client: MessageQueueClient,
@@ -338,10 +337,6 @@ def test_store_and_lookup(
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Store, Retrieve, and Verify require CUDA",
-)
-@pytest.mark.skipif(
-    not _has_working_new_shared_cuda(),
-    reason="new_shared_cuda is not available or not working on this system",
 )
 def test_store_retrieve_verify(
     client: MessageQueueClient,
@@ -404,10 +399,6 @@ def test_store_retrieve_verify(
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Partial miss retrieval requires CUDA",
-)
-@pytest.mark.skipif(
-    not _has_working_new_shared_cuda(),
-    reason="new_shared_cuda is not available or not working on this system",
 )
 def test_retrieve_partial_miss(
     client: MessageQueueClient,
@@ -478,10 +469,6 @@ def test_retrieve_partial_miss(
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Multiple retrieve operations require CUDA",
-)
-@pytest.mark.skipif(
-    not _has_working_new_shared_cuda(),
-    reason="new_shared_cuda is not available or not working on this system",
 )
 def test_multiple_retrieve_operations(
     client: MessageQueueClient,
@@ -577,10 +564,6 @@ def test_multiple_retrieve_operations(
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Multiple store operations require CUDA",
-)
-@pytest.mark.skipif(
-    not _has_working_new_shared_cuda(),
-    reason="new_shared_cuda is not available or not working on this system",
 )
 def test_multiple_store_operations(
     client: MessageQueueClient,
