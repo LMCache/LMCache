@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
@@ -25,6 +26,10 @@ from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.connector._file_lock import (
+    exclusive_flock,
+    lock_path_for_file,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -581,15 +586,19 @@ class LocalDiskBackend(StorageBackendInterface):
         return memory_obj
 
     def write_file(self, buffer, path):
+        lock_path = lock_path_for_file(Path(path))
         start_time = time.time()
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
-            with open(path, "wb") as f:
-                f.write(buffer)
-        else:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, buffer)
-            os.close(fd)
+        with exclusive_flock(lock_path):
+            if os.path.exists(path):
+                return
+            if size % self.os_disk_bs != 0 or not self.use_odirect:
+                with open(path, "wb") as f:
+                    f.write(buffer)
+            else:
+                fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
+                os.write(fd, buffer)
+                os.close(fd)
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "

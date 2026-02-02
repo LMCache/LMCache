@@ -16,6 +16,10 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.connector._file_lock import (
+    async_exclusive_flock,
+    lock_path_for_file,
+)
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
@@ -296,47 +300,57 @@ class FSConnector(RemoteConnector):
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
         final_path, temp_path = self._get_file_and_tmp_path(key)
+        lock_path = lock_path_for_file(final_path)
 
         try:
-            # Prepare metadata
-            buffer = memory_obj.byte_array
-            metadata = (
-                RemoteMetadata(
-                    len(buffer),
-                    memory_obj.get_shapes(),
-                    memory_obj.get_dtypes(),
-                    memory_obj.get_memory_format(),
-                )
-                if self.save_chunk_meta
-                else None
-            )
+            async with async_exclusive_flock(lock_path):
+                if await aiofiles.os.path.exists(final_path):
+                    return
 
-            size = len(buffer)
-            do_use_odirect = self.use_odirect
-            if do_use_odirect:
-                fblock_aligned = self.os_disk_bs > 0 and size % self.os_disk_bs == 0
-                if not fblock_aligned:
-                    logger.warning(
-                        f"Cannot use O_DIRECT for writing size {size}, "
-                        f"which is not aligned to block size {self.os_disk_bs}."
+                # Prepare metadata
+                buffer = memory_obj.byte_array
+                metadata = (
+                    RemoteMetadata(
+                        len(buffer),
+                        memory_obj.get_shapes(),
+                        memory_obj.get_dtypes(),
+                        memory_obj.get_memory_format(),
                     )
-                    do_use_odirect = False
-
-            if do_use_odirect:
-                # Use Direct I/O
-                await self.loop.run_in_executor(
-                    None, self._put_with_odirect, temp_path, buffer
+                    if self.save_chunk_meta
+                    else None
                 )
-            else:
-                # Use standard async I/O
-                # Write to file (metadata + data)
-                async with aiofiles.open(temp_path, "wb") as f:
-                    if metadata is not None:
-                        await f.write(metadata.serialize())
-                    await f.write(buffer)
 
-            # Atomically rename temp file to final destination
-            await aiofiles.os.replace(temp_path, final_path)
+                size = len(buffer)
+                do_use_odirect = self.use_odirect
+                if do_use_odirect:
+                    fblock_aligned = self.os_disk_bs > 0 and size % self.os_disk_bs == 0
+                    if not fblock_aligned:
+                        logger.warning(
+                            f"Cannot use O_DIRECT for writing size {size}, "
+                            f"which is not aligned to block size {self.os_disk_bs}."
+                        )
+                        do_use_odirect = False
+
+                if do_use_odirect:
+                    # Use Direct I/O
+                    await self.loop.run_in_executor(
+                        None, self._put_with_odirect, temp_path, buffer
+                    )
+                else:
+                    # Use standard async I/O
+                    # Write to file (metadata + data)
+                    async with aiofiles.open(temp_path, "wb") as f:
+                        if metadata is not None:
+                            await f.write(metadata.serialize())
+                        await f.write(buffer)
+
+                # Atomically rename temp file to final destination
+                try:
+                    await aiofiles.os.replace(temp_path, final_path)
+                except FileNotFoundError:
+                    if await aiofiles.os.path.exists(final_path):
+                        return
+                    raise
 
         except Exception as e:
             logger.error(f"Failed to write file {final_path}: {str(e)}")
