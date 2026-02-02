@@ -108,9 +108,9 @@ class StorageManager:
                 memory objects corresponding to the requested keys.
 
         Note:
-            If any object is not found in L1 storage, None is yielded. This function
-            will release release the read lock of all successfully read memory objects
-            when exiting the context.
+            If any object is not found in L1 storage, None is yielded. In this case,
+            this function will release release the read lock of all successfully read
+            memory objects when exiting the context.
 
             If the caller raised exception during the processing of the yielded memory
             objects, this function will ensure that the read locks will be decreased.
@@ -132,19 +132,20 @@ class StorageManager:
             good_keys.append(k)
             good_objs.append(o)
 
+        successfully_yielded = False
+
         try:
             yield good_objs if all_good else None
+            successfully_yielded = True
         except Exception as e:
             logger.warning(
                 "Exception occurred while processing read prefetched results: %s",
                 str(e),
             )
-            # Decrease the read lock for all successfully read memory objects
-            self._l1_manager.finish_read(good_keys)
         finally:
             # Decrease the read lock for all successfully read memory objects
-            # if not all good
-            if not all_good:
+            # if None is yielded or exception occurs during caller's processing
+            if not all_good or not successfully_yielded:
                 self._l1_manager.finish_read(good_keys)
 
     def finish_read_prefetched(
