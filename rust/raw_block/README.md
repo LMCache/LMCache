@@ -13,8 +13,8 @@ maturin develop --release
 ## Features
 
 - Direct block device access with O_DIRECT support
-- Batch read/write operations (preadv/pwritev)
-- Optional asynchronous I/O via multi-process mode
+- Synchronous `pread` / `pwrite` only (no `preadv`/`pwritev`)
+- No async I/O; `py.allow_threads` releases the GIL but still blocks the OS thread
 
 ## Usage
 
