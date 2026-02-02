@@ -694,6 +694,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         fi
     fi
 
+    sleep 60
     cleanup 0
 done
 
