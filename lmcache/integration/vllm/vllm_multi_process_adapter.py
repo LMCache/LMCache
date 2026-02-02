@@ -70,10 +70,16 @@ def get_lmcache_chunk_size(
 @dataclass
 class LoadStoreOp:
     token_ids: list[int]
-    """Token IDs for the load/store operation (server computes hashes)"""
+    """Token IDs for the load/store operation (full token sequence)"""
 
     block_ids: list[int]
     """Block ids for the load/store operation"""
+
+    start: int = 0
+    """Start token index"""
+
+    end: int = 0
+    """End token index"""
 
     def __len__(self) -> int:
         return len(self.block_ids)
@@ -210,13 +216,17 @@ class LMCacheMPSchedulerAdapter:
         )
 
     # Helper functions
-    def _create_key(self, token_ids: list[int]) -> IPCCacheEngineKey:
+    def _create_key(
+        self, token_ids: list[int], start: int = 0, end: int = 0
+    ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
             token_ids=tuple(token_ids),
+            start=start,
+            end=end,
         )
 
 
@@ -295,7 +305,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        key = self._create_key(op.token_ids)
+        key = self._create_key(op.token_ids, op.start, op.end)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
@@ -317,7 +327,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        key = self._create_key(op.token_ids)
+        key = self._create_key(op.token_ids, op.start, op.end)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
@@ -343,7 +353,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = [self._create_key(op.token_ids) for op in ops]
+        keys = [self._create_key(op.token_ids, op.start, op.end) for op in ops]
         block_ids = []
         for op in ops:
             block_ids.extend(op.block_ids)
@@ -372,7 +382,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = [self._create_key(op.token_ids) for op in ops]
+        keys = [self._create_key(op.token_ids, op.start, op.end) for op in ops]
         block_ids = []
         for op in ops:
             block_ids.extend(op.block_ids)
@@ -495,11 +505,15 @@ class LMCacheMPWorkerAdapter:
 
         return safe_finished_s
 
-    def _create_key(self, token_ids: list[int]) -> IPCCacheEngineKey:
+    def _create_key(
+        self, token_ids: list[int], start: int = 0, end: int = 0
+    ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
             token_ids=tuple(token_ids),
+            start=start,
+            end=end,
         )

@@ -569,8 +569,8 @@ class MPCacheEngine:
 
         for request_id, key in zip(request_ids, keys):
             session = self.session_manager.get_or_create(request_id)
-            new_hashes = session.append_tokens_and_hash(
-                list(key.token_ids), self.token_hasher
+            new_hashes = session.set_tokens_and_hash_range(
+                list(key.token_ids), key.start, key.end, self.token_hasher
             )
 
             hash_keys = [
@@ -631,9 +631,19 @@ class MPCacheEngine:
 
         for request_id, key in zip(request_ids, keys):
             session = self.session_manager.get_or_create(request_id)
-            session.compute_all_hashes(list(key.token_ids), self.token_hasher)
+            range_hashes = session.set_tokens_and_hash_range(
+                list(key.token_ids), key.start, key.end, self.token_hasher
+            )
 
-            hash_keys = key.to_hash_keys(self.token_hasher)
+            hash_keys = [
+                IPCCacheEngineHashKey(
+                    model_name=key.model_name,
+                    world_size=key.world_size,
+                    worker_id=key.worker_id,
+                    chunk_hash=TokenHasher.hash_to_bytes(h),
+                )
+                for h in range_hashes
+            ]
             combined_hash_keys.extend(hash_keys)
 
         if not combined_hash_keys:

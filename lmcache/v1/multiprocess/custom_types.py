@@ -158,6 +158,8 @@ class IPCCacheEngineKey:
     world_size: int
     worker_id: int
     token_ids: tuple[int, ...]  # frozen tuple for hashability
+    start: int = 0
+    end: int = 0
 
     def to_hash_keys(self, hasher: "TokenHasher") -> list[IPCCacheEngineHashKey]:
         """Compute chunk hashes and return one IPCCacheEngineHashKey per chunk."""

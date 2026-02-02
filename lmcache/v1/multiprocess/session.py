@@ -28,28 +28,37 @@ class Session:
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
 
-    def append_tokens_and_hash(
-        self, new_token_ids: list[int], hasher: TokenHasher
+    def set_tokens_and_hash_range(
+        self, full_token_ids: list[int], start: int, end: int,
+        hasher: TokenHasher,
     ) -> list:
-        """Append tokens, compute hashes for any newly complete chunks.
+        """Idempotently set tokens, compute hashes up to end, return hashes
+        for [start, end).
+
+        - Sets token_ids (idempotent, not append)
+        - Computes rolling hashes up to end_chunk using cached prefix state
+        - Returns chunk hashes for the [start_chunk, end_chunk) range
+        - Safe to call multiple times: already-computed chunks are skipped
 
         Args:
-            new_token_ids: New tokens to append (incremental).
+            full_token_ids: Complete token sequence (replaces, not extends).
+            start: Start token index.
+            end: End token index.
             hasher: TokenHasher instance for hash computation.
 
         Returns:
-            List of newly computed hash values.
+            List of hash values for chunks in [start_chunk, end_chunk).
         """
-        self.token_ids.extend(new_token_ids)
+        self.token_ids = full_token_ids
 
-        new_hashes = []
         chunk_size = hasher.chunk_size
-        total_complete = len(self.token_ids) - len(self.token_ids) % chunk_size
+        start_chunk = start // chunk_size
+        end_chunk = end // chunk_size
 
-        while self.num_chunks_processed * chunk_size < total_complete:
-            start = self.num_chunks_processed * chunk_size
-            end = start + chunk_size
-            chunk = self.token_ids[start:end]
+        while self.num_chunks_processed < end_chunk:
+            cs = self.num_chunks_processed * chunk_size
+            ce = cs + chunk_size
+            chunk = self.token_ids[cs:ce]
 
             prefix = (
                 self.last_prefix_hash
@@ -59,10 +68,9 @@ class Session:
             h = hasher.hash_tokens(chunk, prefix)
             self.last_prefix_hash = h
             self.chunk_hashes.append(h)
-            new_hashes.append(h)
             self.num_chunks_processed += 1
 
-        return new_hashes
+        return self.chunk_hashes[start_chunk:end_chunk]
 
     def compute_all_hashes(
         self, token_ids: list[int], hasher: TokenHasher
@@ -81,7 +89,10 @@ class Session:
         self.last_prefix_hash = None
         self.num_chunks_processed = 0
 
-        return self.append_tokens_and_hash([], hasher)
+        total_tokens = len(self.token_ids)
+        return self.set_tokens_and_hash_range(
+            self.token_ids, 0, total_tokens, hasher
+        )
 
 
 class SessionManager:
