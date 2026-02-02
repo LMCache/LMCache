@@ -18,6 +18,9 @@ from lmcache.v1.multiprocess.distributed.api import (
 from lmcache.v1.multiprocess.distributed.config import StorageManagerConfig
 from lmcache.v1.multiprocess.distributed.error import L1Error, strerror
 from lmcache.v1.multiprocess.distributed.l1_manager import L1Manager
+from lmcache.v1.multiprocess.distributed.storage_controllers import (
+    EvictionController,
+)
 
 logger = init_logger(__name__)
 
@@ -31,6 +34,13 @@ class PrefetchHandle:
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
+
+        # Eviction controller
+        self._eviction_controller = EvictionController(
+            l1_manager=self._l1_manager,
+            eviction_config=config.eviction_config,
+        )
+        self._eviction_controller.start()
 
     # External APIs for serving engine integration code to call
     def reserve_write(
@@ -219,6 +229,7 @@ class StorageManager:
         """
         Close the storage manager and release all resources.
         """
+        self._eviction_controller.stop()
         self._l1_manager.close()
 
     # Functions for debugging and testing

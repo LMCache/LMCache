@@ -36,9 +36,9 @@ from lmcache.v1.multiprocess.distributed.api import (
     ipc_keys_to_object_keys,
 )
 from lmcache.v1.multiprocess.distributed.config import (
-    L1ManagerConfig,
-    L1MemoryManagerConfig,
     StorageManagerConfig,
+    add_storage_manager_args,
+    parse_args_to_config,
 )
 from lmcache.v1.multiprocess.distributed.storage_manager import StorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
@@ -587,12 +587,11 @@ def add_handler_helper(
 
 
 def run_cache_server(
+    storage_manager_config: StorageManagerConfig,
     host: str = "localhost",
     port: int = 5555,
     chunk_size: int = 256,
-    cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
-    disable_lazy_alloc: bool = False,
     return_engine: bool = False,
 ):
     """
@@ -612,16 +611,6 @@ def run_cache_server(
         If return_engine is False: None (blocks until interrupted)
     """
     # Initialize the engine
-    l1_memory_cfg = L1MemoryManagerConfig(
-        size_in_bytes=int(cpu_buffer_size * 1024**3),
-        use_lazy=not disable_lazy_alloc,
-    )
-    storage_manager_config = StorageManagerConfig(
-        l1_manager_config=L1ManagerConfig(
-            memory_config=l1_memory_cfg,
-            # Use default TTLs
-        )
-    )
     engine = MPCacheEngine(
         storage_manager_config=storage_manager_config,
         chunk_size=chunk_size,
@@ -679,25 +668,26 @@ def parse_args():
         "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
     )
     parser.add_argument(
-        "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
-    )
-    parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
+    # parser.add_argument(
+    #    "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
+    # )
 
-    parser.add_argument(
-        "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
-    )
+    # parser.add_argument(
+    #    "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
+    # )
+    parser = add_storage_manager_args(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    storage_manager_config = parse_args_to_config(args)
     run_cache_server(
+        storage_manager_config=storage_manager_config,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
-        cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
-        disable_lazy_alloc=args.disable_lazy_alloc,
     )

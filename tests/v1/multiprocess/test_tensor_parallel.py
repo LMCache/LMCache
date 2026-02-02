@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.multiprocess.distributed.config import (
+    EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
@@ -50,6 +51,9 @@ def storage_manager():
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=l1_memory_config,
+        ),
+        eviction_config=EvictionConfig(
+            eviction_policy="LRU",
         ),
     )
     manager = StorageManager(config=storage_manager_config)

@@ -12,6 +12,7 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.distributed.config import (
+    EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
@@ -89,6 +90,9 @@ def basic_storage_manager_config(basic_l1_config):
     """Create a basic StorageManagerConfig for testing"""
     return StorageManagerConfig(
         l1_manager_config=basic_l1_config,
+        eviction_config=EvictionConfig(
+            eviction_policy="LRU",
+        ),
     )
 
 
@@ -97,6 +101,9 @@ def small_storage_manager_config(small_l1_config):
     """Create a small StorageManagerConfig to test memory exhaustion."""
     return StorageManagerConfig(
         l1_manager_config=small_l1_config,
+        eviction_config=EvictionConfig(
+            eviction_policy="LRU",
+        ),
     )
 
 

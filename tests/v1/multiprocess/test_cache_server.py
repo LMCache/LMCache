@@ -16,6 +16,12 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
 )
+from lmcache.v1.multiprocess.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -113,8 +119,20 @@ def server_process_runner(
     """
     Entry point for the server process.
     """
+    storage_manager_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=int(cpu_buffer_size * 1024**3),
+                use_lazy=True,
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
     run_cache_server(
-        host=host, port=port, chunk_size=chunk_size, cpu_buffer_size=cpu_buffer_size
+        storage_manager_config=storage_manager_config,
+        host=host,
+        port=port,
+        chunk_size=chunk_size,
     )
 
 
