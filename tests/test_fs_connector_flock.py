@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
+# Future
 from __future__ import annotations
 
+# Standard
+from pathlib import Path
+from types import ModuleType
+from typing import Any
 import asyncio
 import multiprocessing as mp
 import sys
 import time
-from pathlib import Path
 
 # Third Party
 import pytest
@@ -23,9 +26,12 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from tests.v1.utils import create_test_memory_obj
 
 try:
-    import fcntl  # noqa: F401
+    # Standard
+    import fcntl as _fcntl  # noqa: F401
 except ImportError:  # pragma: no cover - non-Linux platforms
-    fcntl = None
+    fcntl: ModuleType | None = None
+else:
+    fcntl = _fcntl
 
 
 def _create_test_key(key_id: int) -> CacheEngineKey:
@@ -91,8 +97,8 @@ def _put_worker(
     base_dir: str,
     key_id: int,
     payload_value: int,
-    barrier: mp.Barrier | None,
-    started_event: mp.Event | None,
+    barrier: Any | None,
+    started_event: Any | None,
     error_queue: mp.Queue,
 ) -> None:
     try:
@@ -109,7 +115,7 @@ def _put_worker(
         loop.run_until_complete(connector.put(_create_test_key(key_id), memory_obj))
     except Exception as exc:
         error_queue.put(repr(exc))
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
     finally:
         try:
             loop.close()
@@ -134,6 +140,7 @@ def test_external_lock_blocks_put(tmp_path: Path) -> None:
     started_event = ctx.Event()
     error_queue: mp.Queue = ctx.Queue()
 
+    assert fcntl is not None
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
