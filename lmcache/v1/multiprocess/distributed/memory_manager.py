@@ -13,7 +13,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.distributed.config import L1MemoryManagerConfig
-from lmcache.v1.multiprocess.distributed.error import L1MemoryManagerError
+from lmcache.v1.multiprocess.distributed.error import L1Error
 
 logger = init_logger(__name__)
 
@@ -57,7 +57,7 @@ class L1MemoryManager:
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
-    ) -> tuple[L1MemoryManagerError, list[MemoryObj]]:
+    ) -> tuple[L1Error, list[MemoryObj]]:
         """
         Allocate memory objects based on the provided layout description and count.
         This function should be thread-safe
@@ -67,10 +67,10 @@ class L1MemoryManager:
             count (int): Number of memory objects to allocate.
 
         Returns:
-            tuple[L1MemoryManagerError, list[MemoryObj]]: Error code and list of
+            tuple[L1Error, list[MemoryObj]]: Error code and list of
             allocated memory objects.
-            Error code will be `L1MemoryManagerError.OUT_OF_MEMORY` if allocation
-            fails; otherwise, it will be `L1MemoryManagerError.SUCCESS`.
+            Error code will be `L1Error.OUT_OF_MEMORY` if allocation
+            fails; otherwise, it will be `L1Error.SUCCESS`.
 
         Note:
             If the allocation fails, the memory object list will be empty.
@@ -79,10 +79,10 @@ class L1MemoryManager:
             layout_desc.shapes, layout_desc.dtypes, count
         )
         if objects is None:
-            return L1MemoryManagerError.OUT_OF_MEMORY, []
-        return L1MemoryManagerError.SUCCESS, objects
+            return L1Error.OUT_OF_MEMORY, []
+        return L1Error.SUCCESS, objects
 
-    def free(self, mem_objs: list[MemoryObj]) -> L1MemoryManagerError:
+    def free(self, mem_objs: list[MemoryObj]) -> L1Error:
         """
         Free the provided memory objects.
         This function should be thread-safe.
@@ -91,11 +91,11 @@ class L1MemoryManager:
             mem_objs (list[MemoryObj]): List of memory objects to free.
 
         Returns:
-            L1MemoryManagerError: Error code indicating the result of the operation.
-            It will be `L1MemoryManagerError.SUCCESS` if the operation succeeds.
+            L1Error: Error code indicating the result of the operation.
+            It will be `L1Error.SUCCESS` if the operation succeeds.
         """
         self._allocator.batched_free(mem_objs)
-        return L1MemoryManagerError.SUCCESS
+        return L1Error.SUCCESS
 
     def get_vm_space(self) -> torch.Tensor:
         """

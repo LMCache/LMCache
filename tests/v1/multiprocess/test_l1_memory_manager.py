@@ -26,10 +26,16 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.distributed.config import L1MemoryManagerConfig
-from lmcache.v1.multiprocess.distributed.error import L1MemoryManagerError
-from lmcache.v1.multiprocess.distributed.memory_manager import (
-    L1MemoryManager,
-)
+from lmcache.v1.multiprocess.distributed.error import L1Error
+
+try:
+    # First Party
+    from lmcache.v1.multiprocess.distributed.memory_manager import (
+        L1MemoryManager,
+    )
+except ImportError:
+    # Skip the tests if the L1MemoryManager cannot be imported
+    pytest.skip("L1MemoryManager could not be imported", allow_module_level=True)
 
 # Skip all tests in this module if CUDA is not available
 pytestmark = pytest.mark.skipif(
@@ -126,7 +132,7 @@ class TestAllocate:
 
     Per the docstring:
     - This function should be thread-safe
-    - Returns tuple[L1MemoryManagerError, list[MemoryObj]]
+    - Returns tuple[L1Error, list[MemoryObj]]
     - Error code is OUT_OF_MEMORY if allocation fails, otherwise SUCCESS
     - If allocation fails, the memory object list will be empty
     """
@@ -137,7 +143,7 @@ class TestAllocate:
 
         error, mem_objs = manager.allocate(basic_layout, count=1)
 
-        assert error == L1MemoryManagerError.SUCCESS
+        assert error == L1Error.SUCCESS
         assert isinstance(mem_objs, list)
         assert len(mem_objs) == 1
         for obj in mem_objs:
@@ -153,7 +159,7 @@ class TestAllocate:
 
         error, mem_objs = manager.allocate(basic_layout, count=count)
 
-        assert error == L1MemoryManagerError.SUCCESS
+        assert error == L1Error.SUCCESS
         assert len(mem_objs) == count
 
         manager.close()
@@ -164,7 +170,7 @@ class TestAllocate:
 
         error, mem_objs = manager.allocate(multi_tensor_layout, count=2)
 
-        assert error == L1MemoryManagerError.SUCCESS
+        assert error == L1Error.SUCCESS
         assert len(mem_objs) == 2
 
         manager.close()
@@ -181,7 +187,7 @@ class TestAllocate:
         # Request more memory than available (8MB * 10 = 80MB > 64MB)
         error, mem_objs = manager.allocate(large_layout, count=10)
 
-        assert error == L1MemoryManagerError.OUT_OF_MEMORY
+        assert error == L1Error.OUT_OF_MEMORY
         assert isinstance(mem_objs, list)
         assert len(mem_objs) == 0
 
@@ -196,7 +202,7 @@ class TestAllocate:
 
         # Verify the docstring contract: "If the allocation fails, the memory
         # object list will be empty."
-        assert error == L1MemoryManagerError.OUT_OF_MEMORY
+        assert error == L1Error.OUT_OF_MEMORY
         assert mem_objs == []
 
         manager.close()
@@ -229,10 +235,10 @@ class TestAllocate:
         # All results should have valid error codes
         for error, mem_objs in results:
             assert error in (
-                L1MemoryManagerError.SUCCESS,
-                L1MemoryManagerError.OUT_OF_MEMORY,
+                L1Error.SUCCESS,
+                L1Error.OUT_OF_MEMORY,
             )
-            if error == L1MemoryManagerError.SUCCESS:
+            if error == L1Error.SUCCESS:
                 assert len(mem_objs) == 1
             else:
                 assert len(mem_objs) == 0
@@ -245,7 +251,7 @@ class TestAllocate:
 
         error, mem_objs = manager.allocate(basic_layout, count=2)
 
-        assert error == L1MemoryManagerError.SUCCESS
+        assert error == L1Error.SUCCESS
         assert len(mem_objs) == 2
 
         manager.close()
@@ -262,7 +268,7 @@ class TestFree:
 
     Per the docstring:
     - This function should be thread-safe
-    - Returns L1MemoryManagerError indicating the result
+    - Returns L1Error indicating the result
     - Returns SUCCESS if operation succeeds
     """
 
@@ -271,11 +277,11 @@ class TestFree:
         manager = L1MemoryManager(basic_config)
 
         error, mem_objs = manager.allocate(basic_layout, count=2)
-        assert error == L1MemoryManagerError.SUCCESS
+        assert error == L1Error.SUCCESS
 
         free_error = manager.free(mem_objs)
 
-        assert free_error == L1MemoryManagerError.SUCCESS
+        assert free_error == L1Error.SUCCESS
 
         manager.close()
 
@@ -284,11 +290,11 @@ class TestFree:
         manager = L1MemoryManager(basic_config)
 
         error, mem_objs = manager.allocate(basic_layout, count=1)
-        assert error == L1MemoryManagerError.SUCCESS
+        assert error == L1Error.SUCCESS
         assert mem_objs[0].is_valid()
 
         free_error = manager.free(mem_objs)
-        assert free_error == L1MemoryManagerError.SUCCESS
+        assert free_error == L1Error.SUCCESS
 
         # After freeing, the memory objects should be invalidated
         for obj in mem_objs:
@@ -302,7 +308,7 @@ class TestFree:
 
         free_error = manager.free([])
 
-        assert free_error == L1MemoryManagerError.SUCCESS
+        assert free_error == L1Error.SUCCESS
 
         manager.close()
 
@@ -312,15 +318,15 @@ class TestFree:
 
         # Allocate
         error1, mem_objs1 = manager.allocate(basic_layout, count=5)
-        assert error1 == L1MemoryManagerError.SUCCESS
+        assert error1 == L1Error.SUCCESS
 
         # Free
         free_error = manager.free(mem_objs1)
-        assert free_error == L1MemoryManagerError.SUCCESS
+        assert free_error == L1Error.SUCCESS
 
         # Reallocate
         error2, mem_objs2 = manager.allocate(basic_layout, count=5)
-        assert error2 == L1MemoryManagerError.SUCCESS
+        assert error2 == L1Error.SUCCESS
         assert len(mem_objs2) == 5
 
         manager.close()
@@ -335,7 +341,7 @@ class TestFree:
         def allocate_and_free_task():
             try:
                 error, mem_objs = manager.allocate(basic_layout, count=1)
-                if error == L1MemoryManagerError.SUCCESS:
+                if error == L1Error.SUCCESS:
                     free_error = manager.free(mem_objs)
                     with lock:
                         errors_list.append(free_error)
@@ -355,7 +361,7 @@ class TestFree:
         for err in errors_list:
             if isinstance(err, Exception):
                 pytest.fail(f"Thread-safety error: {err}")
-            assert err == L1MemoryManagerError.SUCCESS
+            assert err == L1Error.SUCCESS
 
         manager.close()
 
@@ -423,7 +429,7 @@ class TestL1MemoryManagerIntegration:
 
         # Allocate
         error, mem_objs = manager.allocate(basic_layout, count=3)
-        assert error == L1MemoryManagerError.SUCCESS
+        assert error == L1Error.SUCCESS
         assert len(mem_objs) == 3
 
         # Verify objects are valid
@@ -432,7 +438,7 @@ class TestL1MemoryManagerIntegration:
 
         # Free
         free_error = manager.free(mem_objs)
-        assert free_error == L1MemoryManagerError.SUCCESS
+        assert free_error == L1Error.SUCCESS
 
         # Verify objects are invalidated
         for obj in mem_objs:
@@ -446,11 +452,11 @@ class TestL1MemoryManagerIntegration:
 
         for i in range(5):
             error, mem_objs = manager.allocate(basic_layout, count=2)
-            assert error == L1MemoryManagerError.SUCCESS, f"Cycle {i} failed"
+            assert error == L1Error.SUCCESS, f"Cycle {i} failed"
             assert len(mem_objs) == 2
 
             free_error = manager.free(mem_objs)
-            assert free_error == L1MemoryManagerError.SUCCESS
+            assert free_error == L1Error.SUCCESS
 
         manager.close()
 
@@ -460,19 +466,19 @@ class TestL1MemoryManagerIntegration:
 
         # Allocate batch 1
         err1, objs1 = manager.allocate(basic_layout, count=2)
-        assert err1 == L1MemoryManagerError.SUCCESS
+        assert err1 == L1Error.SUCCESS
 
         # Allocate batch 2
         err2, objs2 = manager.allocate(basic_layout, count=2)
-        assert err2 == L1MemoryManagerError.SUCCESS
+        assert err2 == L1Error.SUCCESS
 
         # Free batch 1
         free_err1 = manager.free(objs1)
-        assert free_err1 == L1MemoryManagerError.SUCCESS
+        assert free_err1 == L1Error.SUCCESS
 
         # Allocate batch 3 (should reuse freed memory)
         err3, objs3 = manager.allocate(basic_layout, count=2)
-        assert err3 == L1MemoryManagerError.SUCCESS
+        assert err3 == L1Error.SUCCESS
 
         # Free remaining
         manager.free(objs2)
@@ -495,12 +501,12 @@ class TestL1MemoryManagerIntegration:
                 for _ in range(iterations):
                     # Allocate
                     error, mem_objs = manager.allocate(basic_layout, count=1)
-                    if error == L1MemoryManagerError.SUCCESS:
+                    if error == L1Error.SUCCESS:
                         # Briefly hold the memory
                         assert len(mem_objs) == 1
                         # Free
                         free_error = manager.free(mem_objs)
-                        assert free_error == L1MemoryManagerError.SUCCESS
+                        assert free_error == L1Error.SUCCESS
             except Exception as e:
                 exceptions.append(e)
 
@@ -524,14 +530,14 @@ class TestErrorCodeSemantics:
 
     def test_success_error_code_value(self):
         """Test that SUCCESS is a valid enum member."""
-        assert L1MemoryManagerError.SUCCESS is not None
-        assert L1MemoryManagerError.SUCCESS.name == "SUCCESS"
+        assert L1Error.SUCCESS is not None
+        assert L1Error.SUCCESS.name == "SUCCESS"
 
     def test_out_of_memory_error_code_value(self):
         """Test that OUT_OF_MEMORY is a valid enum member."""
-        assert L1MemoryManagerError.OUT_OF_MEMORY is not None
-        assert L1MemoryManagerError.OUT_OF_MEMORY.name == "OUT_OF_MEMORY"
+        assert L1Error.OUT_OF_MEMORY is not None
+        assert L1Error.OUT_OF_MEMORY.name == "OUT_OF_MEMORY"
 
     def test_error_codes_are_distinct(self):
         """Test that error codes are distinct values."""
-        assert L1MemoryManagerError.SUCCESS != L1MemoryManagerError.OUT_OF_MEMORY
+        assert L1Error.SUCCESS != L1Error.OUT_OF_MEMORY

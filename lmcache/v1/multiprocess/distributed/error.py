@@ -5,63 +5,35 @@ Definition of errors for class APIs.
 """
 
 # Standard
-from typing import Union
 import enum
 
 
-class L1MemoryManagerError(enum.Enum):
-    """Errors *Returned* by L1MemoryManager class APIs."""
+class L1Error(enum.Enum):
+    """Errors for L1Manager class APIs."""
 
     SUCCESS = enum.auto()
     """ Operation succeeded. """
 
+    KEY_NOT_EXIST = enum.auto()
+    """ The specified key does not exist. """
+
+    KEY_NOT_READABLE = enum.auto()
+    """ The specified key exists but cannot be read """
+
+    KEY_NOT_WRITABLE = enum.auto()
+    """ The specified key exists but cannot be written """
+
+    KEY_IN_WRONG_STATE = enum.auto()
+    """ The specified key is in the wrong state for the operation. """
+
+    KEY_IS_LOCKED = enum.auto()
+    """ The specified key is locked and cannot perform the operation. """
+
     OUT_OF_MEMORY = enum.auto()
-    """ Operation failed due to insufficient memory. """
+    """ Not enough memory to complete the operation. """
 
 
-class L1ObjectManagerError(enum.IntFlag):
-    """Errors *Returned* by L1ObjectManager class APIs.
-
-    Support mixing using bitwise OR operation. Uses IntFlag to allow
-    combining multiple error flags into a single value.
-    """
-
-    SUCCESS = 0x00
-    """ Operation succeeded. """
-
-    KEYS_NOT_FOUND = 0x01
-    """ Expected existing keys but found keys not found. """
-
-    KEYS_ALREADY_EXIST = 0x02
-    """ Expected non-exist keys but found keys existed. """
-
-    KEYS_NOT_RESERVED = 0x04
-    """ Expected non-reserved keys but found keys reserved. """
-
-    KEYS_NOT_COMMITTED = 0x08
-    """ Expected committed keys but found keys not committed. """
-
-    KEYS_ALREADY_LOCKED = 0x10
-    """ Expected unlocked keys but found keys already locked. """
-
-    def has_error(self, error: "L1ObjectManagerError") -> bool:
-        """Check if the error code has the specific error in it.
-
-        Returns:
-            bool: True if there is any error, False otherwise.
-        """
-        return self & error != 0
-
-    def mix_error(self, error: "L1ObjectManagerError") -> "L1ObjectManagerError":
-        """Mix the current error code with another error code using bitwise OR.
-
-        Returns:
-            L1ObjectManagerError: The mixed error code.
-        """
-        return self | error
-
-
-ErrorType = Union[L1MemoryManagerError, L1ObjectManagerError]
+ErrorType = L1Error
 
 
 def strerror(error: ErrorType) -> str:
@@ -73,33 +45,20 @@ def strerror(error: ErrorType) -> str:
     Returns:
         str: The human-readable string.
     """
-    if isinstance(error, L1MemoryManagerError):
-        if error == L1MemoryManagerError.SUCCESS:
+    if isinstance(error, L1Error):
+        if error == L1Error.SUCCESS:
             return "Operation succeeded."
-        elif error == L1MemoryManagerError.OUT_OF_MEMORY:
-            return "Operation failed due to insufficient memory."
-    elif isinstance(error, L1ObjectManagerError):
-        if error == L1ObjectManagerError.SUCCESS:
-            return "Operation succeeded."
-
-        # Handle multiple errors combined with bitwise OR
-        error_messages = []
-        if error.has_error(L1ObjectManagerError.KEYS_NOT_FOUND):
-            error_messages.append("Expected existing keys but found keys not found.")
-        if error.has_error(L1ObjectManagerError.KEYS_ALREADY_EXIST):
-            error_messages.append("Expected non-exist keys but found keys existed.")
-        if error.has_error(L1ObjectManagerError.KEYS_NOT_RESERVED):
-            error_messages.append("Expected non-reserved keys but found keys reserved.")
-        if error.has_error(L1ObjectManagerError.KEYS_NOT_COMMITTED):
-            error_messages.append(
-                "Expected committed keys but found keys not committed."
-            )
-        if error.has_error(L1ObjectManagerError.KEYS_ALREADY_LOCKED):
-            error_messages.append(
-                "Expected unlocked keys but found keys already locked."
-            )
-
-        if error_messages:
-            return " ".join(error_messages)
+        elif error == L1Error.KEY_NOT_EXIST:
+            return "The specified key does not exist."
+        elif error == L1Error.KEY_NOT_READABLE:
+            return "The specified key exists but cannot be read."
+        elif error == L1Error.KEY_NOT_WRITABLE:
+            return "The specified key exists but cannot be written."
+        elif error == L1Error.KEY_IN_WRONG_STATE:
+            return "The specified key is in the wrong state for the operation."
+        elif error == L1Error.KEY_IS_LOCKED:
+            return "The specified key is locked and cannot perform the operation."
+        elif error == L1Error.OUT_OF_MEMORY:
+            return "Not enough memory to complete the operation."
 
     return "Unknown error."
