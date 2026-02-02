@@ -267,7 +267,8 @@ def _bench_rust_raw_block(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark LocalDiskBackend vs RustRawBlockBackend under high write concurrency."
+            "Benchmark LocalDiskBackend vs RustRawBlockBackend "
+            "under high write concurrency."
         )
     )
     parser.add_argument("--num-ops", type=int, default=256, help="Total put ops")
