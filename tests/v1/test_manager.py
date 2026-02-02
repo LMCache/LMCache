@@ -378,21 +378,13 @@ class TestLMCacheManagerHelpers:
         """Test _need_gpu_interm_buffer returns opposite of enable_pd."""
         config = LMCacheEngineConfig.from_defaults()
         config.enable_pd = False
-        vllm_config = MagicMock()
-        connector = MagicMock()
+        # First Party
+        from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
 
-        with patch.object(LMCacheManager, "_init_components"):
-            manager = LMCacheManager(
-                config=config,
-                vllm_config=vllm_config,
-                role="scheduler",
-                connector=connector,
-            )
-
-        assert manager._need_gpu_interm_buffer() is True
+        assert need_gpu_interm_buffer(config) is True
 
         config.enable_pd = True
-        assert manager._need_gpu_interm_buffer() is False
+        assert need_gpu_interm_buffer(config) is False
 
 
 class TestLMCacheManagerValidation:
