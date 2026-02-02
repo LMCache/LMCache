@@ -572,6 +572,7 @@ class NixlAgentWrapper:
     reg_descs: Any
     xfer_descs: Any
     xfer_handler: Any
+    page_size: int
 
     def __init__(
         self,
