@@ -97,13 +97,16 @@ class StandaloneLMCacheManager(LMCacheManager):
                 self._lmcache_engine.mark_init_failed(self._init_failed_reason)
             logger.warning("Skipping post_init due to previous initialization failure")
             return
-        if self._lmcache_engine is not None:
-            # Standalone mode post-init is simpler (no async_lookup_server)
-            self._lmcache_engine.post_init()
+        try:
+            if self._lmcache_engine is not None:
+                # Standalone mode post-init is simpler (no async_lookup_server)
+                self._lmcache_engine.post_init()
 
-        # Initialize health monitor after engine post_init completes (if engine exists)
-        # This also sets up PeriodicThreadRegistry metrics
-        self._init_health_monitor()
+            # Initialize health monitor after engine post_init completes
+            # This also sets up PeriodicThreadRegistry metrics
+            self._init_health_monitor()
+        except Exception as e:
+            self._handle_post_init_failure(e)
 
     def stop_services(self) -> None:
         """Shutdown for standalone mode with simplified logic."""
