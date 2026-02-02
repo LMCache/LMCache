@@ -396,3 +396,104 @@ Tips:
 - If you want to run the ``query-twice.py`` script multiple times, you'll need to either restart the vLLM LMCache server or change the prefix of the context you pass in since you've already warmed LMCache.
 
 - The max model length here was decided by running an L4 with only 23GB of GPU memory. If you have more memory, you can increase the max model length and modify ``query-twice.py`` to use more of the long context. LMCache TTFT improvement becomes more pronounced as the context length increases!
+
+
+.. _local-storage-benchmarking:
+
+Benchmarking
+------------
+
+For more rigorous benchmarking of local disk storage, you can use LMCache's **Long Doc QA** workload generator. This tool sends configurable long-context queries to measure TTFT improvements at scale.
+
+**Step 1. Use the Recommender**
+
+The Long Doc QA Recommender helps determine optimal deployment settings based on your hardware:
+
+.. code-block:: bash
+
+    python benchmarks/long_doc_qa/long_doc_qa_recommender.py --model meta-llama/Llama-3.1-8B-Instruct
+
+**Step 2. Deploy vLLM with Disk Offloading**
+
+Create a config file ``disk-benchmark.yaml``:
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    local_cpu: false
+    max_local_cpu_size: 10.0
+    local_disk: "file:///tmp/lmcache_disk/"
+    max_local_disk_size: 12.0
+
+Start the server:
+
+.. code-block:: bash
+
+    PYTHONHASHSEED=0 \
+    LMCACHE_CONFIG_FILE="disk-benchmark.yaml" \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --tensor-parallel-size 1 \
+        --max-model-len 16384 \
+        --no-enable-prefix-caching \
+        --kv-transfer-config \
+        '{"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}'
+
+**Step 3. Run the Benchmark**
+
+.. code-block:: bash
+
+    PYTHONHASHSEED=0 python benchmarks/long_doc_qa/long_doc_qa.py \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --num-documents 30 \
+        --document-length 10000 \
+        --output-len 100 \
+        --repeat-mode tile \
+        --max-inflight-requests 8
+
+**Configurable Parameters:**
+
+- ``--num-documents``: Number of unique documents to send (example: 30)
+- ``--document-length``: Tokens per document (example: 10000)
+- ``--output-len``: Output tokens per request (example: 100)
+- ``--repeat-mode``: How to repeat (``random``, ``tile``, ``interleave``)
+- ``--max-inflight-requests``: Concurrent requests (example: 8)
+
+**Benchmark Results (Disk Offloading):**
+
+.. code-block:: text
+
+    Warmup round mean TTFT: 2.134s
+    Warmup round time: 12.502s
+    Warmup round prompt count: 30
+    Warmup round successful prompt count: 30
+
+    === BENCHMARK RESULTS ===
+    Query round mean TTFT: 0.687s
+    Query round time: 16.207s
+    Query round prompt count: 30
+    Query round successful prompt count: 30
+
+In this run, TTFT improved significantly (2.134s -> 0.687s) after the disk cache was warm.
+
+**Comparing with Baseline vLLM (No LMCache):**
+
+Run vLLM without LMCache to establish a baseline:
+
+.. code-block:: bash
+
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --tensor-parallel-size 1 \
+        --max-model-len 16384 \
+        --no-enable-prefix-caching
+
+Then run the same benchmark. The baseline should be slower than the LMCache disk offload run.
+
+**Clearing the Disk Cache Between Runs:**
+
+To reset the disk cache for fresh benchmarks:
+
+.. code-block:: bash
+
+    rm -rf /tmp/lmcache_disk/*
+
+Or restart the vLLM server to clear both CPU and disk caches.
