@@ -25,7 +25,7 @@ from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSend
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.connector._file_lock import (
     exclusive_flock,
-    lock_path_for_file,
+    lock_path_for_chunk_hash,
 )
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
@@ -540,7 +540,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         # TODO(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
+        self.write_file(key, buffer, path)
 
         # ref count down here because there's a ref_count_up in
         # `submit_put_task` above.
@@ -619,8 +619,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
         return memory_obj
 
-    def write_file(self, buffer, path):
-        lock_path = lock_path_for_file(Path(path))
+    def write_file(self, key, buffer, path):
+        lock_path = lock_path_for_chunk_hash(Path(path), key.chunk_hash)
         start_time = time.time()
         size = len(buffer)
         tmp_path = self._tmp_path_for_path(path)

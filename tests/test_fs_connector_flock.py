@@ -20,7 +20,7 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.connector._file_lock import lock_path_for_file
+from lmcache.v1.storage_backend.connector._file_lock import lock_path_for_chunk_hash
 from lmcache.v1.storage_backend.connector.fs_connector import FSConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from tests.v1.utils import create_test_memory_obj
@@ -132,7 +132,7 @@ def test_external_lock_blocks_put(tmp_path: Path) -> None:
     key_id = 123
     connector, loop = _build_fs_connector(base_dir)
     file_path = connector._get_file_path(_create_test_key(key_id))
-    lock_path = lock_path_for_file(file_path)
+    lock_path = lock_path_for_chunk_hash(file_path, key_id)
     loop.close()
     asyncio.set_event_loop(None)
 

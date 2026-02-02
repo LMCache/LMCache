@@ -10,6 +10,10 @@ def lock_path_for_file(file_path: Path) -> Path:
     return file_path.with_name(file_path.name + ".lock")
 
 
+def lock_path_for_chunk_hash(file_path: Path, chunk_hash: int) -> Path:
+    return file_path.with_name(f"{chunk_hash}.lock")
+
+
 @contextmanager
 def exclusive_flock(lock_path: Path):
     lock_path.parent.mkdir(parents=True, exist_ok=True)

@@ -18,7 +18,7 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector._file_lock import (
     async_exclusive_flock,
-    lock_path_for_file,
+    lock_path_for_chunk_hash,
 )
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -303,7 +303,7 @@ class FSConnector(RemoteConnector):
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         """Store data to file system"""
         final_path, temp_path = self._get_file_and_tmp_path(key)
-        lock_path = lock_path_for_file(final_path)
+        lock_path = lock_path_for_chunk_hash(final_path, key.chunk_hash)
 
         try:
             async with async_exclusive_flock(lock_path):
