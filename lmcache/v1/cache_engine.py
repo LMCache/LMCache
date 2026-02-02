@@ -40,7 +40,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.gpu_connector import (
+from lmcache.v1.gpu_connector.gpu_connectors import (
     GPUConnectorInterface,
     SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,

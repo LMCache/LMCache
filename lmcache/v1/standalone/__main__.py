@@ -30,7 +30,7 @@ from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
-from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.standalone.manager import StandaloneLMCacheManager
