@@ -10,7 +10,6 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.full_sync_sender import FullSyncSender
 from lmcache.v1.cache_controller.message import (
@@ -44,6 +43,7 @@ from lmcache.v1.cache_controller.message import (
     WorkerReqRetMsg,
 )
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (
     DEFAULT_SOCKET_RECV_TIMEOUT_MS,
     DEFAULT_SOCKET_SEND_TIMEOUT_MS,
@@ -72,7 +72,7 @@ class LMCacheWorker:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         lmcache_engine: "LMCacheEngine",
     ):
         # TODO (Jiayi): "instance_id" might not be needed anymore.

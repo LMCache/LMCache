@@ -207,6 +207,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
     def memcheck(self) -> bool:
         return self._allocator.memcheck()
 
+    def get_underlying_buffer(self) -> torch.Tensor:
+        """
+        Get the underlying buffer tensor. Will be used by RDMA registrations.
+        """
+        return self._buffer
+
     # Helper functions
     def _pin_memory_chunk(self, offset: int, size: int):
         """

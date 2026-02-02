@@ -17,7 +17,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.health_monitor.base import HealthMonitor
@@ -26,6 +25,7 @@ from lmcache.v1.health_monitor.checks.remote_backend_check import (
 )
 from lmcache.v1.health_monitor.constants import FallbackPolicy
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -123,11 +123,12 @@ def test_config():
 
 @pytest.fixture
 def test_metadata():
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(4, 2, 256, 8, 128),
         role="worker",
@@ -625,7 +626,11 @@ class TestFallbackIntegrationWithRealStorageManager:
         """Test contains operation respects bypass mode."""
         sm = real_storage_manager
         test_key = CacheEngineKey(
-            "vllm", "test_model", 1, 0, hash("test"), torch.bfloat16
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=hash("test"),
+            dtype=torch.bfloat16,
         )
 
         # Test with LocalCPUBackend bypass
