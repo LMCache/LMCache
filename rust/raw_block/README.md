@@ -21,14 +21,13 @@ maturin develop --release
 ```python
 from lmcache_rust_raw_block_io import RawBlockDevice
 
-# Open device
-dev = RawBlockDevice("/dev/nvme0n1", use_odirect=True)
+# Open device (path, writable, use_odirect=False, alignment=4096)
+dev = RawBlockDevice("/dev/nvme0n1", True, use_odirect=True)
 
 # Write data
-dev.pwrite(offset=0, data=b"hello", total_len=4096)
+dev.pwrite_from_buffer(offset=0, data=b"hello", total_len=4096)
 
 # Read data
 buf = bytearray(4096)
-dev.pread_into(offset=0, buf=buf, length=5, total_len=4096)
+dev.pread_into(offset=0, out=buf, payload_len=5, total_len=4096)
 ```
-
