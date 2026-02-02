@@ -19,6 +19,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.health_monitor.base import HealthMonitor
 from lmcache.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
@@ -35,12 +36,10 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
-    from lmcache.v1.gpu_connector import CreateGPUConnector
     from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
