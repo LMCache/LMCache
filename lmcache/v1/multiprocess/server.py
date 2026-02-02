@@ -296,7 +296,6 @@ class MPCacheEngine:
             "Must store with worker_id != None"
         )
 
-        # keys = ipc_keys_to_storage_keys(ipc_keys)
         keys = ipc_keys_to_object_keys(ipc_keys)
 
         assert instance_id in self.gpu_contexts, (
@@ -319,15 +318,9 @@ class MPCacheEngine:
 
             num_tokens = self.chunk_size
             cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-            # fmt = (
-            #    MemoryFormat.KV_MLA_FMT if gpu_context.is_mla else MemoryFormat.KV_2LTD
-            # )
             layout_desc = MemoryLayoutDesc(
                 shapes=[cpu_shape], dtypes=[gpu_context.dtype]
             )
-            # reserve_handle, reserved_dict = self.storage_manager.reserve(
-            #    keys, cpu_shape, gpu_context.dtype, fmt=fmt
-            # )
             reserved_dict = self.storage_manager.reserve_write(keys, layout_desc, "new")
 
             for idx, key in enumerate(keys):
@@ -362,7 +355,6 @@ class MPCacheEngine:
         self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
             self.storage_manager.finish_write,
             list(reserved_dict.keys()),
-            # self.storage_manager.commit, reserve_handle
         )
         ed = time.perf_counter()
         if length := len(reserved_dict):
@@ -410,7 +402,6 @@ class MPCacheEngine:
         assert all(ipc_key.worker_id is not None for ipc_key in ipc_keys), (
             "Must retrieve with worker_id != None"
         )
-        # keys = ipc_keys_to_storage_keys(ipc_keys)
         keys = ipc_keys_to_object_keys(ipc_keys)
 
         assert instance_id in self.gpu_contexts, (
@@ -454,7 +445,6 @@ class MPCacheEngine:
             # TODO (ApostaC): the error processing here is not clear,
             # consider refactoring it
             try:
-                # with self.storage_manager.retrieve(keys) as memory_objs:
                 with self.storage_manager.read_prefetched_results(keys) as memory_objs:
                     if not memory_objs or len(memory_objs) != len(keys):
                         logger.error("Some keys not found during retrieve!")
@@ -470,7 +460,6 @@ class MPCacheEngine:
                 # the event ipc handle is returned to the caller.
                 event.record()
                 gpu_context.cupy_stream.launch_host_func(
-                    # self.storage_manager.on_retrieve_finished, keys
                     self.storage_manager.finish_read_prefetched,
                     prefetched_keys,
                 )
@@ -534,10 +523,8 @@ class MPCacheEngine:
         assert all(ipc_key.worker_id is None for ipc_key in ipc_keys), (
             "Must lookup with worker_id == None"
         )
-        # keys = ipc_keys_to_storage_keys(ipc_keys)
         keys = ipc_keys_to_object_keys(ipc_keys)
 
-        # found_count = self.storage_manager.lookup(keys)
         handle = self.storage_manager.submit_prefetch_task(keys)
         while True:
             found_count = self.storage_manager.query_prefetch_status(handle)
@@ -670,13 +657,6 @@ def parse_args():
     parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
-    # parser.add_argument(
-    #    "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
-    # )
-
-    # parser.add_argument(
-    #    "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
-    # )
     parser = add_storage_manager_args(parser)
     return parser.parse_args()
 
