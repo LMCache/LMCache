@@ -1,3 +1,6 @@
+agents:
+  queue: "yotta-lab"
+
 env:
   DOCKER_BUILDKIT: 1
 
