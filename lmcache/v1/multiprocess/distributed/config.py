@@ -27,6 +27,9 @@ class L1MemoryManagerConfig:
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
 
+    def __post_init__(self):
+        self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
+
 
 @dataclass
 class L1ManagerConfig:

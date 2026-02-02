@@ -434,6 +434,13 @@ class L1Manager:
         self._memory_manager.free(need_to_free)
         return ret
 
+    @l1_mgr_synchronized
+    def clear(self) -> None:
+        """Clear all objects from L1 cache."""
+        all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+        self._memory_manager.free(all_memory_objs)
+        self._objects.clear()
+
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
         with self._lock:
@@ -455,3 +462,8 @@ class L1Manager:
             The L1ObjectState if the object exists, None otherwise.
         """
         return self._objects.get(key, None)
+
+    @l1_mgr_synchronized
+    def memcheck(self) -> None:
+        """Perform memory check for L1 cache."""
+        self._memory_manager.memcheck()

@@ -123,3 +123,7 @@ class L1MemoryManager:
         Close the memory manager and release all resources.
         """
         self._allocator.close()
+
+    # Debugging APIs
+    def memcheck(self):
+        self._allocator.memcheck()
