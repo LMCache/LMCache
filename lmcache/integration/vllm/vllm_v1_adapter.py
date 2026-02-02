@@ -380,6 +380,15 @@ class ReqMeta:
         # Calculate the token ids and slot mappings for load and save
         token_ids = input_token_ids[:num_tokens_to_save]
 
+        logger.warning(
+            "[DEBUG] from_request_tracker: AFTER SLICE req_id=%s, "
+            "token_ids_len=%d (sliced from %d), num_tokens_to_save=%d",
+            tracker.req_id,
+            len(token_ids),
+            input_token_len,
+            num_tokens_to_save,
+        )
+
         # If the request has multimodal hashes, apply them to the token ids
         if tracker.mm_hashes:
             # TODO: Optimize this
@@ -1140,6 +1149,18 @@ class LMCacheConnectorV1Impl:
                     skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )
 
+            logger.warning(
+                "[DEBUG] wait_for_save: req_id=%s, skip_leading_tokens=%d, "
+                "len(token_ids)=%d, is_last_prefill=%s, kv_role=%s, "
+                "has_disagg_spec=%s",
+                request.req_id,
+                skip_leading_tokens,
+                len(token_ids),
+                request.is_last_prefill,
+                self.kv_role,
+                request.disagg_spec is not None,
+            )
+
             if skip_leading_tokens == len(token_ids):
                 # DEBUG LOGGING
                 logger.warning(
@@ -1185,6 +1206,18 @@ class LMCacheConnectorV1Impl:
                     token_ids = token_ids[:aligned_token_len]
                     store_mask = store_mask[:aligned_token_len]
                     slot_mapping = slot_mapping[:aligned_token_len]
+
+            logger.warning(
+                "[DEBUG] wait_for_save: CALLING store() for req_id=%s, "
+                "token_ids_len=%d, is_last_prefill=%s, "
+                "disagg_spec.is_last_prefill=%s",
+                request.req_id,
+                len(token_ids),
+                is_last_prefill,
+                request.disagg_spec.is_last_prefill
+                if request.disagg_spec
+                else None,
+            )
 
             self.lmcache_engine.store(
                 token_ids,
@@ -1450,15 +1483,18 @@ class LMCacheConnectorV1Impl:
                 + scheduler_output.num_scheduled_tokens[request.req_id]
             )
 
-            # DEBUG LOGGING
+            # DEBUG LOGGING: num_computed_tokens = from vLLM request (tokens already computed).
+            # discard_partial_chunks = config value we pass into from_request_tracker.
             logger.warning(
                 "[DEBUG] build_connector_meta: req_id=%s, num_computed_tokens=%d, "
-                "num_scheduled_tokens=%d, num_tokens_to_compute=%d, prompt_len=%d",
+                "num_scheduled_tokens=%d, num_tokens_to_compute=%d, prompt_len=%d, "
+                "discard_partial_chunks=%s",
                 request.req_id,
                 request.num_computed_tokens,
                 scheduler_output.num_scheduled_tokens[request.req_id],
                 num_tokens_to_compute,
                 len(request.prompt_token_ids),
+                self._discard_partial_chunks,
             )
 
             lmcache_cached_tokens = 0
@@ -1526,12 +1562,18 @@ class LMCacheConnectorV1Impl:
                     all_token_ids=all_token_ids,
                 )
 
+                # In PD (disagg) mode, do not discard partial chunks (fixes small-prompt hang).
+                discard_partial = (
+                    self._discard_partial_chunks
+                    if request_tracker.disagg_spec is None
+                    else False
+                )
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
-                    discard_partial_chunks=self._discard_partial_chunks,
+                    discard_partial_chunks=discard_partial,
                     save_decode_cache=self._save_decode_cache,
                 )
                 if req_meta is not None:
@@ -1605,12 +1647,18 @@ class LMCacheConnectorV1Impl:
                 all_token_ids=all_token_ids,
             )
 
+            # In PD (disagg) mode, do not discard partial chunks (fixes small-prompt hang).
+            discard_partial = (
+                self._discard_partial_chunks
+                if request_tracker.disagg_spec is None
+                else False
+            )
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
-                discard_partial_chunks=self._discard_partial_chunks,
+                discard_partial_chunks=discard_partial,
                 save_decode_cache=self._save_decode_cache,
             )
             if req_meta is not None:
