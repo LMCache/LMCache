@@ -42,7 +42,7 @@ docker run -d \
     --entrypoint /opt/venv/bin/python3 \
     lmcache/vllm-openai:test \
     -m lmcache.v1.multiprocess.server \
-    --l1-size "$CPU_BUFFER_SIZE" \
+    --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
     --port "$LMCACHE_PORT"

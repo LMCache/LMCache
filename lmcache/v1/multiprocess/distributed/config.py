@@ -107,7 +107,7 @@ def add_storage_manager_args(
         "L1 Memory Manager", "Configuration for L1 memory manager"
     )
     memory_group.add_argument(
-        "--l1-size",
+        "--l1-size-gb",
         type=float,
         required=True,
         help="The size of L1 memory in GB.",
@@ -119,7 +119,7 @@ def add_storage_manager_args(
         help="Whether to use lazy loading for L1 memory. (Default is True)",
     )
     memory_group.add_argument(
-        "--l1-init-size",
+        "--l1-init-size-gb",
         type=int,
         default=20,
         help="The initial size (GB) when using lazy allocation. Default is 20.",
@@ -207,9 +207,9 @@ def parse_args_to_config(
         StorageManagerConfig: The configuration object.
     """
     memory_config = L1MemoryManagerConfig(
-        size_in_bytes=int(args.l1_size * (1 << 30)),
+        size_in_bytes=int(args.l1_size_gb * (1 << 30)),
         use_lazy=args.l1_use_lazy,
-        init_size_in_bytes=int(args.l1_init_size * (1 << 30)),
+        init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
         align_bytes=args.l1_align_bytes,
     )
 

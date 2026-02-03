@@ -13,7 +13,10 @@ from dataclasses import dataclass
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -114,7 +117,6 @@ class MemoryLayoutDesc:
 def ipc_keys_to_object_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[ObjectKey]:
     """
     Convert a list of IPCCacheEngineKey to a list of ObjectKey
-    The caller need to make sure that the ipc_keys have the same parallel setup
 
     When the ipc key's worker id is unspecified (None), this function will generate
     (explode) multiple ObjectKeys for all workers in the world_size.
@@ -124,9 +126,23 @@ def ipc_keys_to_object_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[ObjectKey
 
     Returns:
         list[ObjectKey]: The converted list of ObjectKey
+
+    Note:
+        For now, we expect all the ipc keys have the same world size. Although
+        it won't break even if they are different, it's not the intended use case.
     """
-    # NOTE (ApostaC): we skip the check of whether all keys have the same world_size
-    # The caller need to make sure it is correct
+    if not ipc_keys:
+        return []
+
+    all_world_size_same = all(
+        ipc_key.world_size == ipc_keys[0].world_size for ipc_key in ipc_keys
+    )
+    if not all_world_size_same:
+        logger.warning(
+            "ipc_keys_to_object_keys: ipc keys have different world sizes. "
+            "This is not expected."
+        )
+
     storage_keys = []
     for ipc_key in ipc_keys:
         if ipc_key.worker_id is None:
