@@ -311,13 +311,16 @@ def get_vllm_torch_dev():
     return torch_dev, dev_name
 
 
-def calculate_local_rank_and_world_size(vllm_config: "VllmConfig"):
+def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
     """
     Calculate the local worker id and local world size.
 
     Current assumption (TODO: add custom logic in the future):
     - Tensor Parallel is intra-node
     - Pipeline Parallel is inter-node
+
+    Returns:
+        Tuple[int, int]: (local_worker_id, local_world_size)
     """
     parallel_config = vllm_config.parallel_config
     global_rank = parallel_config.rank

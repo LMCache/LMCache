@@ -6,6 +6,7 @@ import torch
 from lmcache.integration.vllm.utils import get_vllm_torch_dev
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
 from lmcache.v1.metadata import LMCacheMetadata
 
@@ -94,5 +95,8 @@ def CreateGPUConnector(
         else:
             raise RuntimeError("No supported connector found for the current platform.")
 
+    elif engine == "mock":
+        kv_shape = metadata.kv_shape
+        return MockGPUConnector(kv_shape=kv_shape)
     else:
         raise RuntimeError(f"Unsupported engine: {engine}")

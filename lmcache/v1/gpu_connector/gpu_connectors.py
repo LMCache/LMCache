@@ -80,21 +80,32 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def batched_to_gpu(
         self,
-        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
-        starts: List[int],
-        ends: List[int],
+        memory_objs: Union[
+            List[List[MemoryObj]], List[MemoryObj], List[int], None
+        ] = None,
+        starts: Optional[List[int]] = None,
+        ends: Optional[List[int]] = None,
         **kwargs,
     ):
         """
         Batched store the data from the memory objects to GPU kv cache.
         Sub-classes should define the format of the kwargs.
 
+        For non-layerwise connectors:
         :param Union[List[List[MemoryObj]], List[MemoryObj]] memory_obj:
             The memory objects to store the data to GPU.
         :param List[int] starts: The starting indices of the data in the corresponding
             token sequence.
         :param List[int] ends: The ending indices of the data in the corresponding
             token sequence.
+
+        For layerwise connectors (generator pattern):
+        :param List[int] memory_objs: Actually the starts list
+        (positional compatibility)
+        :param List[int] starts: Actually the ends list
+        (positional compatibility)
+        Note: Layerwise connectors receive memory objects
+        via generator.send()
         """
         raise NotImplementedError
 
