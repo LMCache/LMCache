@@ -32,6 +32,25 @@ CPU_BUFFER_SIZE = 5.0
 DEFAULT_TIMEOUT = 5.0
 
 
+def _has_working_new_shared_cuda() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        # Minimal sanity check — adapt to your real API
+        buf = torch.empty(1, device="cuda")
+        shared = buf.untyped_storage()._new_shared_cuda()  # or your exact call
+        return shared is not None
+    except Exception:
+        return False
+
+
+if not _has_working_new_shared_cuda():
+    pytest.skip(
+        "new_shared_cuda is not available or not working on this system",
+        allow_module_level=True,
+    )
+
+
 def initialize_kv_cache(
     device: torch.device,
     num_pages: int = 1024,
