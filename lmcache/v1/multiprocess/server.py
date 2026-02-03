@@ -808,8 +808,8 @@ def parse_args():
     parser.add_argument(
         "--hash-algorithm",
         type=str,
-        default="builtin",
-        help="Hash algorithm for token-based operations (e.g., builtin, sha256_cbor)",
+        default="blake3",
+        help="Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)",
     )
     return parser.parse_args()
 

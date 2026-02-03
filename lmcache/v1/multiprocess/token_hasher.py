@@ -21,6 +21,29 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
+def _make_blake3_hash_func() -> Callable:
+    """Create a blake3-based hash function compatible with the
+    (prefix_hash, tuple(tokens), None) calling convention."""
+    import blake3 as _blake3
+
+    def blake3_hash(args):
+        prefix_hash, tokens, _ = args
+        h = _blake3.blake3()
+        # Serialize prefix hash
+        if isinstance(prefix_hash, bytes):
+            h.update(prefix_hash)
+        elif isinstance(prefix_hash, int):
+            h.update(prefix_hash.to_bytes(8, byteorder="big", signed=True))
+        else:
+            h.update(bytes(prefix_hash))
+        # Serialize token IDs
+        for t in tokens:
+            h.update(t.to_bytes(4, byteorder="big", signed=False))
+        return h.digest()  # 32 bytes
+
+    return blake3_hash
+
+
 class TokenHasher:
     """Computes rolling prefix hashes for token chunks.
 
@@ -29,7 +52,7 @@ class TokenHasher:
     chunk hashes compatible with IPCCacheEngineHashKey.
     """
 
-    def __init__(self, chunk_size: int = 256, hash_algorithm: str = "builtin"):
+    def __init__(self, chunk_size: int = 256, hash_algorithm: str = "blake3"):
         self.chunk_size = chunk_size
         self.hash_func = self._get_hash_func(hash_algorithm)
         self.none_hash = self._init_none_hash()
@@ -44,6 +67,10 @@ class TokenHasher:
 
         Adapted from TokenDatabase._get_vllm_hash_func (token_database.py:97-168).
         """
+        if hash_algorithm == "blake3":
+            logger.info("Using blake3 hash function")
+            return _make_blake3_hash_func()
+
         # Try get_hash_fn_by_name from both locations (PR#27151)
         for module_path in ["vllm.utils.hashing", "vllm.utils"]:
             try:
@@ -127,16 +154,15 @@ class TokenHasher:
             if hasattr(kv_cache_utils, "init_none_hash"):
                 kv_cache_utils.init_none_hash(self.hash_func)
                 none_hash = kv_cache_utils.NONE_HASH
-                logger.info(
-                    "Initialized NONE_HASH=%s from vLLM (>= PR#20511)", none_hash
-                )
+                logger.info("Initialized NONE_HASH=%s from vLLM", none_hash)
                 return none_hash
-            else:
-                logger.info("Using default NONE_HASH=0 (vLLM < PR#20511)")
-                return 0
-        except (ImportError, AttributeError):
-            logger.info("Using default NONE_HASH=0 (vLLM not available)")
-            return 0
+        except (ImportError, AttributeError, ValueError):
+            pass
+
+        # Fallback: compute none_hash using our hash function
+        none_hash = self.hash_func((0, (0,), None))
+        logger.info("Computed NONE_HASH=%s using hash function", none_hash)
+        return none_hash
 
     def hash_tokens(self, tokens: list[int], prefix_hash: Any = None) -> Any:
         """Hash one chunk with rolling prefix.
