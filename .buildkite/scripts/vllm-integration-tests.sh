@@ -630,7 +630,7 @@ echo "Using port $PORT to send or receive requests."
 cd docker/
 
 # Create the container image
-# build_lmcache_vllmopenai_image
+build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
