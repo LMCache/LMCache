@@ -125,7 +125,7 @@ run_lmcache_vllmopenai_container() {
 
     # Pick the GPUs based on config
     gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
-    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" "" "$gpu_count"
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 "$gpu_count"
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
     # docker args
