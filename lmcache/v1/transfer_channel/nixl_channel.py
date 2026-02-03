@@ -639,3 +639,4 @@ class NixlAgentWrapper:
         self.reg_descs = reg_descs
         self.xfer_descs = xfer_descs
         self.xfer_handler = xfer_handler
+        self.page_size = page_size
