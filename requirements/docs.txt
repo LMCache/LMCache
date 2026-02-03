@@ -7,7 +7,7 @@ sphinxcontrib-jquery==4.1
 sphinxcontrib-jsmath==1.0.1
 sphinxcontrib-qthelp==2.0.0
 sphinxcontrib-serializinghtml==2.0.0
-sphinxawesome_theme==5.3.2
+sphinxawesome_theme==6.0.0
 sphinx-copybutton==0.5.2
 sphinxcontrib-mermaid==1.2.2
 sphinx-multiversion==0.2.4
