@@ -389,7 +389,6 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     True,
                     self.use_mla,
                 )
-
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if not memory_obj.tensor.is_cuda:
