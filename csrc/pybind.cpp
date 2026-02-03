@@ -5,6 +5,7 @@
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
 #include "mem_alloc.h"
+#include "resp.h"
 #include "utils.h"
 #include <torch/torch.h>
 #include <iostream>
@@ -39,4 +40,9 @@ PYBIND11_MODULE(c_ops, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("free_numa_ptr", &free_numa_ptr);
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
+}
+
+PYBIND11_MODULE(lmcache_redis, m) {
+  py::class_<MultiRESPClient>(m, "LMCacheRedisClient");
+  m.def()
 }
