@@ -97,8 +97,21 @@ class LMCacheManager:
         self._runtime_plugin_launcher: Optional[RuntimePluginLauncher] = None
         self._health_monitor: Optional[HealthMonitor] = None
 
+        # Flag to track if initialization failed
+        self._init_failed = False
+        self._init_failed_reason: str = ""
+
         # Initialize components based on role
-        self._init_components()
+        try:
+            self._init_components()
+        except Exception as e:
+            self._init_failed = True
+            self._init_failed_reason = str(e)
+            logger.error(
+                "Failed to initialize LMCacheManager components: %s. "
+                "System will operate in degraded mode (recompute).",
+                e,
+            )
 
     def _init_components(self) -> None:
         """Initialize components based on the role for vLLM mode."""
@@ -521,30 +534,60 @@ class LMCacheManager:
         if self._runtime_plugin_launcher is not None:
             self._runtime_plugin_launcher.launch_plugins()
 
+    def _handle_post_init_failure(self, e: Exception) -> None:
+        """
+        Handle initialization failure during post_init.
+
+        This method is shared between LMCacheManager and subclasses to avoid
+        code duplication.
+
+        Args:
+            e: The exception that caused the failure
+        """
+        self._init_failed = True
+        self._init_failed_reason = str(e)
+        if self._lmcache_engine is not None:
+            self._lmcache_engine.mark_init_failed(str(e))
+        logger.error(
+            "Failed during post_init: %s. "
+            "System will operate in degraded mode (recompute).",
+            e,
+        )
+
     def post_init(self) -> None:
         """
         Post-initialization after KV caches are registered.
         """
+        # If initialization already failed, mark engine and return early
+        if self._init_failed:
+            if self._lmcache_engine is not None:
+                self._lmcache_engine.mark_init_failed(self._init_failed_reason)
+            logger.warning("Skipping post_init due to previous initialization failure")
+            return
+
         if self._lmcache_engine is None:
             # Initialize health monitor for scheduler (even without engine)
             self._init_health_monitor()
             return
 
-        # vLLM mode post-init
-        # First Party
-        from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
-            LMCacheAsyncLookupServer,
-        )
+        try:
+            # vLLM mode post-init
+            # First Party
+            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+                LMCacheAsyncLookupServer,
+            )
 
-        async_lookup_server = None
-        if self._config.enable_async_loading and self._lookup_server is not None:
-            assert isinstance(self._lookup_server, LMCacheAsyncLookupServer)
-            async_lookup_server = self._lookup_server
+            async_lookup_server = None
+            if self._config.enable_async_loading and self._lookup_server is not None:
+                assert isinstance(self._lookup_server, LMCacheAsyncLookupServer)
+                async_lookup_server = self._lookup_server
 
-        self._lmcache_engine.post_init(async_lookup_server=async_lookup_server)
+            self._lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
-        # Initialize health monitor after engine post_init completes
-        self._init_health_monitor()
+            # Initialize health monitor after engine post_init completes
+            self._init_health_monitor()
+        except Exception as e:
+            self._handle_post_init_failure(e)
 
     def stop_services(self) -> None:
         """Stop all managed components gracefully."""
@@ -687,12 +730,21 @@ class LMCacheManager:
         """
         Check if the LMCacheManager is healthy.
 
+        Returns False if:
+        - Initialization failed
+        - HealthMonitor reports unhealthy
+        - Engine reports unhealthy
+
         Returns:
             bool: True if healthy, False otherwise
         """
-        if self._health_monitor is None:
-            return True
-        return self._health_monitor.is_healthy()
+        if self._init_failed:
+            return False
+        if self._lmcache_engine is not None and not self._lmcache_engine.is_healthy():
+            return False
+        if self._health_monitor is not None:
+            return self._health_monitor.is_healthy()
+        return True
 
     @property
     def config(self) -> LMCacheEngineConfig:

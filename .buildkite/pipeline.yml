@@ -10,16 +10,26 @@ steps:
 
       uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
       source .venv-$BUILDKITE_BUILD_ID/bin/activate
-
       uv pip install --upgrade pip setuptools wheel
+
+      if command -v nvidia-smi >/dev/null 2>&1; then
+        source .buildkite/scripts/pick-free-gpu.sh 18000
+        export CUDA_LAUNCH_BLOCKING=1
+      else
+        source .buildkite/scripts/pick-free-gpu-amd.sh 18000
+        export AMD_SERIALIZE_KERNEL=1
+        export PYTORCH_ROCM_ARCH="gfx942"
+        export TORCH_DONT_CHECK_COMPILER_ABI=1
+        export CXX=hipcc
+        export BUILD_WITH_HIP=1
+        uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
+      fi
+
       uv pip install -r requirements/common.txt
       uv pip install -r requirements/test.txt
       uv pip install -e . --no-build-isolation
       uv pip freeze
 
-      source .buildkite/scripts/pick-free-gpu.sh 18000
-
-      CUDA_LAUNCH_BLOCKING=1 \
       LMCACHE_TRACK_USAGE="false" \
       pytest --maxfail=1 --cov=lmcache \
         --cov-report term --cov-report=html:coverage-test \

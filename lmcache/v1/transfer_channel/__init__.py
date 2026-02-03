@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import Optional
+
 # First Party
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 
@@ -13,6 +16,7 @@ def CreateTransferChannel(
     align_bytes: int,
     tp_rank: int,
     peer_init_url: str,
+    device: Optional[str] = None,
     **kwargs,
 ) -> BaseTransferChannel:
     """
@@ -53,6 +57,7 @@ def CreateTransferChannel(
             align_bytes=align_bytes,
             tp_rank=tp_rank,
             peer_init_url=peer_init_url,
+            device=device,
             **kwargs,
         )
         return transfer_channel
