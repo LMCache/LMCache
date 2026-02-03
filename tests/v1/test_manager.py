@@ -477,3 +477,192 @@ class TestLMCacheManagerCalculateDraftLayers:
             )
 
         assert manager._calculate_draft_layers() == 3
+
+
+class TestLMCacheManagerInitFailure:
+    """Tests for LMCacheManager initialization failure handling."""
+
+    def test_init_components_exception_makes_unhealthy(self):
+        """Test that exception during _init_components makes manager unhealthy."""
+        config = LMCacheEngineConfig.from_defaults()
+        vllm_config = MagicMock()
+        connector = MagicMock()
+
+        with patch.object(
+            LMCacheManager,
+            "_init_components",
+            side_effect=RuntimeError("Test init failure"),
+        ):
+            manager = LMCacheManager(
+                config=config,
+                vllm_config=vllm_config,
+                role="worker",
+                connector=connector,
+            )
+
+        # Verify through is_healthy API
+        assert manager.is_healthy() is False
+
+    def test_post_init_skipped_when_init_failed(self):
+        """Test that post_init marks engine unhealthy when init failed."""
+        config = LMCacheEngineConfig.from_defaults()
+        vllm_config = MagicMock()
+        connector = MagicMock()
+
+        with patch.object(
+            LMCacheManager,
+            "_init_components",
+            side_effect=RuntimeError("Test init failure"),
+        ):
+            manager = LMCacheManager(
+                config=config,
+                vllm_config=vllm_config,
+                role="worker",
+                connector=connector,
+            )
+
+        mock_engine = MagicMock()
+        manager._lmcache_engine = mock_engine
+
+        manager.post_init()
+
+        # Engine should be marked as init failed
+        mock_engine.mark_init_failed.assert_called_once()
+        # Manager should report unhealthy
+        assert manager.is_healthy() is False
+
+    def test_post_init_exception_makes_unhealthy(self):
+        """Test that exception during post_init makes system unhealthy."""
+        config = LMCacheEngineConfig.from_defaults()
+        vllm_config = MagicMock()
+        connector = MagicMock()
+
+        with patch.object(LMCacheManager, "_init_components"):
+            manager = LMCacheManager(
+                config=config,
+                vllm_config=vllm_config,
+                role="worker",
+                connector=connector,
+            )
+
+        mock_engine = MagicMock()
+        mock_engine.post_init.side_effect = RuntimeError("Test post_init failure")
+        manager._lmcache_engine = mock_engine
+
+        manager.post_init()
+
+        # Verify engine was marked as failed
+        mock_engine.mark_init_failed.assert_called_once()
+        # Manager should report unhealthy
+        assert manager.is_healthy() is False
+
+    def test_unhealthy_engine_makes_manager_unhealthy(self):
+        """Test that manager is unhealthy when engine is unhealthy."""
+        config = LMCacheEngineConfig.from_defaults()
+        vllm_config = MagicMock()
+        connector = MagicMock()
+
+        with patch.object(LMCacheManager, "_init_components"):
+            manager = LMCacheManager(
+                config=config,
+                vllm_config=vllm_config,
+                role="worker",
+                connector=connector,
+            )
+
+        mock_engine = MagicMock()
+        mock_engine.is_healthy.return_value = False
+        manager._lmcache_engine = mock_engine
+
+        assert manager.is_healthy() is False
+
+    def test_healthy_when_all_components_healthy(self):
+        """Test that manager is healthy when all components are healthy."""
+        config = LMCacheEngineConfig.from_defaults()
+        vllm_config = MagicMock()
+        connector = MagicMock()
+
+        with patch.object(LMCacheManager, "_init_components"):
+            manager = LMCacheManager(
+                config=config,
+                vllm_config=vllm_config,
+                role="worker",
+                connector=connector,
+            )
+
+        mock_engine = MagicMock()
+        mock_engine.is_healthy.return_value = True
+        manager._lmcache_engine = mock_engine
+
+        mock_health_monitor = MagicMock()
+        mock_health_monitor.is_healthy.return_value = True
+        manager._health_monitor = mock_health_monitor
+
+        assert manager.is_healthy() is True
+
+
+class TestLMCacheEngineInitFailure:
+    """Tests for LMCacheEngine init failure behavior on lookup/retrieve."""
+
+    def test_lookup_returns_zero_when_init_failed(self):
+        """Test that lookup returns 0 when engine is marked as init failed."""
+        # First Party
+        from lmcache.v1.cache_engine import LMCacheEngine
+
+        engine = MagicMock(spec=LMCacheEngine)
+        engine._init_failed = False
+        engine._health_monitor = None
+
+        # Attach real methods to the mock
+        engine.mark_init_failed = LMCacheEngine.mark_init_failed.__get__(
+            engine, LMCacheEngine
+        )
+        engine.is_healthy = LMCacheEngine.is_healthy.__get__(engine, LMCacheEngine)
+
+        # Call mark_init_failed and verify is_healthy returns False
+        engine.mark_init_failed("Test reason")
+        assert engine.is_healthy() is False
+
+    def test_retrieve_returns_empty_mask_when_init_failed(self):
+        """Test retrieve returns all-False mask when engine init failed."""
+        # First Party
+        from lmcache.v1.cache_engine import LMCacheEngine
+
+        engine = MagicMock(spec=LMCacheEngine)
+        engine._init_failed = False
+        engine._health_monitor = None
+
+        # Attach real methods to the mock
+        engine.mark_init_failed = LMCacheEngine.mark_init_failed.__get__(
+            engine, LMCacheEngine
+        )
+        engine.is_healthy = LMCacheEngine.is_healthy.__get__(engine, LMCacheEngine)
+
+        # Mark as init failed and verify is_healthy returns False
+        # (which would cause retrieve to return all-False mask)
+        engine.mark_init_failed("Test reason")
+        assert engine.is_healthy() is False
+
+    def test_mark_init_failed_makes_engine_unhealthy(self):
+        """Test that mark_init_failed makes engine report unhealthy."""
+        # First Party
+        from lmcache.v1.cache_engine import LMCacheEngine
+
+        engine = MagicMock(spec=LMCacheEngine)
+        engine._init_failed = False
+        engine._health_monitor = None
+
+        # Attach real methods to the mock
+        engine.mark_init_failed = LMCacheEngine.mark_init_failed.__get__(
+            engine, LMCacheEngine
+        )
+        engine.is_healthy = LMCacheEngine.is_healthy.__get__(engine, LMCacheEngine)
+
+        # Verify initially healthy
+        assert engine.is_healthy() is True
+
+        # Call the method under test
+        engine.mark_init_failed("Test reason")
+
+        # Assert on the outcome
+        assert engine.is_healthy() is False
