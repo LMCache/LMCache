@@ -398,8 +398,7 @@ def prepare_message_for_vllm(
 
                     frame_content_list: List[Dict[str, Any]] = []
                     for i, frame in enumerate(frames):
-                        if i % 8 == 0:
-                            frame_content_list.append({"type": "text", "text": blend_special_str})
+                        frame_content_list.append({"type": "text", "text": blend_special_str})
                         img = Image.fromarray(frame)
                         buf = BytesIO()
                         img.save(buf, format="PNG")

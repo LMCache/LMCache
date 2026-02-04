@@ -186,9 +186,8 @@ class LMCBaseModel(nn.Module, ABC):
 
         is_costream = bool(getattr(self.blender.common_metadata, "is_costream", False)) 
         GOP = int(getattr(self.blender.common_metadata, "GOP"))  
-        if is_costream:
-            pass
-            # get the GOP parameter, and then just recompute the first frame of the GOP
+        if is_costream and GOP <= 0:
+            raise ValueError(f"GOP must be positive in CoStream mode, got {GOP}.")
         
         
         # Some integrations allow get_input_embeddings to accept ids directly; keep existing call style

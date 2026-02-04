@@ -308,6 +308,8 @@ class ReqMeta:
     disagg_spec: Optional[DisaggSpec] = None
     # the configs of the request
     request_configs: Optional[dict] = None
+    # Number of tokens produced by one frame.
+    tokens_per_frame: Optional[int] = None
 
     @staticmethod
     def from_request_tracker(
@@ -430,6 +432,12 @@ class ReqMeta:
             # Do not load if not in `can_load` state
             load_spec = None
 
+        tokens_per_frame: Optional[int] = None
+        if tracker.mm_positions and len(tracker.mm_positions) > 0:
+            tokens_per_frame = int(getattr(tracker.mm_positions[0], "length", 0))
+            if tokens_per_frame <= 0:
+                tokens_per_frame = None
+
         return ReqMeta(
             req_id=tracker.req_id,
             token_ids=token_ids,
@@ -439,6 +447,7 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
+            tokens_per_frame=tokens_per_frame,
         )
 
 
@@ -964,6 +973,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        tokens_per_frame=request.tokens_per_frame,
                         page_stream=page_stream,
                         sync=sync,
                     )

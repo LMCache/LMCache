@@ -118,12 +118,71 @@ class LMCBlender:
         rotary = self._get_rotary_emb(attn_layer)
         q, k = rotary(self.metadata.positions, q, k)
 
-        # VLCache: recompute prefix x% tokens' KV, reuse suffix (1-x)% KV from old KV
+        # CoStream: recompute only key-frame tokens
         if bool(getattr(self.common_metadata, "is_costream", False)):
-            pass
-            # TODO: implement the details with recomputing key freams
+            # Build recompute indices once, then keep using the same reduced path
+            # for following layers in this request.
+            if self.metadata.imp_indices is None:
+                num_tokens = q.shape[0]
+                all_indices = torch.arange(num_tokens, device=q.device, dtype=torch.long)
 
+                # Gap positions are cache-miss token positions; the remaining
+                # tokens are cache-hit positions.
+                gap_positions = getattr(self.gpu_connector, "current_gap_positions", None)
+                if gap_positions is not None and gap_positions.numel() > 0:
+                    gap_positions = gap_positions.to(device=q.device, dtype=torch.long)
+                    valid_gap = gap_positions[(gap_positions >= 0) & (gap_positions < num_tokens)]
+                    hit_mask = torch.ones(num_tokens, device=q.device, dtype=torch.bool)
+                    hit_mask[valid_gap] = False
+                    hit_indices = all_indices[hit_mask]
+                else:
+                    hit_indices = all_indices
 
+                gop = max(int(getattr(self.common_metadata, "GOP", 1)), 1)
+                tokens_per_frame = int(self.metadata.tokens_per_frame or 0)
+                # Recompute key frames by GOP at frame granularity.
+                if tokens_per_frame > 0:
+                    num_frames = (num_tokens + tokens_per_frame - 1) // tokens_per_frame
+                    selected_chunks = []
+                    for frame_id in range(0, num_frames, gop):
+                        start = frame_id * tokens_per_frame
+                        end = min(start + tokens_per_frame, num_tokens)
+                        frame_hit_offsets = torch.nonzero(
+                            hit_mask[start:end],
+                            as_tuple=True,
+                        )[0]
+                        if frame_hit_offsets.numel() > 0:
+                            selected_chunks.append(frame_hit_offsets + start)
+                    if selected_chunks:
+                        selected_indices = torch.cat(selected_chunks, dim=0)
+                    elif hit_indices.numel() > 0:
+                        selected_indices = hit_indices[:1]
+                    else:
+                        selected_indices = hit_indices
+                elif gop > 1:
+                    # Fallback: no frame info, degrade to token-based selection.
+                    selected_indices = hit_indices[(hit_indices % gop) == 0]
+                    if selected_indices.numel() == 0 and hit_indices.numel() > 0:
+                        selected_indices = hit_indices[:1]
+                else:
+                    selected_indices = hit_indices
+
+                self.metadata.imp_indices = selected_indices
+                self.metadata.positions = self.metadata.positions[selected_indices]
+                attn_metadata.update_from_top_indices(selected_indices)
+                logger.info(
+                    "CoStream mode selected %d/%d hit tokens for recompute (GOP=%d).",
+                    int(selected_indices.numel()),
+                    int(num_tokens),
+                    gop,
+                )
+
+            imp_indices = self.metadata.imp_indices
+            assert imp_indices is not None
+            k, v = k[imp_indices], v[imp_indices]
+            q = q[imp_indices]
+            residual = residual[imp_indices]
+            attn_output = attn_output[: len(imp_indices)]
 
         # Recomputation/selection logic for important layers
         if layer_id in self.common_metadata.check_layers and not self.common_metadata.is_costream:
@@ -203,6 +262,9 @@ class LMCBlender:
         if isinstance(tokens, list):
             tokens = torch.tensor(tokens).cuda()
         logger.info("enter blend")
+        tokens_per_frame = kwargs.get("tokens_per_frame")
+        if tokens_per_frame is not None:
+            self.metadata.tokens_per_frame = int(tokens_per_frame)
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
         # +2 is for the handshake/closing process with the retriever at both the beginning and end.

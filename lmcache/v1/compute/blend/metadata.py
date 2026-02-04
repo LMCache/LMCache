@@ -28,8 +28,10 @@ class LMCBlendMetadata:
     imp_indices: Optional[torch.Tensor] = None
     attn_mask: Optional[torch.Tensor] = None
     positions: Optional[torch.Tensor] = None
+    tokens_per_frame: Optional[int] = None
 
     def clean(self):
         self.imp_indices = None
         self.attn_mask = None
         self.positions = None
+        self.tokens_per_frame = None
