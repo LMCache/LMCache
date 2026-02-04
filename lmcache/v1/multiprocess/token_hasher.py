@@ -25,6 +25,7 @@ def _make_blake3_hash_func() -> Callable:
     """Create a blake3-based hash function compatible with the
     (prefix_hash, tuple(tokens), None) calling convention."""
     import blake3 as _blake3
+    import struct
 
     def blake3_hash(args):
         prefix_hash, tokens, _ = args
@@ -36,9 +37,8 @@ def _make_blake3_hash_func() -> Callable:
             h.update(prefix_hash.to_bytes(8, byteorder="big", signed=True))
         else:
             h.update(bytes(prefix_hash))
-        # Serialize token IDs
-        for t in tokens:
-            h.update(t.to_bytes(4, byteorder="big", signed=False))
+        # Serialize token IDs in one batch
+        h.update(struct.pack(f">{len(tokens)}I", *tokens))
         return h.digest()  # 32 bytes
 
     return blake3_hash
