@@ -476,7 +476,7 @@ def build_argparser():
     ap.add_argument("--stride-ratio", type=float, default=0.4, help="Stride ratio relative to window size.")
     ap.add_argument("--max-windows", type=int, default=0, help="Optional cap on number of windows per video (0 = all).")
     ap.add_argument("--blend-special-str", type=str, default="<<SEG>>", help="Segment token inserted before each frame.")
-    ap.add_argument("--base-url", type=str, default="http://localhost:8001/v1", help="OpenAI-compatible base URL.")
+    ap.add_argument("--base-url", type=str, default="http://localhost:8000/v1", help="OpenAI-compatible base URL.")
     ap.add_argument("--prompts", type=json.loads,
                     default={
                         "abuse": "Describe the frames and determine if they show any abuse. Start your response with 'Yes' or 'No'.",

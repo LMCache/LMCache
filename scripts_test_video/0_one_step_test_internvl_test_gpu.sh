@@ -1,31 +1,26 @@
-# cd ../scripts_to_build_env
-# bash 3_compile.sh
-# cd ../scripts_test_video
+cd ../scripts_to_build_env
+bash 3_compile.sh
+cd ../scripts_test_video
 
 BLEND_SPECIAL_STR="<<SEG>>"
 # update in lmcache_blend.yml
 sed -i "s|blend_special_str: .*|blend_special_str: \"$BLEND_SPECIAL_STR\"|g" lmcache_blend.yml
+
 echo "Waiting for server to start..."
-source /opt/venv/bin/activate
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export LM_CACHE_METRICS=1
 export LMCACHE_DEBUG=1
 export LMDEBUG=1
 export LMCACHE_VERBOSE=1
-export LMCACHE_CONFIG_FILE="lmcache_blend.yml"
-export LM_CACHE_CONFIG_FILE="lmcache_blend.yml"
+export LMCACHE_CONFIG_FILE=lmcache_blend.yml
+export LM_CACHE_CONFIG_FILE=lmcache_blend.yml 
+export VLLM_LOGGING_LEVEL=DEBUG
+# export PYTORCH_CUDA_ALLOC_CONF=debug:True
 
 change_recompute_ratio=False
-if [ "$change_recompute_ratio" = True ] ; then
-  sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: [0.15]|g" lmcache_blend.yml
-  echo "  blend_recompute_ratio set to 0.15"
-fi  
-model=Qwen/Qwen3-VL-32B-Instruct
-model_name="Qwen3-VL-32B-Instruct"
-# model=Qwen/Qwen3-VL-8B-Thinking
-# model_name="Qwen3-VL-8B-Thinking"
-SERVER_LOG=server_32B.log
-dataset_root=/home/users/ntu/wenyanch/dataset/Anomaly-Detection-Dataset
+model=OpenGVLab/InternVL3-14B
+model_name="InternVL3-14B"
+SERVER_LOG=server.log
+dataset_root=/root/workspace/dataset/Anomaly-Detection-Dataset
 dataset_json="datasets/small_dataset.json"
 
 # 1. simple example
@@ -38,8 +33,11 @@ dataset_json="datasets/small_dataset.json"
 
 # 2. anomaly detection
 WIN_SIZES=(40)
-STRIDE_SIZES=(0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
-blend_recompute_ratios=(0.1)
+STRIDE_SIZES=(0.1)
+blend_recompute_ratios=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0)
+
+# export VLLM_LOGGING_LEVEL=DEBUG
+# export PYTHONUNBUFFERED=1
 
 if [ "$change_recompute_ratio" = False ] ; then
   blend_recompute_ratios=(0.15)
@@ -48,8 +46,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
   # update in lmcache_blend.yml
   sed -i "s|blend_recompute_ratios: .*|blend_recompute_ratios: ${ratio}|g" lmcache_blend.yml
   echo "  blend_recompute_ratio set to ${ratio}"
-  results_dir=results_analysis/logs/${model_name}/small_dataset
-  results_dir=results_analysis/logs/${model_name}/small_dataset
+  results_dir=results_analysis/logs/${model_name}/small_dataset/test_gpu_backend
   if [ ! -d "$results_dir" ]; then
     mkdir -p "$results_dir"
   fi
@@ -65,14 +62,14 @@ for ratio in "${blend_recompute_ratios[@]}"; do
     --port 8000 \
     --trust-remote-code \
     --disable-log-requests \
-    --max-num-batched-tokens 65536 \
-    --max-model-len 8192 \
-    --tensor-parallel-size 4 \
-    --max-num-batched-tokens 153600 \
+    --chat-template-content-format openai \
+    --max-num-batched-tokens 204800 \
     --gpu-memory-utilization 0.9 \
+    --disable-chunked-mm-input \
     --enforce-eager \
     --no-enable-prefix-caching \
-    --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_size":100000000}' > $SERVER_LOG 2>&1 &
+    --mm-processor-kwargs '{"max_dynamic_patch": 4}' \
+    --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_size":1000000000}' > $SERVER_LOG 2>&1 &
 
   # check if server is up by looking for a specific log line
   while ! grep -q "Application startup complete." "$SERVER_LOG"; do

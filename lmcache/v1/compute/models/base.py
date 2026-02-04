@@ -253,6 +253,9 @@ class LMCBaseModel(nn.Module, ABC):
                 q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
                     q, k, v, residual, self.start_layer + layer_idx, attn_output, attn_metadata
                 )
+                if timing is not None:
+                    pre_attn_end.record(stream)
+                    pre_attn_events = (pre_attn_start, pre_attn_end)
 
                 if timing is not None:
                     pre_attn_end.record(stream)

@@ -75,10 +75,10 @@ vllm serve $model \
   --port 8001 \
   --trust-remote-code \
   --disable-log-requests \
-  --max-num-batched-tokens 102400 \
-  --max-model-len 30656 \
   --gpu-memory-utilization 0.9 \
-  --tensor-parallel-size 2 \
+  --disable-chunked-mm-input \
+  --max-model-len 65536 \
+  --max-num-batched-tokens 66156 \
   --enforce-eager \
   --no-enable-prefix-caching \
   --mm-processor-kwargs '{"max_dynamic_patch": 4}' > $SERVER_LOG 2>&1 &

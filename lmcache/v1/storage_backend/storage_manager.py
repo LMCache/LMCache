@@ -216,6 +216,10 @@ class StorageManager:
             f"Storage backends created: "
             f"{', '.join(self.storage_backends.keys())}"
         )
+        logger.info(
+            f"Storage backends created: "
+            f"{', '.join(self.storage_backends.keys())}"
+        )
 
         # the backend used for actual storage
         self.non_allocator_backends = self.get_non_allocator_backends()
@@ -227,6 +231,8 @@ class StorageManager:
             self.allocator_backend = self._get_allocator_backend(config)
         if config.local_cpu:
             self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+        if config.local_gpu:
+            self.local_gpu_backend = self.storage_backends["LocalGPUBackend"]
         if config.local_gpu:
             self.local_gpu_backend = self.storage_backends["LocalGPUBackend"]
 
@@ -307,6 +313,8 @@ class StorageManager:
     ) -> AllocatorBackendInterface:
         if self.enable_pd:
             allocator_backend = self.storage_backends["PDBackend"]
+        elif self.config.local_gpu:
+            allocator_backend = self.storage_backends["LocalGPUBackend"]
         elif self.config.local_gpu:
             allocator_backend = self.storage_backends["LocalGPUBackend"]
         else:
@@ -552,7 +560,10 @@ class StorageManager:
         """
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         # Search all backends for blocking get
+        start_event.record()
         start_event.record()
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
@@ -641,6 +652,7 @@ class StorageManager:
         """
         if location is None:
             location = "LocalGPUBackend"
+            location = "LocalGPUBackend"
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
@@ -672,6 +684,7 @@ class StorageManager:
         :return: A generator that yields a future for each layer.
         """
         if location is None:
+            location = "LocalGPUBackend"
             location = "LocalGPUBackend"
 
         for keys_multi_chunk in keys:
@@ -921,6 +934,11 @@ class StorageManager:
                 "LocalDiskBackend",
                 "LocalGPUBackend",
             ]:
+            if backend_name in [
+                "LocalCPUBackend",
+                "LocalDiskBackend",
+                "LocalGPUBackend",
+            ]:
                 backend.touch_cache()
 
     def remove(
@@ -936,6 +954,7 @@ class StorageManager:
 
         :param Optional[List[str]] locations: The range of storage backends
         to perform `remove` in.
+        Should be a subset of ["LocalCPUBackend", "LocalDiskBackend", "LocalGPUBackend"].
         Should be a subset of ["LocalCPUBackend", "LocalDiskBackend", "LocalGPUBackend"].
         If None, perform `remove` in all backends.
 
