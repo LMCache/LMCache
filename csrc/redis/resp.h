@@ -39,6 +39,7 @@ class MultiRESPClient {
                             py::list memviews);
   uint64_t submit_batch_set(const std::vector<std::string>& keys,
                             py::list memviews);
+  uint64_t submit_batch_exists(const std::vector<std::string>& keys);
 
   py::list drain_completions();
 

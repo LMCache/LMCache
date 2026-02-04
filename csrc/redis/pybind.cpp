@@ -20,6 +20,8 @@ PYBIND11_MODULE(lmcache_redis, m) {
            py::arg("keys"), py::arg("memoryviews"))
       .def("submit_batch_set", &MultiRESPClient::submit_batch_set,
            py::arg("keys"), py::arg("memoryviews"))
+      .def("submit_batch_exists", &MultiRESPClient::submit_batch_exists,
+           py::arg("keys"))
       .def("drain_completions", &MultiRESPClient::drain_completions)
       .def("close", &MultiRESPClient::close);
 }

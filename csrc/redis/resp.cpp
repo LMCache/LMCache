@@ -47,7 +47,14 @@ Therefore, we have:
 
 // tiling refers to dividing work for batched operations between threads
 // beforehand
-enum class Op : uint8_t { GET, SET, EXISTS, BATCH_TILE_GET, BATCH_TILE_SET };
+enum class Op : uint8_t {
+  GET,
+  SET,
+  EXISTS,
+  BATCH_TILE_GET,
+  BATCH_TILE_SET,
+  BATCH_TILE_EXISTS
+};
 
 // shared communication state between threads executing a single batch operation
 // all threads need to complete before the completion is sent
@@ -59,6 +66,13 @@ struct BatchState {
 
   std::mutex err_mu;
   std::string first_error;
+
+  // for batch exists, store the boolean results (0/1)
+  // IMPORTANT: not vector<bool> due to concurrent write data race
+  std::vector<uint8_t> exists_results;
+
+  // track batch operation type to avoid fragile req.op checks
+  Op batch_op;
 };
 
 struct Request {
@@ -88,6 +102,9 @@ struct Request {
   // shared batch state between threads executing a single batch operation
   // so that they can coordinate when to send the completion
   std::shared_ptr<BatchState> batch;
+
+  // for batch exists tiles, track which indices this tile is responsible for
+  size_t start_idx = 0;
 };
 
 struct Completion {
@@ -99,6 +116,9 @@ struct Completion {
   bool ok = true;
   // for EXISTS only (no result in the completion for SET and GET)
   bool result_bool = false;
+
+  // for batch EXISTS, store multiple boolean results as bytes (0/1)
+  std::vector<uint8_t> result_bytes;
 
   // error string if operation failed
   std::string error;
@@ -470,6 +490,7 @@ uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
       next_future_id_.fetch_add(1, std::memory_order_relaxed);
   auto batch_state = std::make_shared<BatchState>();
   batch_state->remaining_tiles.store(num_tiles, std::memory_order_relaxed);
+  batch_state->batch_op = Op::BATCH_TILE_GET;
 
   // fan out
   for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
@@ -523,6 +544,7 @@ uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
       next_future_id_.fetch_add(1, std::memory_order_relaxed);
   auto batch_state = std::make_shared<BatchState>();
   batch_state->remaining_tiles.store(num_tiles, std::memory_order_relaxed);
+  batch_state->batch_op = Op::BATCH_TILE_SET;
 
   // fan out
   for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
@@ -547,6 +569,52 @@ uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
       tile_req.keys.push_back(keys[i]);
       tile_req.buf_ptrs.push_back(info.ptr);
       tile_req.buf_owners.push_back(mv);
+    }
+
+    enqueue_request(std::move(tile_req));
+  }
+
+  return batch_future_id;
+}
+
+// python interface (non-blocking)
+// future_id = client.submit_batch_exists(keys: list[str])
+uint64_t MultiRESPClient::submit_batch_exists(
+    const std::vector<std::string>& keys) {
+  size_t num_items = keys.size();
+  if (num_items == 0) {
+    throw std::runtime_error("keys list is empty");
+  }
+
+  // divide work evenly between workers into tiles (round up, the last tile
+  // will be clipped)
+  size_t num_tiles =
+      std::min<size_t>(num_workers_, num_items);  // avoid empty tiles
+  size_t tile_size = (num_items + num_tiles - 1) / num_tiles;  // round up
+
+  // create shared batch state
+  uint64_t batch_future_id =
+      next_future_id_.fetch_add(1, std::memory_order_relaxed);
+  auto batch_state = std::make_shared<BatchState>();
+  batch_state->remaining_tiles.store(num_tiles, std::memory_order_relaxed);
+  batch_state->batch_op = Op::BATCH_TILE_EXISTS;
+  // Use uint8_t instead of bool to avoid vector<bool> concurrent write data
+  // race
+  batch_state->exists_results.assign(num_items, 0);
+
+  // fan out
+  for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+    size_t start = tile_idx * tile_size;
+    size_t end = std::min(start + tile_size, num_items);  // clip last tile
+
+    Request tile_req;
+    tile_req.op = Op::BATCH_TILE_EXISTS;
+    tile_req.future_id = batch_future_id;
+    tile_req.batch = batch_state;
+    tile_req.start_idx = start;
+
+    for (size_t i = start; i < end; ++i) {
+      tile_req.keys.push_back(keys[i]);
     }
 
     enqueue_request(std::move(tile_req));
@@ -590,9 +658,18 @@ py::list MultiRESPClient::drain_completions() {
       c = std::move(completions_.front());
       completions_.pop();
     }
-    // convert Completion to python tuple: (future_id, ok, result_bool, error)
+    // convert Completion to python tuple: (future_id, ok, result_bool, error,
+    // result_bools) result_bools will be None for non-batch-exists operations
+    py::object bools_obj = py::none();
+    if (!c.result_bytes.empty()) {
+      py::list bools_list;
+      for (uint8_t b : c.result_bytes) {
+        bools_list.append(bool(b));
+      }
+      bools_obj = bools_list;
+    }
     completions_list.append(
-        py::make_tuple(c.future_id, c.ok, c.result_bool, c.error));
+        py::make_tuple(c.future_id, c.ok, c.result_bool, c.error, bools_obj));
   }
 
   return completions_list;
@@ -815,6 +892,14 @@ void MultiRESPClient::worker_loop() {
             }
             comp.ok = true;
             break;
+          case Op::BATCH_TILE_EXISTS:
+            for (size_t i = 0; i < req.keys.size(); ++i) {
+              bool exists = do_exists(conn, req.keys[i]);
+              // write result as uint8_t (0/1) to avoid vector<bool> data race
+              req.batch->exists_results[req.start_idx + i] = exists ? 1 : 0;
+            }
+            comp.ok = true;
+            break;
         }
       } catch (const std::exception& e) {
         comp.ok = false;
@@ -822,15 +907,15 @@ void MultiRESPClient::worker_loop() {
         // if we're shutting down, socket errors are expected
         if (stop_.load(std::memory_order_acquire)) {
           // cleanup and exit without pushing completion
+          py::gil_scoped_acquire gil;
           if (req.op == Op::BATCH_TILE_GET || req.op == Op::BATCH_TILE_SET) {
-            py::gil_scoped_acquire gil;
             for (auto& owner : req.buf_owners) {
               owner = py::none();
             }
-          } else {
-            py::gil_scoped_acquire gil;
+          } else if (req.op == Op::GET || req.op == Op::SET) {
             req.buf_owner = py::none();
           }
+          // BATCH_TILE_EXISTS and EXISTS have no Python refs to clean up
           break;  // exit loop
         }
       }
@@ -838,7 +923,8 @@ void MultiRESPClient::worker_loop() {
       // 3. push completion to CQ
 
       // batch completions need to be "joined"
-      if (req.op == Op::BATCH_TILE_GET || req.op == Op::BATCH_TILE_SET) {
+      if (req.op == Op::BATCH_TILE_GET || req.op == Op::BATCH_TILE_SET ||
+          req.op == Op::BATCH_TILE_EXISTS) {
         if (!comp.ok) {
           req.batch->any_failed.store(true, std::memory_order_relaxed);
           std::lock_guard<std::mutex> lk(req.batch->err_mu);
@@ -846,8 +932,8 @@ void MultiRESPClient::worker_loop() {
             req.batch->first_error = comp.error;
           }
         }
-        // release Python refs for this tile under GIL
-        {
+        // release Python refs for this tile under GIL (only for GET/SET tiles)
+        if (req.op == Op::BATCH_TILE_GET || req.op == Op::BATCH_TILE_SET) {
           py::gil_scoped_acquire gil;
           for (auto& owner : req.buf_owners) {
             owner = py::none();
@@ -867,13 +953,19 @@ void MultiRESPClient::worker_loop() {
             std::lock_guard<std::mutex> lk(req.batch->err_mu);
             batch_comp.error = req.batch->first_error;
           }
+          // for batch exists, copy the results (use batch_op to determine type)
+          if (req.batch->batch_op == Op::BATCH_TILE_EXISTS) {
+            batch_comp.result_bytes = std::move(req.batch->exists_results);
+          }
           push_completion(std::move(batch_comp));
         }
       }
 
       // single completions
       else {
-        {
+        // Only release buf_owner if it was actually used (GET/SET/EXISTS with
+        // buffer)
+        if (req.op == Op::GET || req.op == Op::SET) {
           py::gil_scoped_acquire gil;
           req.buf_owner = py::none();
         }
