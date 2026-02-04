@@ -1,0 +1,9 @@
+chunk_size: 1024
+use_gpu_connector_v3: True
+local_cpu: True
+max_local_cpu_size: 5
+save_unfull_chunk: False
+extra_config:
+  first_rank_max_local_cpu_size: 10
+  save_only_first_rank: True
+# hit_miss_ratio: 0.5
