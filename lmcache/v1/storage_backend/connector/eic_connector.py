@@ -388,9 +388,9 @@ class EICConnector(RemoteConnector):
         err_code = get_outcome.status_codes[0]
         if status_code != eic.StatusCode.SUCCESS or err_code != eic.StatusCode.SUCCESS:
             logger.error(
-                f"eic mget data {key_str} failed, status_code {status_code}"
-                " err_code {err_code}"
+                f"eic mget data {key_str} failed, status_code {status_code} err_code {err_code}"
             )
+            memory_obj.ref_count_down()
             return None
         else:
             logger.debug(f"eic mget data {key_str} success")
@@ -544,28 +544,30 @@ class EICConnector(RemoteConnector):
                 logger.error(f"Memory object tensor is None for key {key_str}")
                 return
 
-            remote_meta = RemoteMetadata(
-                self.remote_metadata_bytes, kv_shapes, kv_dtypes, memory_format
-            )
-            meta_bytes = remote_meta.serialize()
-            meta_list.append(meta_bytes)
-            meta_ptr = self.bytes_get_ptr(meta_bytes)
-            meta_size = len(meta_bytes)
             data_ptr = kv_tensor.data_ptr()
             data_size = len(kv_bytes)
 
-            logger.info(
-                "eic batched_put %s, shapes: %s, dtypes: %s, fmt: %s",
+            logger.debug(
+                "eic batched_put %s, data_size: %s, shapes: %s, dtypes: %s, fmt: %s",
                 key_str,
+                data_size,
                 kv_shapes,
                 kv_dtypes,
                 memory_format,
             )
 
             # Add meta key & value
-            meta_key = key_str + "_meta"
-            eic_keys.append(meta_key)
-            eic_vals.append(meta_ptr, meta_size, False)
+            if self.save_chunk_meta:
+                remote_meta = RemoteMetadata(
+                    self.remote_metadata_bytes, kv_shapes, kv_dtypes, memory_format
+                )
+                meta_bytes = remote_meta.serialize()
+                meta_list.append(meta_bytes)
+                meta_ptr = self.bytes_get_ptr(meta_bytes)
+                meta_size = len(meta_bytes)
+                meta_key = key_str + "_meta"
+                eic_keys.append(meta_key)
+                eic_vals.append(meta_ptr, meta_size, False)
             # Add data key & value
             eic_keys.append(key_str)
             if self.trans_type == eic.TransportType.TRANSPORT_GDR:
@@ -608,7 +610,7 @@ class EICConnector(RemoteConnector):
         )
 
     def support_batched_put(self) -> bool:
-        return False
+        return not self.save_chunk_meta
 
     async def batched_put(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
@@ -624,8 +626,28 @@ class EICConnector(RemoteConnector):
             priority=Priorities.PUT,
         )
 
+    def support_batched_contains(self) -> bool:
+        return True
+
     def support_batched_async_contains(self) -> bool:
         return True
+
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        key_strings = eic.StringVector()
+        for key in keys:
+            key_strings.append(key.to_string())
+        exist_option = eic.ExistOption()
+        status_code, exist_outcome = self.connection.mexist(key_strings, exist_option)
+        if status_code != eic.StatusCode.SUCCESS:
+            logger.warning(f"batched_contains return fail, status_code {status_code}")
+            return 0
+        success_count = 0
+        for err_code in exist_outcome.status_codes:
+            if err_code == eic.StatusCode.SUCCESS:
+                success_count += 1
+            else:
+                break
+        return success_count
 
     async def _batched_async_contains(
         self,
@@ -689,8 +711,87 @@ class EICConnector(RemoteConnector):
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
         # calling self.get will create a circular dependency
-        results = await asyncio.gather(*(self._get(key) for key in keys))
-        return results
+        if self.save_chunk_meta:
+            results = await asyncio.gather(*(self._get(key) for key in keys))
+            return results
+        else:
+            return await self._batched_get_without_meta(keys)
+
+    async def _batched_get_without_meta(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+        if not self.meta_shapes or not self.meta_dtypes or not self.meta_fmt:
+            logger.error(
+                f"Metadata required for batch_get_without_meta but not available: "
+                f"meta_shapes={self.meta_shapes}, "
+                f"meta_dtypes={self.meta_dtypes}, "
+                f"meta_fmt={self.meta_fmt}"
+            )
+            return [None] * len(keys)
+
+        logger.debug(f"Using batch_get_without_meta for {len(keys)} keys")
+
+        data_keys = eic.StringVector()
+        data_vals = eic.IOBuffers()
+        memory_objs: List[Optional[MemoryObj]] = []
+        for key in keys:
+            memory_obj = self.memory_allocator.allocate(
+                self.meta_shapes, self.meta_dtypes, self.meta_fmt
+            )
+            if memory_obj is None or memory_obj.tensor is None:
+                break
+            obj_size = memory_obj.get_size()
+            data_ptr = memory_obj.tensor.data_ptr()
+
+            logger.debug(
+                "eic batched_get_without_meta %s, data_size %s, dtypes %s, shapes %s, fmt %s",
+                key.to_string(),
+                obj_size,
+                memory_obj.get_dtypes(),
+                memory_obj.get_shapes(),
+                memory_obj.get_memory_format()
+            )
+
+            memory_objs.append(memory_obj)
+            data_keys.append(key.to_string())
+            if self.trans_type == eic.TransportType.TRANSPORT_GDR:
+                data_vals.append(data_ptr, obj_size, True)
+            else:
+                data_vals.append(data_ptr, obj_size, False)
+
+        if not memory_objs:
+            logger.warning("Batch-get aborted: unable to allocate any buffers.")
+            return [None] * len(keys)
+
+        results: List[Optional[MemoryObj]] = [None] * len(keys)
+        try:
+            get_option = eic.GetOption()
+            get_option.ns = self.eic_kv_ns
+            status_code, data_vals, get_outcome = self.connection.mget(
+                data_keys, get_option, data_vals
+            )
+            first_err_code = get_outcome.status_codes[0]
+            if status_code != eic.StatusCode.SUCCESS or first_err_code != eic.StatusCode.SUCCESS:
+                logger.error(
+                    f"eic batched_get_without_meta mget data failed, status_code {status_code} err_code {first_err_code}"
+                )
+                for memory_obj in memory_objs:
+                    memory_obj.ref_count_down()
+                return [None] * len(keys)
+            else:
+                for i, data_key in enumerate(data_keys):
+                    key_status_code = get_outcome.status_codes[i]
+                    if key_status_code != eic.StatusCode.SUCCESS:
+                        logger.error(f"eic batched_get_without_meta {data_key} failed, err_code {key_status_code}")
+                        memory_objs[i].ref_count_down()
+                    else:
+                        logger.debug(f"eic batched_get_without_meta {data_key} success")
+                        results[i] = memory_objs[i]
+            return results
+        except Exception as exc:
+            logger.error(f"batch_get_without_meta threw exception: {str(exc)}")
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_down()
+            return [None] * len(keys)
+
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
@@ -714,8 +815,11 @@ class EICConnector(RemoteConnector):
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
         # calling self.get will create a circular dependency
-        results = await asyncio.gather(*(self._get(key) for key in keys))
-        return [r for r in results if r is not None]
+        if self.save_chunk_meta:
+            results = await asyncio.gather(*(self._get(key) for key in keys))
+            return [r for r in results if r is not None]
+        else:
+            return await self._batched_get_without_meta(keys)
 
     async def batched_get_non_blocking(
         self,
