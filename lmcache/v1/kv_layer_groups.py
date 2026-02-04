@@ -173,10 +173,15 @@ class KVLayerGroupsManager:
         )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            shape = kv_cache.shape
-            dtype = kv_cache.dtype
-            key = (shape, dtype)
-            groups_dict[key].append((layer_name, idx))
+            # Normalize to iterable
+            tensors = kv_cache if isinstance(kv_cache, (tuple, list)) else [kv_cache]
+
+            # Find the first non-None tensor
+            for tensor in tensors:
+                if tensor is not None:
+                    key = (tensor.shape, tensor.dtype)
+                    groups_dict[key].append((layer_name, idx))
+                    break
 
         # Build KVLayerGroupInfo list
         # Sort groups by the first layer index to maintain order
