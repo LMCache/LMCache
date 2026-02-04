@@ -20,7 +20,13 @@ import uvicorn
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineHashKey
+from lmcache.v1.multiprocess.custom_types import StorageKey
+from lmcache.v1.multiprocess.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.multiprocess.server import MPCacheEngine, run_cache_server
 
 logger = init_logger(__name__)
@@ -38,6 +44,19 @@ class ServerConfig:
     chunk_size: int = 256
     cpu_buffer_size: float = 5.0
     max_workers: int = 1
+
+    def to_storage_manager_config(self) -> StorageManagerConfig:
+        return StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=int(self.cpu_buffer_size * 1024**3),
+                    use_lazy=True,
+                ),
+            ),
+            eviction_config=EvictionConfig(
+                eviction_policy="LRU",
+            ),
+        )
 
 
 _server_config = ServerConfig()
@@ -57,10 +76,10 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting LMCache HTTP server...")
     zmq_server, engine = run_cache_server(
+        storage_manager_config=_server_config.to_storage_manager_config(),
         host=_server_config.zmq_host,
         port=_server_config.zmq_port,
         chunk_size=_server_config.chunk_size,
-        cpu_buffer_size=_server_config.cpu_buffer_size,
         max_workers=_server_config.max_workers,
         return_engine=True,
     )
@@ -188,7 +207,7 @@ def search_keys_by_hash(
     model_name: str | None = None,
     world_size: int | None = None,
     worker_id: int | None = None,
-) -> list[IPCCacheEngineHashKey]:
+) -> list[StorageKey]:
     """
     Search for keys matching the given hash and optional filters.
 
@@ -199,11 +218,13 @@ def search_keys_by_hash(
         world_size: Optional world size filter
         worker_id: Optional worker ID filter
     Returns:
-        List of matching IPCCacheEngineHashKey objects
+        List of matching StorageKey objects
     """
     matching_keys = []
     with engine.lock:
-        all_keys = engine.storage_manager.get_all_keys()
+        # TODO: get_all_keys is not implemented in new storage manager
+        logger.error("Get all keys is not implemented, returning empty list")
+        all_keys = []  # type: ignore
 
         for key in all_keys:
             if key.chunk_hash != chunk_hash:
@@ -221,7 +242,7 @@ def search_keys_by_hash(
 
 def get_memory_objects(
     engine: MPCacheEngine,
-    keys: list[IPCCacheEngineHashKey],
+    keys: list[StorageKey],
 ) -> list[MemoryObj]:
     """
     Get memory objects for the given keys without locking/unlocking.
@@ -235,18 +256,11 @@ def get_memory_objects(
     Returns:
         List of MemoryObj objects (filtered to only include found objects)
     """
-    memory_objs = []
-    storage_manager = engine.storage_manager
-    # Use storage manager's buffer lock for thread safety
-    with storage_manager._buffer_lock:
-        for key in keys:
-            if storage_manager._has_key(key):
-                obj = storage_manager._commited_memory_objects[key]
-                # Touch the cache policy to update LRU
-                storage_manager._cache_policy.update_on_hit(
-                    key, storage_manager._commited_memory_objects
-                )
-                memory_objs.append(obj)
+    # TODO: Adapt to new storage manager implementation
+    memory_objs = []  # type: ignore
+    logger.error(
+        "get_memory_objects's implementation is out of date. Empty is returned."
+    )
 
     return memory_objs
 
@@ -267,10 +281,12 @@ async def get_all_hashes(
     """
     Return all chunk hashes in a canonical string encoding.
     """
-    engine = get_engine(request)
+    engine = get_engine(request)  # noqa: F841
 
     try:
-        all_keys = engine.storage_manager.get_all_keys()
+        # TODO: get_all_keys is not implemented in new storage manager
+        all_keys = []  # type: ignore
+        logger.error("Get all keys is not implemented, returning empty list")
         return [hash_bytes_to_string(k.chunk_hash, encoding=encoding) for k in all_keys]
     except Exception as e:
         logger.error("Error retrieving all hashes: %s", e, exc_info=True)
@@ -309,7 +325,7 @@ async def get_kv_cache(
 
         if model_name is not None and world_size is not None and worker_id is not None:
             keys = [
-                IPCCacheEngineHashKey(
+                StorageKey(
                     model_name=model_name,
                     world_size=world_size,
                     worker_id=worker_id,
@@ -385,7 +401,7 @@ async def get_kv_cache_metadata(
 
         if model_name is not None and world_size is not None and worker_id is not None:
             keys = [
-                IPCCacheEngineHashKey(
+                StorageKey(
                     model_name=model_name,
                     world_size=world_size,
                     worker_id=worker_id,
@@ -458,7 +474,7 @@ async def download_kv_cache(
             and download_request.worker_id is not None
         ):
             keys = [
-                IPCCacheEngineHashKey(
+                StorageKey(
                     model_name=download_request.model_name,
                     world_size=download_request.world_size,
                     worker_id=download_request.worker_id,
@@ -532,8 +548,8 @@ async def set_kv_cache(
     - If it does not exist, CREATE a new entry using MemoryFormat.KV_2LTD,
       but only if (model_name, world_size, worker_id) are provided.
     """
-    engine = get_engine(request)
-    storage = engine.storage_manager
+    engine = get_engine(request)  # noqa: F841
+    storage = engine.storage_manager  # noqa: F841
 
     try:
         chunk_hash_bytes = hash_string_to_bytes(chunk_hash, encoding=hash_encoding)
@@ -557,7 +573,7 @@ async def set_kv_cache(
         # Resolve key metadata:
         # Prefer inference from existing key(s) for this hash
         # (guarantees correct metadata).
-        inferred_key: Optional[IPCCacheEngineHashKey] = None
+        inferred_key: Optional[StorageKey] = None
         keys = search_keys_by_hash(
             engine, chunk_hash_bytes, model_name, world_size, worker_id
         )
@@ -578,7 +594,7 @@ async def set_kv_cache(
                         "provide model_name/world_size/worker_id to create one."
                     ),
                 )
-            key = IPCCacheEngineHashKey(
+            key = StorageKey(
                 model_name=model_name,
                 world_size=world_size,
                 worker_id=worker_id,
@@ -586,8 +602,8 @@ async def set_kv_cache(
             )
 
         # 1) Overwrite path (most common for your -2 := -1 test)
-        with storage._buffer_lock:  # internal but OK for debug server
-            existing_obj = storage._commited_memory_objects.get(key, None)
+        # TODO: Adapt to new storage manager implementation
+        existing_obj = None
 
         if existing_obj is not None:
             dst = existing_obj.tensor
@@ -631,38 +647,14 @@ async def set_kv_cache(
             )
 
         # 2) Create-new path (only if metadata provided above)
-        fmt = MemoryFormat.KV_2LTD  # confirmed correct
-        reserve_handle, reserved_dict = storage.reserve(
-            [key], uploaded_tensor.shape, uploaded_tensor.dtype, fmt=fmt
+        # TODO: Adapt to new storage manager implementation
+        logger.error(
+            "Pending on adapting to the new storage manager implementation, "
+            "returning failure..."
         )
-        if key not in reserved_dict:
-            raise HTTPException(
-                status_code=500, detail="Failed to reserve memory for KV cache"
-            )
-
-        obj = reserved_dict[key]
-        if obj.tensor is None:
-            raise HTTPException(
-                status_code=500, detail="Reserved MemoryObj has no tensor"
-            )
-
-        obj.tensor.copy_(uploaded_tensor, non_blocking=False)
-        storage.commit(reserve_handle)
-
-        return JSONResponse(
-            content={
-                "status": "success",
-                "mode": "reserve_commit",
-                "chunk_hash": chunk_hash,
-                "hash_encoding": hash_encoding,
-                "key": {
-                    "model_name": key.model_name,
-                    "world_size": key.world_size,
-                    "worker_id": key.worker_id,
-                },
-                "shape": list(uploaded_tensor.shape),
-                "dtype": str(uploaded_tensor.dtype),
-            }
+        raise HTTPException(
+            status_code=500,
+            detail="Creating new entries is not implemented in this version.",
         )
 
     except HTTPException:

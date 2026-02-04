@@ -20,8 +20,8 @@ export BUILD_ID="${BUILD_ID:-local_$$}"
 export RESULTS_DIR="${RESULTS_DIR:-$HOME/lmcache_ci_results_${BUILD_ID}}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
 
-GPU_LMCACHE="${GPU_LMCACHE:-0}"
-GPU_BASELINE="${GPU_BASELINE:-1}"
+GPU_LMCACHE="${GPU_LMCACHE:-3}"
+GPU_BASELINE="${GPU_BASELINE:-4}"
 
 # Track overall result
 TEST_RESULT=0
@@ -72,7 +72,8 @@ echo "============================================"
 
 python -m lmcache.v1.multiprocess.server \
     --port "$LMCACHE_PORT" \
-    --cpu-buffer-size 80 \
+    --l1-size-gb 80 \
+    --eviction-policy LRU \
     --max-workers 4 \
     > "$RESULTS_DIR/lmcache_server.log" 2>&1 &
 LMCACHE_PID=$!

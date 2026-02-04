@@ -49,7 +49,7 @@ class TokenHasher:
 
     This class encapsulates the hash function loading and hash computation
     logic needed by the multiprocess server to convert token IDs into
-    chunk hashes compatible with IPCCacheEngineHashKey.
+    chunk hashes compatible with IPCCacheEngineKey (hash mode).
     """
 
     def __init__(self, chunk_size: int = 256, hash_algorithm: str = "blake3"):
@@ -194,7 +194,7 @@ class TokenHasher:
 
     @staticmethod
     def hash_to_bytes(hash_val: Any) -> bytes:
-        """Convert hash value to bytes for IPCCacheEngineHashKey.chunk_hash.
+        """Convert hash value to bytes for IPCCacheEngineKey.chunk_hash.
 
         Handles both bytes (sha256_cbor) and int (builtin hash) return types.
         """

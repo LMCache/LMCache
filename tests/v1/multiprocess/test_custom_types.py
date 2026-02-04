@@ -11,16 +11,16 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
-    IPCCacheEngineHashKey,
+    IPCCacheEngineKey,
     get_customized_decoder,
     get_customized_encoder,
 )
 
 
 def test_ipc_cache_engine_key_serialization():
-    """Test encoding and decoding of IPCCacheEngineHashKey using msgspec."""
-    # Create a sample IPCCacheEngineHashKey
-    original_key = IPCCacheEngineHashKey.from_int_hash(
+    """Test encoding and decoding of IPCCacheEngineKey using msgspec."""
+    # Create a sample IPCCacheEngineKey (hash mode)
+    original_key = IPCCacheEngineKey.from_int_hash(
         model_name="test_model", world_size=4, worker_id=1, chunk_hash=123456789
     )
 
@@ -28,10 +28,10 @@ def test_ipc_cache_engine_key_serialization():
     encoded = msgspec.msgpack.encode(original_key)
 
     # Decode the key
-    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheEngineHashKey)
+    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheEngineKey)
 
     # Verify correctness
-    assert original_key == decoded_key, "IPCCacheEngineHashKeys do not match!"
+    assert original_key == decoded_key, "IPCCacheEngineKeys do not match!"
 
 
 @pytest.mark.skipif(

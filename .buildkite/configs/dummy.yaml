@@ -14,7 +14,6 @@ vllm:
     - "1024"
     - "--gpu-memory-utilization"
     - "0.35"
-    - "--enforce-eager"
     - "--load-format"
     - "dummy"
     - "--kv-transfer-config"

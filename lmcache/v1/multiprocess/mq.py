@@ -132,7 +132,9 @@ class MessageQueueClient:
 
         # main thread
         self.is_finished = threading.Event()
-        self.worker_thread = threading.Thread(target=self._main_loop, daemon=True)
+        self.worker_thread = threading.Thread(
+            target=self._main_loop, daemon=True, name="mq-client-thread"
+        )
         self.worker_thread.start()
 
         # Pending job's futures
@@ -348,7 +350,9 @@ class MessageQueueServer:
 
         # Main loop thread
         self.is_finished = threading.Event()
-        self.worker_thread = threading.Thread(target=self._main_loop, daemon=True)
+        self.worker_thread = threading.Thread(
+            target=self._main_loop, daemon=True, name="mq-server-thread"
+        )
 
         # Thread pool for blocking handlers
         self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
