@@ -579,7 +579,7 @@ class MultiRESPClient {
         if (completions_.empty()) {
           signaled_.store(false, std::memory_order_release);
           // re-check: if someone raced and pushed after we decided empty but
-          // before store?
+          // before store
           if (!completions_.empty() &&
               !signaled_.exchange(true, std::memory_order_acq_rel)) {
             uint64_t x = 1;
