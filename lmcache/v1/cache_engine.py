@@ -511,6 +511,7 @@ class LMCacheEngine:
                 keys, memory_objs, transfer_spec=transfer_spec
             )
 
+        store_stats.end_time = time.perf_counter()
         tot_time = store_stats.time_to_store()
 
         logger.info(
@@ -826,6 +827,7 @@ class LMCacheEngine:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
+        retrieve_stats.end_time = time.perf_counter()
         onload_time = retrieve_stats.time_to_retrieve()
 
         retrieved_tokens = torch.sum(ret_mask)

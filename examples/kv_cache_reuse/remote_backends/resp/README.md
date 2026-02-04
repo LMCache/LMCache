@@ -39,11 +39,14 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --load-format dummy
 ```
 
+Coming Soon: 
+MP Mode Controller
+
 Send twice. First time for store. Second time for retrieve. 
 ```bash
 curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: application/json"   -d '{
     "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "prompt": "'"$(printf 'Elaborate the significance of KV cache in language models. %.0s' {1..1000})"'",
+    "prompt": "'"$(printf 'aElaborate the significance of KV cache in language models. %.0s' {1..1000})"'",
     "max_tokens": 10
   }'
 ```
