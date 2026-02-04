@@ -177,11 +177,12 @@ class KVLayerGroupsManager:
             tensors = kv_cache if isinstance(kv_cache, (tuple, list)) else [kv_cache]
 
             # Find the first non-None tensor
-            for tensor in tensors:
-                if tensor is not None:
-                    key = (tensor.shape, tensor.dtype)
-                    groups_dict[key].append((layer_name, idx))
-                    break
+            first_valid_tensor = next(
+                (tensor for tensor in tensors if tensor is not None), None
+            )
+            if first_valid_tensor is not None:
+                key = (first_valid_tensor.shape, first_valid_tensor.dtype)
+                groups_dict[key].append((layer_name, idx))
 
         # Build KVLayerGroupInfo list
         # Sort groups by the first layer index to maintain order
