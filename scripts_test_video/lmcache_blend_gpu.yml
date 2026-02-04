@@ -1,5 +1,6 @@
 local_gpu: True
-is_vlcache: False
+is_costream: True
+GOP: 8 # win_size*stride_size
 max_local_gpu_size: 6
 enable_blending: True
 use_layerwise: True

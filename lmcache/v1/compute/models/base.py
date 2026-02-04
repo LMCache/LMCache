@@ -184,29 +184,12 @@ class LMCBaseModel(nn.Module, ABC):
         timing = True
         input_ids = input_ids.cuda()
 
-        is_vlcache = bool(getattr(self.blender.common_metadata, "is_vlcache", False))
-        rr = getattr(self.blender.common_metadata, "recomp_ratios", None)
-        if rr is not None and len(rr) > 0:
-            ratio = float(rr[0])
-        ratio = 0.0 if ratio < 0.0 else (1.0 if ratio > 1.0 else ratio)
-        logger.info(f"is_vlcache is {is_vlcache}, and recompute_ratio is {ratio}")        
-        if is_vlcache:
-            # Slice input to prefix only, so attention/ffn compute is reduced.
-            # Assumes input_ids is [B, T] (typical). If it is [T], adjust accordingly.
-            if input_ids.dim() == 2:
-                B, T = input_ids.shape
-                prefix_T = int(T * ratio)
-                prefix_T = 1 if prefix_T <= 0 else prefix_T  # avoid empty prefill
-                input_ids = input_ids[:, :prefix_T]
-            else:
-                T = int(input_ids.numel())
-                prefix_T = int(T * ratio)
-                prefix_T = 1 if prefix_T <= 0 else prefix_T
-                input_ids = input_ids[:prefix_T]
-
-            # Reset positions so rotary/positional logic matches the sliced prefix.
-            self.blender.metadata.positions = None
-            self.blender.metadata.imp_indices = None    
+        is_costream = bool(getattr(self.blender.common_metadata, "is_costream", False)) 
+        GOP = int(getattr(self.blender.common_metadata, "GOP"))  
+        if is_costream:
+            pass
+            # get the GOP parameter, and then just recompute the first frame of the GOP
+        
         
         # Some integrations allow get_input_embeddings to accept ids directly; keep existing call style
         hidden_states = self.vllm_model.get_input_embeddings(input_ids)

@@ -16,7 +16,8 @@ class LMCBlendCommonMetadata:
     check_layers: List[int]
     recomp_ratios: Optional[List[float]] = None
     thresholds: Optional[List[float]] = None
-    is_vlcache: bool = False
+    is_costream: bool = True
+    GOP: int = 8
 
 @dataclass
 class LMCBlendMetadata:

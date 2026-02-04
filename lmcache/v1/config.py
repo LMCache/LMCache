@@ -186,16 +186,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
-    "is_vlcache": {
-        "type": bool,
-        "default": False,
-        "env_converter": _to_bool,
-    },
     "is_costream": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
-    }
+    },
+        "is_costream": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
     # P2P configurations

@@ -1,7 +1,4 @@
 echo "Waiting for server to start..."
-model=Qwen/Qwen2.5-VL-7B-Instruct
-model_name="Qwen2.5-VL-7B-Instruct"
-<<<<<<< HEAD
 model=Qwen/Qwen3-VL-32B-Instruct
 model_name="Qwen3-VL-32B-Instruct"
 # model=Qwen/Qwen3-VL-8B-Thinking
@@ -9,14 +6,6 @@ model_name="Qwen3-VL-32B-Instruct"
 source /opt/venv/bin/activate
 SERVER_LOG=server_baseline_32B.log   
 dataset_root=/home/users/ntu/wenyanch/dataset/Anomaly-Detection-Dataset
-=======
-model=Qwen/Qwen3-VL-8B-Instruct
-model_name="Qwen3-VL-8B-Instruct"
-model=Qwen/Qwen3-VL-8B-Thinking
-model_name="Qwen3-VL-8B-Thinking"
-SERVER_LOG=server_baseline.log   
-dataset_root=/root/workspace/dataset/Anomaly-Detection-Dataset
->>>>>>> b45bbc8 (use GPU as storage backend)
 dataset_json="datasets/small_dataset.json"
 results_dir=results_analysis/logs_baselines/${model_name}/small_dataset
 if [ ! -d "$results_dir" ]; then
@@ -24,11 +13,7 @@ if [ ! -d "$results_dir" ]; then
 fi     
 
 # 2. anomaly detection
-<<<<<<< HEAD
 WIN_SIZES=(40)
-=======
-WIN_SIZES=(30)
->>>>>>> b45bbc8 (use GPU as storage backend)
 STRIDE_SIZES=(0.2)
 
 rm -f $SERVER_LOG
@@ -40,17 +25,10 @@ vllm serve $model \
   --host 0.0.0.0 \
   --port 8000 \
   --disable-log-requests \
-<<<<<<< HEAD
   --max-num-batched-tokens 65536 \
   --max-model-len 8192 \
   --gpu-memory-utilization 0.9 \
   --tensor-parallel-size 4 \
-=======
-  --max-num-batched-tokens 204800 \
-  --gpu-memory-utilization 0.9 \
-  --max-model-len 65536 \
-  --disable-chunked-mm-input \
->>>>>>> b45bbc8 (use GPU as storage backend)
   --enforce-eager \
   --no-enable-prefix-caching > $SERVER_LOG 2>&1 &
 
@@ -71,11 +49,7 @@ for WIN in "${WIN_SIZES[@]}"; do
       --dataset-json $dataset_json \
       --csv-name request_times_win${WIN}_stride${STRIDE}.csv \
       --model $model \
-<<<<<<< HEAD
-      --sample-fps 1.0 \
-=======
       --sample-fps 2.0 \
->>>>>>> b45bbc8 (use GPU as storage backend)
       --use-sliding-window \
       --window-seconds ${WIN} \
       --stride-ratio ${STRIDE} \
@@ -84,8 +58,4 @@ for WIN in "${WIN_SIZES[@]}"; do
     sleep 5
   done
   sleep 5
-<<<<<<< HEAD
 done
-=======
-done
->>>>>>> b45bbc8 (use GPU as storage backend)

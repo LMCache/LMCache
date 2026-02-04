@@ -51,7 +51,8 @@ class LMCBlender:
             check_layers=config.blend_check_layers,
             recomp_ratios=config.blend_recompute_ratios,
             thresholds=config.blend_thresholds,
-            is_vlcache=config.is_vlcache,
+            is_costream=config.is_costream,
+            GOP=config.GOP,
         )
 
         # This will be set during the blending process
@@ -118,26 +119,14 @@ class LMCBlender:
         q, k = rotary(self.metadata.positions, q, k)
 
         # VLCache: recompute prefix x% tokens' KV, reuse suffix (1-x)% KV from old KV
-        if bool(getattr(self.common_metadata, "is_vlcache", False)):
-            stream = torch.cuda.current_stream()
-            t_s = torch.cuda.Event(enable_timing=True)
-            t_e = torch.cuda.Event(enable_timing=True)
+        if bool(getattr(self.common_metadata, "is_costream", False)):
+            pass
+            # TODO: implement the details with recomputing key freams
 
-            prefix_len = int(k.shape[0])
-
-            t_s.record(stream)
-            old_k[:prefix_len].copy_(k)
-            old_v[:prefix_len].copy_(v)
-            t_e.record(stream)
-
-            stream.synchronize()
-            copy_ms = t_s.elapsed_time(t_e)
-            logger.info("VLCache writeback layer=%d prefix_len=%d copy_ms=%.3f", layer_id, prefix_len, copy_ms)
-            return q, k, v, residual, attn_output, attn_metadata
 
 
         # Recomputation/selection logic for important layers
-        if layer_id in self.common_metadata.check_layers and not self.common_metadata.is_vlcache:
+        if layer_id in self.common_metadata.check_layers and not self.common_metadata.is_costream:
             logger.info(f'layer_id is {layer_id}, len(layers) is {len(self.layers)}')   
             # Select the KV rows that need to be recalculated based on L2 differences
             diff_k = torch.sum(
