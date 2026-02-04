@@ -15,6 +15,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.gpu_backend import LocalGPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -125,6 +126,11 @@ def CreateStorageBackends(
         "enable_nixl_storage"
     )
 
+    only_gpu_backend = config.local_gpu
+    logger.info(f"only_gpu_backend: {only_gpu_backend}, is_cuda_worker: {is_cuda_worker(metadata)}")
+    if only_gpu_backend and not is_cuda_worker(metadata):
+        raise RuntimeError("local_gpu=True requires a CUDA worker")
+
     if config.enable_pd:
         # First Party
         from lmcache.v1.storage_backend.pd_backend import PDBackend
@@ -139,7 +145,15 @@ def CreateStorageBackends(
         # For scheduler role, local_cpu_backend is None
         pass
     elif not config.enable_pd or config.local_cpu:
-        if config.max_local_cpu_size > 0:
+        if only_gpu_backend:
+            local_gpu_backend = LocalGPUBackend(
+                config,
+                metadata,
+                dst_device,
+                lmcache_worker,
+            )
+            storage_backends[str(local_gpu_backend)] = local_gpu_backend
+        elif config.max_local_cpu_size > 0 and not only_gpu_backend:
             local_cpu_backend = LocalCPUBackend(
                 config,
                 metadata,

@@ -12,8 +12,8 @@ export LM_CACHE_METRICS=1
 export LMCACHE_DEBUG=1
 export LMDEBUG=1
 export LMCACHE_VERBOSE=1
-export LMCACHE_CONFIG_FILE=lmcache_blend.yml
-export LM_CACHE_CONFIG_FILE=lmcache_blend.yml 
+export LMCACHE_CONFIG_FILE="lmcache_blend.yml"
+export LM_CACHE_CONFIG_FILE="lmcache_blend.yml"
 
 change_recompute_ratio=False
 if [ "$change_recompute_ratio" = True ] ; then

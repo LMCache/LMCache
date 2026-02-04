@@ -90,7 +90,7 @@ class LMCacheEngine:
                 shape [chunk_size]
         """
         # TODO(Jiayi): the following step can be parallelized
-        tokens = tokens.cpu()
+        # tokens = tokens.cpu()
         for i in range(0, len(tokens), self.chunk_size):
             yield tokens[i : i + self.chunk_size]
 

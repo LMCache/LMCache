@@ -14,6 +14,9 @@ from lmcache.v1.compute.positional_encoding import get_fused_rope
 # TODO(Jiayi): A few things need to be tested/supported:
 # TP, PP, Multimodal
 
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 def _get_attr_rec(obj, dotted: str) -> Optional[object]:
     cur = obj
@@ -173,18 +176,44 @@ class LMCBaseModel(nn.Module, ABC):
     @torch.compile
     def compute_layer(
         self,
+        check_layers,
         input_ids: torch.Tensor,
         page_stream=None,
         **kwargs,
     ):
+        timing = True
         input_ids = input_ids.cuda()
 
+        is_vlcache = bool(getattr(self.blender.common_metadata, "is_vlcache", False))
+        rr = getattr(self.blender.common_metadata, "recomp_ratios", None)
+        if rr is not None and len(rr) > 0:
+            ratio = float(rr[0])
+        ratio = 0.0 if ratio < 0.0 else (1.0 if ratio > 1.0 else ratio)
+        logger.info(f"is_vlcache is {is_vlcache}, and recompute_ratio is {ratio}")        
+        if is_vlcache:
+            # Slice input to prefix only, so attention/ffn compute is reduced.
+            # Assumes input_ids is [B, T] (typical). If it is [T], adjust accordingly.
+            if input_ids.dim() == 2:
+                B, T = input_ids.shape
+                prefix_T = int(T * ratio)
+                prefix_T = 1 if prefix_T <= 0 else prefix_T  # avoid empty prefill
+                input_ids = input_ids[:, :prefix_T]
+            else:
+                T = int(input_ids.numel())
+                prefix_T = int(T * ratio)
+                prefix_T = 1 if prefix_T <= 0 else prefix_T
+                input_ids = input_ids[:prefix_T]
+
+            # Reset positions so rotary/positional logic matches the sliced prefix.
+            self.blender.metadata.positions = None
+            self.blender.metadata.imp_indices = None    
+        
         # Some integrations allow get_input_embeddings to accept ids directly; keep existing call style
         hidden_states = self.vllm_model.get_input_embeddings(input_ids)
 
         residual = None
         attn_output = None
-
+        logger.info(f"input token ids shape is {input_ids.shape}")
         # TODO(Jiayi): Need to build `attn_metadata` more elegantly.
         attn_metadata = self.lmc_attn_layers[0].init_attn_metadata(
             input_ids=input_ids,
@@ -193,8 +222,21 @@ class LMCBaseModel(nn.Module, ABC):
         stream = page_stream if page_stream is not None else torch.cuda.current_stream()
 
         for layer_idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
+            pre_attn_events = None
+            attn_events = None
+            post_attn_events = None
+            ffn_events = None
+            total_events = None
             # Pre-LN/residual before Self Attention
             with torch.cuda.stream(stream):
+                if timing is not None:
+                    total_start = torch.cuda.Event(enable_timing=True)
+                    total_end = torch.cuda.Event(enable_timing=True)
+                    total_start.record(stream)
+                if timing is not None:
+                    pre_attn_start = torch.cuda.Event(enable_timing=True)
+                    pre_attn_end = torch.cuda.Event(enable_timing=True)
+                    pre_attn_start.record(stream)
                 if residual is None:
                     residual = hidden_states
                     hidden_states = layer.input_layernorm(hidden_states)
@@ -212,6 +254,10 @@ class LMCBaseModel(nn.Module, ABC):
                     q, k, v, residual, self.start_layer + layer_idx, attn_output, attn_metadata
                 )
 
+                if timing is not None:
+                    pre_attn_end.record(stream)
+                    pre_attn_events = (pre_attn_start, pre_attn_end)
+
                 # Take attention dimensions for this layer (extracted from vllm_attn_layers, stored in __init__)
                 attn_core = self.vllm_attn_layers[self.start_layer + layer_idx]
                 num_heads = _pick(attn_core, "num_heads")
@@ -226,20 +272,68 @@ class LMCBaseModel(nn.Module, ABC):
                     -1, num_heads, head_size
                 )
 
+                if timing is not None:
+                    attn_start = torch.cuda.Event(enable_timing=True)
+                    attn_end = torch.cuda.Event(enable_timing=True)
+                    attn_start.record(stream)
                 attn_output = self.lmc_attn_layers[self.start_layer + layer_idx].forward_contiguous(
                     q, k, v, attn_output, attn_metadata
                 )
+                if timing is not None:
+                    attn_end.record(stream)
+                    attn_events = (attn_start, attn_end)
 
                 attn_output = attn_output.view(-1, num_heads * head_size)
                 # K/V reshape back to flat for downstream (even if not directly used, keep consistent with original implementation)
                 _ = k.view(-1, num_kv_heads * head_size)
                 _ = v.view(-1, num_kv_heads * head_size)
 
+                # # if layer_idx > check_layer, skip the following operations
+                # if layer_idx > check_layers[-1]: 
+                #     yield
+                #     continue 
+
                 # Output projection
+                if timing is not None:
+                    post_attn_start = torch.cuda.Event(enable_timing=True)
+                    post_attn_end = torch.cuda.Event(enable_timing=True)
+                    post_attn_start.record(stream)
                 hidden_states, _ = layer.self_attn.o_proj(attn_output)
 
                 # FFN
                 hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+                if timing is not None:
+                    post_attn_end.record(stream)
+                    post_attn_events = (post_attn_start, post_attn_end)
+
+                if timing is not None:
+                    ffn_start = torch.cuda.Event(enable_timing=True)
+                    ffn_end = torch.cuda.Event(enable_timing=True)
+                    ffn_start.record(stream)
                 hidden_states = layer.mlp(hidden_states)
+                if timing is not None:
+                    ffn_end.record(stream)
+                    ffn_events = (ffn_start, ffn_end)
+                    total_end.record(stream)
+                    total_events = (total_start, total_end)
+
+            if timing is not None:
+                # Synchronize once per layer so all CUDA events are complete.
+                stream.synchronize()
+                layer_no = self.start_layer + layer_idx
+                pre_ms = pre_attn_events[0].elapsed_time(pre_attn_events[1])
+                attn_ms = attn_events[0].elapsed_time(attn_events[1])
+                post_ms = post_attn_events[0].elapsed_time(post_attn_events[1])
+                ffn_ms = ffn_events[0].elapsed_time(ffn_events[1])
+                total_ms = total_events[0].elapsed_time(total_events[1])
+                logger.info(
+                    "layer=%d pre_attn_ms=%.3f attention_ms=%.3f post_attn_ms=%.3f ffn_ms=%.3f total_ms=%.3f",
+                    layer_no,
+                    pre_ms,
+                    attn_ms,
+                    post_ms,
+                    ffn_ms,
+                    total_ms,
+                )
 
             yield

@@ -102,9 +102,8 @@ def generate_windows_by_frames(num_frames: int, win_frames: int, stride_frames: 
 def frames_to_user_content_qwen(frames: List[Image.Image], prompt_text: str, segment_token: str) -> List[dict]:
     """Build Qwen-style content: segment token + image_url pairs, followed by the prompt."""
     content = []
-    for i, img in enumerate(frames):
-        if i % 8 == 0:
-            content.append({"type": "text", "text": segment_token})
+    for img in frames:
+        content.append({"type": "text", "text": segment_token})
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -128,9 +127,8 @@ def frames_to_user_content_internvl(
 ) -> List[dict]:
     """InternVL via /v1/chat/completions: use text + image_url schema."""
     content = []
-    for i, img in enumerate(frames):
-        if i % 8 == 0:
-            content.append({"type": "text", "text": segment_token})
+    for img in frames:
+        content.append({"type": "text", "text": segment_token})
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -317,6 +315,7 @@ def run(args):
     cat_stats = {}
 
     categorys = list(prompts.keys())
+    categorys = ["abuse"]
 
     try:
         for category in categorys:

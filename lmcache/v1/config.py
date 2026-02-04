@@ -130,6 +130,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
+    "local_gpu": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
+    "max_local_gpu_size": {"type": float, "default": 5.0, "env_converter": float},
     "reserve_local_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
     "local_disk": {
         "type": Optional[str],
@@ -180,6 +186,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
+    "is_vlcache": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
+    "is_costream": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    }
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
     # P2P configurations
@@ -513,6 +529,22 @@ def _validate_config(self):
     enable_nixl_storage = self.extra_config is not None and self.extra_config.get(
         "enable_nixl_storage"
     )
+    if self.local_gpu:
+        if self.local_cpu:
+            logger.warning("local_gpu=True forces local_cpu=False")
+            self.local_cpu = False
+        if (
+            self.local_disk
+            or self.remote_url is not None
+            or self.gds_path is not None
+            or self.weka_path is not None
+            or self.enable_p2p
+            or self.enable_pd
+            or enable_nixl_storage
+        ):
+            logger.warning(
+                "local_gpu=True ignores other storage backends and PD/P2P settings"
+            )
     if self.enable_pd:
         assert self.pd_role is not None
         assert self.pd_buffer_size is not None
@@ -538,7 +570,7 @@ def _log_config(self):
     config_dict = {}
     for name in _CONFIG_DEFINITIONS:
         value = getattr(self, name)
-        if name in ["max_local_cpu_size", "max_local_disk_size"]:
+        if name in ["max_local_cpu_size", "max_local_disk_size", "max_local_gpu_size"]:
             value = f"{value} GB"
         config_dict[name] = value
 
@@ -548,9 +580,13 @@ def _log_config(self):
 
 def _to_original_config(self):
     """Convert to original configuration format"""
+    if self.local_gpu:
+        local_device = "cuda"
+    else:
+        local_device = "cpu" if self.local_cpu else "cuda"
     return orig_config.LMCacheEngineConfig(
         chunk_size=self.chunk_size,
-        local_device="cpu" if self.local_cpu else "cuda",
+        local_device=local_device,
         max_local_cache_size=int(self.max_local_cpu_size),
         remote_url=None,
         remote_serde=None,

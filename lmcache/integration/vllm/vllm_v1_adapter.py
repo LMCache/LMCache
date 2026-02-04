@@ -313,7 +313,7 @@ class ReqMeta:
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
-        lmcache_chunk_size: int = 256,
+        lmcache_chunk_size: int = 1024,
         load_spec: Optional[LoadSpec] = None,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
@@ -334,7 +334,7 @@ class ReqMeta:
         """
         input_token_ids = tracker.token_ids
         input_token_len = len(input_token_ids)
-
+        
         is_last_prefill = False
         if input_token_len == tracker.prompt_len:
             is_last_prefill = True
@@ -375,7 +375,6 @@ class ReqMeta:
             )
         else:
             num_tokens_to_save = input_token_len
-
         # If we need to save, update the number of saved tokens
         if not skip_save:
             tracker.num_saved_tokens = num_tokens_to_save
@@ -912,6 +911,7 @@ class LMCacheConnectorV1Impl:
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
+                logger.info("skip request due to load spec is None")
                 continue
 
             tokens = request.token_ids
@@ -928,12 +928,14 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            logger.info(f"enter self.enable_blending {self.enable_blending}, self.use_layerwise {self.use_layerwise}")
             if self.use_layerwise:
                 if idx == last_idx:
                     sync = True
                 else:
                     sync = False
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
+                logger.info(f"self.enable_blending {self.enable_blending}")
                 if self.enable_blending:
                     self._ensure_blender_initialized()
                     if self.blender is None:
@@ -956,12 +958,14 @@ class LMCacheConnectorV1Impl:
                     # TODO(Jiayi): Need to make prefix caching and blending compatible
                     start_blending = time.perf_counter()
                     page_stream = self.lmcache_engine.gpu_connector.get_page_stream()
+
                     self.blender.blend(
                         tokens[:lmcache_cached_tokens],
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         page_stream=page_stream,
+                        sync=sync,
                     )
                     end_blending = time.perf_counter()
                     logger.info(
@@ -1477,7 +1481,7 @@ class LMCacheConnectorV1Impl:
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             return
-
+        logger.info(f"num_external_tokens is {num_external_tokens}")
         if num_external_tokens == 0:
             # No need to load anything
             self.load_specs[request.request_id].can_load = False

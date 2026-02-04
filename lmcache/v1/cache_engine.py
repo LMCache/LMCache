@@ -580,6 +580,20 @@ class LMCacheEngine:
             "gpu_connector is required for retrieve_layer operation"
         )
 
+        gpu_start_event = None
+        gpu_end_event = None
+        timing_stream = None
+        if torch.cuda.is_available():
+            gpu_start_event = torch.cuda.Event(enable_timing=True)
+            gpu_end_event = torch.cuda.Event(enable_timing=True)
+            timing_stream = (
+                self.gpu_connector.load_stream
+                if self.gpu_connector is not None
+                and hasattr(self.gpu_connector, "load_stream")
+                else torch.cuda.current_stream()
+            )
+            gpu_start_event.record(timing_stream)
+
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
         else:
@@ -626,6 +640,12 @@ class LMCacheEngine:
 
             ret_mask[start:end] = True
 
+        total_chunk_tokens = 0
+        if starts:
+            total_chunk_tokens = sum(
+                end - start for start, end in zip(starts, ends, strict=False)
+            )
+
         if keys:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
@@ -648,6 +668,17 @@ class LMCacheEngine:
             next(mem_obj_consumer)
 
             to_count_down = []
+            per_layer_timing = (
+                torch.cuda.is_available()
+                and self.gpu_connector is not None
+                and hasattr(self.gpu_connector, "load_stream")
+            )
+            load_stream = (
+                self.gpu_connector.load_stream
+                if per_layer_timing
+                else torch.cuda.current_stream()
+            )
+
             for layer_id in range(self.num_layers):
                 task = next(get_generator)
 
@@ -661,7 +692,38 @@ class LMCacheEngine:
                     yield None
 
                 mem_objs_layer = task
-                mem_obj_consumer.send(mem_objs_layer)
+                if per_layer_timing:
+                    layer_start_event = torch.cuda.Event(enable_timing=True)
+                    layer_end_event = torch.cuda.Event(enable_timing=True)
+                    layer_start_event.record(load_stream)
+                    mem_obj_consumer.send(mem_objs_layer)
+                    layer_end_event.record(load_stream)
+                    layer_end_event.synchronize()
+                    layer_elapsed_ms = layer_start_event.elapsed_time(layer_end_event)
+                    layer_bytes = 0
+                    for mem_obj in mem_objs_layer:
+                        if mem_obj.tensor is not None:
+                            layer_bytes += (
+                                mem_obj.tensor.numel()
+                                * mem_obj.tensor.element_size()
+                            )
+                    layer_gb = layer_bytes / 1024**3
+                    layer_gbps = (
+                        layer_gb / (layer_elapsed_ms / 1000)
+                        if layer_elapsed_ms > 0
+                        else 0.0
+                    )
+                    logger.info(
+                        "Layer %d load-to-gpu cost %.3f ms for %d tokens, "
+                        "%.4f GB, %.2f GB/s",
+                        layer_id,
+                        layer_elapsed_ms,
+                        total_chunk_tokens,
+                        layer_gb,
+                        layer_gbps,
+                    )
+                else:
+                    mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
 
             for mem_obj in to_count_down:
@@ -679,10 +741,17 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        elapsed_ms = None
+        if gpu_start_event is not None and gpu_end_event is not None:
+            assert timing_stream is not None
+            gpu_end_event.record(timing_stream)
+            gpu_end_event.synchronize()
+            elapsed_ms = gpu_start_event.elapsed_time(gpu_end_event)
         logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
+            f"out of total {len(tokens)} tokens. "
+            f"retrieve_layer gpu cost {elapsed_ms:.3f} ms"
         )
 
         yield ret_mask

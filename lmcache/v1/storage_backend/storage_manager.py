@@ -39,6 +39,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.gpu_backend import LocalGPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
 if TYPE_CHECKING:
@@ -211,6 +212,10 @@ class StorageManager:
                 lmcache_worker,
             )
         )
+        logger.info(
+            f"Storage backends created: "
+            f"{', '.join(self.storage_backends.keys())}"
+        )
 
         # the backend used for actual storage
         self.non_allocator_backends = self.get_non_allocator_backends()
@@ -222,6 +227,8 @@ class StorageManager:
             self.allocator_backend = self._get_allocator_backend(config)
         if config.local_cpu:
             self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+        if config.local_gpu:
+            self.local_gpu_backend = self.storage_backends["LocalGPUBackend"]
 
         self.manager_lock = threading.Lock()
 
@@ -300,6 +307,8 @@ class StorageManager:
     ) -> AllocatorBackendInterface:
         if self.enable_pd:
             allocator_backend = self.storage_backends["PDBackend"]
+        elif self.config.local_gpu:
+            allocator_backend = self.storage_backends["LocalGPUBackend"]
         else:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
         assert isinstance(allocator_backend, AllocatorBackendInterface)
@@ -541,8 +550,10 @@ class StorageManager:
         """
         Blocking function to get the memory object from the storages.
         """
-
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         # Search all backends for blocking get
+        start_event.record()
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
                 continue
@@ -557,8 +568,20 @@ class StorageManager:
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                     assert isinstance(local_cpu_backend, LocalCPUBackend)
                     local_cpu_backend.submit_put_task(key, memory_obj)
+                
+                if (
+                    backend_name not in ["LocalGPUBackend"]
+                    and "LocalGPUBackend" in self.storage_backends
+                ):
+                    local_gpu_backend = self.storage_backends["LocalGPUBackend"]
+                    assert isinstance(local_gpu_backend, LocalGPUBackend)
+                    local_gpu_backend.submit_put_task(key, memory_obj)
+                end_event.record()
+                torch.cuda.synchronize()
+                elapsed_time_ms = start_event.elapsed_time(end_event)
+                logger.info(f"Elapsed time for load data: {elapsed_time_ms:.3f} ms")
                 return memory_obj
-
+        
         return None
 
     def get_non_blocking(
@@ -617,7 +640,7 @@ class StorageManager:
         :return: A generator that yields a future for each layer.
         """
         if location is None:
-            location = "LocalCPUBackend"
+            location = "LocalGPUBackend"
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
@@ -649,7 +672,7 @@ class StorageManager:
         :return: A generator that yields a future for each layer.
         """
         if location is None:
-            location = "LocalCPUBackend"
+            location = "LocalGPUBackend"
 
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
@@ -893,7 +916,11 @@ class StorageManager:
 
     def touch_cache(self):
         for backend_name, backend in self.storage_backends.items():
-            if backend_name == "LocalCPUBackend" or backend_name == "LocalDiskBackend":
+            if backend_name in [
+                "LocalCPUBackend",
+                "LocalDiskBackend",
+                "LocalGPUBackend",
+            ]:
                 backend.touch_cache()
 
     def remove(
@@ -909,7 +936,7 @@ class StorageManager:
 
         :param Optional[List[str]] locations: The range of storage backends
         to perform `remove` in.
-        Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"] for now.
+        Should be a subset of ["LocalCPUBackend", "LocalDiskBackend", "LocalGPUBackend"].
         If None, perform `remove` in all backends.
 
         return: Total number of removed caches in the specified

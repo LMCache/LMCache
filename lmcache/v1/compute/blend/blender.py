@@ -51,6 +51,7 @@ class LMCBlender:
             check_layers=config.blend_check_layers,
             recomp_ratios=config.blend_recompute_ratios,
             thresholds=config.blend_thresholds,
+            is_vlcache=config.is_vlcache,
         )
 
         # This will be set during the blending process
@@ -81,7 +82,7 @@ class LMCBlender:
         """
         layer_id 为全局层号（与 layerwise_model 内部一致），支持 Qwen2.5-VL。
         """
-        logger.debug(f"Blender is processing KV for layer {layer_id}")
+        logger.info(f"Blender is processing KV for layer {layer_id}")
         try:
             old_k, old_v = self.gpu_connector.get_kv(layer_id)
         except ValueError:
@@ -102,23 +103,43 @@ class LMCBlender:
                 device=q.device,
             )
 
-        # 初始化（或继承）positions：长度与当前批次 token 维度一致
+        # Initialize (or inherit) positions: length is consistent with the dimension of the current batch of tokens
         if self.metadata.positions is None:
             self.metadata.positions = torch.arange(
                 q.shape[0], device=q.device, dtype=torch.int64
             )
 
-        # 通过已解析的 layers 取当前层，避免 vllm_model.model.layers 的硬编码
+        # Retrieves the current layer by using the parsed layers, avoiding hard-coding of vllm_model.model.layers
         layer = self.layers[layer_id]
         attn_layer = layer.self_attn
 
-        # Rotary 编码（Qwen 家族常见）
+        # Rotary (common in the Qwen family)
         rotary = self._get_rotary_emb(attn_layer)
         q, k = rotary(self.metadata.positions, q, k)
 
-        # 重要层的重计算/挑选逻辑
-        if layer_id in self.common_metadata.check_layers:
-            # 以 L2 差异挑选需重算的 KV 行
+        # VLCache: recompute prefix x% tokens' KV, reuse suffix (1-x)% KV from old KV
+        if bool(getattr(self.common_metadata, "is_vlcache", False)):
+            stream = torch.cuda.current_stream()
+            t_s = torch.cuda.Event(enable_timing=True)
+            t_e = torch.cuda.Event(enable_timing=True)
+
+            prefix_len = int(k.shape[0])
+
+            t_s.record(stream)
+            old_k[:prefix_len].copy_(k)
+            old_v[:prefix_len].copy_(v)
+            t_e.record(stream)
+
+            stream.synchronize()
+            copy_ms = t_s.elapsed_time(t_e)
+            logger.info("VLCache writeback layer=%d prefix_len=%d copy_ms=%.3f", layer_id, prefix_len, copy_ms)
+            return q, k, v, residual, attn_output, attn_metadata
+
+
+        # Recomputation/selection logic for important layers
+        if layer_id in self.common_metadata.check_layers and not self.common_metadata.is_vlcache:
+            logger.info(f'layer_id is {layer_id}, len(layers) is {len(self.layers)}')   
+            # Select the KV rows that need to be recalculated based on L2 differences
             diff_k = torch.sum(
                 (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
             )
@@ -142,7 +163,7 @@ class LMCBlender:
 
             attn_metadata.update_from_top_indices(top_indices)
 
-        # 将挑选后的 KV 写回/返回
+        # Write the selected key-value pairs back/return
         if self.metadata.imp_indices is not None:
             old_k[self.metadata.imp_indices] = k
             old_v[self.metadata.imp_indices] = v
@@ -162,21 +183,19 @@ class LMCBlender:
         Perform layerwise retrieve + blending.
         """
         # TODO(Jiayi): store is currently not included in this function
-
-        layerwise_model_executor = self.layerwise_model.compute_layer(tokens)
+        check_layers = self.common_metadata.check_layers
+        layerwise_model_executor = self.layerwise_model.compute_layer(check_layers, tokens)
         layerwise_retriever = self.cache_engine.retrieve_layer(tokens, mask, **kwargs)
 
-        # 预热 retriever
+        # warmup retriever
         next(layerwise_retriever)
         yield
 
-        # 分层执行（使用 num_layers，已按 start/end 计算）
         for _ in range(self.num_layers):
             next(layerwise_retriever)
             next(layerwise_model_executor)
             yield
 
-        # 结束收尾
         next(layerwise_retriever)
 
         self.metadata.clean()
@@ -194,9 +213,9 @@ class LMCBlender:
 
         if isinstance(tokens, list):
             tokens = torch.tensor(tokens).cuda()
-
+        logger.info("enter blend")
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
-        # +2 是为了首尾两次与 retriever 的握手/收尾
+        # +2 is for the handshake/closing process with the retriever at both the beginning and end.
         for _ in range(self.num_layers + 2):
             next(layerwise_blender)
