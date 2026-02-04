@@ -941,17 +941,12 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 logger.debug(f"Finished loading layer {layer_id - 1}")
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
             # memobj -> gpu_buffer -> kvcaches
             with torch.cuda.stream(self.load_stream):
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
                 ):
                     assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
-                    logger.info(f"Memory obj device: {memory_obj.tensor.device}")
-                    start_event.record(self.load_stream)
-                    logger.info(f"Memory obj device: {memory_obj.tensor.device}")
                     start_event.record(self.load_stream)
                     if self.use_gpu:
                         tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
@@ -966,17 +961,6 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             True,
                             self.vllm_two_major,
                         )
-                    end_event.record(self.load_stream)
-                    end_event.synchronize()
-                    elapsed_ms = start_event.elapsed_time(end_event)
-                    logger.info(
-                        "Layer %d, chunk (%d, %d) transfer to GPU buffer cost %.3f ms",
-                        layer_id,
-                        start,
-                        end,
-                        elapsed_ms,
-                    )
-                start_event.record(self.load_stream)
                     end_event.record(self.load_stream)
                     end_event.synchronize()
                     elapsed_ms = start_event.elapsed_time(end_event)
@@ -1011,8 +995,9 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             current_stream.wait_stream(self.load_stream)
 
         # free the buffer memory
-        assert tmp_gpu_buffer_obj is not None
-        tmp_gpu_buffer_obj.ref_count_down()
+        if self.use_gpu:
+            assert tmp_gpu_buffer_obj is not None
+            tmp_gpu_buffer_obj.ref_count_down()
 
         logger.debug(f"Finished loading layer {layer_id}")
         yield
