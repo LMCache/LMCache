@@ -391,6 +391,7 @@ class EICConnector(RemoteConnector):
                 f"eic mget data {key_str} failed, status_code {status_code}"
                 " err_code {err_code}"
             )
+            memory_obj.ref_count_down()
             return None
         else:
             logger.debug(f"eic mget data {key_str} success")

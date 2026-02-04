@@ -1579,6 +1579,7 @@ class LMCacheEngine:
                 location=location,
             )
 
+            used_keys: set[CacheEngineKey] = set()
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is None:
                     logger.warning(
@@ -1593,9 +1594,20 @@ class LMCacheEngine:
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
                 ret_mask[start:end] = True
+                used_keys.add(key)
+
+            for (key, _, _), memory_obj in zip(blocks, memory_objs, strict=False):
+                if memory_obj is not None and key not in used_keys:
+                    logger.debug("ref_count_down for %s of %s as the previous key failed", key, location)
+                    memory_obj.ref_count_down()
 
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
+
+            for key, memory_obj, _, end in reordered_chunks:
+                if end >= last_failed_block_start:
+                    logger.debug("ref_count_down for %s as it is truncated by last_failed_block_start %d", key, last_failed_block_start)
+                    memory_obj.ref_count_down()
 
             reordered_chunks = [
                 (key, memory_obj, start, end)
