@@ -3,6 +3,7 @@
 from typing import Optional
 from unittest.mock import MagicMock
 import asyncio
+import ctypes
 import inspect
 import random
 import socket
@@ -19,6 +20,26 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+
+
+def has_cufile() -> bool:
+    """
+    True only when NVIDIA cuFile is available:
+    - python package `cufile` importable
+    - dynamic library `libcufile.so` loadable
+    """
+    try:
+        # Third Party
+        import cufile  # noqa: F401
+    except Exception:
+        return False
+
+    try:
+        ctypes.CDLL("libcufile.so")
+    except OSError:
+        return False
+
+    return True
 
 
 def recover_engine_states(engine):

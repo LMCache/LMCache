@@ -118,8 +118,46 @@ class L1MemoryManager:
                 "get_vm_space is not implemented for this allocator type."
             )
 
+    def get_memory_usage(self) -> tuple[int, int]:
+        """
+        Get the current memory usage. This function will mainly be used to support
+        eviction decision.
+
+        Returns:
+            tuple[int, int]: A tuple containing used memory in bytes and total memory
+            in bytes.
+
+        Note:
+            In the future, we may want to make a "callback" based mechanism to
+            trigger eviction when the memory usage reaches a watermark.
+        """
+
+        # HACK: now trying to read this from the address manager in a ad-hoc
+        # manner
+        def get_address_manager(allocator: MemoryAllocatorInterface):
+            if isinstance(allocator, MixedMemoryAllocator) and hasattr(
+                allocator.pin_allocator, "address_manager"
+            ):
+                return allocator.pin_allocator.address_manager
+            elif isinstance(allocator, LazyMemoryAllocator):
+                return allocator._allocator.address_manager
+            else:
+                raise NotImplementedError(
+                    "get_memory_usage is not implemented for this allocator type."
+                )
+
+        address_manager = get_address_manager(self._allocator)
+        free_size = address_manager.get_free_size()
+        total_size = address_manager.get_heap_size()
+        used_size = total_size - free_size
+        return used_size, total_size
+
     def close(self) -> None:
         """
         Close the memory manager and release all resources.
         """
         self._allocator.close()
+
+    # Debugging APIs
+    def memcheck(self):
+        self._allocator.memcheck()
