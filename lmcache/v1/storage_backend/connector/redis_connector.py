@@ -347,7 +347,19 @@ class RESPConnector(RemoteConnector):
     def support_batched_contains(self) -> bool:
         return True
 
-    async def _batched_contains(self, keys: List[CacheEngineKey]) -> int:
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        """Synchronous batched contains - checks consecutive prefix existence."""
+        key_strs = [key.to_string() for key in keys]
+        results = self.client.batch_exists_sync(key_strs)
+        count = 0
+        # we only want the prefixes
+        for result in results:
+            if not result:
+                return count
+            count += 1
+        return count
+
+    async def _batched_async_contains(self, keys: List[CacheEngineKey]) -> int:
         key_strs = [key.to_string() for key in keys]
         results = await self.client.batch_exists(key_strs)
         count = 0
@@ -379,7 +391,7 @@ class RESPConnector(RemoteConnector):
         """
         # prefetch priority
         return await self.pq_executor.submit_job(
-            self._batched_contains, keys=keys, priority=Priorities.PREFETCH
+            self._batched_async_contains, keys=keys, priority=Priorities.PREFETCH
         )
 
     def support_batched_get_non_blocking(self) -> bool:
