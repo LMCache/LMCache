@@ -15,6 +15,7 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.distributed.config import L1ManagerConfig
 from lmcache.v1.multiprocess.distributed.error import L1Error
+from lmcache.v1.multiprocess.distributed.internal_api import L1ManagerListener
 from lmcache.v1.multiprocess.distributed.memory_manager import L1MemoryManager
 
 logger = init_logger(__name__)
@@ -132,6 +133,17 @@ class L1Manager:
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
 
+        self._registered_listeners: list[L1ManagerListener] = []
+
+    def register_listener(self, listener: L1ManagerListener) -> None:
+        """Register a listener for L1Manager events.
+
+        Args:
+            listener: The listener to register.
+        """
+        with self._lock:
+            self._registered_listeners.append(listener)
+
     @l1_mgr_synchronized
     def reserve_read(
         self,
@@ -151,6 +163,7 @@ class L1Manager:
             KEY_NOT_READABLE: The key exists but is not readable.
         """
         ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
         for key in keys:
             entry = self._objects.get(key, None)
             if entry is None:
@@ -163,7 +176,10 @@ class L1Manager:
 
             entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            successful_keys.append(key)
 
+        for listener in self._registered_listeners:
+            listener.on_keys_reserved_read(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -222,7 +238,9 @@ class L1Manager:
                 which means the reader may read inconsistent data.
         """
         need_to_free: list[MemoryObj] = []
+        need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -257,11 +275,18 @@ class L1Manager:
             if entry.is_temporary and not entry.read_lock.is_locked():
                 # NOTE: temporary objects shouldn't have write-locks
                 need_to_free.append(entry.memory_obj)
+                need_to_free_keys.append(key)
                 del self._objects[key]
 
             ret[key] = L1Error.SUCCESS
+            successful_keys.append(key)
 
         self._memory_manager.free(need_to_free)
+
+        for listener in self._registered_listeners:
+            listener.on_keys_read_finished(successful_keys)
+            listener.on_keys_deleted_by_manager(need_to_free_keys)
+
         return ret
 
     @l1_mgr_synchronized
@@ -295,6 +320,7 @@ class L1Manager:
         """
         need_to_allocate: list[tuple[ObjectKey, bool]] = []
         ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
 
         for key, is_temp in zip(keys, is_temporary, strict=False):
             entry = self._objects.get(key, None)
@@ -312,6 +338,7 @@ class L1Manager:
 
             entry.write_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            successful_keys.append(key)
 
         # Early return if no allocation is needed
         if len(need_to_allocate) == 0:
@@ -347,7 +374,10 @@ class L1Manager:
                 )
                 self._objects[key].write_lock.lock()
                 ret[key] = (L1Error.SUCCESS, mem_obj)
+                successful_keys.append(key)
 
+        for listener in self._registered_listeners:
+            listener.on_keys_reserved_write(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -369,6 +399,7 @@ class L1Manager:
                 which means the writer may have caused inconsistent data.
         """
         ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -396,7 +427,10 @@ class L1Manager:
 
             entry.write_lock.unlock()
             ret[key] = L1Error.SUCCESS
+            successful_keys.append(key)
 
+        for listener in self._registered_listeners:
+            listener.on_keys_write_finished(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -416,6 +450,7 @@ class L1Manager:
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -430,9 +465,35 @@ class L1Manager:
             need_to_free.append(entry.memory_obj)
             del self._objects[key]
             ret[key] = L1Error.SUCCESS
+            successful_keys.append(key)
 
         self._memory_manager.free(need_to_free)
+
+        for listener in self._registered_listeners:
+            listener.on_keys_deleted_by_manager(successful_keys)
         return ret
+
+    @l1_mgr_synchronized
+    def clear(self) -> None:
+        """Clear all objects from L1 cache."""
+        all_keys = list(self._objects.keys())
+        all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+        self._memory_manager.free(all_memory_objs)
+        self._objects.clear()
+        for listener in self._registered_listeners:
+            listener.on_keys_deleted_by_manager(all_keys)
+
+    def get_memory_usage(self) -> tuple[int, int]:
+        """Get the current memory usage of L1 cache.
+
+        Returns:
+            A tuple of (used_memory_bytes, total_memory_bytes).
+
+        Note:
+            In the future, we many want to make a "callback" based mechanism
+            via "L1ManagerListener" to notify the memory usage changes.
+        """
+        return self._memory_manager.get_memory_usage()
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
@@ -455,3 +516,8 @@ class L1Manager:
             The L1ObjectState if the object exists, None otherwise.
         """
         return self._objects.get(key, None)
+
+    @l1_mgr_synchronized
+    def memcheck(self) -> None:
+        """Perform memory check for L1 cache."""
+        self._memory_manager.memcheck()
