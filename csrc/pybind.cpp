@@ -5,7 +5,6 @@
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
 #include "mem_alloc.h"
-#include "resp.h"
 #include "utils.h"
 #include <torch/torch.h>
 #include <iostream>
