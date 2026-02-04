@@ -9,7 +9,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(lmcache_redis, m) {
   py::class_<MultiRESPClient>(m, "LMCacheRedisClient")
       .def(py::init<std::string, int, size_t, int>(), py::arg("host"),
-           py::arg("port"), py::arg("chunk_size"), py::arg("num_workers"))
+           py::arg("port"), py::arg("chunk_bytes"), py::arg("num_workers"))
       .def("event_fd", &MultiRESPClient::event_fd)
       .def("submit_get", &MultiRESPClient::submit_get, py::arg("key"),
            py::arg("memoryview"))
