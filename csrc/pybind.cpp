@@ -41,8 +41,3 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("free_numa_ptr", &free_numa_ptr);
   m.def("get_gpu_pci_bus_id", &get_gpu_pci_bus_id);
 }
-
-PYBIND11_MODULE(lmcache_redis, m) {
-  py::class_<MultiRESPClient>(m, "LMCacheRedisClient");
-  m.def()
-}
