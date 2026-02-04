@@ -1565,12 +1565,8 @@ class LMCacheConnectorV1Impl:
                     )
                     tokens_to_keep = num_token_slots
 
-                request_tracker.token_ids = list(
-                    request.all_token_ids[:tokens_to_keep]
-                )
-                request_tracker.num_saved_tokens = min(
-                    request_tracker.num_saved_tokens, num_current_tokens
-                )
+                request_tracker.token_ids = list(request.all_token_ids[:tokens_to_keep])
+                request_tracker.num_saved_tokens = min(request_tracker.num_saved_tokens, tokens_to_keep)
 
             # Pass all_token_ids for preempted requests to restore
             # token_ids correctly for chunk key computation
