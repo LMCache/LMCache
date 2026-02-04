@@ -23,10 +23,17 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.multiprocess.custom_types import (
-    StorageKey,
+from lmcache.v1.multiprocess.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
 )
-from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
+from lmcache.v1.multiprocess.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.multiprocess.distributed.storage_manager import StorageManager
 
 # ==============================================================================
 # Test Fixtures
@@ -36,7 +43,20 @@ from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
 @pytest.fixture
 def storage_manager():
     """Create a storage manager with 1GB buffer for testing."""
-    manager = MPStorageManager(cpu_buffer_size=1.0)
+    l1_memory_config = L1MemoryManagerConfig(
+        size_in_bytes=1 << 30,
+        use_lazy=True,
+        init_size_in_bytes=1 << 30,
+    )
+    storage_manager_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=l1_memory_config,
+        ),
+        eviction_config=EvictionConfig(
+            eviction_policy="LRU",
+        ),
+    )
+    manager = StorageManager(config=storage_manager_config)
     yield manager
     manager.close()
 
@@ -54,6 +74,14 @@ def test_dtype():
 
 
 @pytest.fixture
+def test_layout(test_shape, test_dtype):
+    return MemoryLayoutDesc(
+        shapes=[test_shape],
+        dtypes=[test_dtype],
+    )
+
+
+@pytest.fixture
 def test_format():
     """Standard test memory format."""
     return MemoryFormat.KV_2LTD
@@ -64,18 +92,23 @@ def test_format():
 # ==============================================================================
 
 
-def create_storage_key(
+def create_object_key(
     chunk_hash: int,
     worker_id: int,
     world_size: int = 2,
     model_name: str = "test_model",
-) -> StorageKey:
-    """Create a StorageKey for testing."""
-    return StorageKey.from_int_hash(
-        model_name=model_name,
+) -> ObjectKey:
+    """Create an ObjectKey for testing."""
+    kv_rank = ObjectKey.ComputeKVRank(
         world_size=world_size,
-        worker_id=worker_id,
-        chunk_hash=chunk_hash,
+        global_rank=worker_id,
+        local_world_size=world_size,
+        local_rank=worker_id,
+    )
+    return ObjectKey(
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_hash),
+        model_name=model_name,
+        kv_rank=kv_rank,
     )
 
 
@@ -83,7 +116,7 @@ def create_interleaved_lookup_keys(
     num_chunks: int,
     world_size: int,
     model_name: str = "test_model",
-) -> list[StorageKey]:
+) -> list[ObjectKey]:
     """
     Create interleaved lookup keys for scheduler-style TP lookup.
 
@@ -98,7 +131,7 @@ def create_interleaved_lookup_keys(
     for chunk_idx in range(num_chunks):
         for worker_id in range(world_size):
             keys.append(
-                create_storage_key(
+                create_object_key(
                     chunk_hash=chunk_idx,
                     worker_id=worker_id,
                     world_size=world_size,
@@ -125,9 +158,7 @@ class TestStorageManagerTPLookup:
     ALL workers must have the cache stored for that chunk.
     """
 
-    def test_tp2_both_workers_have_all_chunks(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp2_both_workers_have_all_chunks(self, storage_manager, test_layout):
         """
         Test TP=2 lookup when both workers have all chunks cached.
         Expected: All lookups return True.
@@ -138,19 +169,20 @@ class TestStorageManagerTPLookup:
         # Store chunks for both workers
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(num_chunks)
             ]
-            handle, _ = storage_manager.reserve(
-                storage_keys, test_shape, test_dtype, test_format
+            reserved_dict = storage_manager.reserve_write(
+                storage_keys, test_layout, "new"
             )
-            storage_manager.commit(handle)
+            storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # All keys should be found (5 chunks * 2 workers = 10)
         assert found_count == num_chunks * world_size
@@ -159,9 +191,7 @@ class TestStorageManagerTPLookup:
         found_ipc_count = found_count // world_size
         assert found_ipc_count == num_chunks
 
-    def test_tp2_only_worker0_has_cache_asymmetric(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp2_only_worker0_has_cache_asymmetric(self, storage_manager, test_layout):
         """
         Test TP=2 lookup when only worker 0 has cache (asymmetric).
         Expected: Lookup returns 0 (no complete cache hit).
@@ -171,17 +201,16 @@ class TestStorageManagerTPLookup:
 
         # Store chunks for worker 0 only
         storage_keys = [
-            create_storage_key(chunk_hash=i, worker_id=0, world_size=world_size)
+            create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(num_chunks)
         ]
-        handle, _ = storage_manager.reserve(
-            storage_keys, test_shape, test_dtype, test_format
-        )
-        storage_manager.commit(handle)
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # Only worker 0's first chunk is found, then lookup stops
         # at worker 1's missing chunk
@@ -194,9 +223,7 @@ class TestStorageManagerTPLookup:
         # 1 // 2 = 0, so no complete cache hit
         assert found_ipc_count == 0
 
-    def test_tp2_only_worker1_has_cache_asymmetric(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp2_only_worker1_has_cache_asymmetric(self, storage_manager, test_layout):
         """
         Test TP=2 lookup when only worker 1 has cache (asymmetric).
         Expected: Lookup returns 0 (first key for worker 0 is missing).
@@ -206,17 +233,16 @@ class TestStorageManagerTPLookup:
 
         # Store chunks for worker 1 only
         storage_keys = [
-            create_storage_key(chunk_hash=i, worker_id=1, world_size=world_size)
+            create_object_key(chunk_hash=i, worker_id=1, world_size=world_size)
             for i in range(num_chunks)
         ]
-        handle, _ = storage_manager.reserve(
-            storage_keys, test_shape, test_dtype, test_format
-        )
-        storage_manager.commit(handle)
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # First lookup key is chunk0_worker0 which is missing
         assert found_count == 0
@@ -225,9 +251,7 @@ class TestStorageManagerTPLookup:
         found_ipc_count = found_count // world_size
         assert found_ipc_count == 0
 
-    def test_tp2_partial_prefix_both_workers(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp2_partial_prefix_both_workers(self, storage_manager, test_layout):
         """
         Test TP=2 lookup with partial prefix: both workers have first 3 chunks.
         Expected: First 3 chunks return True, rest return False.
@@ -239,19 +263,20 @@ class TestStorageManagerTPLookup:
         # Store first 3 chunks for both workers
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(num_stored_chunks)
             ]
-            handle, _ = storage_manager.reserve(
-                storage_keys, test_shape, test_dtype, test_format
+            reserved_dict = storage_manager.reserve_write(
+                storage_keys, test_layout, "new"
             )
-            storage_manager.commit(handle)
+            storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_requested_chunks, world_size)
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
         assert found_count == num_stored_chunks * world_size
@@ -261,7 +286,7 @@ class TestStorageManagerTPLookup:
         assert found_ipc_count == num_stored_chunks
 
     def test_tp2_different_partial_hits_min_common_prefix(
-        self, storage_manager, test_shape, test_dtype, test_format
+        self, storage_manager, test_layout
     ):
         """
         Test TP=2 with different partial hits across workers.
@@ -273,27 +298,28 @@ class TestStorageManagerTPLookup:
 
         # Worker 0 has 5 chunks
         storage_keys_w0 = [
-            create_storage_key(chunk_hash=i, worker_id=0, world_size=world_size)
+            create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(5)
         ]
-        handle, _ = storage_manager.reserve(
-            storage_keys_w0, test_shape, test_dtype, test_format
+        reserved_dict = storage_manager.reserve_write(
+            storage_keys_w0, test_layout, "new"
         )
-        storage_manager.commit(handle)
+        storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Worker 1 has only 2 chunks
         storage_keys_w1 = [
-            create_storage_key(chunk_hash=i, worker_id=1, world_size=world_size)
+            create_object_key(chunk_hash=i, worker_id=1, world_size=world_size)
             for i in range(2)
         ]
-        handle, _ = storage_manager.reserve(
-            storage_keys_w1, test_shape, test_dtype, test_format
+        reserved_dict = storage_manager.reserve_write(
+            storage_keys_w1, test_layout, "new"
         )
-        storage_manager.commit(handle)
+        storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(5, world_size)
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # Lookup order:
         # chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, chunk2_w0, chunk2_w1...
@@ -310,9 +336,7 @@ class TestStorageManagerTPLookup:
         # 5 // 2 = 2, so only 2 complete chunks
         assert found_ipc_count == 2
 
-    def test_tp4_all_workers_have_cache(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp4_all_workers_have_cache(self, storage_manager, test_layout):
         """
         Test TP=4 lookup when all 4 workers have all chunks cached.
         """
@@ -322,19 +346,20 @@ class TestStorageManagerTPLookup:
         # Store chunks for all workers
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(num_chunks)
             ]
-            handle, _ = storage_manager.reserve(
-                storage_keys, test_shape, test_dtype, test_format
+            reserved_dict = storage_manager.reserve_write(
+                storage_keys, test_layout, "new"
             )
-            storage_manager.commit(handle)
+            storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # All keys found: 3 chunks * 4 workers = 12
         assert found_count == num_chunks * world_size
@@ -342,9 +367,7 @@ class TestStorageManagerTPLookup:
         found_ipc_count = found_count // world_size
         assert found_ipc_count == num_chunks
 
-    def test_tp4_one_worker_missing_causes_no_hit(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp4_one_worker_missing_causes_no_hit(self, storage_manager, test_layout):
         """
         Test TP=4 where one worker (worker 2) is missing all cache.
         Expected: No complete hits due to prefix matching.
@@ -355,19 +378,20 @@ class TestStorageManagerTPLookup:
         # Store chunks for workers 0, 1, 3 (skip worker 2)
         for worker_id in [0, 1, 3]:
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(num_chunks)
             ]
-            handle, _ = storage_manager.reserve(
-                storage_keys, test_shape, test_dtype, test_format
+            reserved_dict = storage_manager.reserve_write(
+                storage_keys, test_layout, "new"
             )
-            storage_manager.commit(handle)
+            storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # Lookup order: chunk0_w0, chunk0_w1, chunk0_w2, chunk0_w3, ...
         # chunk0_w0: found (1)
@@ -392,74 +416,74 @@ class TestStorageManagerTPLookup:
 class TestStorageManagerTPStoreRetrieve:
     """Tests for store and retrieve operations with tensor parallel."""
 
-    def test_tp2_store_creates_separate_keys(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp2_store_creates_separate_keys(self, storage_manager, test_layout):
         """
         Test that storing with different worker_ids creates separate entries.
         """
         world_size = 2
 
         # Store same chunk hash but different worker_ids
-        key_w0 = create_storage_key(chunk_hash=100, worker_id=0, world_size=world_size)
-        key_w1 = create_storage_key(chunk_hash=100, worker_id=1, world_size=world_size)
+        key_w0 = create_object_key(chunk_hash=100, worker_id=0, world_size=world_size)
+        key_w1 = create_object_key(chunk_hash=100, worker_id=1, world_size=world_size)
 
         # Store worker 0's data
-        handle0, reserved0 = storage_manager.reserve(
-            [key_w0], test_shape, test_dtype, test_format
-        )
-        assert len(reserved0) == 1
-        storage_manager.commit(handle0)
+        reserved_dict0 = storage_manager.reserve_write([key_w0], test_layout, "new")
+        assert len(reserved_dict0) == 1
+        storage_manager.finish_write(list(reserved_dict0.keys()))
 
         # Store worker 1's data
-        handle1, reserved1 = storage_manager.reserve(
-            [key_w1], test_shape, test_dtype, test_format
-        )
-        assert len(reserved1) == 1
-        storage_manager.commit(handle1)
+        reserved_dict1 = storage_manager.reserve_write([key_w1], test_layout, "new")
+        assert len(reserved_dict1) == 1
+        storage_manager.finish_write(list(reserved_dict1.keys()))
+
+        # Prefetch to secure both entries
+        handle = storage_manager.submit_prefetch_task([key_w0, key_w1])
+        _ = storage_manager.query_prefetch_status(handle)
 
         # Both should be retrievable independently
-        with storage_manager.retrieve([key_w0]) as objs:
+        with storage_manager.read_prefetched_results([key_w0]) as objs:
             assert len(objs) == 1
 
-        with storage_manager.retrieve([key_w1]) as objs:
+        with storage_manager.read_prefetched_results([key_w1]) as objs:
             assert len(objs) == 1
 
-    def test_tp2_retrieve_specific_worker(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_tp2_retrieve_specific_worker(self, storage_manager, test_layout):
         """
         Test that retrieve with specific worker_id only gets that worker's data.
         """
         world_size = 2
 
         # Store for both workers
+        all_keys = []
         for worker_id in range(world_size):
             keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(3)
             ]
-            handle, _ = storage_manager.reserve(
-                keys, test_shape, test_dtype, test_format
-            )
-            storage_manager.commit(handle)
+            reserved_dict = storage_manager.reserve_write(keys, test_layout, "new")
+            storage_manager.finish_write(list(reserved_dict.keys()))
+            all_keys.extend(keys)
+
+        # Prefetch to secure all entries
+        handle = storage_manager.submit_prefetch_task(all_keys)
+        _ = storage_manager.query_prefetch_status(handle)
 
         # Retrieve only worker 0's data
         keys_w0 = [
-            create_storage_key(chunk_hash=i, worker_id=0, world_size=world_size)
+            create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(3)
         ]
-        with storage_manager.retrieve(keys_w0) as objs:
+        with storage_manager.read_prefetched_results(keys_w0) as objs:
             assert len(objs) == 3
 
         # Retrieve only worker 1's data
         keys_w1 = [
-            create_storage_key(chunk_hash=i, worker_id=1, world_size=world_size)
+            create_object_key(chunk_hash=i, worker_id=1, world_size=world_size)
             for i in range(3)
         ]
-        with storage_manager.retrieve(keys_w1) as objs:
+        with storage_manager.read_prefetched_results(keys_w1) as objs:
             assert len(objs) == 3
 
 
@@ -475,9 +499,7 @@ class TestStorageManagerTPStoreRetrieve:
 class TestTPEdgeCases:
     """Edge case tests for tensor parallel support."""
 
-    def test_world_size_1_stores_and_retrieves(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_world_size_1_stores_and_retrieves(self, storage_manager, test_layout):
         """
         Test that world_size=1 (no TP) works correctly through the API.
         Single worker stores and retrieves data successfully.
@@ -487,25 +509,22 @@ class TestTPEdgeCases:
 
         # Store chunks for worker 0
         storage_keys = [
-            create_storage_key(chunk_hash=i, worker_id=0, world_size=world_size)
+            create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(num_chunks)
         ]
-        handle, _ = storage_manager.reserve(
-            storage_keys, test_shape, test_dtype, test_format
-        )
-        storage_manager.commit(handle)
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Lookup should find all chunks
-        found_count = storage_manager.lookup(storage_keys)
+        handle = storage_manager.submit_prefetch_task(storage_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == num_chunks
 
         # Retrieve should work
-        with storage_manager.retrieve(storage_keys) as objs:
+        with storage_manager.read_prefetched_results(storage_keys) as objs:
             assert len(objs) == num_chunks
 
-    def test_large_world_size_tp8(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_large_world_size_tp8(self, storage_manager, test_layout):
         """
         Test with larger world_size (TP=8) through the API.
         All 8 workers store and lookup works correctly.
@@ -514,17 +533,19 @@ class TestTPEdgeCases:
         num_chunks = 3
 
         # Store chunks for all workers
+        all_keys = []
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(num_chunks)
             ]
-            handle, _ = storage_manager.reserve(
-                storage_keys, test_shape, test_dtype, test_format
+            all_keys.extend(storage_keys)
+            reserved_dict = storage_manager.reserve_write(
+                storage_keys, test_layout, "new"
             )
-            storage_manager.commit(handle)
+            storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys (simulating scheduler lookup)
         # Order: [chunk0_w0, chunk0_w1, ..., chunk0_w7, chunk1_w0, ...]
@@ -532,29 +553,28 @@ class TestTPEdgeCases:
         for chunk_idx in range(num_chunks):
             for worker_id in range(world_size):
                 lookup_keys.append(
-                    create_storage_key(
+                    create_object_key(
                         chunk_hash=chunk_idx, worker_id=worker_id, world_size=world_size
                     )
                 )
 
         # All keys should be found
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == num_chunks * world_size
 
         # Verify retrieval for each worker
         for worker_id in range(world_size):
             worker_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(num_chunks)
             ]
-            with storage_manager.retrieve(worker_keys) as objs:
+            with storage_manager.read_prefetched_results(worker_keys) as objs:
                 assert len(objs) == num_chunks
 
-    def test_all_workers_same_chunk_different_keys(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_all_workers_same_chunk_different_keys(self, storage_manager, test_layout):
         """
         Test that same chunk_hash with different worker_ids creates
         distinct entries in storage and can be stored/retrieved independently.
@@ -564,9 +584,7 @@ class TestTPEdgeCases:
 
         # Create storage keys for all workers with same chunk_hash
         storage_keys = [
-            create_storage_key(
-                chunk_hash=chunk_hash, worker_id=i, world_size=world_size
-            )
+            create_object_key(chunk_hash=chunk_hash, worker_id=i, world_size=world_size)
             for i in range(world_size)
         ]
 
@@ -574,22 +592,21 @@ class TestTPEdgeCases:
         assert len(set(storage_keys)) == world_size
 
         # Store all keys
-        handle, reserved = storage_manager.reserve(
-            storage_keys, test_shape, test_dtype, test_format
-        )
-        assert len(reserved) == world_size
-        storage_manager.commit(handle)
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        assert len(reserved_dict) == world_size
+        storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Lookup all keys
-        found_count = storage_manager.lookup(storage_keys)
+        handle = storage_manager.submit_prefetch_task(storage_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == world_size
 
         # Retrieve each worker's key independently
         for worker_id in range(world_size):
-            worker_key = create_storage_key(
+            worker_key = create_object_key(
                 chunk_hash=chunk_hash, worker_id=worker_id, world_size=world_size
             )
-            with storage_manager.retrieve([worker_key]) as objs:
+            with storage_manager.read_prefetched_results([worker_key]) as objs:
                 assert len(objs) == 1
                 assert objs[0] is not None
 
@@ -606,9 +623,7 @@ class TestTPEdgeCases:
 class TestTPIntegration:
     """Integration tests simulating real TP workflows."""
 
-    def test_full_tp2_workflow(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_full_tp2_workflow(self, storage_manager, test_layout):
         """
         Simulate a full TP=2 workflow:
         1. Worker 0 stores chunks 0, 1, 2
@@ -624,16 +639,15 @@ class TestTPIntegration:
         # Step 1 & 2: Workers store their chunks
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(stored_chunks)
             ]
-            handle, reserved = storage_manager.reserve(
-                storage_keys, test_shape, test_dtype, test_format
+            reserved_dict = storage_manager.reserve_write(
+                storage_keys, test_layout, "new"
             )
-            assert len(reserved) == stored_chunks
-            storage_manager.commit(handle)
+            storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Step 3: Scheduler lookup with interleaved keys
         # Order: [chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, ...]
@@ -641,13 +655,14 @@ class TestTPIntegration:
         for chunk_idx in range(requested_chunks):
             for worker_id in range(world_size):
                 lookup_keys.append(
-                    create_storage_key(
+                    create_object_key(
                         chunk_hash=chunk_idx,
                         worker_id=worker_id,
                         world_size=world_size,
                     )
                 )
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
 
         # Step 4: Verify hit count
         # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
@@ -660,19 +675,17 @@ class TestTPIntegration:
         # Step 5: Workers retrieve their chunks
         for worker_id in range(world_size):
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(stored_chunks)
             ]
-            with storage_manager.retrieve(storage_keys) as objs:
+            with storage_manager.read_prefetched_results(storage_keys) as objs:
                 assert len(objs) == stored_chunks
                 for obj in objs:
                     assert obj is not None
 
-    def test_concurrent_tp2_stores(
-        self, storage_manager, test_shape, test_dtype, test_format
-    ):
+    def test_concurrent_tp2_stores(self, storage_manager, test_layout):
         """
         Test concurrent stores from multiple "workers" (threads).
         """
@@ -682,15 +695,13 @@ class TestTPIntegration:
 
         def worker_store(worker_id: int):
             storage_keys = [
-                create_storage_key(
+                create_object_key(
                     chunk_hash=i, worker_id=worker_id, world_size=world_size
                 )
                 for i in range(num_chunks)
             ]
-            handle, reserved = storage_manager.reserve(
-                storage_keys, test_shape, test_dtype, test_format
-            )
-            storage_manager.commit(handle)
+            reserved = storage_manager.reserve_write(storage_keys, test_layout, "new")
+            storage_manager.finish_write(list(reserved.keys()))
             results[worker_id] = len(reserved)
 
         # Run stores concurrently
@@ -712,11 +723,12 @@ class TestTPIntegration:
         for chunk_idx in range(num_chunks):
             for worker_id in range(world_size):
                 lookup_keys.append(
-                    create_storage_key(
+                    create_object_key(
                         chunk_hash=chunk_idx,
                         worker_id=worker_id,
                         world_size=world_size,
                     )
                 )
-        found_count = storage_manager.lookup(lookup_keys)
+        handle = storage_manager.submit_prefetch_task(lookup_keys)
+        found_count = storage_manager.query_prefetch_status(handle)
         assert found_count == num_chunks * world_size
