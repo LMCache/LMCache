@@ -524,23 +524,25 @@ class MPCacheEngine:
     def lookup(
         self,
         request_id: str,
-        key: IPCCacheEngineKey,
+        keys: list[IPCCacheEngineKey],
     ) -> int:
-        """Lookup using token IDs or hash.
+        """Lookup using token IDs or hashes.
 
-        For token mode: Creates/updates session, computes all chunk hashes,
-        converts to hash keys, and delegates to _lookup_impl().
+        For token mode (single key with token_ids): Creates/updates session,
+        computes all chunk hashes, converts to hash keys, and delegates to
+        _lookup_impl().
 
-        For hash mode: Directly uses the hash key.
+        For hash mode (keys with chunk_hash): Directly uses the hash keys.
 
         Args:
             request_id: Unique request identifier for session tracking.
-            key: Cache key (token mode or hash mode).
+            keys: List of cache keys (token mode or hash mode).
 
         Returns:
             Number of matched chunks (prefix match count).
         """
-        if key.is_token_mode():
+        if len(keys) == 1 and keys[0].is_token_mode():
+            key = keys[0]
             # Token mode: hash tokens first
             session = self.session_manager.get_or_create(request_id)
             session.compute_all_hashes(list(key.token_ids), self.token_hasher)
@@ -560,8 +562,8 @@ class MPCacheEngine:
                 for hk in hash_keys
             ]
         else:
-            # Hash mode: use directly
-            ipc_keys = [key.no_worker_id_version()]
+            # Hash mode: keys already have chunk_hash, use directly
+            ipc_keys = [k.no_worker_id_version() for k in keys]
 
         results = self._lookup_impl(ipc_keys, lock=True)
         return sum(results)

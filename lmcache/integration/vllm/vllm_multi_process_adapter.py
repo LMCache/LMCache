@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any
+from itertools import islice
+from typing import Any, Iterable
 import os
 
 # Third Party
@@ -25,6 +26,20 @@ logger = init_logger(__name__)
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     logger.info("KV caches keys are %s", list(kv_caches.keys()))
     return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
+
+
+def striding_block_hashes(
+    block_hashes: list[bytes], blocks_in_chunk: int
+) -> Iterable[bytes]:
+    """Extract chunk-level hashes from block hashes by striding.
+
+    In hash-based vLLM, each vLLM block has its own hash.  LMCache chunks
+    span ``blocks_in_chunk`` consecutive blocks.  The representative hash
+    for a chunk is the hash of the **last** block in that chunk (because
+    each block hash already encodes its prefix).  So we start at index
+    ``blocks_in_chunk - 1`` and stride by ``blocks_in_chunk``.
+    """
+    return islice(block_hashes, blocks_in_chunk - 1, None, blocks_in_chunk)
 
 
 def send_lmcache_request(
@@ -69,17 +84,20 @@ def get_lmcache_chunk_size(
 
 @dataclass
 class LoadStoreOp:
-    token_ids: list[int]
-    """Token IDs for the load/store operation (full token sequence)"""
-
     block_ids: list[int]
     """Block ids for the load/store operation"""
 
+    token_ids: list[int] | None = None
+    """Token IDs for the load/store operation (token mode)"""
+
+    block_hashes: list[bytes] | None = None
+    """Block hashes for the load/store operation (hash mode)"""
+
     start: int = 0
-    """Start token index"""
+    """Start token index (token mode only)"""
 
     end: int = 0
-    """End token index"""
+    """End token index (token mode only)"""
 
     def __len__(self) -> int:
         return len(self.block_ids)
@@ -130,15 +148,20 @@ class LMCacheMPSchedulerAdapter:
     def maybe_submit_lookup_request(
         self,
         request_id: str,
-        token_ids: list[int],
+        token_ids_or_hashes: list[int] | list[bytes],
     ):
         """
-        Submit a new lookup request to LMCache if there is no ongoing request
+        Submit a new lookup request to LMCache if there is no ongoing request.
+
+        Supports both token-based and hash-based vLLM:
+        - list[int]: token IDs (new token-based vLLM) → single token-mode key
+        - list[bytes]: block hashes (old hash-based vLLM) → strided hash-mode keys
 
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
-            token_ids: The token IDs to lookup from LMCache
+            token_ids_or_hashes: Either token IDs (list[int]) or block hashes
+                (list[bytes]) to lookup from LMCache
 
         Returns:
             None
@@ -154,11 +177,22 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        key = self._create_key(token_ids)
+        if token_ids_or_hashes and isinstance(token_ids_or_hashes[0], bytes):
+            # Hash mode: stride block hashes → N hash-mode keys
+            block_hashes: list[bytes] = token_ids_or_hashes  # type: ignore[assignment]
+            chunk_hashes = list(
+                striding_block_hashes(block_hashes, self.blocks_in_chunk)
+            )
+            keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+        else:
+            # Token mode: single token-mode key
+            token_ids: list[int] = token_ids_or_hashes  # type: ignore[assignment]
+            keys = [self._create_key(token_ids)]
+
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
-            [request_id, key],
+            [request_id, keys],
         )
         self.lookup_futures[request_id] = future
 
@@ -227,6 +261,15 @@ class LMCacheMPSchedulerAdapter:
             token_ids=tuple(token_ids),
             start=start,
             end=end,
+        )
+
+    def _create_hash_key(self, chunk_hash: bytes) -> IPCCacheEngineKey:
+        """Create a hash-mode IPC cache engine key"""
+        return IPCCacheEngineKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=None,
+            chunk_hash=chunk_hash,
         )
 
 
@@ -305,11 +348,21 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        key = self._create_key(op.token_ids, op.start, op.end)
+        if op.block_hashes is not None:
+            # Hash mode
+            chunk_hashes = list(
+                striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
+            )
+            keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+            request_ids = [request_id] * len(keys)
+        else:
+            # Token mode
+            keys = [self._create_key(op.token_ids, op.start, op.end)]
+            request_ids = [request_id]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [[request_id], [key], self.instance_id, op.block_ids,
+            [request_ids, keys, self.instance_id, op.block_ids,
              event.ipc_handle()],
         ).to_cuda_future()
         self.store_futures[request_id] = (future, [])
@@ -327,11 +380,21 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        key = self._create_key(op.token_ids, op.start, op.end)
+        if op.block_hashes is not None:
+            # Hash mode
+            chunk_hashes = list(
+                striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
+            )
+            keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+            request_ids = [request_id] * len(keys)
+        else:
+            # Token mode
+            keys = [self._create_key(op.token_ids, op.start, op.end)]
+            request_ids = [request_id]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [[request_id], [key], self.instance_id, op.block_ids,
+            [request_ids, keys, self.instance_id, op.block_ids,
              event.ipc_handle()],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, [])
@@ -353,14 +416,27 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = [self._create_key(op.token_ids, op.start, op.end) for op in ops]
-        block_ids = []
-        for op in ops:
+        all_keys: list[IPCCacheEngineKey] = []
+        all_request_ids: list[str] = []
+        block_ids: list[int] = []
+        for request_id, op in zip(request_ids, ops):
+            if op.block_hashes is not None:
+                chunk_hashes = list(
+                    striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
+                )
+                keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+                all_keys.extend(keys)
+                all_request_ids.extend([request_id] * len(keys))
+            else:
+                all_keys.append(
+                    self._create_key(op.token_ids, op.start, op.end)
+                )
+                all_request_ids.append(request_id)
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [list(request_ids), keys, self.instance_id, block_ids,
+            [all_request_ids, all_keys, self.instance_id, block_ids,
              event.ipc_handle()],
         ).to_cuda_future()
         self.store_futures[request_ids[0]] = (future, list(request_ids[1:]))
@@ -382,14 +458,27 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = [self._create_key(op.token_ids, op.start, op.end) for op in ops]
-        block_ids = []
-        for op in ops:
+        all_keys: list[IPCCacheEngineKey] = []
+        all_request_ids: list[str] = []
+        block_ids: list[int] = []
+        for request_id, op in zip(request_ids, ops):
+            if op.block_hashes is not None:
+                chunk_hashes = list(
+                    striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
+                )
+                keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+                all_keys.extend(keys)
+                all_request_ids.extend([request_id] * len(keys))
+            else:
+                all_keys.append(
+                    self._create_key(op.token_ids, op.start, op.end)
+                )
+                all_request_ids.append(request_id)
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [list(request_ids), keys, self.instance_id, block_ids,
+            [all_request_ids, all_keys, self.instance_id, block_ids,
              event.ipc_handle()],
         ).to_cuda_future()
         self.retrieve_futures[request_ids[0]] = (future, list(request_ids[1:]))
@@ -516,4 +605,13 @@ class LMCacheMPWorkerAdapter:
             token_ids=tuple(token_ids),
             start=start,
             end=end,
+        )
+
+    def _create_hash_key(self, chunk_hash: bytes) -> IPCCacheEngineKey:
+        """Create a hash-mode IPC cache engine key"""
+        return IPCCacheEngineKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=self.worker_id,
+            chunk_hash=chunk_hash,
         )
