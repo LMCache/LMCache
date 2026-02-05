@@ -140,7 +140,7 @@ class L1MemoryManager:
             ):
                 return allocator.pin_allocator.address_manager
             elif isinstance(allocator, LazyMemoryAllocator):
-                return allocator._allocator.address_manager
+                return allocator.get_address_manager()
             else:
                 raise NotImplementedError(
                     "get_memory_usage is not implemented for this allocator type."

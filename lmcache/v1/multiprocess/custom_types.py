@@ -77,7 +77,9 @@ class CudaIPCWrapper:
             We should call `torch.cuda.init()` before using this function.
         """
         device = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
-        storage = torch.UntypedStorage._new_shared_cuda(device, *self.handle[1:])
+        storage = torch.UntypedStorage._new_shared_cuda(  # noqa: SLF001
+            device, *self.handle[1:]
+        )
         t = torch.tensor(0, device=device, dtype=self.dtype)
         t.set_(storage)
         return t.view(self.shape)
