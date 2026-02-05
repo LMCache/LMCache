@@ -545,7 +545,7 @@ class MPCacheEngine:
             key = keys[0]
             assert key.token_ids is not None
             session = self.session_manager.get_or_create(request_id)
-            session.compute_all_hashes(list(key.token_ids), self.token_hasher)
+            session.set_tokens(list(key.token_ids), 0, len(key.token_ids))
             hash_keys = key.to_hash_keys(self.token_hasher)
             if not hash_keys:
                 return 0
@@ -599,9 +599,7 @@ class MPCacheEngine:
                 # Token mode: hash tokens first
                 assert key.token_ids is not None
                 session = self.session_manager.get_or_create(request_id)
-                new_hashes = session.set_tokens_and_hash_range(
-                    list(key.token_ids), key.start, key.end, self.token_hasher
-                )
+                new_hashes = session.set_tokens(list(key.token_ids), key.start, key.end)
 
                 hash_keys = [
                     IPCCacheEngineKey(
@@ -668,8 +666,8 @@ class MPCacheEngine:
                 # Token mode: hash tokens first
                 assert key.token_ids is not None
                 session = self.session_manager.get_or_create(request_id)
-                range_hashes = session.set_tokens_and_hash_range(
-                    list(key.token_ids), key.start, key.end, self.token_hasher
+                range_hashes = session.set_tokens(
+                    list(key.token_ids), key.start, key.end
                 )
 
                 hash_keys = [
