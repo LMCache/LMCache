@@ -934,11 +934,6 @@ class StorageManager:
                 "LocalDiskBackend",
                 "LocalGPUBackend",
             ]:
-            if backend_name in [
-                "LocalCPUBackend",
-                "LocalDiskBackend",
-                "LocalGPUBackend",
-            ]:
                 backend.touch_cache()
 
     def remove(
