@@ -124,7 +124,9 @@ class LMCBlender:
             # for following layers in this request.
             if self.metadata.imp_indices is None:
                 num_tokens = q.shape[0]
+                logger.info(f'num_tokens is {num_tokens}')
                 all_indices = torch.arange(num_tokens, device=q.device, dtype=torch.long)
+                hit_mask = torch.ones(num_tokens, device=q.device, dtype=torch.bool)
 
                 # Gap positions are cache-miss token positions; the remaining
                 # tokens are cache-hit positions.
@@ -132,19 +134,18 @@ class LMCBlender:
                 if gap_positions is not None and gap_positions.numel() > 0:
                     gap_positions = gap_positions.to(device=q.device, dtype=torch.long)
                     valid_gap = gap_positions[(gap_positions >= 0) & (gap_positions < num_tokens)]
-                    hit_mask = torch.ones(num_tokens, device=q.device, dtype=torch.bool)
                     hit_mask[valid_gap] = False
-                    hit_indices = all_indices[hit_mask]
-                else:
-                    hit_indices = all_indices
+                hit_indices = all_indices[hit_mask]
 
                 gop = max(int(getattr(self.common_metadata, "GOP", 1)), 1)
                 tokens_per_frame = int(self.metadata.tokens_per_frame or 0)
+                logger.info(f'tokens_per_frame is {tokens_per_frame}, gop is {gop}')
                 # Recompute key frames by GOP at frame granularity.
                 if tokens_per_frame > 0:
                     num_frames = (num_tokens + tokens_per_frame - 1) // tokens_per_frame
                     selected_chunks = []
                     for frame_id in range(0, num_frames, gop):
+                        logger.info(f'frame_id: {frame_id}, num_frames: {num_frames}')
                         start = frame_id * tokens_per_frame
                         end = min(start + tokens_per_frame, num_tokens)
                         frame_hit_offsets = torch.nonzero(
@@ -159,6 +160,7 @@ class LMCBlender:
                         selected_indices = hit_indices[:1]
                     else:
                         selected_indices = hit_indices
+                    logger.info(f"selected_indices length is {len(selected_indices)}")    
                 elif gop > 1:
                     # Fallback: no frame info, degrade to token-based selection.
                     selected_indices = hit_indices[(hit_indices % gop) == 0]

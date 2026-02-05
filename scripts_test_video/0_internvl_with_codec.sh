@@ -10,7 +10,7 @@ if [ -n "$1" ]; then
     STRIDE_SIZES=($1)
     echo "Using custom STRIDE_SIZES: ${STRIDE_SIZES[*]}"
 else
-    STRIDE_SIZES=(0.8)
+    STRIDE_SIZES=(0.2)
     echo "No stride sizes provided, using default: ${STRIDE_SIZES[*]}"
 fi
 # --------------------
@@ -18,7 +18,7 @@ fi
 BLEND_SPECIAL_STR="<<SEG>>"
 
 # Update blend_special_str in the YAML config file
-sed -i "s|blend_special_str: .*|blend_special_str: \"$BLEND_SPECIAL_STR\"|g" lmcache_blend.yml
+sed -i "s|blend_special_str: .*|blend_special_str: \"$BLEND_SPECIAL_STR\"|g" lmcache_blend_gpu.yml
 
 echo "Waiting for server to start..."
 
@@ -84,7 +84,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
   SERVER_LOG=server_win${WIN_SIZES[0]}_stride${STRIDE_SIZES[0]}_recompute${ratio}.log
   vllm serve $model \
     --host 0.0.0.0 \
-    --port 8001 \
+    --port 8000 \
     --trust-remote-code \
     --disable-log-requests \
     --max-num-batched-tokens 102400 \
@@ -92,7 +92,6 @@ for ratio in "${blend_recompute_ratios[@]}"; do
     --gpu-memory-utilization 0.9 \
     --tensor-parallel-size 2 \
     --enforce-eager \
-    --chat-template-content-format string \
     --no-enable-prefix-caching \
     --mm-processor-kwargs '{"max_dynamic_patch": 4}' \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_size":500000000}' > $SERVER_LOG 2>&1 &
@@ -121,6 +120,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
         --window-seconds ${WIN} \
         --stride-ratio ${STRIDE} \
         --category all \
+        --gop 8 \
         --blend-special-str "$BLEND_SPECIAL_STR"
         
       sleep 5

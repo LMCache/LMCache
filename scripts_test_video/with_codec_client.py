@@ -79,6 +79,7 @@ def build_video_messages(
     target_category: Optional[str],
     all_categories: Sequence[str],
     system_prompt: str,
+    model: str,
 ) -> List[Dict[str, Any]]:
     video_filename = os.path.basename(video_path)
     video_base_name = os.path.splitext(video_filename)[0]
@@ -86,16 +87,22 @@ def build_video_messages(
     category = target_category or extract_category_from_video_name(video_base_name, all_categories)
     prompt_text = generate_prompt_for_category(category)
 
-    return [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": [
+    if "internvl" in model.lower():
+        return [{"role": "user", "content":[
                 {"type": "text", "text": prompt_text},
                 {"type": "video", "video": video_path, "fps": fps},
-            ],
-        },
-    ]
+            ],}]
+    else:
+        return [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "video", "video": video_path, "fps": fps},
+                ],
+            },
+        ]
 
 
 # ----------------------------
@@ -174,6 +181,7 @@ def encode_video_to_h264_x264(
     start_time: float,
     duration: Optional[float],
     ffmpeg_timeout: int,
+    gop: int,
 ) -> str:
     info = get_video_info(input_video)
     if not info:
@@ -204,8 +212,9 @@ def encode_video_to_h264_x264(
 
     # GOP keyint based on window_seconds * 0.2
     if window_seconds is not None and window_seconds > 0:
-        gop_seconds = float(window_seconds) * 0.2
+        gop_seconds = gop 
         keyint = max(1, int(gop_seconds * output_fps))
+        print(f'gop is {gop}, keyint is {keyint}')
         cmd.extend(["-g", str(keyint)])
     else:
         cmd.extend(["-g", "100"])
@@ -256,6 +265,7 @@ def compress_video_to_h264(
     slices_dir: str,
     outputs_dir: str,
     ffmpeg_timeout: int,
+    gop: int,
 ) -> str:
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     os.makedirs(slices_dir, exist_ok=True)
@@ -275,6 +285,7 @@ def compress_video_to_h264(
         start_time=start_time,
         duration=duration,
         ffmpeg_timeout=ffmpeg_timeout,
+        gop=gop,
     )
 
 
@@ -324,6 +335,7 @@ def prepare_message_for_vllm(
     slices_dir: str,
     outputs_dir: str,
     ffmpeg_timeout: int,
+    gop: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     vllm_messages: List[Dict[str, Any]] = []
     fps_list: List[float] = []
@@ -391,6 +403,7 @@ def prepare_message_for_vllm(
                         slices_dir=slices_dir,
                         outputs_dir=outputs_dir,
                         ffmpeg_timeout=ffmpeg_timeout,
+                        gop=gop,
                     )
 
                     frames, video_fps = extract_frames_from_video(compressed_path, sample_fps=fps)
@@ -398,7 +411,8 @@ def prepare_message_for_vllm(
 
                     frame_content_list: List[Dict[str, Any]] = []
                     for i, frame in enumerate(frames):
-                        frame_content_list.append({"type": "text", "text": blend_special_str})
+                        if i == gop:
+                            frame_content_list.append({"type": "text", "text": blend_special_str})
                         img = Image.fromarray(frame)
                         buf = BytesIO()
                         img.save(buf, format="PNG")
@@ -544,14 +558,14 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--use-sliding-window", action="store_true")
     p.add_argument("--window-seconds", type=float, default=30.0)
-    p.add_argument("--stride-ratio", type=float, default=1.0)
+    p.add_argument("--stride-ratio", type=float, default=0.2)
 
     p.add_argument("--category", type=str, default="auto", help="auto|all|<CategoryName>")
     p.add_argument("--blend-special-str", type=str, default="<<SEG>>")
 
     # server / OpenAI client
     p.add_argument("--host", type=str, default="0.0.0.0")
-    p.add_argument("--port", type=int, default=8001)  # align with your bash vllm serve --port 8001
+    p.add_argument("--port", type=int, default=8000)  # align with your bash vllm serve --port 8000
     p.add_argument("--api-timeout", type=int, default=300)
     p.add_argument("--system-prompt", type=str, default="You are a helpful assistant.")
 
@@ -586,6 +600,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=",".join(DEFAULT_ALL_CATEGORIES),
         help="Comma-separated all categories (including Normal)",
+    )
+    p.add_argument(
+        "--gop",
+        type=int,
+        default=16,
+        help="Group of Pictures",
     )
 
     args = p.parse_args()
@@ -676,6 +696,8 @@ def main() -> None:
         print(f"Generated {len(windows)} windows")
 
         for target_category in categories_to_process:
+            if target_category.lower() not in video_base_name.lower() and 'normal' not in video_base_name.lower():
+                continue
             # output directory per category/video (keeps your original structure, but rooted at --output-dir)
             category_output_dir = os.path.join(args.output_dir, target_category, video_base_name)
             os.makedirs(category_output_dir, exist_ok=True)
@@ -702,6 +724,7 @@ def main() -> None:
                         target_category=target_category,
                         all_categories=args.all_categories,
                         system_prompt=args.system_prompt,
+                        model=args.model,
                     )
 
                     vllm_messages, video_kwargs = prepare_message_for_vllm(
@@ -719,6 +742,7 @@ def main() -> None:
                         slices_dir=args.slices_dir,
                         outputs_dir=args.outputs_dir,
                         ffmpeg_timeout=args.ffmpeg_timeout,
+                        gop=args.gop,
                     )
 
                     request_start = time.time()
@@ -787,7 +811,6 @@ def main() -> None:
 
     if csv_fh:
         csv_fh.close()
-
 
 if __name__ == "__main__":
     main()
