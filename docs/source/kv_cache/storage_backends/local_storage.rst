@@ -24,7 +24,7 @@ Two ways to configure LMCache Disk Offloading:
     # Otherwise, enable by setting the directory where LMCache will
     # create files for each KV cache chunks
     # (this directory does NOT need to exist beforehand)
-    export LMCACHE_LOCAL_DISK="file://~/local/disk_test/local_disk/"
+    export LMCACHE_LOCAL_DISK="file://$HOME/local/disk_test/local_disk/"
     # 5GB of Disk
     export LMCACHE_MAX_LOCAL_DISK_SIZE=5.0
 
