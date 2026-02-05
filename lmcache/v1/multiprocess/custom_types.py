@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 import pickle
 import threading
 
 # Third Party
 import msgspec
 import torch
+
+if TYPE_CHECKING:
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 """
 Defines the types and the customized encoder/decoders for inter-process
@@ -197,7 +200,7 @@ class IPCCacheEngineKey:
             request_id=self.request_id,
         )
 
-    def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:  # type: ignore[name-defined]  # noqa: F821
+    def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:
         """Compute chunk hashes and return one hash-mode IPCCacheEngineKey per chunk.
 
         Only valid for token mode. Preserves request_id in generated keys.
@@ -206,10 +209,6 @@ class IPCCacheEngineKey:
             raise ValueError(
                 "Cannot compute hashes for hash-mode key. Key is already in hash mode."
             )
-        # Import here to avoid circular import at module level
-        # First Party
-        from lmcache.v1.multiprocess.token_hasher import TokenHasher as _TokenHasher
-
         assert self.token_ids is not None
         chunk_hashes = hasher.compute_chunk_hashes(list(self.token_ids))
         return [
@@ -217,7 +216,7 @@ class IPCCacheEngineKey:
                 model_name=self.model_name,
                 world_size=self.world_size,
                 worker_id=self.worker_id,
-                chunk_hash=_TokenHasher.hash_to_bytes(h),
+                chunk_hash=hasher.hash_to_bytes(h),
                 request_id=self.request_id,
             )
             for h in chunk_hashes

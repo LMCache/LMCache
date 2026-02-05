@@ -20,8 +20,8 @@ export BUILD_ID="${BUILD_ID:-local_$$}"
 export RESULTS_DIR="${RESULTS_DIR:-$HOME/lmcache_ci_results_${BUILD_ID}}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
 
-GPU_LMCACHE="${GPU_LMCACHE:-6}"
-GPU_BASELINE="${GPU_BASELINE:-7}"
+GPU_LMCACHE="${GPU_LMCACHE:-2}"
+GPU_BASELINE="${GPU_BASELINE:-3}"
 
 # Track overall result
 TEST_RESULT=0

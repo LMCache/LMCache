@@ -121,10 +121,10 @@ _PROTOCOL_DEFINTIONS = {
         response_class=None,
         handler_type=HandlerType.SYNC,
     ),
-    # Store (token-based, batched)
-    # - keys: list[KeyType] (request_id embedded in each key)
+    # Store
+    # - keys: list[KeyType]
     # - instance_id: int
-    # - gpu_block_ids: list[int] (flattened)
+    # - gpu_block_ids: list[int]
     # - event_ipc_handle: bytes
     # Returns: cuda event handle, bool (success)
     RequestType.STORE: ProtocolDefinition(
@@ -132,10 +132,10 @@ _PROTOCOL_DEFINTIONS = {
         response_class=tuple[bytes, bool],
         handler_type=HandlerType.BLOCKING,
     ),
-    # Retrieve (token-based, batched)
-    # - keys: list[KeyType] (request_id embedded in each key)
+    # Retrieve
+    # - keys: list[KeyType]
     # - instance_id: int
-    # - gpu_block_ids: list[int] (flattened)
+    # - gpu_block_ids: list[int]
     # - event_ipc_handle: bytes
     # Returns: cuda event handle, list[bool]
     RequestType.RETRIEVE: ProtocolDefinition(
@@ -143,9 +143,9 @@ _PROTOCOL_DEFINTIONS = {
         response_class=tuple[bytes, list[bool]],
         handler_type=HandlerType.BLOCKING,
     ),
-    # Lookup (token-based or hash-based)
-    # - keys: list[KeyType] (request_id embedded in each key)
-    # Returns: int (number of matched chunks)
+    # Lookup
+    # - keys: list[KeyType]
+    # Returns: int
     RequestType.LOOKUP: ProtocolDefinition(
         payload_classes=[list[KeyType]],
         response_class=int,

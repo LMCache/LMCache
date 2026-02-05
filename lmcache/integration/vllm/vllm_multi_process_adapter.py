@@ -148,20 +148,24 @@ class LMCacheMPSchedulerAdapter:
     def maybe_submit_lookup_request(
         self,
         request_id: str,
-        token_ids_or_hashes: list[int] | list[bytes],
+        *,
+        block_hashes: list[bytes] | None = None,
+        token_ids: list[int] | None = None,
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
         Supports both token-based and hash-based vLLM:
-        - list[int]: token IDs (new token-based vLLM) → single token-mode key
-        - list[bytes]: block hashes (old hash-based vLLM) → strided hash-mode keys
+        - token_ids: token IDs (token-based vLLM) → single token-mode key
+        - block_hashes: block hashes (hash-based vLLM) → strided hash-mode keys
+
+        Exactly one of block_hashes or token_ids must be provided.
 
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
-            token_ids_or_hashes: Either token IDs (list[int]) or block hashes
-                (list[bytes]) to lookup from LMCache
+            block_hashes: Block hashes to lookup from LMCache (hash mode)
+            token_ids: Token IDs to lookup from LMCache (token mode)
 
         Returns:
             None
@@ -177,9 +181,12 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        if token_ids_or_hashes and isinstance(token_ids_or_hashes[0], bytes):
+        assert (block_hashes is None) != (token_ids is None), (
+            "Exactly one of block_hashes or token_ids must be provided"
+        )
+
+        if block_hashes is not None:
             # Hash mode: stride block hashes → N hash-mode keys
-            block_hashes: list[bytes] = token_ids_or_hashes  # type: ignore[assignment]
             chunk_hashes = list(
                 striding_block_hashes(block_hashes, self.blocks_in_chunk)
             )
@@ -188,7 +195,7 @@ class LMCacheMPSchedulerAdapter:
             ]
         else:
             # Token mode: single token-mode key
-            token_ids: list[int] = token_ids_or_hashes  # type: ignore[assignment]
+            assert token_ids is not None
             keys = [self._create_key(token_ids, request_id=request_id)]
 
         future = send_lmcache_request(
