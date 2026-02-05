@@ -391,7 +391,7 @@ Check out your KV Cache in your SSD:
 
 .. code-block:: bash
 
-    ls "~/local/disk_test/local_disk/"
+    ls "$HOME/local/disk_test/local_disk/"
 
 .. _local-storage-tips:
 
