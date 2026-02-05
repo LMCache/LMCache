@@ -34,7 +34,7 @@ functions are supported:
 
 - LOOKUP:
     request_id: str
-    keys: list[KeyType] (token-based or hash-based)
+    keys: list[KeyType]
 """
 
 # Identifier for different vLLM instances
@@ -150,7 +150,7 @@ _PROTOCOL_DEFINTIONS = {
     ),
     # Lookup (token-based or hash-based)
     # - request_id: str
-    # - keys: list[KeyType] (token-based or hash-based keys)
+    # - keys: list[KeyType]
     # Returns: int (number of matched chunks)
     RequestType.LOOKUP: ProtocolDefinition(
         payload_classes=[str, list[KeyType]],

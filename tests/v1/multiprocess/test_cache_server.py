@@ -142,6 +142,11 @@ def make_request_id(prefix: str = "req") -> str:
     return f"{prefix}_{_req_counter}"
 
 
+def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
+    """Create lookup keys: worker_id=None."""
+    return [k.no_worker_id_version() for k in keys]
+
+
 def server_process_runner(
     host: str, port: int, chunk_size: int, cpu_buffer_size: float
 ):
@@ -335,8 +340,13 @@ def test_store_and_lookup(
     # Store
     store_future = client.submit_request(
         RequestType.STORE,
-        [[req_id] * num_keys, keys, registered_instance, gpu_block_ids,
-         event.ipc_handle()],
+        [
+            [req_id] * num_keys,
+            keys,
+            registered_instance,
+            gpu_block_ids,
+            event.ipc_handle(),
+        ],
         get_response_class(RequestType.STORE),
     )
     store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -345,8 +355,7 @@ def test_store_and_lookup(
     # Lookup - keys that exist
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"),
-         [key.no_worker_id_version() for key in keys]],
+        [make_request_id("lookup"), lookup_keys(keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -356,8 +365,7 @@ def test_store_and_lookup(
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
     lookup_future2 = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"),
-         [key.no_worker_id_version() for key in non_existent_keys]],
+        [make_request_id("lookup"), lookup_keys(non_existent_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
@@ -386,8 +394,13 @@ def test_store_retrieve_verify(
     store_block_ids = list(range(0, 16 * num_keys))
     store_future = client.submit_request(
         RequestType.STORE,
-        [[req_id] * num_keys, keys, registered_instance, store_block_ids,
-         event.ipc_handle()],
+        [
+            [req_id] * num_keys,
+            keys,
+            registered_instance,
+            store_block_ids,
+            event.ipc_handle(),
+        ],
         get_response_class(RequestType.STORE),
     )
     store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -399,8 +412,7 @@ def test_store_retrieve_verify(
     # Call look up to ensure the data is ready to be retrieved
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"),
-         [key.no_worker_id_version() for key in keys]],
+        [make_request_id("lookup"), lookup_keys(keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -413,8 +425,13 @@ def test_store_retrieve_verify(
     retrieve_req_id = make_request_id("retrieve")
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [[retrieve_req_id] * num_keys, keys, registered_instance,
-         retrieve_block_ids, event.ipc_handle()],
+        [
+            [retrieve_req_id] * num_keys,
+            keys,
+            registered_instance,
+            retrieve_block_ids,
+            event.ipc_handle(),
+        ],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -463,8 +480,13 @@ def test_retrieve_partial_miss(
 
     store_future = client.submit_request(
         RequestType.STORE,
-        [[store_req] * num_stored, stored_keys, registered_instance,
-         store_block_ids, event.ipc_handle()],
+        [
+            [store_req] * num_stored,
+            stored_keys,
+            registered_instance,
+            store_block_ids,
+            event.ipc_handle(),
+        ],
         get_response_class(RequestType.STORE),
     )
     assert store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT) is True
@@ -472,8 +494,7 @@ def test_retrieve_partial_miss(
     # Lookup to ensure keys are stored
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"),
-         [key.no_worker_id_version() for key in stored_keys]],
+        [make_request_id("lookup"), lookup_keys(stored_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -495,8 +516,13 @@ def test_retrieve_partial_miss(
 
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [[retrieve_req] * num_requested, all_keys, registered_instance,
-         retrieve_block_ids, event.ipc_handle()],
+        [
+            [retrieve_req] * num_requested,
+            all_keys,
+            registered_instance,
+            retrieve_block_ids,
+            event.ipc_handle(),
+        ],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -511,8 +537,7 @@ def test_retrieve_partial_miss(
     # Doing look up again to ensure data is ready
     lookup_future_2 = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"),
-         [key.no_worker_id_version() for key in stored_keys]],
+        [make_request_id("lookup"), lookup_keys(stored_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result_2 = lookup_future_2.result(timeout=DEFAULT_TIMEOUT)
@@ -525,8 +550,13 @@ def test_retrieve_partial_miss(
     retrieve_req_2 = make_request_id("partial_retrieve2")
     retrieve_future_2 = client.submit_request(
         RequestType.RETRIEVE,
-        [[retrieve_req_2] * num_stored, stored_keys, registered_instance,
-         retrieve_block_ids_2, event.ipc_handle()],
+        [
+            [retrieve_req_2] * num_stored,
+            stored_keys,
+            registered_instance,
+            retrieve_block_ids_2,
+            event.ipc_handle(),
+        ],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result_2 = retrieve_future_2.to_cuda_future().result(
@@ -580,8 +610,13 @@ def test_multiple_retrieve_operations(
         store_result = (
             client.submit_request(
                 RequestType.STORE,
-                [[store_req] * keys_per_batch, keys, registered_instance,
-                 blocks, event.ipc_handle()],
+                [
+                    [store_req] * keys_per_batch,
+                    keys,
+                    registered_instance,
+                    blocks,
+                    event.ipc_handle(),
+                ],
                 get_response_class(RequestType.STORE),
             )
             .to_cuda_future()
@@ -597,14 +632,12 @@ def test_multiple_retrieve_operations(
     ]
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"),
-         [key.no_worker_id_version() for key in all_keys]],
+        [make_request_id("lookup"), lookup_keys(all_keys)],
         get_response_class(RequestType.LOOKUP),
     )
 
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
-    assert lookup_result == num_batches * keys_per_batch, \
-        "All stored keys should exist"
+    assert lookup_result == num_batches * keys_per_batch, "All stored keys should exist"
 
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
@@ -627,8 +660,13 @@ def test_multiple_retrieve_operations(
 
         retrieve_future = client.submit_request(
             RequestType.RETRIEVE,
-            [[retrieve_req] * keys_per_batch, keys, registered_instance,
-             blocks, event.ipc_handle()],
+            [
+                [retrieve_req] * keys_per_batch,
+                keys,
+                registered_instance,
+                blocks,
+                event.ipc_handle(),
+            ],
             get_response_class(RequestType.RETRIEVE),
         )
         retrieve_futures.append(retrieve_future.to_cuda_future())
@@ -674,8 +712,13 @@ def test_multiple_store_operations(
     result1 = (
         client.submit_request(
             RequestType.STORE,
-            [[store_req1] * 30, keys1, registered_instance, blocks1,
-             event.ipc_handle()],
+            [
+                [store_req1] * 30,
+                keys1,
+                registered_instance,
+                blocks1,
+                event.ipc_handle(),
+            ],
             get_response_class(RequestType.STORE),
         )
         .to_cuda_future()
@@ -692,8 +735,13 @@ def test_multiple_store_operations(
     result2 = (
         client.submit_request(
             RequestType.STORE,
-            [[store_req2] * 20, keys2, registered_instance, blocks2,
-             event.ipc_handle()],
+            [
+                [store_req2] * 20,
+                keys2,
+                registered_instance,
+                blocks2,
+                event.ipc_handle(),
+            ],
             get_response_class(RequestType.STORE),
         )
         .to_cuda_future()
@@ -705,13 +753,11 @@ def test_multiple_store_operations(
     all_keys = keys1 + keys2
     lookup_result = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"),
-         [key.no_worker_id_version() for key in all_keys]],
+        [make_request_id("lookup"), lookup_keys(all_keys)],
         get_response_class(RequestType.LOOKUP),
     ).result(timeout=DEFAULT_TIMEOUT)
 
-    assert lookup_result == 50, \
-        "All stored keys from both batches should exist"
+    assert lookup_result == 50, "All stored keys from both batches should exist"
 
 
 @pytest.mark.skipif(

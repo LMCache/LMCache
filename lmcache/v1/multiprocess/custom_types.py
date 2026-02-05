@@ -197,7 +197,7 @@ class IPCCacheEngineKey:
             request_id=self.request_id,
         )
 
-    def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:
+    def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:  # type: ignore[name-defined]  # noqa: F821
         """Compute chunk hashes and return one hash-mode IPCCacheEngineKey per chunk.
 
         Only valid for token mode. Preserves request_id in generated keys.
@@ -207,8 +207,10 @@ class IPCCacheEngineKey:
                 "Cannot compute hashes for hash-mode key. Key is already in hash mode."
             )
         # Import here to avoid circular import at module level
+        # First Party
         from lmcache.v1.multiprocess.token_hasher import TokenHasher as _TokenHasher
 
+        assert self.token_ids is not None
         chunk_hashes = hasher.compute_chunk_hashes(list(self.token_ids))
         return [
             IPCCacheEngineKey(
@@ -237,6 +239,7 @@ class StorageKey:
     Similar to IPCCacheEngineKey (hash mode) but worker_id must always be an int.
     This is kept for backward compatibility with the old storage manager.
     """
+
     model_name: str
     world_size: int
 
@@ -354,6 +357,7 @@ def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageK
 
     storage_keys = []
     for ipc_key in ipc_keys:
+        assert ipc_key.chunk_hash is not None
         if ipc_key.worker_id is None:
             for worker_id in range(ipc_key.world_size):
                 storage_keys.append(
@@ -375,5 +379,3 @@ def ipc_keys_to_storage_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[StorageK
             )
 
     return storage_keys
-
-

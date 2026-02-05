@@ -244,7 +244,7 @@ class MPCacheEngine:
         # thread lock to avoid tmp buffer conflicts
         self.lock = threading.Lock()
 
-        # storage manager (distributed)
+        # storage manager
         self.storage_manager = StorageManager(storage_manager_config)
 
         # Token hasher and session manager for token-based operations
@@ -528,9 +528,9 @@ class MPCacheEngine:
     ) -> int:
         """Lookup using token IDs or hashes.
 
-        For token mode (single key with token_ids): Creates/updates session,
-        computes all chunk hashes, converts to hash keys, and delegates to
-        _lookup_impl().
+        For token mode (single key with token_ids): Creates/reuses a session,
+        computes all hashes via the session manager, converts to hash keys,
+        and delegates to _lookup_impl().
 
         For hash mode (keys with chunk_hash): Directly uses the hash keys.
 
@@ -543,10 +543,9 @@ class MPCacheEngine:
         """
         if len(keys) == 1 and keys[0].is_token_mode():
             key = keys[0]
-            # Token mode: hash tokens first
+            assert key.token_ids is not None
             session = self.session_manager.get_or_create(request_id)
             session.compute_all_hashes(list(key.token_ids), self.token_hasher)
-
             hash_keys = key.to_hash_keys(self.token_hasher)
             if not hash_keys:
                 return 0
@@ -595,9 +594,10 @@ class MPCacheEngine:
         """
         combined_ipc_keys: list[IPCCacheEngineKey] = []
 
-        for request_id, key in zip(request_ids, keys):
+        for request_id, key in zip(request_ids, keys, strict=False):
             if key.is_token_mode():
                 # Token mode: hash tokens first
+                assert key.token_ids is not None
                 session = self.session_manager.get_or_create(request_id)
                 new_hashes = session.set_tokens_and_hash_range(
                     list(key.token_ids), key.start, key.end, self.token_hasher
@@ -619,8 +619,7 @@ class MPCacheEngine:
 
         if not combined_ipc_keys:
             logger.warning(
-                "store: no complete chunks from any request "
-                "(num_requests=%d)",
+                "store: no complete chunks from any request (num_requests=%d)",
                 len(request_ids),
             )
             assert instance_id in self.gpu_contexts
@@ -664,9 +663,10 @@ class MPCacheEngine:
         """
         combined_ipc_keys: list[IPCCacheEngineKey] = []
 
-        for request_id, key in zip(request_ids, keys):
+        for request_id, key in zip(request_ids, keys, strict=False):
             if key.is_token_mode():
                 # Token mode: hash tokens first
+                assert key.token_ids is not None
                 session = self.session_manager.get_or_create(request_id)
                 range_hashes = session.set_tokens_and_hash_range(
                     list(key.token_ids), key.start, key.end, self.token_hasher
@@ -688,8 +688,7 @@ class MPCacheEngine:
 
         if not combined_ipc_keys:
             logger.warning(
-                "retrieve: no complete chunks from any request "
-                "(num_requests=%d)",
+                "retrieve: no complete chunks from any request (num_requests=%d)",
                 len(request_ids),
             )
             assert instance_id in self.gpu_contexts

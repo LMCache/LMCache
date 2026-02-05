@@ -357,13 +357,13 @@ class LMCacheMPWorkerAdapter:
             request_ids = [request_id] * len(keys)
         else:
             # Token mode
+            assert op.token_ids is not None
             keys = [self._create_key(op.token_ids, op.start, op.end)]
             request_ids = [request_id]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [request_ids, keys, self.instance_id, op.block_ids,
-             event.ipc_handle()],
+            [request_ids, keys, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
         self.store_futures[request_id] = (future, [])
 
@@ -389,13 +389,13 @@ class LMCacheMPWorkerAdapter:
             request_ids = [request_id] * len(keys)
         else:
             # Token mode
+            assert op.token_ids is not None
             keys = [self._create_key(op.token_ids, op.start, op.end)]
             request_ids = [request_id]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [request_ids, keys, self.instance_id, op.block_ids,
-             event.ipc_handle()],
+            [request_ids, keys, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, [])
 
@@ -419,7 +419,7 @@ class LMCacheMPWorkerAdapter:
         all_keys: list[IPCCacheEngineKey] = []
         all_request_ids: list[str] = []
         block_ids: list[int] = []
-        for request_id, op in zip(request_ids, ops):
+        for request_id, op in zip(request_ids, ops, strict=False):
             if op.block_hashes is not None:
                 chunk_hashes = list(
                     striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
@@ -428,16 +428,20 @@ class LMCacheMPWorkerAdapter:
                 all_keys.extend(keys)
                 all_request_ids.extend([request_id] * len(keys))
             else:
-                all_keys.append(
-                    self._create_key(op.token_ids, op.start, op.end)
-                )
+                assert op.token_ids is not None
+                all_keys.append(self._create_key(op.token_ids, op.start, op.end))
                 all_request_ids.append(request_id)
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [all_request_ids, all_keys, self.instance_id, block_ids,
-             event.ipc_handle()],
+            [
+                all_request_ids,
+                all_keys,
+                self.instance_id,
+                block_ids,
+                event.ipc_handle(),
+            ],
         ).to_cuda_future()
         self.store_futures[request_ids[0]] = (future, list(request_ids[1:]))
 
@@ -461,7 +465,7 @@ class LMCacheMPWorkerAdapter:
         all_keys: list[IPCCacheEngineKey] = []
         all_request_ids: list[str] = []
         block_ids: list[int] = []
-        for request_id, op in zip(request_ids, ops):
+        for request_id, op in zip(request_ids, ops, strict=False):
             if op.block_hashes is not None:
                 chunk_hashes = list(
                     striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
@@ -470,16 +474,20 @@ class LMCacheMPWorkerAdapter:
                 all_keys.extend(keys)
                 all_request_ids.extend([request_id] * len(keys))
             else:
-                all_keys.append(
-                    self._create_key(op.token_ids, op.start, op.end)
-                )
+                assert op.token_ids is not None
+                all_keys.append(self._create_key(op.token_ids, op.start, op.end))
                 all_request_ids.append(request_id)
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [all_request_ids, all_keys, self.instance_id, block_ids,
-             event.ipc_handle()],
+            [
+                all_request_ids,
+                all_keys,
+                self.instance_id,
+                block_ids,
+                event.ipc_handle(),
+            ],
         ).to_cuda_future()
         self.retrieve_futures[request_ids[0]] = (future, list(request_ids[1:]))
 

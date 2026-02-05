@@ -19,7 +19,7 @@ import uvicorn
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import StorageKey
 from lmcache.v1.multiprocess.distributed.config import (
     EvictionConfig,

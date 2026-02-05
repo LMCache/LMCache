@@ -24,8 +24,11 @@ logger = init_logger(__name__)
 def _make_blake3_hash_func() -> Callable:
     """Create a blake3-based hash function compatible with the
     (prefix_hash, tuple(tokens), None) calling convention."""
-    import blake3 as _blake3
+    # Standard
     import struct
+
+    # Third Party
+    import blake3 as _blake3
 
     def blake3_hash(args):
         prefix_hash, tokens, _ = args
@@ -139,9 +142,7 @@ class TokenHasher:
                 return hash_func
             except ValueError:
                 continue
-        raise ValueError(
-            f"Hash function '{hash_algorithm}' not found in {module_name}"
-        )
+        raise ValueError(f"Hash function '{hash_algorithm}' not found in {module_name}")
 
     def _init_none_hash(self) -> Any:
         """Initialize NONE_HASH.
@@ -149,6 +150,7 @@ class TokenHasher:
         Adapted from TokenDatabase.__init__ (token_database.py:64-82).
         """
         try:
+            # Third Party
             from vllm.v1.core import kv_cache_utils
 
             if hasattr(kv_cache_utils, "init_none_hash"):

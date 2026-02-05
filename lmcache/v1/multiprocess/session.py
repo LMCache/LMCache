@@ -29,7 +29,10 @@ class Session:
     created_at: float = field(default_factory=time.time)
 
     def set_tokens_and_hash_range(
-        self, full_token_ids: list[int], start: int, end: int,
+        self,
+        full_token_ids: list[int],
+        start: int,
+        end: int,
         hasher: TokenHasher,
     ) -> list:
         """Idempotently set tokens, compute hashes up to end, return hashes
@@ -72,9 +75,7 @@ class Session:
 
         return self.chunk_hashes[start_chunk:end_chunk]
 
-    def compute_all_hashes(
-        self, token_ids: list[int], hasher: TokenHasher
-    ) -> list:
+    def compute_all_hashes(self, token_ids: list[int], hasher: TokenHasher) -> list:
         """Set full token_ids and compute all chunk hashes from scratch.
 
         Args:
@@ -90,9 +91,7 @@ class Session:
         self.num_chunks_processed = 0
 
         total_tokens = len(self.token_ids)
-        return self.set_tokens_and_hash_range(
-            self.token_ids, 0, total_tokens, hasher
-        )
+        return self.set_tokens_and_hash_range(self.token_ids, 0, total_tokens, hasher)
 
 
 class SessionManager:
