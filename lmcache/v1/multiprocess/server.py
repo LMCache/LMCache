@@ -523,7 +523,6 @@ class MPCacheEngine:
 
     def lookup(
         self,
-        request_id: str,
         keys: list[IPCCacheEngineKey],
     ) -> int:
         """Lookup using token IDs or hashes.
@@ -535,14 +534,18 @@ class MPCacheEngine:
         For hash mode (keys with chunk_hash): Directly uses the hash keys.
 
         Args:
-            request_id: Unique request identifier for session tracking.
             keys: List of cache keys (token mode or hash mode).
+                  request_id is embedded in each key.
 
         Returns:
             Number of matched chunks (prefix match count).
         """
         if len(keys) == 1 and keys[0].is_token_mode():
             key = keys[0]
+            request_id = key.request_id
+            assert request_id is not None, (
+                "Token mode lookup requires request_id in key"
+            )
             assert key.token_ids is not None
             session = self.session_manager.get_or_create(request_id)
             session.set_tokens(list(key.token_ids), 0, len(key.token_ids))
@@ -569,7 +572,6 @@ class MPCacheEngine:
 
     def store(
         self,
-        request_ids: list[str],
         keys: list[IPCCacheEngineKey],
         instance_id: int,
         gpu_block_ids: list[int],
@@ -577,14 +579,15 @@ class MPCacheEngine:
     ) -> tuple[bytes, bool]:
         """Store using token IDs or hashes (batched).
 
-        For token mode: Iterates over request_ids/keys, computes hashes via sessions,
-        combines all hash keys, then delegates to _store_impl().
+        For token mode: Iterates over keys, reads request_id from each key,
+        computes hashes via sessions, combines all hash keys, then delegates
+        to _store_impl().
 
         For hash mode: Directly uses the hash keys.
 
         Args:
-            request_ids: Unique request identifiers for session tracking.
             keys: Cache keys, one per request (token mode or hash mode).
+                  request_id is embedded in each key.
             instance_id: GPU instance ID.
             gpu_block_ids: Flattened GPU block IDs.
             event_ipc_handle: IPC handle of the event to wait on.
@@ -594,10 +597,14 @@ class MPCacheEngine:
         """
         combined_ipc_keys: list[IPCCacheEngineKey] = []
 
-        for request_id, key in zip(request_ids, keys, strict=False):
+        for key in keys:
+            request_id = key.request_id
             if key.is_token_mode():
                 # Token mode: hash tokens first
                 assert key.token_ids is not None
+                assert request_id is not None, (
+                    "Token mode store requires request_id in key"
+                )
                 session = self.session_manager.get_or_create(request_id)
                 new_hashes = session.set_tokens(list(key.token_ids), key.start, key.end)
 
@@ -618,7 +625,7 @@ class MPCacheEngine:
         if not combined_ipc_keys:
             logger.warning(
                 "store: no complete chunks from any request (num_requests=%d)",
-                len(request_ids),
+                len(keys),
             )
             assert instance_id in self.gpu_contexts
             gpu_context = self.gpu_contexts[instance_id]
@@ -636,7 +643,6 @@ class MPCacheEngine:
 
     def retrieve(
         self,
-        request_ids: list[str],
         keys: list[IPCCacheEngineKey],
         instance_id: int,
         gpu_block_ids: list[int],
@@ -644,14 +650,15 @@ class MPCacheEngine:
     ) -> tuple[bytes, list[bool]]:
         """Retrieve using token IDs or hashes (batched).
 
-        For token mode: Iterates over request_ids/keys, computes hashes via sessions,
-        combines all hash keys, then delegates to _retrieve_impl().
+        For token mode: Iterates over keys, reads request_id from each key,
+        computes hashes via sessions, combines all hash keys, then delegates
+        to _retrieve_impl().
 
         For hash mode: Directly uses the hash keys.
 
         Args:
-            request_ids: Unique request identifiers for session tracking.
             keys: Cache keys, one per request (token mode or hash mode).
+                  request_id is embedded in each key.
             instance_id: GPU instance ID.
             gpu_block_ids: Flattened GPU block IDs.
             event_ipc_handle: IPC handle of the event to wait on.
@@ -661,10 +668,14 @@ class MPCacheEngine:
         """
         combined_ipc_keys: list[IPCCacheEngineKey] = []
 
-        for request_id, key in zip(request_ids, keys, strict=False):
+        for key in keys:
+            request_id = key.request_id
             if key.is_token_mode():
                 # Token mode: hash tokens first
                 assert key.token_ids is not None
+                assert request_id is not None, (
+                    "Token mode retrieve requires request_id in key"
+                )
                 session = self.session_manager.get_or_create(request_id)
                 range_hashes = session.set_tokens(
                     list(key.token_ids), key.start, key.end
@@ -687,7 +698,7 @@ class MPCacheEngine:
         if not combined_ipc_keys:
             logger.warning(
                 "retrieve: no complete chunks from any request (num_requests=%d)",
-                len(request_ids),
+                len(keys),
             )
             assert instance_id in self.gpu_contexts
             gpu_context = self.gpu_contexts[instance_id]

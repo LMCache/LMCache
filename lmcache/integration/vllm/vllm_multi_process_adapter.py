@@ -183,16 +183,18 @@ class LMCacheMPSchedulerAdapter:
             chunk_hashes = list(
                 striding_block_hashes(block_hashes, self.blocks_in_chunk)
             )
-            keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+            keys = [
+                self._create_hash_key(ch, request_id=request_id) for ch in chunk_hashes
+            ]
         else:
             # Token mode: single token-mode key
             token_ids: list[int] = token_ids_or_hashes  # type: ignore[assignment]
-            keys = [self._create_key(token_ids)]
+            keys = [self._create_key(token_ids, request_id=request_id)]
 
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
-            [request_id, keys],
+            [keys],
         )
         self.lookup_futures[request_id] = future
 
@@ -251,7 +253,11 @@ class LMCacheMPSchedulerAdapter:
 
     # Helper functions
     def _create_key(
-        self, token_ids: list[int], start: int = 0, end: int = 0
+        self,
+        token_ids: list[int],
+        start: int = 0,
+        end: int = 0,
+        request_id: str | None = None,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
@@ -261,15 +267,19 @@ class LMCacheMPSchedulerAdapter:
             token_ids=tuple(token_ids),
             start=start,
             end=end,
+            request_id=request_id,
         )
 
-    def _create_hash_key(self, chunk_hash: bytes) -> IPCCacheEngineKey:
+    def _create_hash_key(
+        self, chunk_hash: bytes, request_id: str | None = None
+    ) -> IPCCacheEngineKey:
         """Create a hash-mode IPC cache engine key"""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
             chunk_hash=chunk_hash,
+            request_id=request_id,
         )
 
 
@@ -353,17 +363,19 @@ class LMCacheMPWorkerAdapter:
             chunk_hashes = list(
                 striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
             )
-            keys = [self._create_hash_key(ch) for ch in chunk_hashes]
-            request_ids = [request_id] * len(keys)
+            keys = [
+                self._create_hash_key(ch, request_id=request_id) for ch in chunk_hashes
+            ]
         else:
             # Token mode
             assert op.token_ids is not None
-            keys = [self._create_key(op.token_ids, op.start, op.end)]
-            request_ids = [request_id]
+            keys = [
+                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+            ]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [request_ids, keys, self.instance_id, op.block_ids, event.ipc_handle()],
+            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
         self.store_futures[request_id] = (future, [])
 
@@ -385,17 +397,19 @@ class LMCacheMPWorkerAdapter:
             chunk_hashes = list(
                 striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
             )
-            keys = [self._create_hash_key(ch) for ch in chunk_hashes]
-            request_ids = [request_id] * len(keys)
+            keys = [
+                self._create_hash_key(ch, request_id=request_id) for ch in chunk_hashes
+            ]
         else:
             # Token mode
             assert op.token_ids is not None
-            keys = [self._create_key(op.token_ids, op.start, op.end)]
-            request_ids = [request_id]
+            keys = [
+                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+            ]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [request_ids, keys, self.instance_id, op.block_ids, event.ipc_handle()],
+            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, [])
 
@@ -417,26 +431,29 @@ class LMCacheMPWorkerAdapter:
                 model inference step
         """
         all_keys: list[IPCCacheEngineKey] = []
-        all_request_ids: list[str] = []
         block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
             if op.block_hashes is not None:
                 chunk_hashes = list(
                     striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
                 )
-                keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+                keys = [
+                    self._create_hash_key(ch, request_id=request_id)
+                    for ch in chunk_hashes
+                ]
                 all_keys.extend(keys)
-                all_request_ids.extend([request_id] * len(keys))
             else:
                 assert op.token_ids is not None
-                all_keys.append(self._create_key(op.token_ids, op.start, op.end))
-                all_request_ids.append(request_id)
+                all_keys.append(
+                    self._create_key(
+                        op.token_ids, op.start, op.end, request_id=request_id
+                    )
+                )
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
             [
-                all_request_ids,
                 all_keys,
                 self.instance_id,
                 block_ids,
@@ -463,26 +480,29 @@ class LMCacheMPWorkerAdapter:
                 model inference step
         """
         all_keys: list[IPCCacheEngineKey] = []
-        all_request_ids: list[str] = []
         block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
             if op.block_hashes is not None:
                 chunk_hashes = list(
                     striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
                 )
-                keys = [self._create_hash_key(ch) for ch in chunk_hashes]
+                keys = [
+                    self._create_hash_key(ch, request_id=request_id)
+                    for ch in chunk_hashes
+                ]
                 all_keys.extend(keys)
-                all_request_ids.extend([request_id] * len(keys))
             else:
                 assert op.token_ids is not None
-                all_keys.append(self._create_key(op.token_ids, op.start, op.end))
-                all_request_ids.append(request_id)
+                all_keys.append(
+                    self._create_key(
+                        op.token_ids, op.start, op.end, request_id=request_id
+                    )
+                )
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
             [
-                all_request_ids,
                 all_keys,
                 self.instance_id,
                 block_ids,
@@ -603,7 +623,11 @@ class LMCacheMPWorkerAdapter:
         return safe_finished_s
 
     def _create_key(
-        self, token_ids: list[int], start: int = 0, end: int = 0
+        self,
+        token_ids: list[int],
+        start: int = 0,
+        end: int = 0,
+        request_id: str | None = None,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
@@ -613,13 +637,17 @@ class LMCacheMPWorkerAdapter:
             token_ids=tuple(token_ids),
             start=start,
             end=end,
+            request_id=request_id,
         )
 
-    def _create_hash_key(self, chunk_hash: bytes) -> IPCCacheEngineKey:
+    def _create_hash_key(
+        self, chunk_hash: bytes, request_id: str | None = None
+    ) -> IPCCacheEngineKey:
         """Create a hash-mode IPC cache engine key"""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
             chunk_hash=chunk_hash,
+            request_id=request_id,
         )

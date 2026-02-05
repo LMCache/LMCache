@@ -19,22 +19,19 @@ functions are supported:
     instance_id: int
 
 - STORE:
-    request_ids: list[str]
-    keys: list[KeyType]
+    keys: list[KeyType]  (request_id embedded in each key)
     instance_id: int
     gpu_block_ids: list[int]
     event_ipc_handle: bytes
 
 - RETRIEVE:
-    request_ids: list[str]
-    keys: list[KeyType]
+    keys: list[KeyType]  (request_id embedded in each key)
     instance_id: int
     gpu_block_ids: list[int]
     event_ipc_handle: bytes
 
 - LOOKUP:
-    request_id: str
-    keys: list[KeyType]
+    keys: list[KeyType]  (request_id embedded in each key)
 """
 
 # Identifier for different vLLM instances
@@ -125,35 +122,32 @@ _PROTOCOL_DEFINTIONS = {
         handler_type=HandlerType.SYNC,
     ),
     # Store (token-based, batched)
-    # - request_ids: list[str]
-    # - keys: list[KeyType] (token-based)
+    # - keys: list[KeyType] (request_id embedded in each key)
     # - instance_id: int
     # - gpu_block_ids: list[int] (flattened)
     # - event_ipc_handle: bytes
     # Returns: cuda event handle, bool (success)
     RequestType.STORE: ProtocolDefinition(
-        payload_classes=[list[str], list[KeyType], int, list[int], bytes],
+        payload_classes=[list[KeyType], int, list[int], bytes],
         response_class=tuple[bytes, bool],
         handler_type=HandlerType.BLOCKING,
     ),
     # Retrieve (token-based, batched)
-    # - request_ids: list[str]
-    # - keys: list[KeyType] (token-based)
+    # - keys: list[KeyType] (request_id embedded in each key)
     # - instance_id: int
     # - gpu_block_ids: list[int] (flattened)
     # - event_ipc_handle: bytes
     # Returns: cuda event handle, list[bool]
     RequestType.RETRIEVE: ProtocolDefinition(
-        payload_classes=[list[str], list[KeyType], int, list[int], bytes],
+        payload_classes=[list[KeyType], int, list[int], bytes],
         response_class=tuple[bytes, list[bool]],
         handler_type=HandlerType.BLOCKING,
     ),
     # Lookup (token-based or hash-based)
-    # - request_id: str
-    # - keys: list[KeyType]
+    # - keys: list[KeyType] (request_id embedded in each key)
     # Returns: int (number of matched chunks)
     RequestType.LOOKUP: ProtocolDefinition(
-        payload_classes=[str, list[KeyType]],
+        payload_classes=[list[KeyType]],
         response_class=int,
         handler_type=HandlerType.BLOCKING,
     ),
