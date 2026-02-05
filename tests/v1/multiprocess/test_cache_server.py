@@ -16,6 +16,12 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
 )
+from lmcache.v1.multiprocess.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -132,8 +138,20 @@ def server_process_runner(
     """
     Entry point for the server process.
     """
+    storage_manager_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=int(cpu_buffer_size * 1024**3),
+                use_lazy=True,
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
     run_cache_server(
-        host=host, port=port, chunk_size=chunk_size, cpu_buffer_size=cpu_buffer_size
+        storage_manager_config=storage_manager_config,
+        host=host,
+        port=port,
+        chunk_size=chunk_size,
     )
 
 
@@ -364,6 +382,15 @@ def test_store_retrieve_verify(
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
+    # Call look up to ensure the data is ready to be retrieved
+    lookup_future = client.submit_request(
+        RequestType.LOOKUP,
+        [[key.no_worker_id_version() for key in keys], True],
+        get_response_class(RequestType.LOOKUP),
+    )
+    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    assert len(lookup_result) == num_keys
+
     # Retrieve to a different location in the cache
     # Use offset of 40 blocks (640 pages total needed: 320 + 320)
     retrieve_offset = 40 * 16
@@ -423,6 +450,15 @@ def test_retrieve_partial_miss(
     )
     assert store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT) is True
 
+    # Lookup to ensure keys are stored
+    lookup_future = client.submit_request(
+        RequestType.LOOKUP,
+        [[key.no_worker_id_version() for key in stored_keys], True],
+        get_response_class(RequestType.LOOKUP),
+    )
+    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    assert len(lookup_result) == num_stored
+
     # Try to retrieve 60 keys (only first 30 exist)
     # Total pages needed: 60 * 16 = 960 (< 1024)
     num_requested = 60
@@ -449,6 +485,15 @@ def test_retrieve_partial_miss(
     assert not any(retrieve_result), (
         "Retrieve is expected to return all FALSE if any key is missing"
     )
+
+    # Doing look up again to ensure data is ready
+    lookup_future_2 = client.submit_request(
+        RequestType.LOOKUP,
+        [[key.no_worker_id_version() for key in stored_keys], True],
+        get_response_class(RequestType.LOOKUP),
+    )
+    lookup_result_2 = lookup_future_2.result(timeout=DEFAULT_TIMEOUT)
+    assert len(lookup_result_2) == num_stored
 
     # Try to retrieve the first 30 keys only (all exist)
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
@@ -516,6 +561,22 @@ def test_multiple_retrieve_operations(
             .result(timeout=DEFAULT_TIMEOUT)
         )
         assert store_result is True
+
+    # Doing look up to ensure data is ready to be retrieved
+    all_keys = [
+        create_cache_key(batch_idx * keys_per_batch + i)
+        for batch_idx in range(num_batches)
+        for i in range(keys_per_batch)
+    ]
+    lookup_future = client.submit_request(
+        RequestType.LOOKUP,
+        [[key.no_worker_id_version() for key in all_keys], True],
+        get_response_class(RequestType.LOOKUP),
+    )
+
+    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    assert len(lookup_result) == num_batches * keys_per_batch
+    assert all(lookup_result), "All stored keys should exist"
 
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks

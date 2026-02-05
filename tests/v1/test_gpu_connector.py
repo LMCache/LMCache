@@ -10,7 +10,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector import (
+from lmcache.v1.gpu_connector.gpu_connectors import (
     SGLangGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
