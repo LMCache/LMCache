@@ -19,19 +19,19 @@ functions are supported:
     instance_id: int
 
 - STORE:
-    keys: list[KeyType]  (request_id embedded in each key)
+    keys: list[KeyType]
     instance_id: int
     gpu_block_ids: list[int]
     event_ipc_handle: bytes
 
 - RETRIEVE:
-    keys: list[KeyType]  (request_id embedded in each key)
+    keys: list[KeyType]
     instance_id: int
     gpu_block_ids: list[int]
     event_ipc_handle: bytes
 
 - LOOKUP:
-    keys: list[KeyType]  (request_id embedded in each key)
+    keys: list[KeyType]
 """
 
 # Identifier for different vLLM instances
