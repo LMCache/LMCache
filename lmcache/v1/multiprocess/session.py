@@ -29,29 +29,27 @@ class Session:
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
 
-    def set_tokens(
-        self,
-        full_token_ids: list[int],
-        start: int,
-        end: int,
-    ) -> list:
-        """Set tokens and compute hashes for the [start, end) range.
-
-        - Sets token_ids (idempotent, not append)
-        - Internally computes rolling hashes up to end_chunk
-        - Returns chunk hashes for the [start_chunk, end_chunk) range
-        - Safe to call multiple times: already-computed chunks are skipped
+    def set_tokens(self, full_token_ids: list[int]) -> None:
+        """Update the token sequence (idempotent, replaces not extends).
 
         Args:
-            full_token_ids: Complete token sequence (replaces, not extends).
+            full_token_ids: Complete token sequence.
+        """
+        self.token_ids = full_token_ids
+
+    def get_hashes(self, start: int, end: int) -> list:
+        """Compute and return chunk hashes for the [start, end) token range.
+
+        Internally computes rolling hashes up to end_chunk, skipping
+        already-computed chunks.
+
+        Args:
             start: Start token index.
             end: End token index.
 
         Returns:
             List of hash values for chunks in [start_chunk, end_chunk).
         """
-        self.token_ids = full_token_ids
-
         chunk_size = self.hasher.chunk_size
         start_chunk = start // chunk_size
         end_chunk = end // chunk_size

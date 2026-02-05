@@ -127,7 +127,7 @@ class ClientContext:
 
 def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
     """
-    Create a cache key for testing (hash mode).
+    Create a cache key for testing.
     """
     return IPCCacheEngineKey.from_int_hash(model, 1, 0, index)
 

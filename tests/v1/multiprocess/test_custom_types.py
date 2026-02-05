@@ -19,7 +19,7 @@ from lmcache.v1.multiprocess.custom_types import (
 
 def test_ipc_cache_engine_key_serialization():
     """Test encoding and decoding of IPCCacheEngineKey using msgspec."""
-    # Create a sample IPCCacheEngineKey (hash mode)
+    # Create a sample IPCCacheEngineKey
     original_key = IPCCacheEngineKey.from_int_hash(
         model_name="test_model", world_size=4, worker_id=1, chunk_hash=123456789
     )
