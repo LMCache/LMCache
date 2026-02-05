@@ -438,6 +438,19 @@ def create_config_class(
     # Add extra namespace items
     namespace.update(namespace_extras)
 
+    # Wrap __post_init__ to ensure validate() is called after initialization.
+    # This guarantees validation runs regardless of how the instance is created
+    # (from_env, from_file, from_defaults, etc.).
+    _original_post_init = namespace.get("__post_init__")
+
+    def _post_init_with_validation(self):
+        if _original_post_init:
+            _original_post_init(self)
+        if hasattr(self, "validate"):
+            self.validate()
+
+    namespace["__post_init__"] = _post_init_with_validation
+
     # Create class
     cls = make_dataclass(
         config_name,
