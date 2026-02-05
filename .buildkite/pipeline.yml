@@ -39,25 +39,16 @@ steps:
         --ignore=tests/skipped \
         --ignore=tests/v1/storage_backend/test_eic.py
 
-    artifact_paths:
-      - "durations/test.html"
-      - "coverage-test.xml"
-      - "coverage-test/**/*"
-
-  - label: "Upload Coverage Report"
-    key: "upload"
-    depends_on:
-        - "unit_tests"
-    command: |
       cat << EOF | buildkite-agent annotate --style "info"
         Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>
       EOF
-  
-  - label: "Clean up"
-    depends_on:
-        - "upload"
-    command: |
+
       export TARGET="$PWD"
       echo "Deleting current workspace $TARGET"
       cd /
       sudo rm -rf "$TARGET"
+
+    artifact_paths:
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"      

@@ -40,12 +40,8 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.gpu_connector import (
-    GPUConnectorInterface,
-    SGLangLayerwiseGPUConnector,
-    VLLMBufferLayerwiseGPUConnector,
-    VLLMPagedMemLayerwiseGPUConnector,
-)
+from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -675,14 +671,7 @@ class LMCacheEngine:
                 mo.get_size() for layer_objs in memory_objs for mo in layer_objs
             )
 
-            assert isinstance(
-                self.gpu_connector,
-                (
-                    VLLMPagedMemLayerwiseGPUConnector,
-                    VLLMBufferLayerwiseGPUConnector,
-                    SGLangLayerwiseGPUConnector,
-                ),
-            )
+            assert_layerwise_gpu_connector(self.gpu_connector)
 
             t_start = time.perf_counter()
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
@@ -955,14 +944,8 @@ class LMCacheEngine:
                 location=location,
             )
 
-            assert isinstance(
-                self.gpu_connector,
-                (
-                    VLLMPagedMemLayerwiseGPUConnector,
-                    VLLMBufferLayerwiseGPUConnector,
-                    SGLangLayerwiseGPUConnector,
-                ),
-            )
+            assert_layerwise_gpu_connector(self.gpu_connector)
+
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
