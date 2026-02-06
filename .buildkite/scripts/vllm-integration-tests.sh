@@ -267,7 +267,7 @@ run_pd_lmcache() {
 
     ########## Proxy ##########
     if [ ! -d ".venv" ]; then
-        UV_PYTHON=python3 uv -q venv
+        UV_PYTHON=python3.12 uv -q venv
     fi
     source .venv/bin/activate
     uv pip install -r "$ORIG_DIR/requirements/build.txt"
@@ -330,7 +330,7 @@ run_p2p_lmcache() {
 
     ##### Controller part start #####
     if [ ! -d ".venv" ]; then
-        UV_PYTHON=python3 uv -q venv
+        UV_PYTHON=python3.12 uv -q venv
     fi
     source .venv/bin/activate
     uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
