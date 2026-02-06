@@ -60,7 +60,7 @@ cleanup() {
         local port="${!port_var:-}"
         if [[ -n "$port" ]]; then
             echo "  - Killing and removing port: $port" >&2
-            fuser -k "${port}/tcp" >&2 || true
+            sudo fuser -k "${port}/tcp" >&2 || true
             if [[ "$port_var" != "PORT" ]]; then
                 printf -v "$port_var" ''
             fi
@@ -270,21 +270,18 @@ run_pd_lmcache() {
         UV_PYTHON=python3.12 uv -q venv
     fi
     source .venv/bin/activate
-    uv pip install -r "$ORIG_DIR/requirements/build.txt"
-    uv pip install torch==2.7.1 httpx fastapi uvicorn requests
-    uv pip install -e "$ORIG_DIR" --no-build-isolation
+    uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
+    uv pip install torch==2.7.1 httpx fastapi uvicorn requests > /dev/null 2>&1
+    uv pip install -e "$ORIG_DIR" --no-build-isolation > /dev/null 2>&1
     # Start proxy
-    echo "Starting disagg proxy server..."
     python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
         --port "$PORT" \
         --prefiller-port "$PORT1" \
         --decoder-port "$PORT2" \
         --decoder-init-port "$init" \
         --decoder-alloc-port "$alloc" \
-        --proxy-host "0.0.0.0" \
         --proxy-port "$proxy" \
         > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
-    echo "Proxy server started on port $proxy, forwarding to prefiller $PORT1 and decoder $PORT2"
     sleep 10
 }
 

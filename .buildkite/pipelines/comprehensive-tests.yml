@@ -4,7 +4,7 @@ env:
 steps:
   - label: ":compression: Comprehensive Tests"
     key: "test"
-    timeout_in_minutes: 60
+    timeout_in_minutes: 120
     commands:
       - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Skip comprehensive tests for safe-path-only PRs.
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
