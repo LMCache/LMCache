@@ -121,7 +121,7 @@ echo "=== DIAGNOSTICS: GPU STATE before CI ==="
 nvidia-smi
 
 echo "[INFO] Selecting free GPU for this build..."
-source .buildkite/scripts/pick-free-gpu.sh 120000 1
+source .buildkite/scripts/pick-free-gpu.sh 90000 1
 echo "[INFO] Using GPU(s): ${CUDA_VISIBLE_DEVICES}"
 
 echo "[INFO] Converting ShareGPT dataset to OpenAI format..."
