@@ -8,12 +8,14 @@ import asyncio
 import itertools
 import os
 import threading
+import time
 import uuid
 
 # Third Party
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
+from torch._C import NoneType
 
 # First Party
 from lmcache.logging import init_logger
@@ -159,13 +161,15 @@ async def send_request_to_prefiller(
     request_id: str,
 ):
     """
-    Send a request to prefiller with X-Request-Id header.
+    Send a request to prefiller with request-id header.
     """
     headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
         "Content-Type": "application/json",
         "X-Request-Id": request_id,
     }
+    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
     return response
@@ -180,9 +184,11 @@ async def send_request_to_decoder(
     Send a request to decoder service.
     """
     headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
         "Content-Type": "application/json",
     }
+    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
     return response
@@ -195,9 +201,11 @@ async def stream_service_response(
     Asynchronously stream the response from a service.
     """
     headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
         "Content-Type": "application/json",
     }
+    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     async with client.stream(
         "POST", endpoint, json=req_data, headers=headers
     ) as response:
@@ -208,6 +216,8 @@ async def stream_service_response(
 
 def generate_request_id() -> str:
     """Generate a unique request ID."""
+    # vLLM will internally truncate the request ID
+    # so we only leave the last 16 digits.
     return str(uuid.uuid4())
 
 
@@ -225,90 +235,20 @@ def remove_pending_request(request_id: str):
         pending_requests.pop(request_id, None)
 
 
-def notify_request(request_id: str) -> bool:
+def notify_request(chatcmpl_request_id: str) -> bool:
     """
     Notify a pending request that prefill is complete.
     Returns True if the request was found and notified.
     """
     with pending_requests_lock:
-        event = pending_requests.get(request_id)
-        if event is not None:
+        request_id = "-".join(chatcmpl_request_id.split("-")[1:-1])
+        event = pending_requests.get(request_id, None)
+        if event:
             # Schedule the event.set() on the main event loop
             if main_event_loop is not None:
                 main_event_loop.call_soon_threadsafe(event.set)
             return True
     return False
-
-
-@app.post("/v1/completions")
-async def handle_completions(request: Request):
-    """Handle /v1/completions requests."""
-    try:
-        req_data = await request.json()
-        original_req_data = req_data.copy()
-
-        # Generate a random request ID
-        request_id = generate_request_id()
-        logger.info(f"Received completions request with generated ID: {request_id}")
-
-        # Pick prefill and decode clients
-        prefill_client, decode_client = round_robin_pick_clients()
-
-        # Create condition variable for this request
-        event = create_pending_request(request_id)
-
-        try:
-            # Modify request for prefiller: set max_tokens=1
-            prefill_req_data = req_data.copy()
-            prefill_req_data["max_tokens"] = 1
-            prefill_req_data["stream"] = False
-
-            # Send to prefiller with X-Request-Id header (ignore output)
-            await send_request_to_prefiller(
-                prefill_client.client,
-                "/v1/completions",
-                prefill_req_data,
-                request_id,
-            )
-            logger.debug(f"Prefill request sent for {request_id}")
-
-            # Wait for the condition variable to be signaled
-            await event.wait()
-            logger.debug(f"Condition signaled for {request_id}, forwarding to decoder")
-
-        finally:
-            # Clean up the pending request
-            remove_pending_request(request_id)
-
-        # Forward original request to decoder
-        is_stream = original_req_data.get("stream", False)
-
-        if is_stream:
-
-            async def generate_stream():
-                async for chunk in stream_service_response(
-                    decode_client.client, "/v1/completions", original_req_data
-                ):
-                    yield chunk
-
-            return StreamingResponse(generate_stream(), media_type="application/json")
-        else:
-            response = await send_request_to_decoder(
-                decode_client.client, "/v1/completions", original_req_data
-            )
-            return JSONResponse(content=response.json())
-
-    except Exception as e:
-        # Standard
-        import sys
-        import traceback
-
-        exc_info = sys.exc_info()
-        logger.error("Error in completions endpoint")
-        logger.error(str(e))
-        logger.error("".join(traceback.format_exception(*exc_info)))
-        raise
-
 
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
@@ -338,16 +278,26 @@ async def handle_chat_completions(request: Request):
             prefill_req_data["stream"] = False
 
             # Send to prefiller with X-Request-Id header (ignore output)
+            prefill_send_time = time.monotonic()
             await send_request_to_prefiller(
                 prefill_client.client,
                 "/v1/chat/completions",
                 prefill_req_data,
                 request_id,
             )
-            logger.debug(f"Prefill request sent for {request_id}")
+            prefill_first_response_time = time.monotonic()
+            prefill_duration = prefill_first_response_time - prefill_send_time
+            logger.info(
+                f"Request {request_id}: prefill request duration = {prefill_duration:.4f}s"
+            )
 
             # Wait for the condition variable to be signaled
             await event.wait()
+            notify_time = time.monotonic()
+            notify_wait_duration = notify_time - prefill_first_response_time
+            logger.info(
+                f"Request {request_id}: wait for notify after prefill response = {notify_wait_duration * 1000:.2f}ms"
+            )
             logger.debug(f"Condition signaled for {request_id}, forwarding to decoder")
 
         finally:
@@ -358,17 +308,31 @@ async def handle_chat_completions(request: Request):
         is_stream = original_req_data.get("stream", False)
 
         if is_stream:
-
             async def generate_stream():
+                first_chunk = True
                 async for chunk in stream_service_response(
                     decode_client.client, "/v1/chat/completions", original_req_data
                 ):
+                    if first_chunk:
+                        decode_first_response_time = time.monotonic()
+                        latency = decode_first_response_time - prefill_first_response_time
+                        logger.info(
+                            f"Request {request_id}: latency between prefill first response "
+                            f"and decode first response = {latency * 1000:.2f}ms"
+                        )
+                        first_chunk = False
                     yield chunk
 
             return StreamingResponse(generate_stream(), media_type="application/json")
         else:
             response = await send_request_to_decoder(
                 decode_client.client, "/v1/chat/completions", original_req_data
+            )
+            decode_first_response_time = time.monotonic()
+            latency = decode_first_response_time - prefill_first_response_time
+            logger.info(
+                f"Request {request_id}: latency between prefill first response "
+                f"and decode first response = {latency * 1000:.2f}ms"
             )
             return JSONResponse(content=response.json())
 
@@ -414,16 +378,14 @@ async def handle_telemetry(request: Request):
         event_type = payload.get("event")
         request_ids = payload.get("request_ids_set", [])
 
-        logger.debug(
-            f"Received telemetry event: {event_type} with {len(request_ids)}"
-            f" request IDs"
-        )
+        for request_id in request_ids:
+            logger.info(f"Received telemetry event: {event_type} for request: {request_id}")
 
         notified_count = 0
         for request_id in request_ids:
             if notify_request(request_id):
                 notified_count += 1
-                logger.debug(f"Notified request: {request_id}")
+                logger.info(f"Notified request: {request_id}")
 
         return JSONResponse(
             content={

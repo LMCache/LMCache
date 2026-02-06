@@ -47,7 +47,7 @@ class FastAPIRequestTelemetry(RequestTelemetry):
         self._closed = False
 
         logger.info(
-            f"FastAPIRequestTelemetry initialized with endpoint: {self._endpoint}"
+            f"LMCache FastAPIRequestTelemetry initialized with endpoint: {self._endpoint}"
         )
 
     def on_request_store_finished(

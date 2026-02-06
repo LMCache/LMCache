@@ -4,7 +4,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any
+from typing import Any, Optional
 import os
 
 # Third Party
@@ -273,8 +273,7 @@ class LMCacheMPWorkerAdapter:
         self.blocks_in_chunk = chunk_size // vllm_block_size
 
         self.request_telemetry = RequestTelemetryFactory.create(
-            telemetry_type="noop",
-            # TODO: forward this config from vLLM to here
+            telemetry_type="fastapi",
             config={},
         )
 
@@ -476,12 +475,16 @@ class LMCacheMPWorkerAdapter:
         # Calculate the final finished stores
         ret_stores.update(self._update_and_get_finished_store())
 
-        self.request_telemetry.on_request_store_finished(
-            request_ids_set=ret_stores,
-            model_name=self.model_name,
-            world_size=self.world_size,
-            kv_rank=self.worker_id,
-        )
+        # the invokation of `get_finished` means that
+        # these requests' KV caches are already fully stored.
+        # or the requests normally ends without any store.
+        if ret_stores:
+            self.request_telemetry.on_request_store_finished(
+                request_ids_set=ret_stores,
+                model_name=self.model_name,
+                world_size=self.world_size,
+                kv_rank=self.worker_id,
+            )
 
         return ret_stores, finished_retrieves
 
