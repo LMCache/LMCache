@@ -7,11 +7,13 @@ import pytest
 import torch
 
 # First Party
+import lmcache.v1.storage_backend.local_cpu_backend as local_cpu_backend_module
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from tests.v1.utils import create_test_memory_obj
@@ -61,6 +63,18 @@ def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
         worker_id=0,
         chunk_hash=hash(key_id),
         dtype=torch.bfloat16,
+    )
+
+
+def create_test_metadata() -> LMCacheMetadata:
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
     )
 
 
@@ -527,3 +541,115 @@ class TestLocalCPUBackend:
         local_cpu_backend.remove(key)
         assert memory_obj.get_ref_count() == initial_ref_count + 1
         local_cpu_backend.memory_allocator.close()
+
+
+class TestLocalCPUBackendAllocatorAlignment:
+    def test_rust_odirect_auto_alignment_for_mixed_allocator(self, monkeypatch):
+        config = create_test_config(local_cpu=True)
+        config.max_local_cpu_size = 0.01
+        config.extra_config = {
+            "rust_raw_block.device_path": "/tmp/dev.bin",
+            "rust_raw_block.use_odirect": True,
+            "rust_raw_block.block_align": 4096,
+        }
+        metadata = create_test_metadata()
+
+        captured: dict[str, object] = {}
+
+        class DummyMixedMemoryAllocator:
+            def __init__(self, size, **kwargs):
+                captured["size"] = size
+                captured["kwargs"] = kwargs
+                self.align_bytes = kwargs.get("align_bytes", 4096)
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            local_cpu_backend_module,
+            "MixedMemoryAllocator",
+            DummyMixedMemoryAllocator,
+        )
+
+        backend = LocalCPUBackend(config=config, metadata=metadata, dst_device="cpu")
+        try:
+            kwargs = captured["kwargs"]
+            assert isinstance(kwargs, dict)
+            assert kwargs.get("align_bytes") == 4096
+        finally:
+            backend.memory_allocator.close()
+
+    def test_explicit_alignment_override_for_mixed_allocator(self, monkeypatch):
+        config = create_test_config(local_cpu=True)
+        config.max_local_cpu_size = 0.01
+        config.extra_config = {
+            "local_cpu.pinned_align_bytes": 4096,
+            "rust_raw_block.device_path": "/tmp/dev.bin",
+            "rust_raw_block.use_odirect": False,
+        }
+        metadata = create_test_metadata()
+
+        captured: dict[str, object] = {}
+
+        class DummyMixedMemoryAllocator:
+            def __init__(self, size, **kwargs):
+                captured["size"] = size
+                captured["kwargs"] = kwargs
+                self.align_bytes = kwargs.get("align_bytes", 4096)
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            local_cpu_backend_module,
+            "MixedMemoryAllocator",
+            DummyMixedMemoryAllocator,
+        )
+
+        backend = LocalCPUBackend(config=config, metadata=metadata, dst_device="cpu")
+        try:
+            kwargs = captured["kwargs"]
+            assert isinstance(kwargs, dict)
+            assert kwargs.get("align_bytes") == 4096
+        finally:
+            backend.memory_allocator.close()
+
+    def test_rust_odirect_alignment_for_lazy_allocator(self, monkeypatch):
+        config = create_test_config(local_cpu=True)
+        config.max_local_cpu_size = 0.02
+        config.enable_lazy_memory_allocator = True
+        config.lazy_memory_safe_size = 0.001
+        config.extra_config = {
+            "local_cpu.enable_experimental_lazy_allocator": True,
+            "local_cpu.lazy_init_size_gb": 0.001,
+            "rust_raw_block.device_path": "/tmp/dev.bin",
+            "rust_raw_block.use_odirect": True,
+            "rust_raw_block.block_align": 4096,
+        }
+        metadata = create_test_metadata()
+
+        captured: dict[str, object] = {}
+
+        class DummyLazyMemoryAllocator:
+            def __init__(self, init_size, final_size, align_bytes, numa_mapping):
+                captured["init_size"] = init_size
+                captured["final_size"] = final_size
+                captured["align_bytes"] = align_bytes
+                captured["numa_mapping"] = numa_mapping
+                self.align_bytes = align_bytes
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            local_cpu_backend_module,
+            "LazyMemoryAllocator",
+            DummyLazyMemoryAllocator,
+        )
+
+        backend = LocalCPUBackend(config=config, metadata=metadata, dst_device="cpu")
+        try:
+            assert captured["align_bytes"] == 4096
+            assert int(captured["init_size"]) <= int(captured["final_size"])
+        finally:
+            backend.memory_allocator.close()

@@ -8,6 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence
 import asyncio
+import ctypes
 import json
 import os
 import threading
@@ -121,6 +122,11 @@ class RustRawBlockBackend(StoragePluginInterface):
         self.block_align: int = int(extra.get("rust_raw_block.block_align", 4096))
         self.header_bytes: int = int(extra.get("rust_raw_block.header_bytes", 4096))
         self.use_odirect: bool = bool(extra.get("rust_raw_block.use_odirect", False))
+        # Try to bypass staging copies when O_DIRECT buffers are already aligned
+        # and large enough in the LMCache CPU allocator.
+        self.enable_zero_copy: bool = bool(
+            extra.get("rust_raw_block.enable_zero_copy", True)
+        )
 
         full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size())
         default_slot_bytes = _round_up(
@@ -163,15 +169,6 @@ class RustRawBlockBackend(StoragePluginInterface):
         )
         self._writes_since_manifest_save: int = 0
 
-        # Default manifest path: /tmp/lmcache_raw_block_<device_name>.manifest.json
-        if not self.manifest_path:
-            device_name = os.path.basename(self.device_path.rstrip("/"))
-            self.manifest_path = f"/tmp/lmcache_raw_block_{device_name}.manifest.json"
-            logger.info(
-                "RustRawBlockBackend: using default manifest_path=%s",
-                self.manifest_path,
-            )
-
         # Debug logging (rate-limited).
         # Only emits when LMCache log level is DEBUG.
         self._dbg_first_n: int = int(extra.get("rust_raw_block.debug_first_n", 4) or 0)
@@ -204,6 +201,14 @@ class RustRawBlockBackend(StoragePluginInterface):
             "TP > 1 support will be added in a future release."
         )
 
+        # Default manifest path: /tmp/lmcache_raw_block_<device_name>.manifest.json
+        if not self.manifest_path:
+            device_name = os.path.basename(self.device_path.rstrip("/"))
+            self.manifest_path = f"/tmp/lmcache_raw_block_{device_name}.manifest.json"
+            logger.info(
+                "RustRawBlockBackend: using default manifest_path=%s",
+                self.manifest_path,
+            )
         # Best-effort restore from manifest (if configured).
         if self.manifest_path:
             self._load_manifest(self.manifest_path)
@@ -244,6 +249,59 @@ class RustRawBlockBackend(StoragePluginInterface):
                 alignment=self.block_align,
             )
         return self._raw
+
+    def _build_direct_odirect_view(
+        self,
+        memory_obj: MemoryObj,
+        payload_len: int,
+        total_len: int,
+        buffer_len: int,
+        *,
+        zero_tail: bool,
+    ) -> Optional[memoryview]:
+        """Build direct physical-memory view for O_DIRECT without staging copy.
+
+        `buffer_len` must be derived from the currently exported Python buffer
+        (`len(memory_obj.byte_array)`/`len(buf)`) to avoid viewing beyond the
+        concrete backing storage.
+        """
+        if not self.use_odirect or not self.enable_zero_copy:
+            return None
+
+        ptr_val = getattr(memory_obj, "data_ptr", None)
+        if callable(ptr_val):
+            try:
+                ptr_val = ptr_val()
+            except Exception:
+                ptr_val = None
+        if ptr_val is None:
+            return None
+
+        if buffer_len <= 0:
+            return None
+
+        try:
+            ptr = int(ptr_val)
+        except Exception:
+            return None
+
+        if ptr <= 0 or ptr % self.block_align != 0:
+            return None
+        if buffer_len < payload_len:
+            return None
+
+        view_len = min(buffer_len, total_len)
+        if view_len < payload_len:
+            return None
+
+        try:
+            raw = (ctypes.c_ubyte * view_len).from_address(ptr)
+            view = memoryview(raw)
+            if zero_tail and total_len > payload_len and view_len >= total_len:
+                ctypes.memset(ptr + payload_len, 0, total_len - payload_len)
+            return view
+        except Exception:
+            return None
 
     def _allocate_slot(self) -> int:
         """Allocate a slot on device.
@@ -329,7 +387,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._free_slots.append(int(entry.offset // self.slot_bytes))
             if inflight is not None:
                 inflight.canceled = True
-            return existed
+        return existed
 
     def batched_submit_put_task(
         self,
@@ -425,6 +483,15 @@ class RustRawBlockBackend(StoragePluginInterface):
                 total_len = _round_up(payload_len, self.block_align)
                 if total_len > (self.slot_bytes - self.header_bytes):
                     raise RuntimeError(f"O_DIRECT payload {total_len} > slot capacity")
+                direct_view = self._build_direct_odirect_view(
+                    memory_obj=memory_obj,
+                    payload_len=payload_len,
+                    total_len=total_len,
+                    buffer_len=len(buf),
+                    zero_tail=True,
+                )
+                if direct_view is not None:
+                    buf = direct_view
 
             # Synchronous blocking write executed in thread pool
             def _do_write():
@@ -521,9 +588,27 @@ class RustRawBlockBackend(StoragePluginInterface):
             pass
 
         try:
-            self._rawdev().pread_into(
-                entry.offset + self.header_bytes, buf, payload_len, total_len
+            direct_view = self._build_direct_odirect_view(
+                memory_obj=memory_obj,
+                payload_len=payload_len,
+                total_len=total_len,
+                buffer_len=len(buf),
+                zero_tail=False,
             )
+            if direct_view is not None:
+                read_payload_len = (
+                    total_len if len(direct_view) >= total_len else payload_len
+                )
+                self._rawdev().pread_into(
+                    entry.offset + self.header_bytes,
+                    direct_view,
+                    read_payload_len,
+                    total_len,
+                )
+            else:
+                self._rawdev().pread_into(
+                    entry.offset + self.header_bytes, buf, payload_len, total_len
+                )
         except Exception as e:
             logger.error(f"Read failed for key {self._dbg_key_short(key)}: {e}")
             raise
