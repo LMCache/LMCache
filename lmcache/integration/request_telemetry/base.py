@@ -22,15 +22,16 @@ class RequestTelemetry(ABC):
 
     Example:
         class LoggingTelemetry(RequestTelemetry):
-            def on_request_save_finished(
+            def on_request_store_finished(
                 self,
-                request_id: str,
-                num_tokens_saved: int,
-                save_duration_ms: float,
+                request_ids_set: set[str],
+                model_name: str,
+                world_size: int,
+                kv_rank: int,
             ) -> None:
                 logger.info(
-                    f"Request {request_id} save finished: "
-                    f"{num_tokens_saved} tokens in {save_duration_ms}ms"
+                    f"Requests {request_ids_set} store finished "
+                    f"on model={model_name}, rank={kv_rank}"
                 )
     """
 

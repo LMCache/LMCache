@@ -4,7 +4,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional
+from typing import Any
 import os
 
 # Third Party
@@ -475,7 +475,7 @@ class LMCacheMPWorkerAdapter:
         # Calculate the final finished stores
         ret_stores.update(self._update_and_get_finished_store())
 
-        # the invokation of `get_finished` means that
+        # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.
         # or the requests normally ends without any store.
         if ret_stores:

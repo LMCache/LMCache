@@ -15,15 +15,14 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
-from torch._C import NoneType
 
 # First Party
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-# Global dictionary to store condition variables (asyncio.Event) indexed by request ID
-# This is shared between the main proxy app and the telemetry app
+# Global dictionary to store asyncio.Events indexed by request ID.
+# This is shared between the main proxy app and the telemetry app.
 pending_requests: dict[str, asyncio.Event] = {}
 pending_requests_lock = threading.Lock()
 
@@ -154,6 +153,16 @@ def round_robin_pick_clients() -> tuple[ClientInfo, ClientInfo]:
     return prefill_client, decode_client
 
 
+def _build_headers(**extra: str) -> dict[str, str]:
+    """Build common HTTP headers, including auth if OPENAI_API_KEY is set."""
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    headers.update(extra)
+    return headers
+
+
 async def send_request_to_prefiller(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -163,13 +172,7 @@ async def send_request_to_prefiller(
     """
     Send a request to prefiller with request-id header.
     """
-    headers = {
-        "Content-Type": "application/json",
-        "X-Request-Id": request_id,
-    }
-    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _build_headers(**{"X-Request-Id": request_id})
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
     return response
@@ -183,12 +186,7 @@ async def send_request_to_decoder(
     """
     Send a request to decoder service.
     """
-    headers = {
-        "Content-Type": "application/json",
-    }
-    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _build_headers()
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
     return response
@@ -200,12 +198,7 @@ async def stream_service_response(
     """
     Asynchronously stream the response from a service.
     """
-    headers = {
-        "Content-Type": "application/json",
-    }
-    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = _build_headers()
     async with client.stream(
         "POST", endpoint, json=req_data, headers=headers
     ) as response:
@@ -216,13 +209,11 @@ async def stream_service_response(
 
 def generate_request_id() -> str:
     """Generate a unique request ID."""
-    # vLLM will internally truncate the request ID
-    # so we only leave the last 16 digits.
     return str(uuid.uuid4())
 
 
 def create_pending_request(request_id: str) -> asyncio.Event:
-    """Create a condition variable for a request and store it."""
+    """Create an asyncio.Event for a request and store it."""
     event = asyncio.Event()
     with pending_requests_lock:
         pending_requests[request_id] = event
@@ -237,10 +228,12 @@ def remove_pending_request(request_id: str):
 
 def notify_request(chatcmpl_request_id: str) -> bool:
     """
-    Notify a pending request that prefill is complete.
+    Notify a pending request that the KV store is complete.
     Returns True if the request was found and notified.
     """
     with pending_requests_lock:
+        # vLLM wraps the request ID as "chatcmpl-{uuid}-{suffix}",
+        # so strip the first and last segments to recover the original UUID.
         request_id = "-".join(chatcmpl_request_id.split("-")[1:-1])
         event = pending_requests.get(request_id, None)
         if event:
@@ -250,12 +243,12 @@ def notify_request(chatcmpl_request_id: str) -> bool:
             return True
     return False
 
+
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
     """Handle /v1/chat/completions requests."""
     try:
         req_data = await request.json()
-        original_req_data = req_data.copy()
 
         # Generate a random request ID
         request_id = generate_request_id()
@@ -266,7 +259,7 @@ async def handle_chat_completions(request: Request):
         # Pick prefill and decode clients
         prefill_client, decode_client = round_robin_pick_clients()
 
-        # Create condition variable for this request
+        # Create event for this request (signaled when KV store finishes)
         event = create_pending_request(request_id)
 
         try:
@@ -288,37 +281,43 @@ async def handle_chat_completions(request: Request):
             prefill_first_response_time = time.monotonic()
             prefill_duration = prefill_first_response_time - prefill_send_time
             logger.info(
-                f"Request {request_id}: prefill request duration = {prefill_duration:.4f}s"
+                f"Request {request_id}: prefill request"
+                f" duration = {prefill_duration:.4f}s"
             )
 
-            # Wait for the condition variable to be signaled
+            # Wait for the event to be signaled (KV store finished)
             await event.wait()
             notify_time = time.monotonic()
             notify_wait_duration = notify_time - prefill_first_response_time
             logger.info(
-                f"Request {request_id}: wait for notify after prefill response = {notify_wait_duration * 1000:.2f}ms"
+                f"Request {request_id}: wait for notify after prefill response"
+                f" = {notify_wait_duration * 1000:.2f}ms"
             )
-            logger.debug(f"Condition signaled for {request_id}, forwarding to decoder")
+            logger.debug(f"Event signaled for {request_id}, forwarding to decoder")
 
         finally:
             # Clean up the pending request
             remove_pending_request(request_id)
 
         # Forward original request to decoder
-        is_stream = original_req_data.get("stream", False)
+        is_stream = req_data.get("stream", False)
 
         if is_stream:
+
             async def generate_stream():
                 first_chunk = True
                 async for chunk in stream_service_response(
-                    decode_client.client, "/v1/chat/completions", original_req_data
+                    decode_client.client, "/v1/chat/completions", req_data
                 ):
                     if first_chunk:
                         decode_first_response_time = time.monotonic()
-                        latency = decode_first_response_time - prefill_first_response_time
+                        latency = (
+                            decode_first_response_time - prefill_first_response_time
+                        )
                         logger.info(
-                            f"Request {request_id}: latency between prefill first response "
-                            f"and decode first response = {latency * 1000:.2f}ms"
+                            f"Request {request_id}: latency between prefill first "
+                            f"response and decode first response = "
+                            f"{latency * 1000:.2f}ms"
                         )
                         first_chunk = False
                     yield chunk
@@ -326,7 +325,7 @@ async def handle_chat_completions(request: Request):
             return StreamingResponse(generate_stream(), media_type="application/json")
         else:
             response = await send_request_to_decoder(
-                decode_client.client, "/v1/chat/completions", original_req_data
+                decode_client.client, "/v1/chat/completions", req_data
             )
             decode_first_response_time = time.monotonic()
             latency = decode_first_response_time - prefill_first_response_time
@@ -370,7 +369,7 @@ async def handle_telemetry(request: Request):
     }
 
     For each request ID in request_ids_set, signal the corresponding
-    condition variable if it exists.
+    event if it exists.
     """
     try:
         payload = await request.json()
@@ -379,7 +378,9 @@ async def handle_telemetry(request: Request):
         request_ids = payload.get("request_ids_set", [])
 
         for request_id in request_ids:
-            logger.info(f"Received telemetry event: {event_type} for request: {request_id}")
+            logger.info(
+                f"Received telemetry event: {event_type} for request: {request_id}"
+            )
 
         notified_count = 0
         for request_id in request_ids:
