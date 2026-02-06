@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
 # This script requires some pre-configuration on the CI machine: 
 # 1. already has a virtual environment activated
 # 2. the model weights already exists on the CI machine
