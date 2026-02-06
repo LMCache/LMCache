@@ -132,7 +132,7 @@ run_lmcache_vllmopenai_container() {
     # docker args
     docker_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
@@ -181,7 +181,7 @@ run_pd_lmcache() {
     # docker args
     prefiller_docker_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus "device=0"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -224,7 +224,7 @@ run_pd_lmcache() {
     # docker args
     decoder_docker_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus "device=1"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -298,7 +298,7 @@ run_p2p_lmcache() {
     # docker args
     docker1_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus "device=0"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -360,7 +360,7 @@ run_p2p_lmcache() {
     # docker args
     docker2_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus "device=1"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
