@@ -458,10 +458,16 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     f"({config.lazy_memory_safe_size:.2f} GB). "
                     f"Using MixedMemoryAllocator instead."
                 )
-            allocator_kwargs = {"numa_mapping": numa_mapping}
             if allocator_align_bytes is not None:
-                allocator_kwargs["align_bytes"] = allocator_align_bytes
-            return MixedMemoryAllocator(cpu_size_bytes, **allocator_kwargs)
+                return MixedMemoryAllocator(
+                    cpu_size_bytes,
+                    numa_mapping=numa_mapping,
+                    align_bytes=allocator_align_bytes,
+                )
+            return MixedMemoryAllocator(
+                cpu_size_bytes,
+                numa_mapping=numa_mapping,
+            )
 
     @staticmethod
     def _is_power_of_two(value: int) -> bool:

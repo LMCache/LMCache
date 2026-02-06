@@ -1902,6 +1902,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 "dtypes must be specified for paged memory allocator"
             )
             assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
+            self.align_bytes = get_size_bytes(kwargs["shapes"], kwargs["dtypes"])
             self.pin_allocator = PagedTensorMemoryAllocator(
                 tensor=self.buffer,
                 shapes=kwargs["shapes"],
@@ -1914,8 +1915,6 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             )
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
-        if use_paging:
-            self.align_bytes = self.pin_allocator.align_bytes
 
         self.buffer_allocator = BufferAllocator("cpu")
 
