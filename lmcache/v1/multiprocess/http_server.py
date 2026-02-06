@@ -20,7 +20,7 @@ import uvicorn
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.custom_types import StorageKey
+from lmcache.v1.multiprocess.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -207,7 +207,7 @@ def search_keys_by_hash(
     model_name: str | None = None,
     world_size: int | None = None,
     worker_id: int | None = None,
-) -> list[StorageKey]:
+) -> list[ObjectKey]:
     """
     Search for keys matching the given hash and optional filters.
 
@@ -218,7 +218,7 @@ def search_keys_by_hash(
         world_size: Optional world size filter
         worker_id: Optional worker ID filter
     Returns:
-        List of matching StorageKey objects
+        List of matching ObjectKey objects
     """
     matching_keys = []
     with engine.lock:
@@ -243,7 +243,7 @@ def search_keys_by_hash(
 
 def get_memory_objects(
     engine: MPCacheEngine,
-    keys: list[StorageKey],
+    keys: list[ObjectKey],
 ) -> list[MemoryObj]:
     """
     Get memory objects for the given keys without locking/unlocking.
@@ -335,14 +335,15 @@ async def get_kv_cache(
         chunk_hash_bytes = hash_string_to_bytes(hash_str, encoding=hash_encoding)
 
         if model_name is not None and world_size is not None and worker_id is not None:
-            keys = [
-                StorageKey(
-                    model_name=model_name,
-                    world_size=world_size,
-                    worker_id=worker_id,
-                    chunk_hash=chunk_hash_bytes,
-                )
-            ]
+            keys = []
+            # keys = [
+            #    ObjectKey(
+            #        model_name=model_name,
+            #        world_size=world_size,
+            #        worker_id=worker_id,
+            #        chunk_hash=chunk_hash_bytes,
+            #    )
+            # ]
         else:
             keys = search_keys_by_hash(
                 engine, chunk_hash_bytes, model_name, world_size, worker_id
@@ -411,14 +412,15 @@ async def get_kv_cache_metadata(
         chunk_hash_bytes = hash_string_to_bytes(hash_str, encoding=hash_encoding)
 
         if model_name is not None and world_size is not None and worker_id is not None:
-            keys = [
-                StorageKey(
-                    model_name=model_name,
-                    world_size=world_size,
-                    worker_id=worker_id,
-                    chunk_hash=chunk_hash_bytes,
-                )
-            ]
+            keys = []
+            # keys = [
+            #    ObjectKey(
+            #        model_name=model_name,
+            #        world_size=world_size,
+            #        worker_id=worker_id,
+            #        chunk_hash=chunk_hash_bytes,
+            #    )
+            # ]
         else:
             keys = search_keys_by_hash(
                 engine, chunk_hash_bytes, model_name, world_size, worker_id
@@ -437,8 +439,8 @@ async def get_kv_cache_metadata(
                 "hash_encoding": hash_encoding,
                 "key": {
                     "model_name": keys[0].model_name,
-                    "world_size": keys[0].world_size,
-                    "worker_id": keys[0].worker_id,
+                    "world_size": 1,
+                    "worker_id": keys[0].kv_rank,
                 },
                 "shape": list(tensor.shape),
                 "dtype": str(tensor.dtype),
@@ -484,14 +486,15 @@ async def download_kv_cache(
             and download_request.world_size is not None
             and download_request.worker_id is not None
         ):
-            keys = [
-                StorageKey(
-                    model_name=download_request.model_name,
-                    world_size=download_request.world_size,
-                    worker_id=download_request.worker_id,
-                    chunk_hash=chunk_hash_bytes,
-                )
-            ]
+            keys = []
+            # keys = [
+            #    ObjectKey(
+            #        model_name=download_request.model_name,
+            #        world_size=download_request.world_size,
+            #        worker_id=download_request.worker_id,
+            #        chunk_hash=chunk_hash_bytes,
+            #    )
+            # ]
         else:
             keys = search_keys_by_hash(
                 engine,
@@ -584,7 +587,7 @@ async def set_kv_cache(
         # Resolve key metadata:
         # Prefer inference from existing key(s) for this hash
         # (guarantees correct metadata).
-        inferred_key: Optional[StorageKey] = None
+        inferred_key: Optional[ObjectKey] = None
         keys = search_keys_by_hash(
             engine, chunk_hash_bytes, model_name, world_size, worker_id
         )
@@ -605,12 +608,13 @@ async def set_kv_cache(
                         "provide model_name/world_size/worker_id to create one."
                     ),
                 )
-            key = StorageKey(
-                model_name=model_name,
-                world_size=world_size,
-                worker_id=worker_id,
-                chunk_hash=chunk_hash_bytes,
-            )
+            key = None
+            # key = ObjectKey(
+            #    model_name=model_name,
+            #    world_size=world_size,
+            #    worker_id=worker_id,
+            #    chunk_hash=chunk_hash_bytes,
+            # )
 
         # 1) Overwrite path (most common for your -2 := -1 test)
         # with storage._buffer_lock:  # internal but OK for debug server
