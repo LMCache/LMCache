@@ -1267,8 +1267,8 @@ class LMCacheConnectorV1Impl:
             logger.debug(
                 "Reqid: %s, Total tokens %d, vLLM computed tokens: %d, LMCache hit tokens: None.",
                 req_id,
-                num_computed_tokens,
                 request.num_tokens,
+                num_computed_tokens,
             )
             return None
 
