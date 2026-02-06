@@ -1264,9 +1264,11 @@ class LMCacheConnectorV1Impl:
 
         if num_external_hit_tokens is None:
             logger.debug(
-                "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
+                "Reqid: %s, Total tokens %d, Inference Engine computed tokens: %d, "
+                "LMCache hit tokens: None.",
                 req_id,
                 request.num_tokens,
+                num_computed_tokens,
             )
             return None
 
@@ -1281,11 +1283,13 @@ class LMCacheConnectorV1Impl:
             need_to_allocate -= 1
 
         logger.info(
-            "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
+            "Reqid: %s, Total tokens %d, Inference Engine computed tokens: %d, "
+            "LMCache hit tokens: %d, need to load: %d",
             req_id,
             request.num_tokens,
+            num_computed_tokens,
             num_external_hit_tokens,
-            need_to_allocate,
+            max(need_to_allocate, 0),
         )
 
         self.load_specs[req_id] = LoadSpec(
