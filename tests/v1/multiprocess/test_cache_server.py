@@ -132,16 +132,6 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
     return IPCCacheEngineKey.from_int_hash(model, 1, 0, index)
 
 
-_req_counter = 0
-
-
-def make_request_id(prefix: str = "req") -> str:
-    """Generate a unique request ID for tests."""
-    global _req_counter
-    _req_counter += 1
-    return f"{prefix}_{_req_counter}"
-
-
 def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
     """Create lookup keys: worker_id=None."""
     return [k.no_worker_id_version() for k in keys]
@@ -335,13 +325,11 @@ def test_store_and_lookup(
     gpu_block_ids = list(range(0, 16 * num_keys))
     event = torch.cuda.Event(interprocess=True)
     event.record()
-    req_id = make_request_id("store_lookup")
 
     # Store
     store_future = client.submit_request(
         RequestType.STORE,
         [
-            [req_id] * num_keys,
             keys,
             registered_instance,
             gpu_block_ids,
@@ -355,7 +343,7 @@ def test_store_and_lookup(
     # Lookup - keys that exist
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"), lookup_keys(keys)],
+        [lookup_keys(keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -365,7 +353,7 @@ def test_store_and_lookup(
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
     lookup_future2 = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"), lookup_keys(non_existent_keys)],
+        [lookup_keys(non_existent_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
@@ -388,14 +376,12 @@ def test_store_retrieve_verify(
     keys = [create_cache_key(i) for i in range(num_keys)]
     event = torch.cuda.Event(interprocess=True)
     event.record()
-    req_id = make_request_id("store_retrieve")
 
     # Store at the beginning of the cache
     store_block_ids = list(range(0, 16 * num_keys))
     store_future = client.submit_request(
         RequestType.STORE,
         [
-            [req_id] * num_keys,
             keys,
             registered_instance,
             store_block_ids,
@@ -412,7 +398,7 @@ def test_store_retrieve_verify(
     # Call look up to ensure the data is ready to be retrieved
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"), lookup_keys(keys)],
+        [lookup_keys(keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -422,11 +408,9 @@ def test_store_retrieve_verify(
     # Use offset of 40 blocks (640 pages total needed: 320 + 320)
     retrieve_offset = 40 * 16
     retrieve_block_ids = list(range(retrieve_offset, retrieve_offset + 16 * num_keys))
-    retrieve_req_id = make_request_id("retrieve")
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
         [
-            [retrieve_req_id] * num_keys,
             keys,
             registered_instance,
             retrieve_block_ids,
@@ -476,12 +460,10 @@ def test_retrieve_partial_miss(
     store_block_ids = list(range(0, 16 * num_stored))
     event = torch.cuda.Event(interprocess=True)
     event.record()
-    store_req = make_request_id("partial_store")
 
     store_future = client.submit_request(
         RequestType.STORE,
         [
-            [store_req] * num_stored,
             stored_keys,
             registered_instance,
             store_block_ids,
@@ -494,7 +476,7 @@ def test_retrieve_partial_miss(
     # Lookup to ensure keys are stored
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"), lookup_keys(stored_keys)],
+        [lookup_keys(stored_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -512,12 +494,9 @@ def test_retrieve_partial_miss(
 
     event = torch.cuda.Event(interprocess=True)
     event.record()
-    retrieve_req = make_request_id("partial_retrieve")
-
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
         [
-            [retrieve_req] * num_requested,
             all_keys,
             registered_instance,
             retrieve_block_ids,
@@ -537,7 +516,7 @@ def test_retrieve_partial_miss(
     # Doing look up again to ensure data is ready
     lookup_future_2 = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"), lookup_keys(stored_keys)],
+        [lookup_keys(stored_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result_2 = lookup_future_2.result(timeout=DEFAULT_TIMEOUT)
@@ -547,11 +526,9 @@ def test_retrieve_partial_miss(
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
     event = torch.cuda.Event(interprocess=True)
     event.record()
-    retrieve_req_2 = make_request_id("partial_retrieve2")
     retrieve_future_2 = client.submit_request(
         RequestType.RETRIEVE,
         [
-            [retrieve_req_2] * num_stored,
             stored_keys,
             registered_instance,
             retrieve_block_ids_2,
@@ -605,13 +582,11 @@ def test_multiple_retrieve_operations(
         )
         event = torch.cuda.Event(interprocess=True)
         event.record()
-        store_req = make_request_id("multi_ret_store")
 
         store_result = (
             client.submit_request(
                 RequestType.STORE,
                 [
-                    [store_req] * keys_per_batch,
                     keys,
                     registered_instance,
                     blocks,
@@ -632,7 +607,7 @@ def test_multiple_retrieve_operations(
     ]
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"), lookup_keys(all_keys)],
+        [lookup_keys(all_keys)],
         get_response_class(RequestType.LOOKUP),
     )
 
@@ -656,12 +631,9 @@ def test_multiple_retrieve_operations(
                 * pages_per_key,
             )
         )
-        retrieve_req = make_request_id("multi_retrieve")
-
         retrieve_future = client.submit_request(
             RequestType.RETRIEVE,
             [
-                [retrieve_req] * keys_per_batch,
                 keys,
                 registered_instance,
                 blocks,
@@ -707,13 +679,11 @@ def test_multiple_store_operations(
     blocks1 = list(range(0, 16 * 30))
     event = torch.cuda.Event(interprocess=True)
     event.record()
-    store_req1 = make_request_id("multi_store1")
 
     result1 = (
         client.submit_request(
             RequestType.STORE,
             [
-                [store_req1] * 30,
                 keys1,
                 registered_instance,
                 blocks1,
@@ -729,14 +699,11 @@ def test_multiple_store_operations(
     # Store batch 2
     keys2 = [create_cache_key(i + 30) for i in range(20)]
     blocks2 = list(range(30 * 16, 50 * 16))
-    store_req2 = make_request_id("multi_store2")
-
     # Test with the same event for 2 store requests
     result2 = (
         client.submit_request(
             RequestType.STORE,
             [
-                [store_req2] * 20,
                 keys2,
                 registered_instance,
                 blocks2,
@@ -753,7 +720,7 @@ def test_multiple_store_operations(
     all_keys = keys1 + keys2
     lookup_result = client.submit_request(
         RequestType.LOOKUP,
-        [make_request_id("lookup"), lookup_keys(all_keys)],
+        [lookup_keys(all_keys)],
         get_response_class(RequestType.LOOKUP),
     ).result(timeout=DEFAULT_TIMEOUT)
 
