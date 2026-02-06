@@ -827,6 +827,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                     req_id=request.req_id,
+                    req_length=len(tokens),
                 )
 
                 # Check the result
@@ -1264,8 +1265,9 @@ class LMCacheConnectorV1Impl:
 
         if num_external_hit_tokens is None:
             logger.debug(
-                "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
+                "Reqid: %s, Total tokens %d, vLLM computed tokens: %d, LMCache hit tokens: None.",
                 req_id,
+                num_computed_tokens,
                 request.num_tokens,
             )
             return None
@@ -1281,11 +1283,12 @@ class LMCacheConnectorV1Impl:
             need_to_allocate -= 1
 
         logger.info(
-            "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
+            "Reqid: %s, Total tokens %d, vLLM computed tokens: %d, LMCache hit tokens: %d, need to load: %d",
             req_id,
             request.num_tokens,
+            num_computed_tokens,
             num_external_hit_tokens,
-            need_to_allocate,
+            max(need_to_allocate, 0),
         )
 
         self.load_specs[req_id] = LoadSpec(

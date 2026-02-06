@@ -841,7 +841,7 @@ class LMCacheEngine:
                 " cost %.4f ms, throughput: %.4f GB/s;",
                 retrieved_tokens,
                 num_required_tokens,
-                len(tokens),
+                kwargs.get('req_length', len(tokens)),
                 tot_kv_size / 1024**3,
                 onload_time * 1000,
                 tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
