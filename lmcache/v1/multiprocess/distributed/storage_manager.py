@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class PrefetchHandle:
-    _prefix_hit_chunks: int
+    prefix_hit_chunks: int
     """ how many chunks are hit in the prefix of the requested keys """
 
 
@@ -202,7 +202,7 @@ class StorageManager:
         if skipped_keys:
             self._l1_manager.finish_read(skipped_keys)
 
-        return PrefetchHandle(_prefix_hit_chunks=hit_count)
+        return PrefetchHandle(prefix_hit_chunks=hit_count)
 
     def query_prefetch_status(
         self,
@@ -218,7 +218,7 @@ class StorageManager:
             the number of prefix hit chunks if the prefetch is done, None if
             it's still in progress.
         """
-        return handle._prefix_hit_chunks
+        return handle.prefix_hit_chunks
 
     def clear(self):
         """
