@@ -33,6 +33,8 @@ class FastAPIRequestTelemetry(RequestTelemetry):
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
+        # NOTE: the default value here is set to specific value for feature testing.
+        # In the future it needs to be passed down from vLLM.
         endpoint = config.get("endpoint", "http://localhost:5768/api/v1/telemetry")
         if endpoint is None:
             raise ValueError("FastAPIRequestTelemetry requires 'endpoint' in config")
@@ -47,7 +49,8 @@ class FastAPIRequestTelemetry(RequestTelemetry):
         self._closed = False
 
         logger.info(
-            f"LMCache FastAPIRequestTelemetry initialized with endpoint: {self._endpoint}"
+            "LMCache FastAPIRequestTelemetry initialized with endpoint: %s",
+            self._endpoint,
         )
 
     def on_request_store_finished(
