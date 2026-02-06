@@ -19,7 +19,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import CreateGPUConnector
+from lmcache.v1.gpu_connector import CreateGPUConnector, EngineType
 from lmcache.v1.health_monitor.base import HealthMonitor
 from lmcache.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
@@ -380,7 +380,9 @@ class LMCacheManager:
             vllm_gpu_connector = None
         else:
             tpg = get_tp_group()
-            vllm_gpu_connector = CreateGPUConnector(self._config, metadata, "vllm")
+            vllm_gpu_connector = CreateGPUConnector(
+                self._config, metadata, EngineType.VLLM
+            )
 
         engine = LMCacheEngineBuilder.get_or_create(
             ENGINE_NAME,

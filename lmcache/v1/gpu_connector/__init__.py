@@ -1,4 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard Library
+# Standard
+from enum import Enum
+
 # Third Party
 import torch
 
@@ -11,19 +15,27 @@ from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
 from lmcache.v1.metadata import LMCacheMetadata
 
 
+class EngineType(Enum):
+    VLLM = "vllm"
+    SGLANG = "sglang"
+    MOCK = "mock"
+
+
 def CreateGPUConnector(
-    config: LMCacheEngineConfig, metadata: LMCacheMetadata, engine: str
+    config: LMCacheEngineConfig, metadata: LMCacheMetadata, engine: EngineType
 ) -> GPUConnectorInterface:
     """
     Create a GPU Connector based on the configuration and metadata.
 
-    We will manually pass in a string representing the serving engine for now.
-    TODO: we should introduce GPUFormat enum and make each GPU Connector
-    serving engine agnostic
+    Args:
+        config: The LMCache engine configuration.
+        metadata: The LMCache metadata.
+        engine: The serving engine type (EngineType.VLLM, EngineType.SGLANG,
+                or EngineType.MOCK).
     """
     use_gpu = need_gpu_interm_buffer(config)
 
-    if engine == "sglang":
+    if engine == EngineType.SGLANG:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import (
             SGLangGPUConnector,
@@ -54,7 +66,7 @@ def CreateGPUConnector(
                 dtype=kv_dtype,
                 device=device,
             )
-    elif engine == "vllm":
+    elif engine == EngineType.VLLM:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import (
             VLLMBufferLayerwiseGPUConnector,
@@ -97,7 +109,7 @@ def CreateGPUConnector(
         else:
             raise RuntimeError("No supported connector found for the current platform.")
 
-    elif engine == "mock":
+    elif engine == EngineType.MOCK:
         kv_shape = metadata.kv_shape
         return MockGPUConnector(kv_shape=kv_shape)
     else:
