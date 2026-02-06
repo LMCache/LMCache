@@ -78,6 +78,7 @@ Documentation
    getting_started/troubleshoot
    getting_started/faq
    getting_started/quickstart/standalone_starter
+   getting_started/recipes/index
    
 
 :raw-html:`<br />`
