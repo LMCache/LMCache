@@ -146,7 +146,8 @@ def large_layout():
 
 def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: int = 0):
     """Helper to create ObjectKey instances."""
-    return ObjectKey(chunk_hash=chunk_hash, model_name=model_name, kv_rank=kv_rank)
+    hash_bytes = ObjectKey.IntHash2Bytes(chunk_hash)
+    return ObjectKey(chunk_hash=hash_bytes, model_name=model_name, kv_rank=kv_rank)
 
 
 # =============================================================================

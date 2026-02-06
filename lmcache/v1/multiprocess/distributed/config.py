@@ -6,6 +6,7 @@ Configuration for distributed storage manager
 
 # Standard
 from dataclasses import dataclass, field
+from typing import Literal
 import argparse
 
 
@@ -27,6 +28,9 @@ class L1MemoryManagerConfig:
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
 
+    def __post_init__(self):
+        self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
+
 
 @dataclass
 class L1ManagerConfig:
@@ -45,6 +49,22 @@ class L1ManagerConfig:
 
 
 @dataclass
+class EvictionConfig:
+    """
+    The configuration for eviction policies.
+    """
+
+    eviction_policy: Literal["LRU"]
+    """ The eviction policy to use. Currently only 'LRU' is supported. """
+
+    trigger_watermark: float = field(default=0.8)
+    """ The memory usage watermark to trigger eviction (0.0 to 1.0). """
+
+    eviction_ratio: float = field(default=0.2)
+    """ The fraction of *allocated* memory to evict when triggered (0.0 to 1.0). """
+
+
+@dataclass
 class StorageManagerConfig:
     """
     The configuration for the distributed storage manager.
@@ -52,6 +72,9 @@ class StorageManagerConfig:
 
     l1_manager_config: L1ManagerConfig
     """ The configuration for the L1 manager. """
+
+    eviction_config: EvictionConfig
+    """ The configuration for eviction policies. """
 
 
 def add_storage_manager_args(
@@ -84,28 +107,28 @@ def add_storage_manager_args(
         "L1 Memory Manager", "Configuration for L1 memory manager"
     )
     memory_group.add_argument(
-        "--l1-size-in-bytes",
-        type=int,
+        "--l1-size-gb",
+        type=float,
         required=True,
-        help="The size of L1 memory in bytes.",
+        help="The size of L1 memory in GB.",
     )
     memory_group.add_argument(
         "--l1-use-lazy",
         action="store_true",
-        default=False,
-        help="Whether to use lazy loading for L1 memory.",
+        default=True,
+        help="Whether to use lazy loading for L1 memory. (Default is True)",
     )
     memory_group.add_argument(
-        "--l1-init-size-in-bytes",
+        "--l1-init-size-gb",
         type=int,
-        default=20 << 30,
-        help="The initial size when using lazy allocation. Default is 20GB.",
+        default=20,
+        help="The initial size (GB) when using lazy allocation. Default is 20.",
     )
     memory_group.add_argument(
         "--l1-align-bytes",
         type=int,
-        default=0x1000,
-        help="The alignment size in bytes. Default is 4KB (0x1000).",
+        default=4096,
+        help="The alignment size in bytes. Default is 4KB (4096 bytes).",
     )
 
     # L1 Manager Config (TTL settings)
@@ -125,6 +148,31 @@ def add_storage_manager_args(
         help="Time to live for each object's read lock. Default is 300s.",
     )
 
+    # Eviction Config
+    eviction_group = parser.add_argument_group(
+        "Eviction Policy", "Configuration for eviction policies"
+    )
+    eviction_group.add_argument(
+        "--eviction-policy",
+        type=str,
+        choices=["LRU"],
+        required=True,
+        help="The eviction policy to use. Currently only 'LRU' is supported.",
+    )
+    eviction_group.add_argument(
+        "--eviction-trigger-watermark",
+        type=float,
+        default=0.8,
+        help="The memory usage watermark to trigger eviction (0.0 to 1.0). "
+        "Default is 0.8.",
+    )
+    eviction_group.add_argument(
+        "--eviction-ratio",
+        type=float,
+        default=0.2,
+        help="The fraction of memory to evict when triggered (0.0 to 1.0). "
+        "Default is 0.2.",
+    )
     return parser
 
 
@@ -159,9 +207,9 @@ def parse_args_to_config(
         StorageManagerConfig: The configuration object.
     """
     memory_config = L1MemoryManagerConfig(
-        size_in_bytes=args.l1_size_in_bytes,
+        size_in_bytes=int(args.l1_size_gb * (1 << 30)),
         use_lazy=args.l1_use_lazy,
-        init_size_in_bytes=args.l1_init_size_in_bytes,
+        init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
         align_bytes=args.l1_align_bytes,
     )
 
@@ -171,7 +219,16 @@ def parse_args_to_config(
         read_ttl_seconds=args.l1_read_ttl_seconds,
     )
 
-    return StorageManagerConfig(l1_manager_config=l1_manager_config)
+    eviction_config = EvictionConfig(
+        eviction_policy=args.eviction_policy,
+        trigger_watermark=args.eviction_trigger_watermark,
+        eviction_ratio=args.eviction_ratio,
+    )
+
+    return StorageManagerConfig(
+        l1_manager_config=l1_manager_config,
+        eviction_config=eviction_config,
+    )
 
 
 def parse_args(args: list[str] | None = None) -> StorageManagerConfig:
