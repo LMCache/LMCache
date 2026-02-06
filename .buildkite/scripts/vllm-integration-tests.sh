@@ -274,14 +274,17 @@ run_pd_lmcache() {
     uv pip install torch==2.7.1 httpx fastapi uvicorn requests > /dev/null 2>&1
     uv pip install -e "$ORIG_DIR" --no-build-isolation > /dev/null 2>&1
     # Start proxy
+    echo "Starting disagg proxy server..."
     python3 "$ORIG_DIR/examples/disagg_prefill/disagg_proxy_server.py" \
         --port "$PORT" \
         --prefiller-port "$PORT1" \
         --decoder-port "$PORT2" \
         --decoder-init-port "$init" \
         --decoder-alloc-port "$alloc" \
+        --proxy-host "0.0.0.0" \
         --proxy-port "$proxy" \
         > "/tmp/build_${BUILD_ID}_${cfg_name}_proxy.log" 2>&1 &
+    echo "Proxy server started on port $proxy, forwarding to prefiller $PORT1 and decoder $PORT2"
     sleep 10
 }
 
@@ -631,7 +634,7 @@ echo "Using port $PORT to send or receive requests."
 cd docker/
 
 # Create the container image
-build_lmcache_vllmopenai_image
+# build_lmcache_vllmopenai_image
 
 ########
 # MAIN #

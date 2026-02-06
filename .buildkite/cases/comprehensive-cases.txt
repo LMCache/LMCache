@@ -1,5 +1,3 @@
-local_cpu.yaml
-local_disk.yaml
 pd.yaml
 multi_device.yaml
 async.yaml
