@@ -788,7 +788,7 @@ class LMCacheEngine:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
                 self.storage_manager.remove(key)
-            memory_obj.ref_count_down()
+           
 
         onload_time = time.perf_counter() - t
 
@@ -1222,9 +1222,10 @@ class LMCacheEngine:
             memory_objs_flat = [mm for m in memory_objs for mm in m]
 
             # Release each memory object
-            for memory_obj in memory_objs_flat:
+            for key, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
+                    memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
@@ -1360,7 +1361,10 @@ class LMCacheEngine:
             assert self.storage_manager is not None
             for location, keys in self.lookup_pins.pop(lookup_id).items():
                 self.storage_manager.batched_unpin(keys, [location])
-
+        
+        elif self.async_loading is not None:
+            self.cleanup_memory_objs(lookup_id)
+        
     @_lmcache_nvtx_annotate
     def clear(
         self,
@@ -1463,7 +1467,7 @@ class LMCacheEngine:
 
         tot_kv_size = 0
         chunks: List[ProcessedChunk] = []
-        future = self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
+        future = self.event_manager.get_event_future(EventType.LOADING, kwargs["req_id"])
 
         # As mentioned in async_lookup_and_prefetch(), the future.result()
         # is key data pair for each chunk in each tier. So extract the key
