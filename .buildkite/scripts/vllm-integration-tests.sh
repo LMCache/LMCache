@@ -59,7 +59,7 @@ cleanup() {
         local port="${!port_var:-}"
         if [[ -n "$port" ]]; then
             echo "  - Killing and removing port: $port" >&2
-            sudo fuser -k "${port}/tcp" >&2 || true
+            fuser -k "${port}/tcp" >/dev/null 2>&1 || true
             if [[ "$port_var" != "PORT" ]]; then
                 printf -v "$port_var" ''
             fi
@@ -630,7 +630,7 @@ echo "Using port $PORT to send or receive requests."
 cd docker/
 
 # Create the container image
-# build_lmcache_vllmopenai_image
+build_lmcache_vllmopenai_image
 
 ########
 # MAIN #
