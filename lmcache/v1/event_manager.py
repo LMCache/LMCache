@@ -125,7 +125,6 @@ class EventManager:
                 return 0
             return len(status_dict[status])
 
-
     def get_event_future(
         self,
         event_type: EventType,
