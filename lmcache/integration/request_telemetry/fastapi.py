@@ -103,5 +103,5 @@ class FastAPIRequestTelemetry(RequestTelemetry):
                 return
             self._closed = True
 
-        self._executor.shutdown(wait=False)
+        self._executor.shutdown(wait=True)
         logger.info("FastAPIRequestTelemetry closed")
