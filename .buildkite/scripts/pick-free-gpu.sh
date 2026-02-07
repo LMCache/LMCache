@@ -22,15 +22,17 @@ while true; do
   fi
 
   mapfile -t candidates < <(
-    nvidia-smi --query-gpu=memory.free,utilization.gpu,index \
+    nvidia-smi --query-gpu=memory.free,utilization.gpu,index,uuid \
       --format=csv,noheader,nounits \
     | awk -F',' -v min_mem="$MIN_FREE_MEM" -v max_util="$MAX_UTIL" -v gpu_limit="$GPU_LIMIT" '{
         mem = $1; util = $2; idx = $3;
+        uuid = $4; 
+        gsub(/[[:space:]]+/, "", uuid);
         gsub(/^[ \t]+|[ \t]+$/, "", mem);
         gsub(/^[ \t]+|[ \t]+$/, "", util);
         gsub(/^[ \t]+|[ \t]+$/, "", idx);
         if (mem >= min_mem && util <= max_util && idx < gpu_limit) {
-          print mem "," util "," idx;
+          print mem "," uuid;
         }
       }'
   )
@@ -41,7 +43,7 @@ while true; do
       printf "%s\n" "${candidates[@]}" \
         | sort -t',' -k1,1 -nr \
         | head -n"${REQUESTED_GPU_COUNT}" \
-        | awk -F',' '{print $3}'
+        | awk -F',' '{print $2}'
     )
     
     if [ "${#top_gpus[@]}" -eq 1 ]; then

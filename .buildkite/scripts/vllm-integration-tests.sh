@@ -34,6 +34,10 @@ PORT=
 PORT1=
 PORT2=
 
+mapfile -t GPU_UUIDS < <(nvidia-smi --query-gpu=uuid --format=csv,noheader | sort)
+GPU_0_UUID=${GPU_UUIDS[0]}
+GPU_1_UUID=${GPU_UUIDS[1]}
+
 #############
 # UTILITIES #
 #############
@@ -181,7 +185,7 @@ run_pd_lmcache() {
     prefiller_docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=0"
+        --gpus "\"device=$GPU_0_UUID\"" \
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
@@ -224,7 +228,7 @@ run_pd_lmcache() {
     decoder_docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=1"
+        --gpus "\"device=$GPU_1_UUID\"" \
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
@@ -298,7 +302,7 @@ run_p2p_lmcache() {
     docker1_args=(
         --runtime nvidia
         --network host
-        --gpus "device=0"
+        --gpus "\"device=$GPU_0_UUID\"" \
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
@@ -360,7 +364,7 @@ run_p2p_lmcache() {
     docker2_args=(
         --runtime nvidia
         --network host
-        --gpus "device=1"
+        --gpus "\"device=$GPU_1_UUID\"" \
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"

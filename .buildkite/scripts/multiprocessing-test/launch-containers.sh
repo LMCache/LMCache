@@ -33,10 +33,11 @@ echo "=== Launching LMCache container ==="
 echo "Container name: $LMCACHE_CONTAINER_NAME"
 echo "Port: $LMCACHE_PORT"
 
+CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader)
 docker run -d \
     --name "$LMCACHE_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus all \
+    --gpus "\"device=$CURRENT_GPUS\"" \
     --network host \
     --ipc host \
     --entrypoint /opt/venv/bin/python3 \
@@ -57,10 +58,11 @@ echo "=== Launching vLLM container ==="
 echo "Container name: $VLLM_CONTAINER_NAME"
 echo "Model: $MODEL"
 
+CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader)
 docker run -d \
     --name "$VLLM_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus all \
+    --gpus "\"device=$CURRENT_GPUS\"" \
     --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
     --ipc host \
@@ -82,10 +84,11 @@ echo "=== Launching vLLM baseline container (without LMCache) ==="
 echo "Container name: $VLLM_BASELINE_CONTAINER_NAME"
 echo "Port: $VLLM_BASELINE_PORT"
 
+CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader)
 docker run -d \
     --name "$VLLM_BASELINE_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus all \
+    --gpus "\"device=$CURRENT_GPUS\"" \
     --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
     --ipc host \
