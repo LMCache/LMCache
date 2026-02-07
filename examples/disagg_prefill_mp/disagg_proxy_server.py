@@ -209,7 +209,7 @@ async def stream_service_response(
 
 def generate_request_id() -> str:
     """Generate a unique request ID."""
-    return str(uuid.uuid4())
+    return str(uuid.uuid4())[:16]
 
 
 def create_pending_request(request_id: str) -> asyncio.Event:
@@ -234,7 +234,8 @@ def notify_request(chatcmpl_request_id: str) -> bool:
     with pending_requests_lock:
         # vLLM wraps the request ID as "chatcmpl-{uuid}-{suffix}",
         # so strip the first and last segments to recover the original UUID.
-        request_id = "-".join(chatcmpl_request_id.split("-")[1:-1])
+        request_id = "-".join(chatcmpl_request_id.split("-")[1:])
+        request_id = request_id[:16]
         event = pending_requests.get(request_id, None)
         if event:
             # Schedule the event.set() on the main event loop
@@ -244,17 +245,19 @@ def notify_request(chatcmpl_request_id: str) -> bool:
     return False
 
 
-@app.post("/v1/chat/completions")
-async def handle_chat_completions(request: Request):
-    """Handle /v1/chat/completions requests."""
+async def _handle_disagg_request(request: Request, endpoint: str):
+    """
+    Common handler for disaggregated prefill/decode requests.
+
+    Works for both /v1/completions and /v1/chat/completions — the only
+    difference is the *endpoint* path forwarded to the prefiller and decoder.
+    """
     try:
         req_data = await request.json()
 
         # Generate a random request ID
         request_id = generate_request_id()
-        logger.info(
-            f"Received chat completions request with generated ID: {request_id}"
-        )
+        logger.info(f"Received {endpoint} request with generated ID: {request_id}")
 
         # Pick prefill and decode clients
         prefill_client, decode_client = round_robin_pick_clients()
@@ -269,12 +272,13 @@ async def handle_chat_completions(request: Request):
             if "max_completion_tokens" in prefill_req_data:
                 prefill_req_data["max_completion_tokens"] = 1
             prefill_req_data["stream"] = False
+            prefill_req_data.pop("stream_options", None)
 
             # Send to prefiller with X-Request-Id header (ignore output)
             prefill_send_time = time.monotonic()
             await send_request_to_prefiller(
                 prefill_client.client,
-                "/v1/chat/completions",
+                endpoint,
                 prefill_req_data,
                 request_id,
             )
@@ -307,7 +311,7 @@ async def handle_chat_completions(request: Request):
             async def generate_stream():
                 first_chunk = True
                 async for chunk in stream_service_response(
-                    decode_client.client, "/v1/chat/completions", req_data
+                    decode_client.client, endpoint, req_data
                 ):
                     if first_chunk:
                         decode_first_response_time = time.monotonic()
@@ -325,7 +329,7 @@ async def handle_chat_completions(request: Request):
             return StreamingResponse(generate_stream(), media_type="application/json")
         else:
             response = await send_request_to_decoder(
-                decode_client.client, "/v1/chat/completions", req_data
+                decode_client.client, endpoint, req_data
             )
             decode_first_response_time = time.monotonic()
             latency = decode_first_response_time - prefill_first_response_time
@@ -341,10 +345,22 @@ async def handle_chat_completions(request: Request):
         import traceback
 
         exc_info = sys.exc_info()
-        logger.error("Error in chat completions endpoint")
+        logger.error(f"Error in {endpoint} endpoint")
         logger.error(str(e))
         logger.error("".join(traceback.format_exception(*exc_info)))
         raise
+
+
+@app.post("/v1/completions")
+async def handle_completions(request: Request):
+    """Handle /v1/completions requests."""
+    return await _handle_disagg_request(request, "/v1/completions")
+
+
+@app.post("/v1/chat/completions")
+async def handle_chat_completions(request: Request):
+    """Handle /v1/chat/completions requests."""
+    return await _handle_disagg_request(request, "/v1/chat/completions")
 
 
 # ============================================================================
