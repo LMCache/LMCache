@@ -22,18 +22,18 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.multiprocess.distributed.api import (
+from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.multiprocess.distributed.config import (
+from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.multiprocess.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.memory_management import MemoryFormat
 
 # ==============================================================================
 # Test Fixtures

@@ -10,8 +10,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.multiprocess.distributed.config import (
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
@@ -20,7 +20,7 @@ from lmcache.v1.multiprocess.distributed.config import (
 
 try:
     # First Party
-    from lmcache.v1.multiprocess.distributed.storage_manager import StorageManager
+    from lmcache.v1.distributed.storage_manager import StorageManager
 except ImportError:
     # Skip tests if L1Manager cannot be imported
     pytest.skip(
