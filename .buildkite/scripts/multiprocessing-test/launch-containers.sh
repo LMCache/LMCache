@@ -33,7 +33,7 @@ echo "=== Launching LMCache container ==="
 echo "Container name: $LMCACHE_CONTAINER_NAME"
 echo "Port: $LMCACHE_PORT"
 
-CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader)
+CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader | paste -sd, -)
 docker run -d \
     --name "$LMCACHE_CONTAINER_NAME" \
     --runtime nvidia \
