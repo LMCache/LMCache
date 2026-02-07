@@ -246,9 +246,7 @@ def update_session_for_key(
     assert request_id is not None, "Token mode requires request_id in key"
     session = session_manager.get_or_create(request_id)
     session.set_tokens(list(key.token_ids))
-    # end=0 means "hash all tokens"
-    end = key.end if key.end > 0 else len(key.token_ids)
-    session.get_hashes(key.start, end)
+    session.get_hashes(key.start, key.end)
 
 
 def resolve_keys(
@@ -277,8 +275,7 @@ def resolve_keys(
             request_id = key.request_id
             assert request_id is not None, "Token mode requires request_id in key"
             session = session_manager.get_or_create(request_id)
-            end = key.end if key.end > 0 else len(key.token_ids)
-            hashes = session.get_hashes(key.start, end)
+            hashes = session.get_hashes(key.start, key.end)
             resolved.extend(
                 IPCCacheEngineKey(
                     model_name=key.model_name,
@@ -294,7 +291,6 @@ def resolve_keys(
 
 
 class MPCacheEngine:
-
     def __init__(
         self,
         storage_manager_config: StorageManagerConfig,
@@ -410,9 +406,9 @@ class MPCacheEngine:
                 obj_keys, layout_desc, "new"
             )
 
-            for idx, key in enumerate(obj_keys):
-                if key in reserved_dict:
-                    memory_obj = reserved_dict[key]
+            for idx, obj_key in enumerate(obj_keys):
+                if obj_key in reserved_dict:
+                    memory_obj = reserved_dict[obj_key]
                 else:
                     continue
 
