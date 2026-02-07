@@ -222,7 +222,8 @@ def search_keys_by_hash(
     """
     matching_keys = []
     with engine.lock:
-        # TODO: get_all_keys is not implemented in new storage manager
+        # all_keys = engine.storage_manager.get_all_keys()
+
         logger.error("Get all keys is not implemented, returning empty list")
         all_keys = []  # type: ignore
 
@@ -256,11 +257,21 @@ def get_memory_objects(
     Returns:
         List of MemoryObj objects (filtered to only include found objects)
     """
-    # TODO: Adapt to new storage manager implementation
     memory_objs = []  # type: ignore
     logger.error(
         "get_memory_objects's implementation is out of date. Empty is returned."
     )
+    # Use storage manager's buffer lock for thread safety
+    # storage_manager = engine.storage_manager
+    # with storage_manager._buffer_lock:
+    #    for key in keys:
+    #        if storage_manager._has_key(key):
+    #            obj = storage_manager._commited_memory_objects[key]
+    #            # Touch the cache policy to update LRU
+    #            storage_manager._cache_policy.update_on_hit(
+    #                key, storage_manager._commited_memory_objects
+    #            )
+    #            memory_objs.append(obj)
 
     return memory_objs
 
@@ -284,7 +295,7 @@ async def get_all_hashes(
     engine = get_engine(request)  # noqa: F841
 
     try:
-        # TODO: get_all_keys is not implemented in new storage manager
+        # all_keys = engine.storage_manager.get_all_keys()
         all_keys = []  # type: ignore
         logger.error("Get all keys is not implemented, returning empty list")
         return [hash_bytes_to_string(k.chunk_hash, encoding=encoding) for k in all_keys]
@@ -606,7 +617,8 @@ async def set_kv_cache(
             # )
 
         # 1) Overwrite path (most common for your -2 := -1 test)
-        # TODO: Adapt to new storage manager implementation
+        # with storage._buffer_lock:  # internal but OK for debug server
+        #    existing_obj = storage._commited_memory_objects.get(key, None)
         existing_obj = None
 
         if existing_obj is not None:
@@ -651,15 +663,49 @@ async def set_kv_cache(
             )
 
         # 2) Create-new path (only if metadata provided above)
-        # TODO: Adapt to new storage manager implementation
-        logger.error(
-            "Pending on adapting to the new storage manager implementation, "
-            "returning failure..."
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Creating new entries is not implemented in this version.",
-        )
+        if True:
+            logger.error(
+                "Pending on adapting to the new storage manager implementation, "
+                "returning failure..."
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Creating new entries is not implemented in this version.",
+            )
+
+        # fmt = MemoryFormat.KV_2LTD  # confirmed correct
+        # reserve_handle, reserved_dict = storage.reserve(
+        #    [key], uploaded_tensor.shape, uploaded_tensor.dtype, fmt=fmt
+        # )
+        # if key not in reserved_dict:
+        #    raise HTTPException(
+        #        status_code=500, detail="Failed to reserve memory for KV cache"
+        #    )
+
+        # obj = reserved_dict[key]
+        # if obj.tensor is None:
+        #    raise HTTPException(
+        #        status_code=500, detail="Reserved MemoryObj has no tensor"
+        #    )
+
+        # obj.tensor.copy_(uploaded_tensor, non_blocking=False)
+        # storage.commit(reserve_handle)
+
+        # return JSONResponse(
+        #    content={
+        #        "status": "success",
+        #        "mode": "reserve_commit",
+        #        "chunk_hash": chunk_hash,
+        #        "hash_encoding": hash_encoding,
+        #        "key": {
+        #            "model_name": key.model_name,
+        #            "world_size": key.world_size,
+        #            "worker_id": key.worker_id,
+        #        },
+        #        "shape": list(uploaded_tensor.shape),
+        #        "dtype": str(uploaded_tensor.dtype),
+        #    }
+        # )
 
     except HTTPException:
         raise

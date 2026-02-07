@@ -329,12 +329,7 @@ def test_store_and_lookup(
     # Store
     store_future = client.submit_request(
         RequestType.STORE,
-        [
-            keys,
-            registered_instance,
-            gpu_block_ids,
-            event.ipc_handle(),
-        ],
+        [keys, registered_instance, gpu_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
     store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -381,12 +376,7 @@ def test_store_retrieve_verify(
     store_block_ids = list(range(0, 16 * num_keys))
     store_future = client.submit_request(
         RequestType.STORE,
-        [
-            keys,
-            registered_instance,
-            store_block_ids,
-            event.ipc_handle(),
-        ],
+        [keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
     store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -410,12 +400,7 @@ def test_store_retrieve_verify(
     retrieve_block_ids = list(range(retrieve_offset, retrieve_offset + 16 * num_keys))
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [
-            keys,
-            registered_instance,
-            retrieve_block_ids,
-            event.ipc_handle(),
-        ],
+        [keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -463,12 +448,7 @@ def test_retrieve_partial_miss(
 
     store_future = client.submit_request(
         RequestType.STORE,
-        [
-            stored_keys,
-            registered_instance,
-            store_block_ids,
-            event.ipc_handle(),
-        ],
+        [stored_keys, registered_instance, store_block_ids, event.ipc_handle()],
         get_response_class(RequestType.STORE),
     )
     assert store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT) is True
@@ -494,14 +474,10 @@ def test_retrieve_partial_miss(
 
     event = torch.cuda.Event(interprocess=True)
     event.record()
+
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [
-            all_keys,
-            registered_instance,
-            retrieve_block_ids,
-            event.ipc_handle(),
-        ],
+        [all_keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
@@ -528,12 +504,7 @@ def test_retrieve_partial_miss(
     event.record()
     retrieve_future_2 = client.submit_request(
         RequestType.RETRIEVE,
-        [
-            stored_keys,
-            registered_instance,
-            retrieve_block_ids_2,
-            event.ipc_handle(),
-        ],
+        [stored_keys, registered_instance, retrieve_block_ids_2, event.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result_2 = retrieve_future_2.to_cuda_future().result(
@@ -586,12 +557,7 @@ def test_multiple_retrieve_operations(
         store_result = (
             client.submit_request(
                 RequestType.STORE,
-                [
-                    keys,
-                    registered_instance,
-                    blocks,
-                    event.ipc_handle(),
-                ],
+                [keys, registered_instance, blocks, event.ipc_handle()],
                 get_response_class(RequestType.STORE),
             )
             .to_cuda_future()
@@ -631,14 +597,10 @@ def test_multiple_retrieve_operations(
                 * pages_per_key,
             )
         )
+
         retrieve_future = client.submit_request(
             RequestType.RETRIEVE,
-            [
-                keys,
-                registered_instance,
-                blocks,
-                event.ipc_handle(),
-            ],
+            [keys, registered_instance, blocks, event.ipc_handle()],
             get_response_class(RequestType.RETRIEVE),
         )
         retrieve_futures.append(retrieve_future.to_cuda_future())
@@ -683,12 +645,7 @@ def test_multiple_store_operations(
     result1 = (
         client.submit_request(
             RequestType.STORE,
-            [
-                keys1,
-                registered_instance,
-                blocks1,
-                event.ipc_handle(),
-            ],
+            [keys1, registered_instance, blocks1, event.ipc_handle()],
             get_response_class(RequestType.STORE),
         )
         .to_cuda_future()
@@ -699,16 +656,12 @@ def test_multiple_store_operations(
     # Store batch 2
     keys2 = [create_cache_key(i + 30) for i in range(20)]
     blocks2 = list(range(30 * 16, 50 * 16))
+
     # Test with the same event for 2 store requests
     result2 = (
         client.submit_request(
             RequestType.STORE,
-            [
-                keys2,
-                registered_instance,
-                blocks2,
-                event.ipc_handle(),
-            ],
+            [keys2, registered_instance, blocks2, event.ipc_handle()],
             get_response_class(RequestType.STORE),
         )
         .to_cuda_future()

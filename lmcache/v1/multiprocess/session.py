@@ -51,6 +51,12 @@ class Session:
             List of hash values for chunks in [start_chunk, end_chunk).
         """
         chunk_size = self.hasher.chunk_size
+        assert start % chunk_size == 0, (
+            f"start ({start}) must be a multiple of chunk_size ({chunk_size})"
+        )
+        assert end % chunk_size == 0, (
+            f"end ({end}) must be a multiple of chunk_size ({chunk_size})"
+        )
         start_chunk = start // chunk_size
         end_chunk = end // chunk_size
 

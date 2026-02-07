@@ -224,13 +224,76 @@ class GPUCacheContext:
             return torch.Size((2, self.num_layers_, num_tokens, self.hidden_dim_size_))
 
 
-class MPCacheEngine:
-    """
-    Multi-process cache engine supporting both token-based and hash-based APIs.
+def update_session_for_key(
+    key: IPCCacheEngineKey,
+    session_manager: SessionManager,
+) -> None:
+    """Update session state for a token-mode key.
 
-    Token mode: Client sends token_ids, server computes hashes
-    Hash mode: Client sends chunk_hash directly
+    For token-mode keys, sets the token sequence on the session and
+    computes hashes so they are cached for resolve_keys.
+
+    For hash-mode keys, this is a no-op.
+
+    Args:
+        key: An IPC cache engine key (token or hash mode).
+        session_manager: The session manager to use.
     """
+    if not key.is_token_mode():
+        return
+    assert key.token_ids is not None
+    request_id = key.request_id
+    assert request_id is not None, "Token mode requires request_id in key"
+    session = session_manager.get_or_create(request_id)
+    session.set_tokens(list(key.token_ids))
+    # end=0 means "hash all tokens"
+    end = key.end if key.end > 0 else len(key.token_ids)
+    session.get_hashes(key.start, end)
+
+
+def resolve_keys(
+    keys: list[IPCCacheEngineKey],
+    session_manager: SessionManager,
+) -> list[IPCCacheEngineKey]:
+    """Convert token-mode keys to hash-mode keys.
+
+    For token-mode keys: uses session to retrieve pre-computed rolling
+    hashes, then creates hash-mode IPCCacheEngineKey instances.
+    update_session_for_key must be called before this function.
+
+    For hash-mode keys: passes through directly.
+
+    Args:
+        keys: List of IPC keys (token or hash mode).
+        session_manager: The session manager to use.
+
+    Returns:
+        List of hash-mode IPCCacheEngineKey.
+    """
+    resolved: list[IPCCacheEngineKey] = []
+    for key in keys:
+        if key.is_token_mode():
+            assert key.token_ids is not None
+            request_id = key.request_id
+            assert request_id is not None, "Token mode requires request_id in key"
+            session = session_manager.get_or_create(request_id)
+            end = key.end if key.end > 0 else len(key.token_ids)
+            hashes = session.get_hashes(key.start, end)
+            resolved.extend(
+                IPCCacheEngineKey(
+                    model_name=key.model_name,
+                    world_size=key.world_size,
+                    worker_id=key.worker_id,
+                    chunk_hash=TokenHasher.hash_to_bytes(h),
+                )
+                for h in hashes
+            )
+        else:
+            resolved.append(key)
+    return resolved
+
+
+class MPCacheEngine:
 
     def __init__(
         self,
@@ -286,98 +349,6 @@ class MPCacheEngine:
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
-    # =========================================================================
-    # Key resolution helper
-    # =========================================================================
-
-    def _resolve_keys(
-        self,
-        keys: list[IPCCacheEngineKey],
-        strip_worker_id: bool = False,
-    ) -> list[IPCCacheEngineKey]:
-        """Convert mixed token/hash mode keys to all hash-mode keys.
-
-        For token-mode keys: uses session to compute rolling hashes,
-        then creates hash-mode IPCCacheEngineKey instances.
-
-        For hash-mode keys: passes through directly (or strips worker_id
-        for lookup).
-
-        Args:
-            keys: List of IPC keys (token or hash mode).
-            strip_worker_id: If True, set worker_id=None on output keys
-                (used by lookup).
-
-        Returns:
-            List of hash-mode IPCCacheEngineKey.
-        """
-        resolved: list[IPCCacheEngineKey] = []
-        for key in keys:
-            if key.is_token_mode():
-                assert key.token_ids is not None
-                request_id = key.request_id
-                assert request_id is not None, "Token mode requires request_id in key"
-                session = self.session_manager.get_or_create(request_id)
-                session.set_tokens(list(key.token_ids))
-                # end=0 means "hash all tokens"
-                end = key.end if key.end > 0 else len(key.token_ids)
-                hashes = session.get_hashes(key.start, end)
-                worker_id = None if strip_worker_id else key.worker_id
-                resolved.extend(
-                    IPCCacheEngineKey(
-                        model_name=key.model_name,
-                        world_size=key.world_size,
-                        worker_id=worker_id,
-                        chunk_hash=TokenHasher.hash_to_bytes(h),
-                    )
-                    for h in hashes
-                )
-            else:
-                if strip_worker_id:
-                    resolved.append(key.no_worker_id_version())
-                else:
-                    resolved.append(key)
-        return resolved
-
-    # =========================================================================
-    # Public handlers
-    # =========================================================================
-
-    def lookup(
-        self,
-        keys: list[IPCCacheEngineKey],
-    ) -> int:
-        """Lookup cache hits for the given keys.
-
-        Supports both token mode and hash mode keys.
-
-        Args:
-            keys: List of cache keys (token mode or hash mode).
-                  request_id is embedded in each key.
-
-        Returns:
-            Number of matched chunks (prefix match count).
-        """
-        ipc_keys = self._resolve_keys(keys, strip_worker_id=True)
-        if not ipc_keys:
-            return 0
-
-        assert all(k.worker_id is None for k in ipc_keys), (
-            "Must lookup with worker_id == None"
-        )
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
-
-        handle = self.storage_manager.submit_prefetch_task(obj_keys)
-        while True:
-            found_count = self.storage_manager.query_prefetch_status(handle)
-            if found_count is not None:
-                break
-        # NOTE(Kuntai): this assumes two things:
-        # 1. the world size is the same between keys
-        # 2. the lookup sort the keys in prefix order and breaks at the first failure
-        found_count = found_count // ipc_keys[0].world_size
-        return found_count
-
     @_lmcache_nvtx_annotate
     def store(
         self,
@@ -386,36 +357,24 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store KV cache blocks for the given keys.
-
-        Supports both token mode and hash mode keys.
+        """
+        Stores the GPU KV cache blocks to CPU.
 
         Args:
-            keys: Cache keys, one per request (token mode or hash mode).
-                  request_id is embedded in each key.
-            instance_id: GPU instance ID.
-            gpu_block_ids: Flattened GPU block IDs.
-            event_ipc_handle: IPC handle of the event to wait on.
+            keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
+                All keys must have worker_id != None (worker store operation).
+            instance_id (int): The GPU instance ID (such as PID).
+            gpu_block_ids (list[int]): The GPU block IDs to store.
+            event_ipc_handle (bytes): The IPC handle of the event to wait on.
 
         Returns:
-            Tuple of (event IPC handle, success bool).
+            tuple[bytes, bool]: The first element is the IPC handle of the event
+                that signals the completion of the store operation. The second
+                element indicates whether the store operation was successful.
         """
-        ipc_keys = self._resolve_keys(keys)
-
-        if not ipc_keys:
-            logger.warning(
-                "store: no complete chunks from any request (num_requests=%d)",
-                len(keys),
-            )
-            assert instance_id in self.gpu_contexts
-            gpu_context = self.gpu_contexts[instance_id]
-            with (
-                torch.cuda.device(gpu_context.device),
-                torch.cuda.stream(gpu_context.stream),
-            ):
-                event = torch.cuda.Event(interprocess=True)
-                event.record()
-            return event.ipc_handle(), False
+        for key in keys:
+            update_session_for_key(key, self.session_manager)
+        ipc_keys = resolve_keys(keys, self.session_manager)
 
         st = time.perf_counter()
 
@@ -500,36 +459,25 @@ class MPCacheEngine:
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, list[bool]]:
-        """Retrieve KV cache blocks for the given keys.
-
-        Supports both token mode and hash mode keys.
+        """
+        Retrieves the CPU KV cache and put into GPU blocks.
 
         Args:
-            keys: Cache keys, one per request (token mode or hash mode).
-                  request_id is embedded in each key.
-            instance_id: GPU instance ID.
-            gpu_block_ids: Flattened GPU block IDs.
-            event_ipc_handle: IPC handle of the event to wait on.
+            keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
+                All keys must have worker_id != None (worker retrieve operation).
+            instance_id (int): The GPU instance ID (such as PID).
+            gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
+            event_ipc_handle (bytes): The IPC handle of the event to wait on.
 
         Returns:
-            Tuple of (event IPC handle, per-chunk success bools).
+            tuple[bytes, list[bool]]: The first element is the IPC handle of the event
+                that signals the completion of the retrieve operation. The second
+                element is a list indicating whether each IPC key was successfully
+                retrieved.
         """
-        ipc_keys = self._resolve_keys(keys)
-
-        if not ipc_keys:
-            logger.warning(
-                "retrieve: no complete chunks from any request (num_requests=%d)",
-                len(keys),
-            )
-            assert instance_id in self.gpu_contexts
-            gpu_context = self.gpu_contexts[instance_id]
-            with (
-                torch.cuda.device(gpu_context.device),
-                torch.cuda.stream(gpu_context.stream),
-            ):
-                event = torch.cuda.Event(interprocess=True)
-                event.record()
-            return event.ipc_handle(), []
+        for key in keys:
+            update_session_for_key(key, self.session_manager)
+        ipc_keys = resolve_keys(keys, self.session_manager)
 
         st = time.perf_counter()
 
@@ -604,6 +552,42 @@ class MPCacheEngine:
 
         return event.ipc_handle(), [True] * len(obj_keys)
 
+    def lookup(
+        self,
+        keys: list[IPCCacheEngineKey],
+    ) -> int:
+        """Lookup cache hits for the given keys.
+
+        Args:
+            keys: List of cache keys.
+                  request_id is embedded in each key.
+
+        Returns:
+            Number of matched chunks (prefix match count).
+        """
+        ipc_keys: list[IPCCacheEngineKey] = []
+        for key in keys:
+            if key.is_token_mode():
+                ipc_keys.extend(key.to_hash_keys(self.token_hasher))
+            else:
+                ipc_keys.append(key)
+        # Strip worker_id for lookup (expand to all workers in ipc_keys_to_object_keys)
+        ipc_keys = [k.no_worker_id_version() for k in ipc_keys]
+        if not ipc_keys:
+            return 0
+        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+
+        handle = self.storage_manager.submit_prefetch_task(obj_keys)
+        while True:
+            found_count = self.storage_manager.query_prefetch_status(handle)
+            if found_count is not None:
+                break
+        # NOTE(Kuntai): this assumes two things:
+        # 1. the world size is the same between keys
+        # 2. the lookup sort the keys in prefix order and breaks at the first failure
+        found_count = found_count // ipc_keys[0].world_size
+        return found_count
+
     # =========================================================================
     # Utility methods
     # =========================================================================
@@ -647,35 +631,6 @@ class MPCacheEngine:
 
         # Release GPU contexts
         self.gpu_contexts.clear()
-
-
-def _start_session_cleanup_timer(
-    session_manager: SessionManager, interval: float = 60.0
-) -> threading.Timer:
-    """Start a daemon timer thread for periodic session cleanup.
-
-    Args:
-        session_manager: The SessionManager to clean up.
-        interval: Cleanup interval in seconds.
-
-    Returns:
-        The started Timer thread.
-    """
-
-    def _cleanup():
-        try:
-            session_manager.cleanup_expired()
-        except Exception:
-            logger.exception("Error during session cleanup")
-        # Re-schedule
-        timer = threading.Timer(interval, _cleanup)
-        timer.daemon = True
-        timer.start()
-
-    timer = threading.Timer(interval, _cleanup)
-    timer.daemon = True
-    timer.start()
-    return timer
 
 
 def add_handler_helper(
@@ -742,9 +697,6 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
-
-    # Start periodic session cleanup
-    _start_session_cleanup_timer(engine.session_manager)
 
     logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
     # Start the ZMQ server

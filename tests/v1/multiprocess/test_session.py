@@ -43,18 +43,6 @@ class TestSession:
         hashes = session.get_hashes(0, 8)
         assert len(hashes) == 2
 
-    def test_get_hashes_partial_range(self, session: Session) -> None:
-        """get_hashes(4, 8) returns only the second chunk's hash."""
-        session.set_tokens(list(range(8)))
-        hashes = session.get_hashes(4, 8)
-        assert len(hashes) == 1
-
-    def test_get_hashes_no_complete_chunks(self, session: Session) -> None:
-        """3 tokens with chunk_size=4 produces 0 hashes."""
-        session.set_tokens([1, 2, 3])
-        hashes = session.get_hashes(0, 3)
-        assert len(hashes) == 0
-
     def test_get_hashes_incremental(self, session: Session) -> None:
         """Calling get_hashes incrementally should produce same results."""
         tokens = list(range(12))

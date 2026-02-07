@@ -115,6 +115,9 @@ class CudaIPCWrapper:
 class IPCCacheEngineKey:
     """Unified cache key supporting BOTH token-based and hash-based modes.
 
+    # TODO(yuwei): update this docstring after cleaning up token mode —
+    # once token mode is removed, this class only needs hash mode.
+
     This key type is sent by the client over ZMQ (serialized via msgspec).
     It supports two modes:
 
