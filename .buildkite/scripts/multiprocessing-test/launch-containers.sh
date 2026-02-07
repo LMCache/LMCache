@@ -37,7 +37,7 @@ CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader | paste -sd, -)
 docker run -d \
     --name "$LMCACHE_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus "\"device=$CURRENT_GPUS\"" \
+    --gpus "'device=$CURRENT_GPUS'" \
     --network host \
     --ipc host \
     --entrypoint /opt/venv/bin/python3 \
@@ -62,7 +62,7 @@ CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader)
 docker run -d \
     --name "$VLLM_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus "\"device=$CURRENT_GPUS\"" \
+    --gpus "'device=$CURRENT_GPUS'" \
     --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
     --ipc host \
@@ -88,7 +88,7 @@ CURRENT_GPUS=$(nvidia-smi --query-gpu=uuid --format=csv,noheader)
 docker run -d \
     --name "$VLLM_BASELINE_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus "\"device=$CURRENT_GPUS\"" \
+    --gpus "'device=$CURRENT_GPUS'" \
     --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
     --ipc host \
