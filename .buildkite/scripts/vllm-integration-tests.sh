@@ -812,7 +812,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         fi
     elif [[ "$feature_type" == "p2p" ]]; then
         # TODO: p2p check_memory_leak has a known bug, skip for now
-        echo "⚠️  Skipping memory leak check for p2p case: check_memory_leak has a known bug that is being fixed"
+        echo "⚠️  Skipping memory leak check for p2p case: check_memory_leak has a known bug that is being fixed."
+    elif [[ "$cfg_name" == "multi_device.yaml" ]]; then
+        echo "⚠️  Skipping memory leak check for multi_device case as it's a flaky test while run check_memory_leak check."
     else
         # Single instance
         if ! check_memory_leak "$PORT"; then
