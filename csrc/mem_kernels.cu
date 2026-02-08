@@ -455,7 +455,7 @@ void multi_layer_kv_transfer_templated(
   int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
 
-  int k_or_v_size = is_mla(gpu_kv_format) ? 1 : 2;
+  int k_or_v_size = lmc::is_mla(gpu_kv_format) ? 1 : 2;
 
   dim3 grid(key_value.size(2), num_layers, k_or_v_size);
   dim3 block(std::min(num_xwords, 128));
@@ -545,7 +545,7 @@ void multi_layer_kv_transfer_unilateral(
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const TransferDirection direction, const GPUKVFormat gpu_kv_format) {
-  const bool use_mla = is_mla(gpu_kv_format);
+  const bool use_mla = lmc::is_mla(gpu_kv_format);
   // MLA case collapses back to multi_layer_kv_transfer
   // (vLLM and SGLang indexing are compatible)
   if (use_mla) {
@@ -639,7 +639,7 @@ void single_layer_kv_transfer(
   int head_size_in_64bit;
   int block_size;
 
-  const bool use_mla = is_mla(gpu_kv_format);
+  const bool use_mla = lmc::is_mla(gpu_kv_format);
 
   if (use_mla) {
     // MLA format: [num_blocks, block_size, head_size]
@@ -823,8 +823,7 @@ void single_layer_kv_transfer_sgl(
         sgl_value_cache,  // [num_blocks, block_size, num_heads, head_size]
                           // key_cache/value_cache must be on gpu
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const TransferDirection
-        direction,  // H2D: LMCache to PagedBuffer, D2H: PagedBuffer to LMCache
+    const TransferDirection direction,
     const bool token_major  // true: lmc_key_value_cache is
                             // [num_tokens, 2, num_heads*head_size]
                             // false: lmc_key_value_cache is
