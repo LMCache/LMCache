@@ -148,7 +148,6 @@ class LMCacheMPSchedulerAdapter:
     def maybe_submit_lookup_request(
         self,
         request_id: str,
-        *,
         block_hashes: list[bytes] | None = None,
         token_ids: list[int] | None = None,
     ):
@@ -196,7 +195,7 @@ class LMCacheMPSchedulerAdapter:
         else:
             # Token mode: single token-mode key
             assert token_ids is not None
-            keys = [self._create_key(token_ids, request_id=request_id)]
+            keys = [self._create_key(token_ids, request_id=request_id).no_worker_id_version()]
 
         future = send_lmcache_request(
             self.mq_client,
