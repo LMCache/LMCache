@@ -28,6 +28,14 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
+from lmcache.v1.gpu_connector.utils import (
+    discover_gpu_kv_format,
+    get_block_size,
+    get_hidden_dim_size,
+    get_num_blocks,
+    get_num_layers,
+    is_mla,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
@@ -82,24 +90,13 @@ class GPUCacheContext:
         pointers_list = [t.data_ptr() for t in self.kv_caches_]
         self.kv_cache_pointers_ = list_to_gpu_tensor(pointers_list, self.device_)
 
-        # MLA flag
-        # MLA shape: [num_blocks, block_size, hidden_dim]
-        # MHA shape: [2, num_blocks, block_size, num_heads, head_size]
-        self.is_mla_ = self.kv_caches_[0].ndim == 3
-
-        # Shape related
-        self.num_layers_ = len(self.kv_caches_)
-        if self.is_mla_:
-            self.num_blocks_ = self.kv_caches_[0].shape[0]
-            self.block_size_ = self.kv_caches_[0].shape[1]
-            self.hidden_dim_size_ = self.kv_caches_[0].shape[2]
-        else:
-            self.num_blocks_ = self.kv_caches_[0].shape[1]
-            self.block_size_ = self.kv_caches_[0].shape[2]
-            # hidden_dim = num_heads * head_size
-            num_heads = self.kv_caches_[0].shape[3]
-            head_size = self.kv_caches_[0].shape[4]
-            self.hidden_dim_size_ = num_heads * head_size
+        # TODO support creating GPUCacheContext for SGLang
+        self.gpu_kv_format_ = discover_gpu_kv_format(kv_caches, "vllm")
+        self.is_mla_ = is_mla(self.gpu_kv_format_)
+        self.num_layers_ = get_num_layers(kv_caches, self.gpu_kv_format_)
+        self.num_blocks_ = get_num_blocks(kv_caches, self.gpu_kv_format_)
+        self.block_size_ = get_block_size(kv_caches, self.gpu_kv_format_)
+        self.hidden_dim_size_ = get_hidden_dim_size(kv_caches, self.gpu_kv_format_)
 
         # Pre-computed slot mapping
         # shape: [num_blocks, block_size]
@@ -346,8 +343,9 @@ class MPCacheEngine:
                         slot_mapping,
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
-                        True,
-                        gpu_context.is_mla,
+                        lmc_ops.TransferDirection.D2H,
+                        gpu_context.gpu_kv_format_,
+                        gpu_context.block_size,
                     )
 
                     assert memory_obj.tensor is not None
@@ -432,8 +430,9 @@ class MPCacheEngine:
                         slot_mapping,
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
-                        False,
-                        gpu_context.is_mla,
+                        lmc_ops.TransferDirection.H2D,
+                        gpu_context.gpu_kv_format_,
+                        gpu_context.block_size,
                     )
 
         with (

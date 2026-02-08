@@ -230,7 +230,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, self.use_mla)
+        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, "vllm")
         self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
         self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
@@ -445,7 +445,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        self.gpu_kv_format = discover_gpu_kv_format(self.kvcaches, self.use_mla)
+        self.gpu_kv_format = discover_gpu_kv_format(self.kvcaches, "vllm")
         self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
         self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
@@ -638,7 +638,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, self.use_mla)
+            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, "vllm")
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
@@ -1035,7 +1035,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, self.use_mla)
+            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, "vllm")
             assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
@@ -1364,7 +1364,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
             )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, self.use_mla)
+        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, "sglang")
         # sglang MLA kv_caches[0].shape: [num_pages * page_size, 1, head_size]
         # sglang MHA kv_caches[0].shape: [num_pages * page_size, num_heads, head_size]
         self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
@@ -1554,7 +1554,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         Also, the first request might be a bit slower due to buffer creation.
         """
         if self.use_gpu and self.gpu_buffer_allocator is None:
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, self.use_mla)
+            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, "sglang")
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format
