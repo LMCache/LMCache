@@ -198,10 +198,14 @@ class LMCacheMPSchedulerAdapter:
             aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
             if aligned_end == 0:
                 return
-            keys = [self._create_key(
-                token_ids, start=0, end=aligned_end,
-                request_id=request_id,
-            ).no_worker_id_version()]
+            keys = [
+                self._create_key(
+                    token_ids,
+                    start=0,
+                    end=aligned_end,
+                    request_id=request_id,
+                ).no_worker_id_version()
+            ]
 
         future = send_lmcache_request(
             self.mq_client,
