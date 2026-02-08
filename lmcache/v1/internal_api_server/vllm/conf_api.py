@@ -6,7 +6,7 @@ import json
 # Third Party
 from fastapi import APIRouter
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 import torch
 
 # First Party
@@ -106,16 +106,14 @@ async def set_config(request: Request):
     try:
         body = await request.json()
     except Exception as e:
-        return PlainTextResponse(
-            content=json.dumps({"error": "Invalid JSON body", "message": str(e)}),
-            media_type="application/json",
+        return JSONResponse(
+            content={"error": "Invalid JSON body", "message": str(e)},
             status_code=400,
         )
 
     if not isinstance(body, dict):
-        return PlainTextResponse(
-            content=json.dumps({"error": "Request body must be a JSON object"}),
-            media_type="application/json",
+        return JSONResponse(
+            content={"error": "Request body must be a JSON object"},
             status_code=400,
         )
 
@@ -142,9 +140,8 @@ async def set_config(request: Request):
     if errors:
         result["errors"] = errors
 
-    status_code = 200 if updated else 400
-    return PlainTextResponse(
-        content=json.dumps(result, indent=2),
-        media_type="application/json",
+    status_code = 400 if errors and not updated else 200
+    return JSONResponse(
+        content=result,
         status_code=status_code,
     )
