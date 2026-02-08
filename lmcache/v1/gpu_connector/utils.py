@@ -8,12 +8,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector.gpu_connectors import (
-    GPUConnectorInterface,
-    SGLangLayerwiseGPUConnector,
-    VLLMBufferLayerwiseGPUConnector,
-    VLLMPagedMemLayerwiseGPUConnector,
-)
+from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
 if torch.cuda.is_available():
     # First Party
@@ -38,10 +33,18 @@ def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
         return True
 
 
-def assert_layerwise_gpu_connector(gpu_connector: GPUConnectorInterface):
+def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     """
     Assert that a GPU Connector is a layerwise connector.
     """
+    # Import at runtime to avoid circular dependency
+    # First Party
+    from lmcache.v1.gpu_connector.gpu_connectors import (
+        SGLangLayerwiseGPUConnector,
+        VLLMBufferLayerwiseGPUConnector,
+        VLLMPagedMemLayerwiseGPUConnector,
+    )
+
     assert isinstance(
         gpu_connector,
         (
