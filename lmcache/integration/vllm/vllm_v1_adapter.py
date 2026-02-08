@@ -310,6 +310,8 @@ class ReqMeta:
     request_configs: Optional[dict] = None
     # Number of tokens produced by one frame.
     tokens_per_frame: Optional[int] = None
+    # Multimodal placeholder positions for precise frame alignment.
+    mm_positions: Optional[list["PlaceholderRange"]] = None
 
     @staticmethod
     def from_request_tracker(
@@ -448,6 +450,7 @@ class ReqMeta:
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
             tokens_per_frame=tokens_per_frame,
+            mm_positions=tracker.mm_positions,
         )
 
 
@@ -974,6 +977,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         tokens_per_frame=request.tokens_per_frame,
+                        mm_positions=request.mm_positions,
                         page_stream=page_stream,
                         sync=sync,
                     )

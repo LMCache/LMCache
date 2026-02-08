@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Sequence, Any
 
 # Third Party
 import torch
@@ -29,9 +29,11 @@ class LMCBlendMetadata:
     attn_mask: Optional[torch.Tensor] = None
     positions: Optional[torch.Tensor] = None
     tokens_per_frame: Optional[int] = None
+    mm_positions: Optional[Sequence[Any]] = None
 
     def clean(self):
         self.imp_indices = None
         self.attn_mask = None
         self.positions = None
         self.tokens_per_frame = None
+        self.mm_positions = None

@@ -813,7 +813,7 @@ class LMCacheEngine:
             # TODO: support batched_contains when layerwise is enabled
             if self.use_layerwise:
                 for start, end, key in chunk_info_iterator:
-                    # if start == 0: continue
+                    if start == 0: continue
                     # logger.info(f"Looking up start={start}, end={end}, key={key}")
                     assert isinstance(key, CacheEngineKey)
 

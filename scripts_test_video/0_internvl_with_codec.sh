@@ -81,7 +81,7 @@ for ratio in "${blend_recompute_ratios[@]}"; do
   sleep 15
 
   # Start vLLM server in the background
-  SERVER_LOG=server_win${WIN_SIZES[0]}_stride${STRIDE_SIZES[0]}_recompute${ratio}.log
+  SERVER_LOG=server_win${WIN_SIZES[0]}_stride${STRIDE_SIZES[0]}_recompute${ratio}_costream.log
   vllm serve $model \
     --host 0.0.0.0 \
     --port 8000 \

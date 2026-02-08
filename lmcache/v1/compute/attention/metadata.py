@@ -30,10 +30,14 @@ class LMCFlashAttnMetadata(LMCAttnMetadata):
 
     def update_from_top_indices(self, top_indices: torch.Tensor):
         top_k_num = len(top_indices)
-        self.max_query_len = top_k_num
         device = self.query_start_loc.device
-        dtype = self.query_start_loc.dtype
-        self.query_start_loc = torch.tensor([0, top_k_num], dtype=dtype, device=device)
+        q_dtype = self.query_start_loc.dtype
+        k_dtype = self.cu_seqlens_k.dtype
+        self.max_query_len = top_k_num
+        self.max_seq_len = top_k_num
+        self.query_start_loc = torch.tensor([0, top_k_num], dtype=q_dtype, device=device)
+        self.seq_lens = torch.tensor([top_k_num], dtype=self.seq_lens.dtype, device=device)
+        self.cu_seqlens_k = torch.tensor([0, top_k_num], dtype=k_dtype, device=device)
 
 
 @dataclass

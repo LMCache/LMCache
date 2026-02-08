@@ -94,7 +94,7 @@ def build_video_messages(
             ],}]
     else:
         return [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
             {
                 "role": "user",
                 "content": [
@@ -301,6 +301,7 @@ def extract_frames_from_video(video_path: str, sample_fps: Optional[float]) -> T
         frame_interval = max(1, int(video_fps / sample_fps))
     else:
         frame_interval = 1
+    effective_fps = video_fps / frame_interval if frame_interval > 0 else video_fps
 
     frame_count = 0
     while True:
@@ -313,7 +314,7 @@ def extract_frames_from_video(video_path: str, sample_fps: Optional[float]) -> T
         frame_count += 1
 
     cap.release()
-    return frames, video_fps
+    return frames, effective_fps
 
 
 # ----------------------------
@@ -336,6 +337,8 @@ def prepare_message_for_vllm(
     outputs_dir: str,
     ffmpeg_timeout: int,
     gop: int,
+    pre_frames: Optional[List[Any]] = None,
+    pre_frames_fps: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     vllm_messages: List[Dict[str, Any]] = []
     fps_list: List[float] = []
@@ -362,6 +365,35 @@ def prepare_message_for_vllm(
             if isinstance(part_message, dict) and "video" in part_message:
                 video_path = part_message.get("video")
                 fps = float(part_message.get("fps", sample_fps))
+
+                # If pre-extracted frames are provided, reuse them to ensure
+                # identical bytes across overlapping windows.
+                if pre_frames is not None and pre_frames_fps:
+                    start_idx = max(0, int(start_s * pre_frames_fps))
+                    end_s_val = start_s + (duration_s or 0.0)
+                    end_idx = (
+                        max(start_idx + 1, int(end_s_val * pre_frames_fps))
+                        if duration_s
+                        else len(pre_frames)
+                    )
+                    frames = pre_frames[start_idx:end_idx]
+                    fps_list.append(float(pre_frames_fps))
+
+                    frame_content_list: List[Dict[str, Any]] = []
+                    for i, frame in enumerate(frames):
+                        frame_content_list.append({"type": "text", "text": blend_special_str})
+                        img = Image.fromarray(frame)
+                        buf = BytesIO()
+                        img.save(buf, format="PNG")
+                        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                        frame_content_list.append(
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+                        )
+                    frame_content_list.append({"type": "text", "text": blend_special_str})
+                    frame_content_list.append({"type": "text", "text": prompt_text})
+
+                    new_content_list.extend(frame_content_list)
+                    continue
 
                 # optional clip
                 if start_s > 0 or duration_s:
@@ -411,8 +443,7 @@ def prepare_message_for_vllm(
 
                     frame_content_list: List[Dict[str, Any]] = []
                     for i, frame in enumerate(frames):
-                        if i == gop:
-                            frame_content_list.append({"type": "text", "text": blend_special_str})
+                        frame_content_list.append({"type": "text", "text": blend_special_str})
                         img = Image.fromarray(frame)
                         buf = BytesIO()
                         img.save(buf, format="PNG")
@@ -695,6 +726,18 @@ def main() -> None:
             windows = [(0.0, duration_s)]
         print(f"Generated {len(windows)} windows")
 
+        # Pre-extract frames once per video to maximize cache hits across windows.
+        pre_frames = None
+        pre_frames_fps = None
+        try:
+            pre_frames, pre_frames_fps = extract_frames_from_video(
+                video_path, sample_fps=args.sample_fps
+            )
+        except Exception as e:
+            print(f"Warning: pre-extract frames failed ({e}), fallback to per-window decode.")
+            pre_frames = None
+            pre_frames_fps = None
+
         for target_category in categories_to_process:
             if target_category.lower() not in video_base_name.lower() and 'normal' not in video_base_name.lower():
                 continue
@@ -743,6 +786,8 @@ def main() -> None:
                         outputs_dir=args.outputs_dir,
                         ffmpeg_timeout=args.ffmpeg_timeout,
                         gop=args.gop,
+                        pre_frames=pre_frames,
+                        pre_frames_fps=pre_frames_fps,
                     )
 
                     request_start = time.time()
