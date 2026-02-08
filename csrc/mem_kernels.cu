@@ -613,10 +613,10 @@ void single_layer_kv_transfer(
 
     torch::Tensor& slot_mapping,  // [num_tokens]
     const TransferDirection direction, const GPUKVFormat gpu_kv_format,
-    const bool token_major,  // true: lmc_key_value_cache is
-                             // [num_tokens, 2, num_heads*head_size]
-                             // false: lmc_key_value_cache is
-                             // [2, num_tokens, num_heads*head_size]
+    const bool token_major  // true: lmc_key_value_cache is
+                            // [num_tokens, 2, num_heads*head_size]
+                            // false: lmc_key_value_cache is
+                            // [2, num_tokens, num_heads*head_size]
 ) {
   // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
   // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
