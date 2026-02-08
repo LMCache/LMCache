@@ -22,7 +22,9 @@ router = APIRouter()
 def _is_mutable_config(key: str) -> bool:
     """Check if a config key is mutable at runtime.
 
-    By default, all configs are mutable unless explicitly set to False.
+    NOTE: This is currently experimental. All configs default to
+    mutable=True unless explicitly set to False. Once the feature
+    is stabilized, the default will be changed to mutable=False.
     """
     return _CONFIG_DEFINITIONS.get(key, {}).get("mutable", True)
 
@@ -88,8 +90,10 @@ async def get_metadata(request: Request, names: Optional[str] = None):
 async def set_config(request: Request):
     """Set config values dynamically.
 
-    By default, all configs are mutable at runtime unless explicitly set
-    "mutable": False in _CONFIG_DEFINITIONS.
+    NOTE: Currently experimental — all configs are mutable at runtime
+    by default unless explicitly set "mutable": False in
+    _CONFIG_DEFINITIONS. The default will change to immutable once
+    the feature is stabilized.
 
     Request body should be JSON with config name-value pairs:
         {"min_retrieve_tokens": 512, "save_decode_cache": true}
