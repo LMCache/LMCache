@@ -193,9 +193,15 @@ class LMCacheMPSchedulerAdapter:
                 self._create_hash_key(ch, request_id=request_id) for ch in chunk_hashes
             ]
         else:
-            # Token mode: single token-mode key
+            # Token mode: truncate to chunk-aligned length
             assert token_ids is not None
-            keys = [self._create_key(token_ids, request_id=request_id).no_worker_id_version()]
+            aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+            if aligned_end == 0:
+                return
+            keys = [self._create_key(
+                token_ids, start=0, end=aligned_end,
+                request_id=request_id,
+            ).no_worker_id_version()]
 
         future = send_lmcache_request(
             self.mq_client,
