@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Tuple
+from typing import TYPE_CHECKING, Any, Tuple
 
 # Third Party
 import torch
@@ -8,7 +8,10 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
 if torch.cuda.is_available():
     # First Party
