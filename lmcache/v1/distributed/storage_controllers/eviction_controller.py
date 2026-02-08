@@ -6,14 +6,14 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.distributed.config import EvictionConfig
-from lmcache.v1.multiprocess.distributed.eviction_policy import CreateEvictionPolicy
-from lmcache.v1.multiprocess.distributed.internal_api import (
+from lmcache.v1.distributed.config import EvictionConfig
+from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
+from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
 )
-from lmcache.v1.multiprocess.distributed.l1_manager import L1Manager
-from lmcache.v1.multiprocess.distributed.storage_controller import (
+from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.storage_controller import (
     StorageControllerInterface,
 )
 

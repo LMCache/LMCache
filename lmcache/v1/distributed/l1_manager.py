@@ -11,12 +11,12 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import TTLLock
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import L1ManagerConfig
+from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ManagerListener
+from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.multiprocess.distributed.config import L1ManagerConfig
-from lmcache.v1.multiprocess.distributed.error import L1Error
-from lmcache.v1.multiprocess.distributed.internal_api import L1ManagerListener
-from lmcache.v1.multiprocess.distributed.memory_manager import L1MemoryManager
 
 logger = init_logger(__name__)
 
@@ -521,3 +521,20 @@ class L1Manager:
     def memcheck(self) -> None:
         """Perform memory check for L1 cache."""
         self._memory_manager.memcheck()
+
+        # Log the locked objects for debugging
+        num_write_locked = 0
+        num_read_locked = 0
+        for key, entry in self._objects.items():
+            if entry.write_lock.is_locked():
+                num_write_locked += 1
+            if entry.read_lock.is_locked():
+                num_read_locked += 1
+
+        logger.info(
+            "L1Manager memcheck: total objects = %d, write-locked = %d, "
+            "read-locked = %d",
+            len(self._objects),
+            num_write_locked,
+            num_read_locked,
+        )

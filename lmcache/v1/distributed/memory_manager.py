@@ -5,15 +5,15 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.config import L1MemoryManagerConfig
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
     MixedMemoryAllocator,
 )
-from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc
-from lmcache.v1.multiprocess.distributed.config import L1MemoryManagerConfig
-from lmcache.v1.multiprocess.distributed.error import L1Error
 
 logger = init_logger(__name__)
 
@@ -140,7 +140,7 @@ class L1MemoryManager:
             ):
                 return allocator.pin_allocator.address_manager
             elif isinstance(allocator, LazyMemoryAllocator):
-                return allocator._allocator.address_manager
+                return allocator.get_address_manager()
             else:
                 raise NotImplementedError(
                     "get_memory_usage is not implemented for this allocator type."

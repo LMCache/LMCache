@@ -8,9 +8,9 @@ from collections import OrderedDict
 import threading
 
 # First Party
-from lmcache.v1.multiprocess.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.distributed.eviction import EvictionPolicy
-from lmcache.v1.multiprocess.distributed.internal_api import (
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.eviction import EvictionPolicy
+from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
 )

@@ -11,16 +11,16 @@ import torch
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import (
-    CudaIPCWrapper,
-    IPCCacheEngineKey,
-    KVCache,
-)
-from lmcache.v1.multiprocess.distributed.config import (
+from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
+)
+from lmcache.v1.multiprocess.custom_types import (
+    CudaIPCWrapper,
+    IPCCacheEngineKey,
+    KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (

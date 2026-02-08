@@ -10,7 +10,7 @@ and can operate on it.
 from abc import ABC, abstractmethod
 
 # First Party
-from lmcache.v1.multiprocess.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import L1Manager
 
 
 class StorageControllerInterface(ABC):
