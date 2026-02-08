@@ -42,7 +42,8 @@ docker run -d \
     --entrypoint /opt/venv/bin/python3 \
     lmcache/vllm-openai:test \
     -m lmcache.v1.multiprocess.server \
-    --cpu-buffer-size "$CPU_BUFFER_SIZE" \
+    --l1-size-gb "$CPU_BUFFER_SIZE" \
+    --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
     --port "$LMCACHE_PORT"
 
@@ -65,12 +66,12 @@ docker run -d \
     --ipc host \
     --env CUDA_VISIBLE_DEVICES=0 \
     --env VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    --env VLLM_ATTENTION_BACKEND=FLASH_ATTN \
     --env VLLM_BATCH_INVARIANT=1 \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
+    --attention-backend FLASH_ATTN \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
@@ -90,12 +91,12 @@ docker run -d \
     --ipc host \
     --env CUDA_VISIBLE_DEVICES=1 \
     --env VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    --env VLLM_ATTENTION_BACKEND=FLASH_ATTN \
     --env VLLM_BATCH_INVARIANT=1 \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
     --port "$VLLM_BASELINE_PORT" \
+    --attention-backend FLASH_ATTN \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
 

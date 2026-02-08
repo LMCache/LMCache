@@ -77,7 +77,9 @@ class CudaIPCWrapper:
             We should call `torch.cuda.init()` before using this function.
         """
         device = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
-        storage = torch.UntypedStorage._new_shared_cuda(device, *self.handle[1:])
+        storage = torch.UntypedStorage._new_shared_cuda(  # noqa: SLF001
+            device, *self.handle[1:]
+        )
         t = torch.tensor(0, device=device, dtype=self.dtype)
         t.set_(storage)
         return t.view(self.shape)
@@ -101,11 +103,15 @@ class CudaIPCWrapper:
         return pickle.loads(data)
 
 
+# TODO: consider adding local_world_size and local_worker_id
+# for multi-node use cases
 @dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
     model_name: str
     world_size: int
-    worker_id: int
+
+    # NOTE(Kuntai): worker_id will be None for scheduler and int for worker
+    worker_id: int | None
     chunk_hash: bytes
 
     @staticmethod
@@ -118,9 +124,19 @@ class IPCCacheEngineKey:
         # NOTE: this is only used by tests
         return int.from_bytes(chunk_hash, byteorder="big") & ((1 << 64) - 1)
 
+    def no_worker_id_version(self) -> "IPCCacheEngineKey":
+        # NOTE(Kuntai): this is for constructing lookup keys
+        # current lookup requests require worker_id to be None.
+        return IPCCacheEngineKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=None,
+            chunk_hash=self.chunk_hash,
+        )
+
     @classmethod
     def from_int_hash(
-        cls, model_name: str, world_size: int, worker_id: int, chunk_hash: int
+        cls, model_name: str, world_size: int, worker_id: int | None, chunk_hash: int
     ) -> "IPCCacheEngineKey":
         # NOTE: this is only used by tests
         return cls(

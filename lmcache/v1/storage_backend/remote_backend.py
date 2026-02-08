@@ -7,13 +7,13 @@ import threading
 import time
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.exceptions import IrrecoverableException
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.connector import CreateConnector
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -27,7 +27,7 @@ class RemoteBackend(StorageBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         dst_device: str = "cuda",
@@ -403,6 +403,15 @@ class RemoteBackend(StorageBackendInterface):
                     )
                 memory_objs = [None] * len(keys)
         else:
+            remote_backend_individual_get_stats: dict[
+                CacheEngineKey, dict[str, float]
+            ] = {}
+            retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
+            if retrieve_stats is not None:
+                retrieve_stats.detailed_metrics[
+                    "remote_backend_individual_get_stats"
+                ] = remote_backend_individual_get_stats
+
             futures = [
                 asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
                 for key in keys
@@ -431,8 +440,19 @@ class RemoteBackend(StorageBackendInterface):
                     fut.cancel()
 
         t2 = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
+        duration = t2 - t1
+        self.stats_monitor.update_interval_remote_time_to_get_sync(duration * 1000)
 
+        retrieve_stats = self.stats_monitor.get_current_retrieve_stats()
+        if retrieve_stats is not None:
+            retrieve_stats.detailed_metrics[
+                "remote_backend_batched_get_blocking_time"
+            ] = (
+                retrieve_stats.detailed_metrics.get(
+                    "remote_backend_batched_get_blocking_time", 0.0
+                )
+                + duration
+            )
         decompressed_memory_objs: list[Optional[MemoryObj]] = []
         error_happened = False
         for memory_obj in memory_objs:

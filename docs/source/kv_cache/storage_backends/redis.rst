@@ -297,12 +297,11 @@ LMCache stores data in Redis using a structured key format. Each key contains th
 
 .. code-block:: text
 
-    format@model_name@world_size@worker_id@chunk_hash
+    model_name@world_size@worker_id@chunk_hash
 
-- `format`: The model format (e.g., "vllm" or "huggingface")
 - `model_name`: Name of the language model
 - `world_size`: Total number of workers in distributed deployment
-- `worker_id`: ID of the worker that created this cache entry
+- `worker_id`: ID of the worker that created this cache entry, in the range of [0, world_size - 1]
 - `chunk_hash`: Hash of the token chunk (SHA-256 based)
 
 For example, a typical key might look like:

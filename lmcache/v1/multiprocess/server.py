@@ -24,10 +24,26 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.gpu_connector import lmcache_memcpy_async_d2h, lmcache_memcpy_async_h2d
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
-from lmcache.v1.multiprocess.mp_storage_manager import MPStorageManager
+from lmcache.v1.gpu_connector.gpu_ops import (
+    lmcache_memcpy_async_d2h,
+    lmcache_memcpy_async_h2d,
+)
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+    KVCache,
+)
+from lmcache.v1.multiprocess.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    ipc_keys_to_object_keys,
+)
+from lmcache.v1.multiprocess.distributed.config import (
+    StorageManagerConfig,
+    add_storage_manager_args,
+    parse_args_to_config,
+)
+from lmcache.v1.multiprocess.distributed.storage_manager import StorageManager
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -209,9 +225,8 @@ class GPUCacheContext:
 class MPCacheEngine:
     def __init__(
         self,
+        storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
-        cpu_buffer_size: float = 5.0,
-        disable_lazy_alloc: bool = False,
     ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
@@ -223,7 +238,7 @@ class MPCacheEngine:
         self.lock = threading.Lock()
 
         # storage manager
-        self.storage_manager = MPStorageManager(cpu_buffer_size, disable_lazy_alloc)
+        self.storage_manager = StorageManager(storage_manager_config)
 
     def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -233,7 +248,7 @@ class MPCacheEngine:
             instance_id (int): The GPU instance ID (such as PID).
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
         """
-        gpu_context = GPUCacheContext(kv_caches)
+        gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
         self.gpu_contexts[instance_id] = gpu_context
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
@@ -258,7 +273,7 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def store(
         self,
-        keys: list[IPCCacheEngineKey],
+        ipc_keys: list[IPCCacheEngineKey],
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
@@ -267,7 +282,8 @@ class MPCacheEngine:
         Stores the GPU KV cache blocks to CPU.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            ipc_keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
+                All keys must have worker_id != None (worker store operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to store.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -278,6 +294,12 @@ class MPCacheEngine:
                 element indicates whether the store operation was successful.
         """
         st = time.perf_counter()
+
+        assert all(ipc_key.worker_id is not None for ipc_key in ipc_keys), (
+            "Must store with worker_id != None"
+        )
+
+        keys = ipc_keys_to_object_keys(ipc_keys)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -299,12 +321,10 @@ class MPCacheEngine:
 
             num_tokens = self.chunk_size
             cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-            fmt = (
-                MemoryFormat.KV_MLA_FMT if gpu_context.is_mla else MemoryFormat.KV_2LTD
+            layout_desc = MemoryLayoutDesc(
+                shapes=[cpu_shape], dtypes=[gpu_context.dtype]
             )
-            reserve_handle, reserved_dict = self.storage_manager.reserve(
-                keys, cpu_shape, gpu_context.dtype, fmt=fmt
-            )
+            reserved_dict = self.storage_manager.reserve_write(keys, layout_desc, "new")
 
             for idx, key in enumerate(keys):
                 if key in reserved_dict:
@@ -336,7 +356,8 @@ class MPCacheEngine:
             event.record()
 
         self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
-            self.storage_manager.commit, reserve_handle
+            self.storage_manager.finish_write,
+            list(reserved_dict.keys()),
         )
         ed = time.perf_counter()
         if length := len(reserved_dict):
@@ -350,7 +371,7 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
-        keys: list[IPCCacheEngineKey],
+        ipc_keys: list[IPCCacheEngineKey],
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
@@ -359,7 +380,8 @@ class MPCacheEngine:
         Retrieves the CPU KV cache and put into GPU blocks.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys for the KV cache blocks.
+            ipc_keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
+                All keys must have worker_id != None (worker retrieve operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -367,9 +389,8 @@ class MPCacheEngine:
         Returns:
             tuple[bytes, list[bool]]: The first element is the IPC handle of the event
                 that signals the completion of the retrieve operation. The second
-                element is a list indicating whether each key was successfully
-                retrieved.
-
+                element is a list indicating whether each IPC key was successfully
+                retrieved. The length matches len(ipc_keys).
 
         Notes:
             - The caller must ensure that all keys are present in the storage (i.e.,
@@ -380,13 +401,19 @@ class MPCacheEngine:
         # retrieves objects is pre-locked by the lookup function (so they
         # must be all found)
         st = time.perf_counter()
+
+        assert all(ipc_key.worker_id is not None for ipc_key in ipc_keys), (
+            "Must retrieve with worker_id != None"
+        )
+        keys = ipc_keys_to_object_keys(ipc_keys)
+
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
         )
 
         gpu_context = self.gpu_contexts[instance_id]
 
-        def _retrieve_loop(keys: list[IPCCacheEngineKey], memory_objs: list[MemoryObj]):
+        def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]):
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
             ):
@@ -417,18 +444,27 @@ class MPCacheEngine:
 
             event = torch.cuda.Event(interprocess=True)
 
+            prefetched_keys: list[ObjectKey] = []
+            # TODO (ApostaC): the error processing here is not clear,
+            # consider refactoring it
             try:
-                with self.storage_manager.retrieve(keys) as memory_objs:
+                with self.storage_manager.read_prefetched_results(keys) as memory_objs:
+                    if not memory_objs or len(memory_objs) != len(keys):
+                        logger.error("Some keys not found during retrieve!")
+                        return event.ipc_handle(), [False] * len(keys)
+
+                    prefetched_keys = keys[: len(memory_objs)]
                     _retrieve_loop(keys, memory_objs)
             except Exception as e:
-                logger.warning("Cannot retrieve keys: %s", str(e))
+                logger.warning("Cannot retrieve keys due to exception: %s", str(e))
                 return event.ipc_handle(), [False] * len(keys)
             finally:
                 # NOTE: the event.record() should be called before
                 # the event ipc handle is returned to the caller.
                 event.record()
                 gpu_context.cupy_stream.launch_host_func(
-                    self.storage_manager.on_retrieve_finished, keys
+                    self.storage_manager.finish_read_prefetched,
+                    prefetched_keys,
                 )
 
         tokens_retrieved = len(keys) * self.chunk_size
@@ -452,7 +488,7 @@ class MPCacheEngine:
 
     def lookup(
         self,
-        keys: list[IPCCacheEngineKey],
+        ipc_keys: list[IPCCacheEngineKey],
         lock: bool | None = None,
     ) -> list[bool]:
         """
@@ -460,17 +496,20 @@ class MPCacheEngine:
         should belongs to a single request (same prompt).
 
         Args:
-            keys (list[IPCCacheEngineKey]): The keys to look up.
+            ipc_keys (list[IPCCacheEngineKey]): The IPC keys to look up.
+                All keys must have worker_id=None (scheduler lookup).
             lock (bool | None): Whether to lock the found keys.
 
         Returns:
-            list[bool]: A list indicating whether each key was found.
+            list[bool]: A list indicating whether each IPC key was found.
+                The length matches len(ipc_keys).
 
         Notes:
             - `lock` is going to be always True in the future.
             - The function does prefix-based lookup. Therefore, it
                 requires that the keys are from the same request and
                 are in order.
+            - When worker_id=None, lookup checks all workers for each IPC key.
         """
         # NOTE: we are doing per-request lookup, the caller need
         # to be aware of this! We need to add this to the doc!
@@ -481,8 +520,24 @@ class MPCacheEngine:
                 "for 5 minutes"
             )
 
-        found_count = self.storage_manager.lookup(keys)
-        return [True] * found_count + [False] * (len(keys) - found_count)
+        if not ipc_keys:
+            return []
+
+        assert all(ipc_key.worker_id is None for ipc_key in ipc_keys), (
+            "Must lookup with worker_id == None"
+        )
+        keys = ipc_keys_to_object_keys(ipc_keys)
+
+        handle = self.storage_manager.submit_prefetch_task(keys)
+        while True:
+            found_count = self.storage_manager.query_prefetch_status(handle)
+            if found_count is not None:
+                break
+        # NOTE(Kuntai): this assumes two things:
+        # 1. the world size is the same between keys
+        # 2. the lookup sort the keys in prefix order and breaks at the first failure
+        found_count = found_count // ipc_keys[0].world_size
+        return [True] * found_count + [False] * (len(ipc_keys) - found_count)
 
     def debug(self) -> str:
         return "OK"
@@ -495,6 +550,17 @@ class MPCacheEngine:
             self.storage_manager.memcheck()
             self.storage_manager.clear()
             self.storage_manager.memcheck()
+
+    def close(self) -> None:
+        """
+        Closes the MPCacheEngine and releases all resources.
+        """
+        # Close storage manager
+        self.storage_manager.close()
+        logger.info("MPCacheEngine closed")
+
+        # Release GPU contexts
+        self.gpu_contexts.clear()
 
 
 def add_handler_helper(
@@ -511,15 +577,34 @@ def add_handler_helper(
 
 
 def run_cache_server(
+    storage_manager_config: StorageManagerConfig,
     host: str = "localhost",
     port: int = 5555,
     chunk_size: int = 256,
-    cpu_buffer_size: float = 5.0,
     max_workers: int = 1,
-    disable_lazy_alloc: bool = False,
+    return_engine: bool = False,
 ):
+    """
+    Run the LMCache cache server with ZMQ message queue.
+
+    Args:
+        host: ZMQ server host
+        port: ZMQ server port
+        chunk_size: Chunk size for KV cache operations
+        cpu_buffer_size: CPU buffer size in GB
+        max_workers: Maximum number of worker threads for ZMQ server
+        return_engine: If True, return (server, engine) after starting;
+                       if False, run blocking loop to keep server alive
+
+    Returns:
+        If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
+        If return_engine is False: None (blocks until interrupted)
+    """
     # Initialize the engine
-    engine = MPCacheEngine(chunk_size, cpu_buffer_size, disable_lazy_alloc)
+    engine = MPCacheEngine(
+        storage_manager_config=storage_manager_config,
+        chunk_size=chunk_size,
+    )
 
     # Initialize the message queue server
     context = zmq.Context.instance()
@@ -539,10 +624,15 @@ def run_cache_server(
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
-    # Start the server
+    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
+    # Start the ZMQ server
     torch.cuda.init()
     server.start()
     logger.info("LMCache cache server is running...")
+
+    # Return server and engine if requested (for HTTP server integration)
+    if return_engine:
+        return server, engine
 
     # Dummy loop to keep the server running
     try:
@@ -551,39 +641,36 @@ def run_cache_server(
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
         server.close()
+        engine.close()
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="LMCache Cache Server")
-    parser.add_argument(
-        "--host", type=str, default="localhost", help="Host to bind the server"
+    parser = argparse.ArgumentParser(
+        description="LMCache ZMQ Cache Server (without HTTP)"
     )
     parser.add_argument(
-        "--port", type=int, default=5555, help="Port to bind the server"
+        "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
+    )
+    parser.add_argument(
+        "--port", type=int, default=5555, help="Port to bind the ZMQ server"
     )
     parser.add_argument(
         "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
     )
     parser.add_argument(
-        "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
-    )
-    parser.add_argument(
         "--max-workers", type=int, default=1, help="Maximum number of worker threads"
     )
-
-    parser.add_argument(
-        "--disable-lazy-alloc", action="store_true", help="Disable lazy allocation"
-    )
+    parser = add_storage_manager_args(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    storage_manager_config = parse_args_to_config(args)
     run_cache_server(
+        storage_manager_config=storage_manager_config,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
-        cpu_buffer_size=args.cpu_buffer_size,
         max_workers=args.max_workers,
-        disable_lazy_alloc=args.disable_lazy_alloc,
     )

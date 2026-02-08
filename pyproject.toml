@@ -84,6 +84,8 @@ select = [
     # "I",
     # flake8-logging-format
     #"G",
+    # flake8-self (private member access)
+    "SLF",
 ]
 ignore = [
     # star imports
@@ -95,6 +97,10 @@ ignore = [
     # f-string format
     "UP032",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore SLF everywhere except lmcache/v1/multiprocess/
+"!lmcache/v1/multiprocess/**" = ["SLF"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg
