@@ -20,6 +20,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+import lmcache.c_ops as lmc_ops
 
 
 def has_cufile() -> bool:
@@ -176,21 +177,26 @@ def generate_kv_cache_paged_list_tensors(
     device,
     block_size=16,
     dtype=torch.bfloat16,
-    use_mla=False,
     num_layers=32,
     head_size=128,
+    # default vllm non-MLA flash attention
+    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
     where KV are in the same tensor
     """
     ret = []
+    # only support vllm MLA format for now
+    use_mla = gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
     num_heads = 1 if use_mla else 8
-    shape = (
-        [num_blocks, block_size, head_size]
-        if use_mla
-        else [2, num_blocks, block_size, num_heads, head_size]
-    )
+    if use_mla:
+        shape = [num_blocks, block_size, head_size]
+    else:
+        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS:
+            shape = [2, num_blocks, block_size, num_heads, head_size]
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS:
+            shape = [num_blocks, 2, block_size, num_heads, head_size]
 
     for i in range(num_layers):
         # TODO(chunxiaozheng): support more dtypes
@@ -235,27 +241,6 @@ def generate_sglang_kv_cache_paged_list_tensors(
         ]
         kv_cache = k_cache + v_cache
     return kv_cache
-
-
-def generate_mla_kv_cache_paged_list_tensors(
-    num_blocks,
-    device,
-    block_size=64,
-    dtype=torch.bfloat16,
-    num_layers=32,
-    head_size=576,
-):
-    """
-    return KV cache of MLA
-    """
-    ret = []
-    shape = [num_blocks, block_size, head_size]
-
-    for i in range(num_layers):
-        kv = torch.rand(shape, dtype=dtype, device=device)
-        ret.append(kv)
-
-    return ret
 
 
 def generate_kv_cache_paged(num_blocks, device, block_size=16, dtype=torch.bfloat16):

@@ -25,6 +25,7 @@ from lmcache.v1.memory_management import (
     TensorMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+import lmcache.c_ops as lmc_ops
 
 # Local
 from .utils import (
@@ -88,12 +89,20 @@ def patch_pin_allocator():
 
 
 @pytest.mark.parametrize("use_gpu", [True, False])
-@pytest.mark.parametrize("use_mla", [True, False])
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS,  # vllm non-MLA flash infer
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
+    ],  # vllm MLA
+)
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
 )
-def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
+def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, gpu_kv_format):
+    use_mla = gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
     num_blocks = 100
     block_size = 16
     num_layers = 32
@@ -108,10 +117,16 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
     allocator = PinMemoryAllocator(1024 * 1024 * 1024)
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(
-        num_blocks=num_blocks, device=device, block_size=block_size, use_mla=use_mla
+        num_blocks=num_blocks,
+        device=device,
+        block_size=block_size,
+        gpu_kv_format=gpu_kv_format,
     )
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(
-        num_blocks=num_blocks, device=device, block_size=block_size, use_mla=use_mla
+        num_blocks=num_blocks,
+        device=device,
+        block_size=block_size,
+        gpu_kv_format=gpu_kv_format,
     )
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -188,13 +203,21 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, use_mla):
 
 
 @pytest.mark.parametrize("use_gpu", [True, False])
-@pytest.mark.parametrize("use_mla", [True, False])
 @pytest.mark.parametrize("num_groups", [1, 2, 3])
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS,  # vllm non-MLA flash infer
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
+    ],  # vllm MLA
+)
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV3",
 )
-def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, use_mla, num_groups):
+def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, num_groups, gpu_kv_format):
+    use_mla = gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
     head_sizes = [64, 66, 66]
     dtypes = [torch.uint8, torch.bfloat16, torch.uint8]
     num_blocks = 100
@@ -220,10 +243,10 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, use_mla, num_groups):
                 num_blocks=num_blocks,
                 device=device,
                 block_size=block_size,
-                use_mla=use_mla,
                 dtype=dtypes[i],
                 num_layers=8,
                 head_size=head_sizes[i],
+                gpu_kv_format=gpu_kv_format,
             )
             groups.append(kv_group)
             for j, layer_tensor in enumerate(kv_group):

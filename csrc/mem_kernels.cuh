@@ -85,6 +85,7 @@ void multi_layer_kv_transfer(torch::Tensor& key_value,
                              const GPUKVFormat gpu_kv_format,
                              const int block_size = 0);
 
+// collapses to multi_layer_kv_transfer for MLA
 void multi_layer_kv_transfer_unilateral(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
@@ -104,17 +105,19 @@ void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
                                   const TransferDirection direction,
                                   const bool token_major = false);
 
+void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
+                          TransferDirection direction,
+                          size_t host_buffer_offset,
+                          size_t host_buffer_alignments);
+
+// deprecated / unused except in unit tests
 void load_and_reshape_flash(torch::Tensor& key_value, torch::Tensor& key_cache,
                             torch::Tensor& value_cache,
                             torch::Tensor& slot_mapping, const int layer_idx);
 
+// deprecated / unused except in unit tests
 void reshape_and_cache_back_flash(torch::Tensor& key_value,
                                   torch::Tensor& key_cache,
                                   torch::Tensor& value_cache,
                                   torch::Tensor& slot_mapping,
                                   const int layer_idx);
-
-void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
-                          TransferDirection direction,
-                          size_t host_buffer_offset,
-                          size_t host_buffer_alignments);
