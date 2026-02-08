@@ -16,6 +16,14 @@ PYBIND11_MODULE(c_ops, m) {
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H)
       .export_values();
+  py::enum_<GPUKVFormat>(m, "GPUKVFormat")
+      .value("NB_NL_2_BS_NH_HS", GPUKVFormat::NB_NL_2_BS_NH_HS)
+      .value("NL_X_2_NB_BS_NH_HS", GPUKVFormat::NL_X_2_NB_BS_NH_HS)
+      .value("NL_X_NB_2_BS_NH_HS", GPUKVFormat::NL_X_NB_2_BS_NH_HS)
+      .value("NL_X_NB_BS_HS", GPUKVFormat::NL_X_NB_BS_HS)
+      .value("NL2_X_NBBS_NH_HS", GPUKVFormat::NL2_X_NBBS_NH_HS)
+      .value("NL_X_NBBS_1_HS", GPUKVFormat::NL_X_NBBS_1_HS)
+      .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
