@@ -522,15 +522,15 @@ class MPCacheEngine:
                 with self.storage_manager.read_prefetched_results(
                     obj_keys
                 ) as memory_objs:
-                    if not memory_objs or len(memory_objs) != len(obj_keys):
+                    if not memory_objs or len(memory_objs) != len(keys):
                         logger.error("Some keys not found during retrieve!")
-                        return event.ipc_handle(), [False] * len(obj_keys)
+                        return event.ipc_handle(), [False] * len(keys)
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     _retrieve_loop(obj_keys, memory_objs)
             except Exception as e:
                 logger.warning("Cannot retrieve keys due to exception: %s", str(e))
-                return event.ipc_handle(), [False] * len(obj_keys)
+                return event.ipc_handle(), [False] * len(keys)
             finally:
                 event.record()
                 gpu_context.cupy_stream.launch_host_func(
@@ -538,7 +538,7 @@ class MPCacheEngine:
                     prefetched_keys,
                 )
 
-        tokens_retrieved = len(obj_keys) * self.chunk_size
+        tokens_retrieved = len(keys) * self.chunk_size
         ed = time.perf_counter()
         logger.info(
             "Retrieved %d tokens in %.3f seconds",
@@ -546,7 +546,7 @@ class MPCacheEngine:
             ed - st,
         )
 
-        return event.ipc_handle(), [True] * len(obj_keys)
+        return event.ipc_handle(), [True] * len(keys)
 
     def lookup(
         self,
@@ -567,8 +567,6 @@ class MPCacheEngine:
                 ipc_keys.extend(key.to_hash_keys(self.token_hasher))
             else:
                 ipc_keys.append(key)
-        # Strip worker_id for lookup (expand to all workers in ipc_keys_to_object_keys)
-        ipc_keys = [k.no_worker_id_version() for k in ipc_keys]
         if not ipc_keys:
             return 0
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
