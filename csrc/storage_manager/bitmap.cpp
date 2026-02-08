@@ -17,7 +17,7 @@ inline unsigned bit_offset(size_t bit_index) {
 }  // namespace
 
 Bitmap::Bitmap(size_t size)
-    : size_(size), data_((size + kBitsPerByte - 1) / kBitsPerByte, 0) {}
+    : size_(size), data_(size == 0 ? 0 : (size - 1) / kBitsPerByte + 1, 0) {}
 
 void Bitmap::set(size_t index) {
   if (index >= size_) return;
@@ -36,70 +36,62 @@ bool Bitmap::test(size_t index) const {
 
 size_t Bitmap::popcount() const {
   if (data_.empty()) return 0;
+
+  // process full bytes
   size_t count = 0;
-  const size_t num_bytes = data_.size();
-  for (size_t i = 0; i < num_bytes; ++i) {
-    uint8_t b = data_[i];
-    if (i == num_bytes - 1 && size_ % kBitsPerByte != 0) {
-      b &= static_cast<uint8_t>((1u << (size_ % kBitsPerByte)) - 1);
-    }
-    count += static_cast<size_t>(__builtin_popcount(static_cast<unsigned>(b)));
+  const size_t num_full_bytes = size_ / kBitsPerByte;
+  for (size_t i = 0; i < num_full_bytes; ++i) {
+    count += static_cast<size_t>(
+        __builtin_popcount(static_cast<unsigned>(data_[i])));
+  }
+
+  // process remaining bits in the last byte
+  const unsigned remaining_bits = size_ % kBitsPerByte;
+  if (remaining_bits > 0) {
+    uint8_t last_byte = data_.back();
+    uint8_t mask = static_cast<uint8_t>((1u << remaining_bits) - 1);
+    last_byte &= mask;
+    count += static_cast<size_t>(
+        __builtin_popcount(static_cast<unsigned>(last_byte)));
   }
   return count;
 }
 
 size_t Bitmap::clz() const {
-  const size_t num_bytes = data_.size();
-  const unsigned last_byte_bits =
-      (num_bytes > 0 && size_ % kBitsPerByte != 0)
-          ? static_cast<unsigned>(size_ % kBitsPerByte)
-          : kBitsPerByte;
+  if (size_ == 0) return 0;
+
+  const size_t num_full_bytes = size_ / kBitsPerByte;
   size_t count = 0;
-  for (size_t i = 0; i < num_bytes; ++i) {
-    const bool is_last_byte = (i == num_bytes - 1);
-    const unsigned bits_in_byte = is_last_byte ? last_byte_bits : kBitsPerByte;
+
+  for (size_t i = 0; i < num_full_bytes; ++i) {
     uint8_t b = data_[i];
-    if (is_last_byte && bits_in_byte < kBitsPerByte) {
-      b &= static_cast<uint8_t>((1u << bits_in_byte) - 1);
-    }
     if (b == 0) {
-      count += bits_in_byte;
+      count += kBitsPerByte;
     } else {
       count += static_cast<size_t>(__builtin_ctz(static_cast<unsigned>(b)));
       return count;
     }
   }
+
+  const unsigned remaining_bits = size_ % kBitsPerByte;
+  if (remaining_bits > 0) {
+    uint8_t last_byte = data_.back();
+    uint8_t mask = static_cast<uint8_t>((1u << remaining_bits) - 1);
+    last_byte &= mask;
+    if (last_byte == 0) {
+      count += remaining_bits;
+    } else {
+      count +=
+          static_cast<size_t>(__builtin_ctz(static_cast<unsigned>(last_byte)));
+    }
+  }
+
   return count;
 }
 
 size_t Bitmap::clo() const {
-  const size_t num_bytes = data_.size();
-  const unsigned last_byte_bits =
-      (num_bytes > 0 && size_ % kBitsPerByte != 0)
-          ? static_cast<unsigned>(size_ % kBitsPerByte)
-          : kBitsPerByte;
-  size_t count = 0;
-  for (size_t i = 0; i < num_bytes; ++i) {
-    const bool is_last_byte = (i == num_bytes - 1);
-    const unsigned bits_in_byte = is_last_byte ? last_byte_bits : kBitsPerByte;
-    uint8_t b = data_[i];
-    if (is_last_byte && bits_in_byte < kBitsPerByte) {
-      b &= static_cast<uint8_t>((1u << bits_in_byte) - 1);
-    }
-    const uint8_t full_byte =
-        (bits_in_byte == kBitsPerByte)
-            ? 0xFF
-            : static_cast<uint8_t>((1u << bits_in_byte) - 1);
-    if (b == full_byte) {
-      count += bits_in_byte;
-    } else {
-      const unsigned mask = (1u << bits_in_byte) - 1;
-      count += static_cast<size_t>(
-          __builtin_ctz(static_cast<unsigned>((~b) & mask)));
-      return count;
-    }
-  }
-  return count;
+  const Bitmap inverted{~(*this)};
+  return inverted.clz();
 }
 
 Bitmap Bitmap::operator&(const Bitmap& other) const {
@@ -112,11 +104,36 @@ Bitmap Bitmap::operator&(const Bitmap& other) const {
 }
 
 std::string Bitmap::to_string() const {
+  if (size_ == 0) return "";
+
   std::string result(size_, '0');
-  for (size_t i = 0; i < size_; ++i) {
-    if (test(i)) {
-      result[i] = '1';
+  for (size_t i = 0; i < data_.size(); ++i) {
+    uint8_t byte = data_[i];
+    for (unsigned j = 0; j < kBitsPerByte; ++j) {
+      size_t bit_index = i * kBitsPerByte + j;
+      if (bit_index >= size_) {
+        break;
+      }
+      if ((byte >> j) & 1u) {
+        result[bit_index] = '1';
+      }
     }
+  }
+
+  return result;
+}
+
+Bitmap Bitmap::operator~() const {
+  Bitmap result(size_);
+  for (size_t i = 0; i < data_.size(); ++i) {
+    result.data_[i] = ~data_[i];
+  }
+
+  // Clear bits that are out of range in the last byte
+  const unsigned remaining_bits = size_ % kBitsPerByte;
+  if (remaining_bits > 0) {
+    uint8_t mask = static_cast<uint8_t>((1u << remaining_bits) - 1);
+    result.data_.back() &= mask;
   }
   return result;
 }

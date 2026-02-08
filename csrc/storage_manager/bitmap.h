@@ -89,6 +89,15 @@ class Bitmap {
  private:
   size_t size_;
   std::vector<uint8_t> data_;
+
+  // Helper functions
+
+  /**
+   * @brief flip the bits in the bitmap (bitwise NOT).
+   *
+   * @return a new Bitmap that is the result of the bitwise NOT operation.
+   */
+  Bitmap operator~() const;
 };
 
 }  // namespace storage_manager
