@@ -27,6 +27,10 @@
 
 namespace lmc {
 
+// Forward declaration
+__host__ __device__ __forceinline__ bool is_mla(
+    const GPUKVFormat gpu_kv_format);
+
 template <typename scalar_t>
 __global__ void load_and_reshape_flash_kernel(
     scalar_t* __restrict__ key_value,  // [num_tokens, num_heads, head_size]
@@ -398,8 +402,9 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
   }
 }
 
-// inline header to check MLA
-__device__ __forceinline__ bool is_mla(const GPUKVFormat gpu_kv_format) {
+// inline header to check MLA (callable from device and host)
+__host__ __device__ __forceinline__ bool is_mla(
+    const GPUKVFormat gpu_kv_format) {
   return gpu_kv_format == GPUKVFormat::NL_X_NB_BS_HS ||  // vllm MLA
          gpu_kv_format == GPUKVFormat::NL_X_NBBS_1_HS;   // SGLang MLA
 }
@@ -610,8 +615,8 @@ void single_layer_kv_transfer(
     // [num_blocks, block_size, head_size] for MLA
 
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const bool direction,  // false: LMCache to PagedBuffer, true: PagedBuffer
-                           // to LMCache
+    const TransferDirection
+        direction,  // H2D: LMCache to PagedBuffer, D2H: PagedBuffer to LMCache
     const GPUKVFormat gpu_kv_format,
     const bool token_major,  // true: lmc_key_value_cache is
                              // [num_tokens, 2, num_heads*head_size]

@@ -37,53 +37,45 @@ The logic for identifying the format currently lives in
 */
 enum class GPUKVFormat : int {
   NB_NL_2_BS_NH_HS = 0,
-  /* 
-  used by: 
+  /*
+  used by:
   - vLLM CROSS_LAYER mode
   */
 
-
   NL_X_2_NB_BS_NH_HS = 1,
   /*
-  used by: 
+  used by:
   - vLLM non-MLA flash attention
   */
 
-
   NL_X_NB_2_BS_NH_HS = 2,
   /*
-  used by: 
+  used by:
   - vLLM non-MLA flash infer
   */
 
-
   NL_X_NB_BS_HS = 3,
-  /* 
+  /*
   used by:
   - vLLM MLA
   */
-
 
   NL2_X_NBBS_NH_HS = 4,
   /*
   - SGLang MHA (flash attention and flash infer)
   */
 
-
   NL_X_NBBS_1_HS = 5,
   /*
   - SGLang MLA
   */
-}
+};
 
-void multi_layer_kv_transfer(torch::Tensor& key_value,
-                             const torch::Tensor& key_value_ptrs,
-                             const torch::Tensor& slot_mapping,
-                             const torch::Device& paged_memory_device,
-                             const int page_buffer_size, 
-                             const TransferDirection direction,
-                             const GPUKVFormat gpu_kv_format,
-                             const int block_size = 0);
+void multi_layer_kv_transfer(
+    torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
+    const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const GPUKVFormat gpu_kv_format, const int block_size = 0);
 
 // collapses to multi_layer_kv_transfer for MLA
 void multi_layer_kv_transfer_unilateral(
@@ -94,7 +86,8 @@ void multi_layer_kv_transfer_unilateral(
 
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_value_cache,
-                              torch::Tensor& slot_mapping, const bool direction,
+                              torch::Tensor& slot_mapping,
+                              const TransferDirection direction,
                               const GPUKVFormat gpu_kv_format,
                               const bool token_major = false);
 
