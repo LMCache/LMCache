@@ -10,17 +10,17 @@ from typing import Iterator, Literal
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.distributed.api import (
+from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.multiprocess.distributed.config import StorageManagerConfig
-from lmcache.v1.multiprocess.distributed.error import L1Error, strerror
-from lmcache.v1.multiprocess.distributed.l1_manager import L1Manager
-from lmcache.v1.multiprocess.distributed.storage_controllers import (
+from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.error import L1Error, strerror
+from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
