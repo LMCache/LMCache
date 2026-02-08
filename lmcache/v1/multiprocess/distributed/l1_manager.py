@@ -521,3 +521,20 @@ class L1Manager:
     def memcheck(self) -> None:
         """Perform memory check for L1 cache."""
         self._memory_manager.memcheck()
+
+        # Log the locked objects for debugging
+        num_write_locked = 0
+        num_read_locked = 0
+        for key, entry in self._objects.items():
+            if entry.write_lock.is_locked():
+                num_write_locked += 1
+            if entry.read_lock.is_locked():
+                num_read_locked += 1
+
+        logger.info(
+            "L1Manager memcheck: total objects = %d, write-locked = %d, "
+            "read-locked = %d",
+            len(self._objects),
+            num_write_locked,
+            num_read_locked,
+        )
