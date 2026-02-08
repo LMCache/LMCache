@@ -27,9 +27,12 @@
 
 namespace lmc {
 
-// Forward declaration
+// inline helper to check MLA (callable from device and host)
 __host__ __device__ __forceinline__ bool is_mla(
-    const GPUKVFormat gpu_kv_format);
+    const GPUKVFormat gpu_kv_format) {
+  return gpu_kv_format == GPUKVFormat::NL_X_NB_BS_HS ||  // vllm MLA
+         gpu_kv_format == GPUKVFormat::NL_X_NBBS_1_HS;   // SGLang MLA
+}
 
 template <typename scalar_t>
 __global__ void load_and_reshape_flash_kernel(
@@ -203,13 +206,13 @@ __device__ __forceinline__ int64_t page_buffer_offset(
     const int block_offset = token_idx % block_size;
     return block_idx * 2 * block_size * scalars_per_token +
            k_or_v * block_size * scalars_per_token +
-           block_offset * scalars_per_token + scalar_offset
+           block_offset * scalars_per_token + scalar_offset;
   }
   // MLA
   // vLLM: NL_X_NB_BS_HS
   // SGLang: NL_X_NBBS_1_HS
   if (is_mla(gpu_kv_format)) {
-    return token_idx * scalars_per_token + scalar_offset
+    return token_idx * scalars_per_token + scalar_offset;
   }
 }
 
@@ -402,12 +405,6 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
   }
 }
 
-// inline header to check MLA (callable from device and host)
-__host__ __device__ __forceinline__ bool is_mla(
-    const GPUKVFormat gpu_kv_format) {
-  return gpu_kv_format == GPUKVFormat::NL_X_NB_BS_HS ||  // vllm MLA
-         gpu_kv_format == GPUKVFormat::NL_X_NBBS_1_HS;   // SGLang MLA
-}
 /**
  * Quickly offload KV cache from vLLM paged memory to the offloading buffer
  * Processes all the layers at the same time
@@ -615,9 +612,7 @@ void single_layer_kv_transfer(
     // [num_blocks, block_size, head_size] for MLA
 
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const TransferDirection
-        direction,  // H2D: LMCache to PagedBuffer, D2H: PagedBuffer to LMCache
-    const GPUKVFormat gpu_kv_format,
+    const TransferDirection direction, const GPUKVFormat gpu_kv_format,
     const bool token_major,  // true: lmc_key_value_cache is
                              // [num_tokens, 2, num_heads*head_size]
                              // false: lmc_key_value_cache is
