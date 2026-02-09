@@ -109,47 +109,11 @@ class MockL2Adapter(L2AdapterInterface):
         Returns:
             L2TaskId: the task id of the submitted store task.
         """
-        total_bytes = 0
-        success = True
-        start = time.perf_counter()
-
         with self._lock:
             task_id = self._get_next_task_id()
-            try:
-                for key, obj in zip(keys, objects, strict=False):
-                    obj_size = obj.get_size()
 
-                    # If the object is larger than max capacity, skip it
-                    if obj_size > self._max_capacity_bytes:
-                        continue
-
-                    # If key already exists, simply skip
-                    if key in self._memory_objects:
-                        continue
-
-                    # Evict old objects if needed
-                    self._evict_if_needed(obj_size)
-
-                    # Store the object
-                    new_obj = clone_tensor_memory_obj(obj)
-                    self._memory_objects[key] = new_obj
-                    self._key_queue.append(key)
-                    self._current_size_bytes += obj_size
-                    total_bytes += obj_size
-            except Exception:
-                success = False
-
-        # Calculate delay based on bandwidth simulation
-        end = time.perf_counter()
-        delay_seconds = (
-            total_bytes / self._bandwidth_byte_ps if self._bandwidth_byte_ps > 0 else 0
-        )
-        delay_seconds -= end - start
-        delay_seconds = max(delay_seconds, 0)  # Ensure non-negative delay
-
-        # Schedule completion coroutine on the event loop
         asyncio.run_coroutine_threadsafe(
-            self._delayed_store_completion(task_id, success, delay_seconds), self._loop
+            self._execute_store_in_the_loop(keys, objects, task_id), self._loop
         )
 
         return task_id
@@ -170,16 +134,11 @@ class MockL2Adapter(L2AdapterInterface):
         return completed
 
     def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
-        bitmap = Bitmap(len(keys))
         with self._lock:
             task_id = self._get_next_task_id()
-            for i, key in enumerate(keys):
-                if key not in self._memory_objects:
-                    continue
-                bitmap.set(i)
-                self._locked_keys[key] += 1
-            self._completed_lookup_tasks[task_id] = bitmap
-        self._signal_lookup_event()
+
+        # Schedule the lookup operation in the event loop thread
+        self._loop.call_soon_threadsafe(self._execute_lookup_in_the_loop, keys, task_id)
         return task_id
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
@@ -187,7 +146,11 @@ class MockL2Adapter(L2AdapterInterface):
             return self._completed_lookup_tasks.pop(task_id, None)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        with self._lock:
+        def _unlock_keys(keys: list[ObjectKey]) -> None:
+            """
+            Coroutine to unlock keys in the event loop thread.
+            This is a helper function to avoid blocking the main thread.
+            """
             for key in keys:
                 if key not in self._locked_keys:
                     continue
@@ -196,39 +159,20 @@ class MockL2Adapter(L2AdapterInterface):
                 else:
                     self._locked_keys[key] -= 1
 
+        # Schedule the unlock operation in the event loop thread
+        self._loop.call_soon_threadsafe(_unlock_keys, keys)
+
     def submit_load_task(
         self,
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        bitmap = Bitmap(len(keys))
-        start = time.perf_counter()
-        total_bytes = 0
-
         with self._lock:
             task_id = self._get_next_task_id()
-            for i, key in enumerate(keys):
-                if key not in self._memory_objects:
-                    continue
-                # load data into the provided memory object
-                obj = self._memory_objects[key]
-                src_tensor = obj.tensor
-                dst_tensor = objects[i].tensor
-                assert src_tensor is not None
-                assert dst_tensor is not None
-                dst_tensor.copy_(src_tensor)
-                bitmap.set(i)
-                total_bytes += obj.get_size()
 
-        end = time.perf_counter()
-        delay_seconds = (
-            total_bytes / self._bandwidth_byte_ps if self._bandwidth_byte_ps > 0 else 0
-        )
-        delay_seconds -= end - start
-        delay_seconds = max(delay_seconds, 0)  # Ensure non-negative delay
-
+        # Schedule the load operation in the event loop thread
         asyncio.run_coroutine_threadsafe(
-            self._delayed_load_completion(task_id, bitmap, delay_seconds), self._loop
+            self._execute_load_in_loop(keys, objects, task_id), self._loop
         )
 
         return task_id
@@ -239,8 +183,26 @@ class MockL2Adapter(L2AdapterInterface):
 
     def close(self):
         # Stop the event loop and wait for the thread to finish
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._loop_thread.join(timeout=1.0)
+        async def _stop_tasks():
+            tasks = [
+                t
+                for t in asyncio.all_tasks(self._loop)
+                if t is not asyncio.current_task()
+            ]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        if self._loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+            try:
+                future.result(timeout=5)  # Wait for tasks to be cancelled
+            except Exception:
+                pass  # Ignore exceptions during shutdown
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
+        self._loop_thread.join()
 
         os.close(self._store_efd)
         os.close(self._lookup_efd)
@@ -292,33 +254,114 @@ class MockL2Adapter(L2AdapterInterface):
         """Signal the store event fd to notify completion."""
         os.eventfd_write(self._store_efd, 1)
 
-    async def _delayed_store_completion(
-        self, task_id: L2TaskId, success: bool, delay_seconds: float
+    async def _execute_store_in_the_loop(
+        self,
+        keys: list[ObjectKey],
+        objects: list[MemoryObj],
+        task_id: L2TaskId,
     ) -> None:
         """
-        Coroutine that waits for the simulated transfer delay, then marks
-        the store task as completed and signals the event fd.
+        Execute the store operation in the event loop thread.
+        This is a helper function to avoid blocking the main thread.
         """
+        total_bytes = 0
+        success = True
+        start = time.perf_counter()
+
+        try:
+            for key, obj in zip(keys, objects, strict=False):
+                obj_size = obj.get_size()
+
+                # If the object is larger than max capacity, skip it
+                if obj_size > self._max_capacity_bytes:
+                    continue
+
+                # If key already exists, simply skip
+                if key in self._memory_objects:
+                    continue
+
+                # Evict old objects if needed
+                self._evict_if_needed(obj_size)
+
+                # Store the object
+                new_obj = clone_tensor_memory_obj(obj)
+                self._memory_objects[key] = new_obj
+                self._key_queue.append(key)
+                self._current_size_bytes += obj_size
+                total_bytes += obj_size
+        except Exception:
+            success = False
+
+        # Calculate delay based on bandwidth simulation
+        end = time.perf_counter()
+        delay_seconds = (
+            total_bytes / self._bandwidth_byte_ps if self._bandwidth_byte_ps > 0 else 0
+        )
+        delay_seconds -= end - start
+        delay_seconds = max(delay_seconds, 0)  # Ensure non-negative delay
+
+        # Schedule completion coroutine on the event loop
         await asyncio.sleep(delay_seconds)
         with self._lock:
             self._completed_store_tasks[task_id] = success
+
         self._signal_store_event()
 
     def _signal_lookup_event(self) -> None:
         """Signal the lookup event fd to notify completion."""
         os.eventfd_write(self._lookup_efd, 1)
 
+    def _execute_lookup_in_the_loop(
+        self, keys: list[ObjectKey], task_id: L2TaskId
+    ) -> None:
+        bitmap = Bitmap(len(keys))
+        for i, key in enumerate(keys):
+            if key not in self._memory_objects:
+                continue
+            bitmap.set(i)
+            self._locked_keys[key] += 1
+        with self._lock:
+            self._completed_lookup_tasks[task_id] = bitmap
+        self._signal_lookup_event()
+
     def _signal_load_event(self) -> None:
         """Signal the load event fd to notify completion."""
         os.eventfd_write(self._load_efd, 1)
 
-    async def _delayed_load_completion(
-        self, task_id: L2TaskId, bitmap: Bitmap, delay_seconds: float
+    async def _execute_load_in_loop(
+        self,
+        keys: list[ObjectKey],
+        objects: list[MemoryObj],
+        task_id: L2TaskId,
     ) -> None:
         """
-        Coroutine that waits for the simulated transfer delay, then marks
-        the load task as completed and signals the event fd.
+        Execute the load operation in the event loop thread.
+        This is a helper function to avoid blocking the main thread.
         """
+        bitmap = Bitmap(len(keys))
+        total_bytes = 0
+        start = time.perf_counter()
+
+        for i, key in enumerate(keys):
+            if key not in self._memory_objects:
+                continue
+            # load data into the provided memory object
+            obj = self._memory_objects[key]
+            src_tensor = obj.tensor
+            dst_tensor = objects[i].tensor
+            assert src_tensor is not None
+            assert dst_tensor is not None
+            dst_tensor.copy_(src_tensor)
+            bitmap.set(i)
+            total_bytes += obj.get_size()
+
+        end = time.perf_counter()
+        delay_seconds = (
+            total_bytes / self._bandwidth_byte_ps if self._bandwidth_byte_ps > 0 else 0
+        )
+        delay_seconds -= end - start
+        delay_seconds = max(delay_seconds, 0)  # Ensure non-negative delay
+
         await asyncio.sleep(delay_seconds)
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
