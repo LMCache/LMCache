@@ -279,11 +279,6 @@ class ReqMeta:
     # the configs of the request
     request_configs: Optional[dict] = None
 
-    # Metrics to pass from scheduler to worker process
-    # These are populated even when load_spec is None (can_load=False)
-    vllm_cached_tokens_for_metrics: Optional[int] = None
-    prompt_tokens_for_metrics: Optional[int] = None
-
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
@@ -397,16 +392,7 @@ class ReqMeta:
         slot_mapping = slot_mapping.flatten()[: len(token_ids)]
         assert slot_mapping.dtype == torch.long  # TODO: this could be removed
 
-        # Extract metrics before potentially setting load_spec to None
-        # These metrics need to be passed to worker process for observability
-        vllm_cached_tokens_for_metrics = (
-            load_spec.vllm_cached_tokens if load_spec is not None else None
-        )
-        prompt_tokens_for_metrics = (
-            len(tracker.token_ids) if load_spec is not None else None
-        )
-
-        # For load operation: check whether the request is scheduled to load
+        # For load operation: log if the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
             logger.debug(
                 "Scheduled to load %d tokens (%d cached in vLLM) for request %s",
@@ -414,10 +400,8 @@ class ReqMeta:
                 load_spec.vllm_cached_tokens,
                 tracker.req_id,
             )
-        else:
-            # Do not load if not in `can_load` state
-            load_spec = None
 
+        # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
             req_id=tracker.req_id,
             token_ids=token_ids,
@@ -427,8 +411,6 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
-            vllm_cached_tokens_for_metrics=vllm_cached_tokens_for_metrics,
-            prompt_tokens_for_metrics=prompt_tokens_for_metrics,
         )
 
 
@@ -787,23 +769,21 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers = []
 
         for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
+            if request.load_spec is None or not request.load_spec.can_load:
                 continue
             last_idx = idx
 
         for idx, request in enumerate(metadata.requests):
-            # Update metrics for all requests, even if load_spec is None
-            # Metrics are passed from scheduler via ReqMeta
-            if request.vllm_cached_tokens_for_metrics is not None:
+            # Update metrics for all requests that have a load_spec
+            if request.load_spec is not None:
                 self._stats_monitor.update_interval_vllm_hit_tokens(
-                    request.vllm_cached_tokens_for_metrics
+                    request.load_spec.vllm_cached_tokens
                 )
-            if request.prompt_tokens_for_metrics is not None:
                 self._stats_monitor.update_interval_prompt_tokens(
-                    request.prompt_tokens_for_metrics
+                    len(request.token_ids)
                 )
 
-            if request.load_spec is None:
+            if request.load_spec is None or not request.load_spec.can_load:
                 continue
 
             tokens = request.token_ids
