@@ -132,6 +132,11 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
     return IPCCacheEngineKey.from_int_hash(model, 1, 0, index)
 
 
+def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
+    """Create lookup keys: worker_id=None."""
+    return [k.no_worker_id_version() for k in keys]
+
+
 def server_process_runner(
     host: str, port: int, chunk_size: int, cpu_buffer_size: float
 ):
@@ -333,23 +338,21 @@ def test_store_and_lookup(
     # Lookup - keys that exist
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [[key.no_worker_id_version() for key in keys], False],
+        [lookup_keys(keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result) == num_keys
-    assert all(lookup_result), "All stored keys should exist"
+    assert lookup_result == num_keys, "All stored keys should exist"
 
     # Lookup - keys that don't exist
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
     lookup_future2 = client.submit_request(
         RequestType.LOOKUP,
-        [[key.no_worker_id_version() for key in non_existent_keys], False],
+        [lookup_keys(non_existent_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result2) == 5
-    assert not any(lookup_result2), "Non-existent keys should not be found"
+    assert lookup_result2 == 0, "Non-existent keys should not be found"
 
 
 @pytest.mark.skipif(
@@ -385,11 +388,11 @@ def test_store_retrieve_verify(
     # Call look up to ensure the data is ready to be retrieved
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [[key.no_worker_id_version() for key in keys], True],
+        [lookup_keys(keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result) == num_keys
+    assert lookup_result == num_keys
 
     # Retrieve to a different location in the cache
     # Use offset of 40 blocks (640 pages total needed: 320 + 320)
@@ -453,11 +456,11 @@ def test_retrieve_partial_miss(
     # Lookup to ensure keys are stored
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [[key.no_worker_id_version() for key in stored_keys], True],
+        [lookup_keys(stored_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result) == num_stored
+    assert lookup_result == num_stored
 
     # Try to retrieve 60 keys (only first 30 exist)
     # Total pages needed: 60 * 16 = 960 (< 1024)
@@ -489,11 +492,11 @@ def test_retrieve_partial_miss(
     # Doing look up again to ensure data is ready
     lookup_future_2 = client.submit_request(
         RequestType.LOOKUP,
-        [[key.no_worker_id_version() for key in stored_keys], True],
+        [lookup_keys(stored_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result_2 = lookup_future_2.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result_2) == num_stored
+    assert lookup_result_2 == num_stored
 
     # Try to retrieve the first 30 keys only (all exist)
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
@@ -570,13 +573,12 @@ def test_multiple_retrieve_operations(
     ]
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [[key.no_worker_id_version() for key in all_keys], True],
+        [lookup_keys(all_keys)],
         get_response_class(RequestType.LOOKUP),
     )
 
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result) == num_batches * keys_per_batch
-    assert all(lookup_result), "All stored keys should exist"
+    assert lookup_result == num_batches * keys_per_batch, "All stored keys should exist"
 
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
@@ -671,12 +673,11 @@ def test_multiple_store_operations(
     all_keys = keys1 + keys2
     lookup_result = client.submit_request(
         RequestType.LOOKUP,
-        [[key.no_worker_id_version() for key in all_keys], False],
+        [lookup_keys(all_keys)],
         get_response_class(RequestType.LOOKUP),
     ).result(timeout=DEFAULT_TIMEOUT)
 
-    assert len(lookup_result) == 50
-    assert all(lookup_result), "All stored keys from both batches should exist"
+    assert lookup_result == 50, "All stored keys from both batches should exist"
 
 
 @pytest.mark.skipif(
