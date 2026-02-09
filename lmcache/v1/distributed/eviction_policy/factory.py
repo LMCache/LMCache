@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
-from lmcache.v1.multiprocess.distributed.config import EvictionConfig
-from lmcache.v1.multiprocess.distributed.eviction import EvictionPolicy
-from lmcache.v1.multiprocess.distributed.eviction_policy.lru import LRUEvictionPolicy
+from lmcache.v1.distributed.config import EvictionConfig
+from lmcache.v1.distributed.eviction import EvictionPolicy
+from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
 
 
 def CreateEvictionPolicy(eviction_config: EvictionConfig) -> EvictionPolicy:

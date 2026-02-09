@@ -13,9 +13,9 @@ These tests verify the basic functionality of the LRUEvictionPolicy:
 # Third Party
 
 # First Party
-from lmcache.v1.multiprocess.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.distributed.eviction_policy import LRUEvictionPolicy
-from lmcache.v1.multiprocess.distributed.internal_api import (
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
+from lmcache.v1.distributed.internal_api import (
     EvictionDestination,
 )
 

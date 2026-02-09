@@ -7,8 +7,8 @@ Eviction module to determine the what to evict from L1 cache
 from abc import abstractmethod
 
 # First Party
-from lmcache.v1.multiprocess.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.distributed.internal_api import (
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
     L1ManagerListener,
