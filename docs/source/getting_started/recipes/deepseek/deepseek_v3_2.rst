@@ -37,9 +37,6 @@ Create ``deepseek_v3_2.yaml``:
    local_cpu: True
    max_local_cpu_size: 5
    save_unfull_chunk: False
-   extra_config:
-     first_rank_max_local_cpu_size: 10
-     save_only_first_rank: True
 
 
 Launching DeepSeek-V3.2 on 8xH200
@@ -64,7 +61,7 @@ The chat-template changes in the DeepSeek-V3.2 are quite significant. vLLM adapt
 
 .. note::
    ``Prefix caching`` is disabled so that all reuse comes from LMCache, making cache hits and TTFT deltas easier to interpret. For real deployments, keep vLLM prefix caching enabled and size the CPU cache appropriately.
-   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances.
+   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances. Please remove it in production. 
 
  
 
@@ -121,3 +118,54 @@ Expected LMCache logs (warm):
    External prefix cache hit rate: 42.6%
 
 This is expected: vLLM labels KV supplied by external connectors (LMCache) as **external prefix cache**.
+
+
+Benchmark  
+----------------------------------
+
+.. code-block:: bash
+
+   vllm bench serve \
+  --model deepseek-ai/DeepSeek-V3.2 \
+  --dataset-name random \
+  --random-input 2048 \
+  --random-output 1024 \
+  --request-rate 10 \
+  --num-prompt 100  
+
+
+Vllm (Prefix Caching)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: text
+
+   ---------------Time to First Token----------------
+   Mean TTFT (ms):                          12942.91
+   Median TTFT (ms):                        12586.42
+   P99 TTFT (ms):                           22870.84
+   -----Time per Output Token (excl. 1st token)------
+   Mean TPOT (ms):                          72.13
+   Median TPOT (ms):                        72.17
+   P99 TPOT (ms):                           81.17
+   ---------------Inter-token Latency----------------
+   Mean ITL (ms):                           72.13
+   Median ITL (ms):                         59.73
+   P99 ITL (ms):                            787.12
+
+Vllm + LMCache 
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: text
+
+   ---------------Time to First Token----------------
+   Mean TTFT (ms):                          6946.60
+   Median TTFT (ms):                        6636.40
+   P99 TTFT (ms):                           17153.67
+   -----Time per Output Token (excl. 1st token)------
+   Mean TPOT (ms):                          71.73
+   Median TPOT (ms):                        71.95
+   P99 TPOT (ms):                           80.79
+   ---------------Inter-token Latency----------------
+   Mean ITL (ms):                           71.73
+   Median ITL (ms):                         59.06
+   P99 ITL (ms):                            804.18
