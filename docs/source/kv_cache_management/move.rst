@@ -33,6 +33,7 @@ configure two lmcache instances:
 
     # cache controller configurations
     enable_controller: True
+    enable_kv_events: True
     lmcache_instance_id: "lmcache_instance_1"
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
@@ -55,7 +56,8 @@ configure two lmcache instances:
 
     # cache controller configurations
     enable_controller: True
-    lmcache_instance_id: "lmcache_instance_1"
+    enable_kv_events: True
+    lmcache_instance_id: "lmcache_instance_2"
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
     lmcache_worker_ports: 8501
