@@ -49,6 +49,17 @@ class _Inflight:
     canceled: bool = False
 
 
+@dataclass
+class _PreparedWrite:
+    key: CacheEngineKey
+    offset: int
+    header: bytes
+    memory_obj: MemoryObj
+    buf: Any
+    payload_len: int
+    total_len: int
+
+
 class RustRawBlockBackend(StoragePluginInterface):
     """
     A storage plugin backend that stores KV chunks into a block device (raw)
@@ -127,6 +138,9 @@ class RustRawBlockBackend(StoragePluginInterface):
         self.enable_zero_copy: bool = bool(
             extra.get("rust_raw_block.enable_zero_copy", True)
         )
+        self.enable_async_batch_mode: bool = bool(
+            extra.get("rust_raw_block.enable_async_batch_mode", False)
+        )
 
         full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size())
         default_slot_bytes = _round_up(
@@ -195,6 +209,11 @@ class RustRawBlockBackend(StoragePluginInterface):
             self.slot_bytes,
             self.block_align,
             self.header_bytes,
+        )
+        logger.info(
+            "RustRawBlockBackend config: zero_copy=%s async_batch_mode=%s",
+            self.enable_zero_copy,
+            self.enable_async_batch_mode,
         )
         logger.warning(
             "RustRawBlockBackend: Currently only TP=1 is supported. "
@@ -416,6 +435,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 )
 
         futures = []
+        batch_entries: list[tuple[CacheEngineKey, int, bytes, MemoryObj]] = []
         for key, obj in zip(keys, objs, strict=False):
             with self._put_lock:
                 if key in self._put_tasks:
@@ -450,19 +470,161 @@ class RustRawBlockBackend(StoragePluginInterface):
 
             header = self._encode_header(key, meta.size)
             obj.ref_count_up()
+            if self.enable_async_batch_mode:
+                batch_entries.append((key, offset, header, obj))
+            else:
+                assert self.loop is not None
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._submit_write(
+                        key=key,
+                        offset=offset,
+                        header=header,
+                        memory_obj=obj,
+                        on_complete_callback=on_complete_callback,
+                    ),
+                    self.loop,
+                )
+                futures.append(fut)
+
+        if batch_entries:
             assert self.loop is not None
             fut = asyncio.run_coroutine_threadsafe(
-                self._submit_write(
-                    key=key,
-                    offset=offset,
-                    header=header,
-                    memory_obj=obj,
+                self._submit_write_batch(
+                    entries=batch_entries,
                     on_complete_callback=on_complete_callback,
                 ),
                 self.loop,
             )
             futures.append(fut)
         return futures or None
+
+    def _prepare_write_payload(self, memory_obj: MemoryObj) -> tuple[Any, int, int]:
+        """Prepare payload view and aligned lengths for write path."""
+        buf = memory_obj.byte_array
+        if hasattr(buf, "cast"):
+            buf = buf.cast("B")
+        payload_len = len(memory_obj.byte_array)
+        total_len = payload_len
+        if self.use_odirect:
+            total_len = _round_up(payload_len, self.block_align)
+            if total_len > (self.slot_bytes - self.header_bytes):
+                raise RuntimeError(f"O_DIRECT payload {total_len} > slot capacity")
+            direct_view = self._build_direct_odirect_view(
+                memory_obj=memory_obj,
+                payload_len=payload_len,
+                total_len=total_len,
+                buffer_len=len(buf),
+                zero_tail=True,
+            )
+            if direct_view is not None:
+                buf = direct_view
+        return buf, payload_len, total_len
+
+    async def _submit_write_batch(
+        self,
+        entries: list[tuple[CacheEngineKey, int, bytes, MemoryObj]],
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+    ) -> None:
+        """Execute a whole put batch in one async submission."""
+        prepared: list[_PreparedWrite] = []
+        errors: dict[CacheEngineKey, Exception] = {}
+
+        for key, offset, header, memory_obj in entries:
+            try:
+                buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
+                prepared.append(
+                    _PreparedWrite(
+                        key=key,
+                        offset=offset,
+                        header=header,
+                        memory_obj=memory_obj,
+                        buf=buf,
+                        payload_len=payload_len,
+                        total_len=total_len,
+                    )
+                )
+            except Exception as e:
+                errors[key] = e
+
+        try:
+            if prepared:
+                try:
+
+                    def _do_write_batch() -> dict[CacheEngineKey, Exception]:
+                        write_errors: dict[CacheEngineKey, Exception] = {}
+                        raw_dev = self._rawdev()
+                        for item in prepared:
+                            try:
+                                hdr_total = (
+                                    _round_up(len(item.header), self.block_align)
+                                    if self.use_odirect
+                                    else len(item.header)
+                                )
+                                raw_dev.pwrite_from_buffer(
+                                    item.offset,
+                                    item.header,
+                                    len(item.header),
+                                    hdr_total,
+                                )
+                                raw_dev.pwrite_from_buffer(
+                                    item.offset + self.header_bytes,
+                                    item.buf,
+                                    item.payload_len,
+                                    item.total_len,
+                                )
+                            except Exception as write_e:
+                                write_errors[item.key] = write_e
+                        return write_errors
+
+                    thread_errors = await asyncio.to_thread(_do_write_batch)
+                    errors.update(thread_errors)
+                except Exception as batch_e:
+                    for item in prepared:
+                        errors.setdefault(item.key, batch_e)
+
+            first_error: Optional[Exception] = None
+            for key, _, _, _ in entries:
+                err = errors.get(key)
+                with self._lock:
+                    inflight = self._inflight.pop(key, None)
+                    if inflight is not None:
+                        if inflight.canceled or err is not None:
+                            self._free_slots.append(
+                                int(inflight.offset // self.slot_bytes)
+                            )
+                        else:
+                            self._index[key] = _Entry(
+                                offset=inflight.offset,
+                                size=inflight.meta.size,
+                                meta=inflight.meta,
+                            )
+                            self._touch(key)
+                if err is None:
+                    self._maybe_save_manifest()
+                    if on_complete_callback is not None:
+                        try:
+                            on_complete_callback(key)
+                        except Exception as cb_e:
+                            logger.warning(
+                                f"on_complete_callback failed for key {key}: {cb_e}"
+                            )
+                else:
+                    logger.error(
+                        "Batch write failed for key %s: %s",
+                        self._dbg_key_short(key),
+                        err,
+                    )
+                    if first_error is None:
+                        first_error = err
+
+            if first_error is not None:
+                raise first_error
+        finally:
+            for _, _, _, memory_obj in entries:
+                memory_obj.ref_count_down()
+            with self._put_lock:
+                for key, _, _, _ in entries:
+                    self._put_tasks.discard(key)
 
     async def _submit_write(
         self,
@@ -474,24 +636,7 @@ class RustRawBlockBackend(StoragePluginInterface):
     ) -> None:
         """Execute write: synchronous blocking write wrapped in async thread."""
         try:
-            buf = memory_obj.byte_array
-            if hasattr(buf, "cast"):
-                buf = buf.cast("B")
-            payload_len = len(memory_obj.byte_array)
-            total_len = payload_len
-            if self.use_odirect:
-                total_len = _round_up(payload_len, self.block_align)
-                if total_len > (self.slot_bytes - self.header_bytes):
-                    raise RuntimeError(f"O_DIRECT payload {total_len} > slot capacity")
-                direct_view = self._build_direct_odirect_view(
-                    memory_obj=memory_obj,
-                    payload_len=payload_len,
-                    total_len=total_len,
-                    buffer_len=len(buf),
-                    zero_tail=True,
-                )
-                if direct_view is not None:
-                    buf = direct_view
+            buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
 
             # Synchronous blocking write executed in thread pool
             def _do_write():
@@ -514,12 +659,15 @@ class RustRawBlockBackend(StoragePluginInterface):
                     )
                     raise
 
-            await asyncio.to_thread(_do_write)
-
+            write_error: Optional[Exception] = None
+            try:
+                await asyncio.to_thread(_do_write)
+            except Exception as e:
+                write_error = e
             with self._lock:
                 inflight = self._inflight.pop(key, None)
                 if inflight is not None:
-                    if inflight.canceled:
+                    if inflight.canceled or write_error is not None:
                         self._free_slots.append(int(inflight.offset // self.slot_bytes))
                     else:
                         self._index[key] = _Entry(
@@ -529,12 +677,17 @@ class RustRawBlockBackend(StoragePluginInterface):
                         )
                         self._touch(key)
 
-            self._maybe_save_manifest()
-            if on_complete_callback is not None:
-                try:
-                    on_complete_callback(key)
-                except Exception as e:
-                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
+            if write_error is None:
+                self._maybe_save_manifest()
+                if on_complete_callback is not None:
+                    try:
+                        on_complete_callback(key)
+                    except Exception as e:
+                        logger.warning(
+                            f"on_complete_callback failed for key {key}: {e}"
+                        )
+            else:
+                raise write_error
         finally:
             memory_obj.ref_count_down()
             with self._put_lock:

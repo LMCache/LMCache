@@ -120,6 +120,86 @@ def test_rust_raw_block_backend_put_get_roundtrip(memory_allocator, loop_in_thre
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
+def test_rust_raw_block_backend_async_batch_mode(memory_allocator, loop_in_thread):
+    """Test async batch mode writes a full batch and retrieves all keys."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_async_batch",
+        )
+        config.storage_plugins = []
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.enable_async_batch_mode": True,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            keys: list[CacheEngineKey] = []
+            objs: list = []
+            expected: dict[CacheEngineKey, bytes] = {}
+            for i in range(4):
+                key = CacheEngineKey("test_model", 1, 0, 1000 + i, torch.bfloat16)
+                obj = alloc.allocate(
+                    [torch.Size([2, 16, 8, 128])],
+                    [torch.bfloat16],
+                    fmt=MemoryFormat.KV_T2D,
+                )
+                assert obj is not None
+                assert obj.tensor is not None
+                obj.tensor.fill_(i + 1)
+                keys.append(key)
+                objs.append(obj)
+                expected[key] = bytes(obj.byte_array)
+
+            futs = backend.batched_submit_put_task(keys, objs)
+            assert futs is not None
+            # Async batch mode should submit one future for the whole batch.
+            assert len(futs) == 1
+            futs[0].result(timeout=10)
+
+            for key in keys:
+                out = backend.get_blocking(key)
+                assert out is not None
+                assert bytes(out.byte_array) == expected[key]
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
 def test_rust_raw_block_backend_eviction_lru(memory_allocator, loop_in_thread):
     """Test LRU eviction when capacity is exceeded."""
     with tempfile.TemporaryDirectory() as td:
