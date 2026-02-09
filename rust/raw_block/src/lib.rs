@@ -185,6 +185,8 @@ fn get_pybuffer<'py>(
     // SAFETY: PyObject_GetBuffer follows CPython buffer protocol.
     unsafe {
         let mut view: pyo3::ffi::Py_buffer = std::mem::zeroed();
+        // Request a contiguous byte-view. This lets Rust issue a single syscall
+        // against a flat pointer instead of handling Python strides/shapes.
         let flags = if writable {
             PYBUF_WRITABLE | PYBUF_ANY_CONTIGUOUS
         } else {
@@ -277,6 +279,9 @@ impl RawBlockDevice {
             return Err(PyValueError::new_err("null buffer pointer"));
         }
 
+        // `payload_len`: user bytes to write.
+        // `total_len`: actual I/O length. For O_DIRECT this is often aligned up.
+        // Example: payload=4100, align=4096 -> total_len=8192.
         let payload_len = payload_len.unwrap_or(buf_len);
         if payload_len > buf_len {
             release_pybuffer(view);
@@ -302,6 +307,9 @@ impl RawBlockDevice {
             }
         }
 
+        // Store pointer as integer before releasing the GIL. The closure passed
+        // to `allow_threads` must own plain data and cannot borrow `view`.
+        // We still keep `view` alive until I/O finishes, then release it below.
         let ptr_usize = ptr as usize;
         let res = py.allow_threads(move || {
             let src = ptr_usize as *const u8;
@@ -318,8 +326,12 @@ impl RawBlockDevice {
                 }
 
                 // Hybrid path for O_DIRECT with padding:
-                // - direct-write the aligned payload prefix
-                // - bounce only the final aligned block and zero-pad its tail
+                // - If the Python pointer is aligned, we avoid copying the large
+                //   aligned prefix and write it directly.
+                // - Only the tail is copied into an aligned bounce buffer, then
+                //   zero-padded to satisfy O_DIRECT full-block writes.
+                //
+                // This keeps copy cost proportional to tail size, not payload size.
                 let aligned_prefix = payload_len / align * align;
                 if aligned_prefix > 0 {
                     pwrite_from_ptr(fd, offset, src, aligned_prefix)?;
@@ -352,7 +364,9 @@ impl RawBlockDevice {
                 return Ok(());
             }
 
-            // Full bounce path (unaligned pointer or non-O_DIRECT padding case).
+            // Full bounce path:
+            // - required when source pointer is not alignment-safe for O_DIRECT.
+            // - also used when non-O_DIRECT call asks for padding behavior.
             let bounce = AlignedBuf::new(total_len, align)?;
             unsafe {
                 libc::memcpy(
@@ -370,6 +384,8 @@ impl RawBlockDevice {
             }
             pwrite_from_ptr(fd, offset, bounce.as_ptr(), total_len)
         });
+        // Always release the CPython buffer view once the blocking I/O closure
+        // completes. This decrements exporter-side view count correctly.
         release_pybuffer(view);
         res?;
         Ok(())
@@ -409,6 +425,9 @@ impl RawBlockDevice {
             return Err(PyValueError::new_err("null buffer pointer"));
         }
 
+        // `payload_len`: bytes caller wants copied into `out`.
+        // `total_len`: bytes to read from device. For O_DIRECT this is usually
+        // aligned up and can be larger than payload_len.
         let total_len = total_len.unwrap_or(payload_len);
         if total_len < payload_len {
             release_pybuffer(view);
@@ -429,6 +448,8 @@ impl RawBlockDevice {
             }
         }
 
+        // Same pattern as write path: move raw address into closure-safe value
+        // while retaining `view` lifetime until closure completion.
         let dst_usize = ptr as usize;
         let res = py.allow_threads(move || {
             let dst = dst_usize as *mut u8;
@@ -443,9 +464,13 @@ impl RawBlockDevice {
                     return pread_into(fd, offset, dst, total_len);
                 }
 
-                // Hybrid path for O_DIRECT with small destination capacity:
-                // - direct-read aligned prefix into dst
-                // - bounce the final aligned tail block, then copy only payload tail
+                // Hybrid path for O_DIRECT with smaller destination capacity:
+                // - read aligned prefix directly into destination.
+                // - read aligned tail into bounce buffer.
+                // - copy only payload tail bytes back into destination.
+                //
+                // This avoids writing beyond Python buffer capacity while still
+                // honoring O_DIRECT aligned read requirements.
                 let aligned_prefix = payload_len / align * align;
                 if aligned_prefix > 0 {
                     pread_into(fd, offset, dst, aligned_prefix)?;
@@ -471,7 +496,9 @@ impl RawBlockDevice {
                 return Ok(());
             }
 
-            // Full bounce read then copy payload into dst.
+            // Full bounce read path:
+            // read aligned size into temporary aligned memory, then copy the
+            // requested payload portion to Python output buffer.
             let bounce = AlignedBuf::new(round_up(total_len, align), align)?;
             pread_into(fd, offset, bounce.as_mut_ptr(), total_len)?;
             unsafe {
