@@ -83,7 +83,9 @@ class StorageManagerConfig:
     eviction_config: EvictionConfig
     """ The configuration for eviction policies. """
 
-    l2_adapter_config: L2AdaptersConfig = field(default=L2AdaptersConfig([]))
+    l2_adapter_config: L2AdaptersConfig = field(
+        default_factory=lambda: L2AdaptersConfig([])
+    )
     """ The configuration for L2 adapters. """
 
 

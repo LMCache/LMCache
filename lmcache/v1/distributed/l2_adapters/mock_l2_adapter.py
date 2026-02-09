@@ -22,13 +22,13 @@ def clone_tensor_memory_obj(obj: MemoryObj) -> TensorMemoryObj:
     assert isinstance(obj, TensorMemoryObj), (
         "Only TensorMemoryObj is supported in this mock adapter"
     )
-    tensor = obj.tensor
-    assert tensor is not None, (
+    raw_tensor = obj.raw_tensor
+    assert raw_tensor is not None, (
         "The tensor data of the object cannot be None for cloning"
     )
 
     new_obj = TensorMemoryObj(
-        raw_data=tensor.detach().clone(),
+        raw_data=raw_tensor.detach().clone(),
         metadata=copy.copy(obj.metadata),
         parent_allocator=None,
     )
@@ -266,10 +266,12 @@ class MockL2Adapter(L2AdapterInterface):
         Evict objects from the cache using FIFO policy until there is enough
         space for the required bytes.
         """
+        keys_to_check = len(self._key_queue)
         while (
             self._current_size_bytes + required_bytes > self._max_capacity_bytes
-            and self._key_queue
+            and keys_to_check > 0
         ):
+            keys_to_check -= 1
             key_to_evict = self._key_queue.pop(0)
 
             if self._locked_keys.get(key_to_evict, 0) > 0:
@@ -280,10 +282,6 @@ class MockL2Adapter(L2AdapterInterface):
             if key_to_evict in self._memory_objects:
                 evicted_obj = self._memory_objects.pop(key_to_evict)
                 self._current_size_bytes -= evicted_obj.get_size()
-
-            if len(self._key_queue) == len(self._locked_keys):
-                # If all remaining keys are locked, we cannot evict any more
-                break
 
         if self._current_size_bytes + required_bytes > self._max_capacity_bytes:
             raise MemoryError(
