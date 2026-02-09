@@ -12,10 +12,7 @@ This crate provides raw block I/O for LMCache via Rust + PyO3.
    - `rust_raw_block.block_align`
    - `rust_raw_block.align_local_cpu_allocator`
    - `local_cpu.pinned_align_bytes` (explicit override)
-4. Optional async batch submission mode in python plugin:
-   - `rust_raw_block.enable_async_batch_mode=true`
-   - one future submission per batch (instead of one future per key)
-5. Benchmark harness reliability improvements:
+4. Benchmark harness reliability improvements:
    - skip `truncate()` for real block devices (`/dev/...`)
    - unique manifest per run (avoid stale-index reuse)
    - timeout/fallback for local disk completion waits
