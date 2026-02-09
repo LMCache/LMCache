@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -110,6 +111,15 @@ def _make_memory_objs(
     return objs
 
 
+def _release_memory_objs(objs: list) -> None:
+    for obj in objs:
+        try:
+            obj.ref_count_down()
+        except Exception:
+            # Best effort for benchmark cleanup.
+            pass
+
+
 def _make_keys(num_ops: int) -> list[CacheEngineKey]:
     return [
         CacheEngineKey("benchmark_model", 1, 0, i, DEFAULT_DTYPE)
@@ -183,9 +193,27 @@ def _bench_local_disk(
         for s in slices:
             ex.submit(submit_slice, s[0], s[1])
 
-    done.wait()
+    # In some environments a completion callback may be dropped under heavy
+    # load even though writes are persisted. Keep the benchmark bounded and use
+    # a file-count fallback so we do not hang forever.
+    timeout_sec = 300.0
+    deadline = start + timeout_sec
+    while not done.wait(timeout=1.0):
+        if completed >= num_ops:
+            break
+        if time.perf_counter() >= deadline:
+            file_count = 0
+            for _root, _dirs, files in os.walk(local_disk_dir):
+                file_count += len(files)
+            if file_count >= num_ops:
+                break
+            raise TimeoutError(
+                "LocalDisk benchmark timed out: "
+                f"completed={completed}, files={file_count}, expected={num_ops}"
+            )
     elapsed = time.perf_counter() - start
 
+    _release_memory_objs(objs)
     backend.disk_worker.close()
     _stop_loop(loop, t)
 
@@ -218,20 +246,34 @@ def _bench_rust_raw_block(
         lmcache_instance_id="bench_rust_raw_block",
     )
 
-    # Create a backing file if raw_device not provided.
+    # Create a backing file if raw_device is not provided. For a real block
+    # device path (e.g. /dev/nvme*), do not truncate.
     temp_dir: Optional[str] = None
+    is_block_device = False
     if not raw_device:
         temp_dir = tempfile.mkdtemp(prefix="raw_block_bench_")
         raw_device = os.path.join(temp_dir, "raw_block.bin")
-    if raw_device:
+    else:
+        try:
+            st_mode = os.stat(raw_device).st_mode
+            is_block_device = stat.S_ISBLK(st_mode)
+        except FileNotFoundError:
+            is_block_device = False
+
+    if raw_device and not is_block_device:
         with open(raw_device, "wb") as f:
             f.truncate(int(raw_device_size_gb * 1024**3))
 
+    manifest_path = os.path.join(
+        tempfile.gettempdir(),
+        f"lmcache_rust_raw_block_bench_{os.getpid()}_{time.time_ns()}.manifest.json",
+    )
     config.extra_config = {
         "rust_raw_block.device_path": raw_device,
         "rust_raw_block.block_align": alignment,
         "rust_raw_block.header_bytes": alignment,
         "rust_raw_block.use_odirect": use_odirect,
+        "rust_raw_block.manifest_path": manifest_path,
         "rust_raw_block.manifest_write_interval": 0,
     }
 
@@ -250,8 +292,7 @@ def _bench_rust_raw_block(
     )
 
     keys = _make_keys(num_ops)
-    keepalive: list[torch.Tensor] = []
-    objs = _make_memory_objs(num_ops, False, alignment, keepalive)
+    objs = _make_memory_objs(num_ops, False, alignment, [])
 
     futures = []
     fut_lock = threading.Lock()
@@ -277,6 +318,7 @@ def _bench_rust_raw_block(
 
     elapsed = time.perf_counter() - start
 
+    _release_memory_objs(objs)
     backend.close()
     _stop_loop(loop, t)
 
@@ -291,6 +333,10 @@ def _bench_rust_raw_block(
                 os.rmdir(temp_dir)
             except Exception:
                 pass
+    try:
+        os.remove(manifest_path)
+    except Exception:
+        pass
 
     return {
         "backend": "rust_raw_block",
