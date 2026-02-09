@@ -15,7 +15,6 @@ from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -411,44 +410,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 config.enable_lazy_memory_allocator
                 and cpu_size > config.lazy_memory_safe_size
             )
-            enable_lazy_experimental = bool(
-                config.get_extra_config_value(
-                    "local_cpu.enable_experimental_lazy_allocator", False
-                )
-            )
-
-            if use_lazy and enable_lazy_experimental:
-                lazy_init_size_gb = float(
-                    config.get_extra_config_value(
-                        "local_cpu.lazy_init_size_gb", config.lazy_memory_safe_size
-                    )
-                )
-                lazy_init_size_bytes = int(max(0.0, lazy_init_size_gb) * 1024**3)
-                lazy_init_size_bytes = min(lazy_init_size_bytes, cpu_size_bytes)
-                # Keep at least one chunk pinned initially if init size is 0 or tiny.
-                if lazy_init_size_bytes <= 0:
-                    lazy_init_size_bytes = min(64 * 1024 * 1024, cpu_size_bytes)
-                lazy_align_bytes = allocator_align_bytes or 4096
-                logger.info(
-                    "Using LazyMemoryAllocator (experimental): "
-                    "init=%d final=%d align=%d",
-                    lazy_init_size_bytes,
-                    cpu_size_bytes,
-                    lazy_align_bytes,
-                )
-                return LazyMemoryAllocator(
-                    init_size=lazy_init_size_bytes,
-                    final_size=cpu_size_bytes,
-                    align_bytes=lazy_align_bytes,
-                    numa_mapping=numa_mapping,
-                )
             if use_lazy:
                 logger.warning(
                     "LazyMixedMemoryAllocator is temporarily unavailable; "
                     "falling back to MixedMemoryAllocator with full allocation. "
-                    "Set extra_config['local_cpu.enable_experimental_lazy_allocator'] "
-                    "to true to opt in. Disable enable_lazy_memory_allocator or "
-                    "reduce max_local_cpu_size to avoid large pinned allocations."
+                    "Disable enable_lazy_memory_allocator or reduce "
+                    "max_local_cpu_size to avoid large pinned allocations."
                 )
             elif config.enable_lazy_memory_allocator:
                 logger.info(
