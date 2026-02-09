@@ -31,6 +31,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
 from lmcache.v1.gpu_connector.utils import (
     discover_gpu_kv_format,
     get_block_size,
+    get_dtype,
     get_hidden_dim_size,
     get_num_blocks,
     get_num_layers,
@@ -132,7 +133,7 @@ class GPUCacheContext:
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.kv_caches_[0].dtype
+        return get_dtype(self.kv_caches_, self.gpu_kv_format_)
 
     @property
     def device(self) -> torch.device:

@@ -314,17 +314,33 @@ def check_mem_obj_equal(left, right, use_mla: bool = False):
             assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
-def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size=128):
+# default checks for vllm non-MLA flash attention
+def check_paged_kv_cache_equal(
+    left,
+    right,
+    slot_mapping,
+    num_heads=8,
+    head_size=128,
+    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,
+):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
+
     token_dim = 0
     num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
-        left_k = left_kv[0].reshape(-1, num_heads, head_size)
-        left_v = left_kv[1].reshape(-1, num_heads, head_size)
-        right_k = right_kv[0].reshape(-1, num_heads, head_size)
-        right_v = right_kv[1].reshape(-1, num_heads, head_size)
+        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS:
+            left_k = left_kv[0].reshape(-1, num_heads, head_size)
+            left_v = left_kv[1].reshape(-1, num_heads, head_size)
+            right_k = right_kv[0].reshape(-1, num_heads, head_size)
+            right_v = right_kv[1].reshape(-1, num_heads, head_size)
+
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS:
+            left_k = left_kv[:, 0].reshape(-1, num_heads, head_size)
+            left_v = left_kv[:, 1].reshape(-1, num_heads, head_size)
+            right_k = right_kv[:, 0].reshape(-1, num_heads, head_size)
+            right_v = right_kv[:, 1].reshape(-1, num_heads, head_size)
 
         assert len(left_k.shape) == 3
         assert len(left_v.shape) == 3

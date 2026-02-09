@@ -409,3 +409,23 @@ def is_mla(gpu_kv_format: "lmc_ops.GPUKVFormat") -> bool:
         gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS  # vllm MLA
         or gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_1_HS  # sglang MLA
     )
+
+
+def get_dtype(kv_caches: Any, gpu_kv_format: "lmc_ops.GPUKVFormat") -> torch.dtype:
+    """
+    Get the dtype from the kv_caches
+    """
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NB_NL_2_BS_NH_HS:
+        return kv_caches.dtype
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS:
+        return kv_caches[0].dtype
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS:
+        return kv_caches[0].dtype
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
+        return kv_caches[0].dtype
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL2_X_NBBS_NH_HS:
+        return kv_caches[0].dtype
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NBBS_1_HS:
+        return kv_caches[0].dtype
+    else:
+        raise ValueError(f"Unknown GPU KV Format: {gpu_kv_format}")
