@@ -15,6 +15,12 @@ set -euo pipefail
 : "${BUILD_ID:?BUILD_ID must be set}"
 
 #######################################
+# Script arguments
+#######################################
+ATTENTION_BACKEND="${1:-FLASH_ATTN}"  # Default to FLASH_ATTN if not provided
+echo "[INFO] Using attention backend: ${ATTENTION_BACKEND}"
+
+#######################################
 # Configuration
 #######################################
 MODEL="Qwen/Qwen2.5-14B-Instruct"
@@ -138,7 +144,7 @@ vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --enforce-eager \
-    --attention-backend FLASH_ATTN \
+    --attention-backend "${ATTENTION_BACKEND}" \
     --gpu-memory-utilization 0.8 \
     -cc.level=0 \
     >"${VLLM_LOG}" 2>&1 &
@@ -189,7 +195,7 @@ vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --enforce-eager \
-    --attention-backend FLASH_ATTN \
+    --attention-backend "${ATTENTION_BACKEND}" \
     --gpu-memory-utilization 0.8 \
     -cc.level=0 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
