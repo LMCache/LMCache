@@ -26,52 +26,57 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 
 - If `--raw-device` is not provided, the benchmark creates `raw_block.bin` in the same `--local-disk-dir` so both backends use the same filesystem.
 - This is safe but **not** representative of true raw block performance.
+- If `--raw-device` points to a real block device (`/dev/...`), the benchmark does not call `truncate()` on that path.
 - `--raw-odirect` should only be used with a real block device that supports O_DIRECT.
 - When `--local-disk-odirect` is enabled, the benchmark allocates **page-aligned** buffers to avoid EINVAL from O_DIRECT.
 - Local disk backend uses its internal worker pool; completion is tracked via callbacks.
+- Rust raw block benchmark uses a unique manifest path per run to avoid stale-index reuse between runs.
 
-## Sample Results (2026-02-02)
+## Sample Results (2026-02-09, O_DIRECT, 5 runs each)
 
-Run parameters:
-- num_ops: 512
-- concurrency: 32
-- local disk dir: `/tmp/lmcache_local_disk_bench`
-- raw device: temp file (no `--raw-device` provided)
-- O_DIRECT: disabled
+Method:
+- Compare `current` branch vs `origin/dev`.
+- `num_ops=4096`, `concurrency in {2,4,8}`.
+- `--local-disk-odirect` enabled.
+- `--raw-odirect` enabled.
+- Raw path is a file on `/mnt/local_disk_mount` for apples-to-apples same-filesystem comparison.
+- Table uses median ops/sec across 5 runs.
 
-| Backend         | Elapsed (s) | Ops/sec |
-|-----------------|-------------|---------|
-| local_disk      | 0.258       | 1985.24 |
-| rust_raw_block  | 0.123       | 4167.19 |
+### Current vs origin/dev (median ops/sec)
 
-Sanity run (output directory path):
-- num_ops: 128
-- concurrency: 16
+| Concurrency | local_disk (`origin/dev`) | local_disk (`current`) | Delta | rust_raw_block (`origin/dev`) | rust_raw_block (`current`) | Delta |
+|-------------|----------------------------|-------------------------|-------|-------------------------------|----------------------------|-------|
+| 2           | 1012.60                    | 1017.26                 | +0.46% | 1913.52                       | 2604.94                    | +36.13% |
+| 4           | 783.83                     | 831.70                  | +6.11% | 1659.36                       | 2839.63                    | +71.13% |
+| 8           | 672.70                     | 669.05                  | -0.54% | 1793.30                       | 1792.14                    | -0.06% |
 
-| Backend         | Elapsed (s) | Ops/sec |
-|-----------------|-------------|---------|
-| local_disk      | 0.065       | 1979.01 |
-| rust_raw_block  | 0.041       | 3106.64 |
+### Current branch (rust_raw_block vs local_disk, median ops/sec)
 
-Same-filesystem run (raw_block.bin inside local disk dir):
-- num_ops: 512
-- concurrency: 32
+| Concurrency | local_disk (`current`) | rust_raw_block (`current`) | Rust vs local_disk |
+|-------------|-------------------------|----------------------------|--------------------|
+| 2           | 1017.26                 | 2604.94                    | +156.08% |
+| 4           | 831.70                  | 2839.63                    | +241.43% |
+| 8           | 669.05                  | 1792.14                    | +167.86% |
 
-| Backend         | Elapsed (s) | Ops/sec |
-|-----------------|-------------|---------|
-| local_disk      | 0.316       | 1622.73 |
-| rust_raw_block  | 0.096       | 5327.97 |
+Interpretation:
+- LocalDiskBackend stays near baseline; changes are small.
+- RustRawBlockBackend shows clear improvement at low-mid concurrency in this setup.
+- At concurrency 8, branch-to-branch rust throughput is effectively unchanged in this sample.
 
-O_DIRECT run (same filesystem, aligned buffers):
-- num_ops: 256
-- concurrency: 16
+### Real block-device smoke (current branch only)
 
-| Backend         | Elapsed (s) | Ops/sec |
-|-----------------|-------------|---------|
-| local_disk      | 0.119       | 2142.55 |
-| rust_raw_block  | 0.130       | 1967.32 |
+Single-run sanity check with raw block device:
+- `num_ops=1024`
+- `concurrency=4`
+- Local disk path: `/mnt/local_disk_mount/lmcache_local_disk_bench_smoke` (`--local-disk-odirect`)
+- Rust raw path: `/dev/nvme1n1p2` (`--raw-odirect`)
 
-> Results are machine- and device-dependent. Use real block devices and O_DIRECT for production-grade comparison.
+| Backend        | Ops/sec |
+|----------------|---------|
+| local_disk     | 2149.71 |
+| rust_raw_block | 3542.56 |
+
+> Results are host/device dependent. Re-run on your target hardware and queue-depth profile before concluding production impact.
 
 ## Output
 
