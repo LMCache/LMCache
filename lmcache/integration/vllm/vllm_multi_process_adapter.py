@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from itertools import islice
-from typing import Any, Iterable
+from typing import Any
 import os
 
 # Third Party
@@ -11,6 +10,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -26,20 +26,6 @@ logger = init_logger(__name__)
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     logger.info("KV caches keys are %s", list(kv_caches.keys()))
     return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
-
-
-def striding_block_hashes(
-    block_hashes: list[bytes], blocks_in_chunk: int
-) -> Iterable[bytes]:
-    """Extract chunk-level hashes from block hashes by striding.
-
-    In hash-based vLLM, each vLLM block has its own hash.  LMCache chunks
-    span ``blocks_in_chunk`` consecutive blocks.  The representative hash
-    for a chunk is the hash of the **last** block in that chunk (because
-    each block hash already encodes its prefix).  So we start at index
-    ``blocks_in_chunk - 1`` and stride by ``blocks_in_chunk``.
-    """
-    return islice(block_hashes, blocks_in_chunk - 1, None, blocks_in_chunk)
 
 
 def send_lmcache_request(
@@ -84,20 +70,17 @@ def get_lmcache_chunk_size(
 
 @dataclass
 class LoadStoreOp:
+    token_ids: list[int]
+    """Token IDs for the load/store operation"""
+
     block_ids: list[int]
     """Block ids for the load/store operation"""
 
-    token_ids: list[int] | None = None
-    """Token IDs for the load/store operation (token mode)"""
-
-    block_hashes: list[bytes] | None = None
-    """Block hashes for the load/store operation (hash mode)"""
-
     start: int = 0
-    """Start token index (token mode only)"""
+    """Start token index"""
 
     end: int = 0
-    """End token index (token mode only)"""
+    """End token index"""
 
     def __len__(self) -> int:
         return len(self.block_ids)
@@ -148,23 +131,15 @@ class LMCacheMPSchedulerAdapter:
     def maybe_submit_lookup_request(
         self,
         request_id: str,
-        block_hashes: list[bytes] | None = None,
-        token_ids: list[int] | None = None,
+        token_ids: list[int],
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
-        Supports both token-based and hash-based vLLM:
-        - token_ids: token IDs (token-based vLLM) → single token-mode key
-        - block_hashes: block hashes (hash-based vLLM) → strided hash-mode keys
-
-        Exactly one of block_hashes or token_ids must be provided.
-
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
-            block_hashes: Block hashes to lookup from LMCache (hash mode)
-            token_ids: Token IDs to lookup from LMCache (token mode)
+            token_ids: Token IDs to lookup from LMCache
 
         Returns:
             None
@@ -180,32 +155,17 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        assert (block_hashes is None) != (token_ids is None), (
-            "Exactly one of block_hashes or token_ids must be provided"
-        )
-
-        if block_hashes is not None:
-            # Hash mode: stride block hashes → N hash-mode keys
-            chunk_hashes = list(
-                striding_block_hashes(block_hashes, self.blocks_in_chunk)
-            )
-            keys = [
-                self._create_hash_key(ch, request_id=request_id) for ch in chunk_hashes
-            ]
-        else:
-            # Token mode: truncate to chunk-aligned length
-            assert token_ids is not None
-            aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
-            if aligned_end == 0:
-                return
-            keys = [
-                self._create_key(
-                    token_ids,
-                    start=0,
-                    end=aligned_end,
-                    request_id=request_id,
-                ).no_worker_id_version()
-            ]
+        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+        if aligned_end == 0:
+            return
+        keys = [
+            self._create_key(
+                token_ids,
+                start=0,
+                end=aligned_end,
+                request_id=request_id,
+            ).no_worker_id_version()
+        ]
 
         future = send_lmcache_request(
             self.mq_client,
@@ -271,9 +231,9 @@ class LMCacheMPSchedulerAdapter:
     def _create_key(
         self,
         token_ids: list[int],
-        start: int = 0,
-        end: int = 0,
-        request_id: str | None = None,
+        start: int,
+        end: int,
+        request_id: str,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
@@ -283,18 +243,6 @@ class LMCacheMPSchedulerAdapter:
             token_ids=tuple(token_ids),
             start=start,
             end=end,
-            request_id=request_id,
-        )
-
-    def _create_hash_key(
-        self, chunk_hash: bytes, request_id: str | None = None
-    ) -> IPCCacheEngineKey:
-        """Create a hash-mode IPC cache engine key"""
-        return IPCCacheEngineKey(
-            model_name=self.model_name,
-            world_size=self.world_size,
-            worker_id=None,
-            chunk_hash=chunk_hash,
             request_id=request_id,
         )
 
@@ -342,6 +290,19 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+
+        # request telemetry, used for prefill-decode disagg
+        # TODO: pass down the configuration via vLLM connector config
+        # instead of env var
+        self.request_telemetry = RequestTelemetryFactory.create(
+            telemetry_type=os.getenv("LMCACHE_REQUEST_TELEMETRY_TYPE", "noop"),
+            config={
+                "endpoint": os.getenv(
+                    "LMCACHE_REQUEST_TELEMETRY_ENDPOINT",
+                    "http://localhost:5768/api/v1/telemetry",
+                ),
+            },
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
@@ -525,6 +486,17 @@ class LMCacheMPWorkerAdapter:
         # Calculate the final finished stores
         ret_stores.update(self._update_and_get_finished_store())
 
+        # the invocation of `get_finished` means that
+        # these requests' KV caches are already fully stored.
+        # or the requests normally ends without any store.
+        if ret_stores:
+            self.request_telemetry.on_request_store_finished(
+                request_ids_set=ret_stores,
+                model_name=self.model_name,
+                world_size=self.world_size,
+                kv_rank=self.worker_id,
+            )
+
         return ret_stores, finished_retrieves
 
     def num_blocks_per_chunk(self) -> int:
@@ -544,6 +516,7 @@ class LMCacheMPWorkerAdapter:
         ).result()
 
         self.mq_client.close()
+        self.request_telemetry.close()
 
     # Helper functions
     def _update_and_get_finished_store(
@@ -561,9 +534,9 @@ class LMCacheMPWorkerAdapter:
     def _create_key(
         self,
         token_ids: list[int],
-        start: int = 0,
-        end: int = 0,
-        request_id: str | None = None,
+        start: int,
+        end: int,
+        request_id: str,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
@@ -573,17 +546,5 @@ class LMCacheMPWorkerAdapter:
             token_ids=tuple(token_ids),
             start=start,
             end=end,
-            request_id=request_id,
-        )
-
-    def _create_hash_key(
-        self, chunk_hash: bytes, request_id: str | None = None
-    ) -> IPCCacheEngineKey:
-        """Create a hash-mode IPC cache engine key"""
-        return IPCCacheEngineKey(
-            model_name=self.model_name,
-            world_size=self.world_size,
-            worker_id=self.worker_id,
-            chunk_hash=chunk_hash,
             request_id=request_id,
         )
