@@ -7,6 +7,7 @@ This module defines the protocol for:
 """
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey, KVCache
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -30,42 +31,42 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     return {
         # Lookup pre-computed chunks
         # Payload:
-        #   - token_ids: List[int] - List of input token IDs to look up
+        #   - key: IPCCacheEngineKey - The key containing the token ids
         # Returns: List of tuples (start, end) indicating the match ranges
         "CB_LOOKUP_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[list[int]],
+            payload_classes=[IPCCacheEngineKey],
             response_class=list[tuple[int, int]],
             handler_type=HandlerType.BLOCKING,
         ),
         # Store pre-computed chunks
         # Payload:
-        #   - token_ids: List[int] - List of input token IDs of the request
+        #   - key: IPCCacheEngineKey - The key containing the token ids
         #   - offset: int - The starting offset in the CB KV cache buffer
         # Returns: None
         "CB_STORE_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[list[int], int],
+            payload_classes=[IPCCacheEngineKey, int],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve pre-computed chunks
         # Payload:
-        #   - token_ids: List[int] - List of input token IDs of the request
+        #   - key: IPCCacheEngineKey - The key containing the token ids
         #   - ranges: List[tuple[int, int]] - List of tuples (start, end) indicating
         #                                     the match ranges to retrieve
         #   - offset: int - The starting offset in the CB KV cache buffer
         # Returns: bool indicating the success of the retrieval
         "CB_RETRIEVE_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[list[int], list[tuple[int, int]], int],
+            payload_classes=[IPCCacheEngineKey, list[tuple[int, int]], int],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
         # Store final chunks after processing
         # Payload:
-        #   - token_ids: List[int] - List of input token IDs of the request
+        #   - key: IPCCacheEngineKey - The key containing the token ids
         #   - offset: int - The starting offset in the CB KV cache buffer
         # Returns: None
         "CB_STORE_FINAL": ProtocolDefinition(
-            payload_classes=[list[int], int],
+            payload_classes=[IPCCacheEngineKey, int],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
@@ -75,7 +76,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - kv_cache: KVCache - The CB KV cache configuration
         # Returns: None
         "CB_REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, "KVCache"],
+            payload_classes=[int, KVCache],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
