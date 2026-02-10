@@ -94,7 +94,7 @@ def cuda_extension() -> tuple[list, dict]:
             "lmcache.c_ops",
             sources=cuda_sources,
             extra_compile_args={
-                "cxx": [flag_cxx_abi],
+                "cxx": [flag_cxx_abi, "-std=c++17"],
                 "nvcc": [flag_cxx_abi],
             },
         ),
@@ -103,7 +103,7 @@ def cuda_extension() -> tuple[list, dict]:
             sources=storage_manager_sources,
             include_dirs=["csrc/storage_manager"],
             extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3"],
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
         ),
         cpp_extension.CppExtension(
@@ -111,7 +111,7 @@ def cuda_extension() -> tuple[list, dict]:
             sources=redis_sources,
             include_dirs=["csrc/redis"],
             extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3"],
+                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
             },
         ),
     ]
@@ -154,7 +154,8 @@ def rocm_extension() -> tuple[list, dict]:
             extra_compile_args={
                 "cxx": [  # hipcc is typically invoked as a C++ compiler
                     # '-D_GLIBCXX_USE_CXX11_ABI=0',
-                    "-O3"
+                    "-O3",
+                    "-std=c++17",
                     # Add any HIP specific flags if needed.
                     # For example, if you need to specify ROCm architecture:
                     # '--offload-arch=gfx942' # (replace with your target arch)
@@ -178,7 +179,7 @@ def rocm_extension() -> tuple[list, dict]:
             sources=storage_manager_sources,
             include_dirs=["csrc/storage_manager"],
             extra_compile_args={
-                "cxx": ["-O3"],
+                "cxx": ["-O3", "-std=c++17"],
             },
         ),
         cpp_extension.CppExtension(
@@ -186,7 +187,7 @@ def rocm_extension() -> tuple[list, dict]:
             sources=redis_sources,
             include_dirs=["csrc/redis"],
             extra_compile_args={
-                "cxx": ["-O3"],
+                "cxx": ["-O3", "-std=c++17"],
             },
         ),
     ]

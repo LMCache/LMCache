@@ -17,6 +17,7 @@
 #include <queue>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -60,18 +61,38 @@ struct WorkerConn {
   std::string set_prefix;
   std::string exists_prefix;
 
+  // reusable buffer for building key headers (avoids repeated dynamic
+  // allocations)
+  std::string key_header_buf;
+
   // pre-computed constants (for comparisons)
-  const char* crlf = "\r\n";
-  static constexpr size_t crlf_len = 2;
+  static constexpr std::string_view crlf = "\r\n";
+  static constexpr size_t crlf_len = crlf.size();
 
-  const char* ok_response = "+OK\r\n";
-  static constexpr size_t ok_response_len = 5;
+  static constexpr std::string_view ok_response = "+OK\r\n";
+  static constexpr size_t ok_response_len = ok_response.size();
 
-  const char* exists_one = ":1\r\n";
-  const char* exists_zero = ":0\r\n";
-  static constexpr size_t exists_response_len = 4;
+  static constexpr std::string_view exists_one = ":1\r\n";
+  static constexpr std::string_view exists_zero = ":0\r\n";
+  static constexpr size_t exists_response_len = exists_one.size();
 
-  WorkerConn() = default;
+  WorkerConn()
+      : get_prefix("*2\r\n$3\r\nGET\r\n"),
+        set_prefix("*3\r\n$3\r\nSET\r\n"),
+        exists_prefix("*2\r\n$6\r\nEXISTS\r\n") {
+    // pre-allocate key_header_buf to handle typical keys without reallocation
+    // typical key format: model_name@world_size@worker_id@chunk_hash_hex@dtype
+    // - model_name: 25-50 chars (e.g., "meta-llama/Llama-3-70b-instruct")
+    // - world_size: 1-2 chars
+    // - worker_id: 1-2 chars
+    // - chunk_hash (SHA256): 64 chars hex
+    // - dtype: 7-8 chars (e.g., "bfloat16")
+    // - separators: 4 chars
+    // total typical key: ~100-140 chars
+    // RESP header overhead: $<len>\r\n<key>\r\n = ~8 bytes
+    // reserve 512 bytes to handle typical keys plus margin
+    key_header_buf.reserve(512);
+  }
 
   void connect(const std::string& host, int port, size_t chunk_bytes) {
     this->host = host;
@@ -85,10 +106,6 @@ struct WorkerConn {
       oss << "$" << chunk_bytes << "\r\n";
       size_header = oss.str();
     }
-
-    get_prefix = "*2\r\n$3\r\nGET\r\n";
-    set_prefix = "*3\r\n$3\r\nSET\r\n";
-    exists_prefix = "*2\r\n$6\r\nEXISTS\r\n";
 
     // 1. create socket
     fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -215,10 +232,27 @@ struct WorkerConn {
     }
   }
 
-  std::string make_key_header(const std::string& key) {
-    std::ostringstream oss;
-    oss << "$" << key.size() << "\r\n" << key << "\r\n";
-    return oss.str();
+  const std::string& make_key_header(const std::string& key) {
+    // reuse the buffer to avoid repeated allocations
+    // format: $<key_length>\r\n<key>\r\n
+    // clear() preserves capacity, so no reallocation after first use (for
+    // typical keys)
+    key_header_buf.clear();
+
+    // only reserve if key is unusually large (defensive)
+    // typical keys are ~100-140 chars, we pre-allocated 512 bytes
+    const size_t needed = key.size() + 16;  // key + RESP overhead
+    if (needed > key_header_buf.capacity()) {
+      key_header_buf.reserve(needed);
+    }
+
+    key_header_buf += '$';
+    key_header_buf += std::to_string(key.size());
+    key_header_buf += crlf;
+    key_header_buf += key;
+    key_header_buf += crlf;
+
+    return key_header_buf;
   }
 };
 
@@ -236,8 +270,8 @@ static void do_get_into(WorkerConn& conn, const std::string& key, void* buf,
     throw std::runtime_error("buffer size mismatch");
   }
 
-  // build key header (can't pre-allocate)
-  std::string key_header = conn.make_key_header(key);
+  // build key header using reusable buffer
+  const std::string& key_header = conn.make_key_header(key);
 
   // send GET cmd
   // iovec let's us combine pre-built parts and dynamic strings
@@ -260,7 +294,8 @@ static void do_get_into(WorkerConn& conn, const std::string& key, void* buf,
   // 3. parse the trailer and validate
   char trailer[WorkerConn::crlf_len];
   conn.recv_exactly(trailer, WorkerConn::crlf_len);
-  if (std::memcmp(trailer, conn.crlf, WorkerConn::crlf_len) != 0) {
+  if (std::memcmp(trailer, WorkerConn::crlf.data(), WorkerConn::crlf_len) !=
+      0) {
     throw std::runtime_error("GET: trailer mismatch");
   }
 }
@@ -273,31 +308,31 @@ static void do_set_from(WorkerConn& conn, const std::string& key,
     throw std::runtime_error("buffer size mismatch");
   }
 
-  // build key header (can't pre-allocate)
-  std::string key_header = conn.make_key_header(key);
+  // build key header using reusable buffer
+  const std::string& key_header = conn.make_key_header(key);
 
-  // send GET cmd
+  // send SET cmd
   // iovec let's us combine pre-built parts and dynamic strings
   conn.send_multipart({{conn.set_prefix.data(), conn.set_prefix.size()},
                        {key_header.data(), key_header.size()},
                        {conn.size_header.data(), conn.size_header.size()},
                        {buf, len},
-                       {conn.crlf, WorkerConn::crlf_len}});
+                       {WorkerConn::crlf.data(), WorkerConn::crlf_len}});
 
   // parse response which should be exactly +OK\r\n
   char response[WorkerConn::ok_response_len];
   conn.recv_exactly(response, WorkerConn::ok_response_len);
 
-  if (std::memcmp(response, conn.ok_response, WorkerConn::ok_response_len) !=
-      0) {
+  if (std::memcmp(response, WorkerConn::ok_response.data(),
+                  WorkerConn::ok_response_len) != 0) {
     throw std::runtime_error("SET: response was not OK");
   }
 }
 
 // RESP EXISTS
 static bool do_exists(WorkerConn& conn, const std::string& key) {
-  // build key header (can't pre-allocate)
-  std::string key_header = conn.make_key_header(key);
+  // build key header using reusable buffer
+  const std::string& key_header = conn.make_key_header(key);
 
   // send EXISTS cmd
   // iovec let's us combine pre-built parts and dynamic strings
@@ -308,10 +343,10 @@ static bool do_exists(WorkerConn& conn, const std::string& key) {
   char response[WorkerConn::exists_response_len];
   conn.recv_exactly(response, WorkerConn::exists_response_len);
 
-  if (std::memcmp(response, conn.exists_one, WorkerConn::exists_response_len) ==
-      0) {
+  if (std::memcmp(response, WorkerConn::exists_one.data(),
+                  WorkerConn::exists_response_len) == 0) {
     return true;
-  } else if (std::memcmp(response, conn.exists_zero,
+  } else if (std::memcmp(response, WorkerConn::exists_zero.data(),
                          WorkerConn::exists_response_len) == 0) {
     return false;
   } else {
