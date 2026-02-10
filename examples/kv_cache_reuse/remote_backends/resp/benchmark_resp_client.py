@@ -21,7 +21,7 @@ async def run_benchmark():
     num_workers = 8
     num_keys = 500
 
-    client = RESPClient(host, port, chunk_bytes, num_workers)
+    client = RESPClient(host, port, num_workers)
 
     try:
         print("Redis RESP Client Benchmark")

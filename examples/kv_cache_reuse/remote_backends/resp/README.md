@@ -4,7 +4,7 @@ The cpp binding is in `csrc/redis/*`.
 
 The key optimization is multi-threading and batching on the C layer and the python side being awoken through the eventfd API where a callback consumes the completion belonging to a non-blocking submission. 
 
-An GET / SET benchmark is in `examples/kv_cache_reuse/remote_backends/resp/example_resp_client.py`. The python client lives inside of `lmcache/v1/storage_backend/resp_client.py`.
+An GET / SET benchmark is in `examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py`. The python client lives inside of `lmcache/v1/storage_backend/resp_client.py`.
 
 Install lmcache from source, then run a sanity check:
 
@@ -46,7 +46,7 @@ Send twice. First time for store. Second time for retrieve.
 ```bash
 curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: application/json"   -d '{
     "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "prompt": "'"$(printf 'aElaborate the significance of KV cache in language models. %.0s' {1..1000})"'",
+    "prompt": "'"$(printf 'abElaborate the significance of KV cache in language models. %.0s' {1..1000})"'",
     "max_tokens": 10
   }'
 ```

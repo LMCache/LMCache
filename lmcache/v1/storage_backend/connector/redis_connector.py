@@ -57,9 +57,7 @@ class RESPConnector(RemoteConnector):
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
-        self.client = RESPClient(
-            host, port, self.full_chunk_size_bytes, num_threads, loop
-        )
+        self.client = RESPClient(host, port, num_threads, loop)
         self.pq_executor = AsyncPQExecutor(loop)
 
     async def _exists(self, key: CacheEngineKey) -> bool:

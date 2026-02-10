@@ -32,12 +32,11 @@ class RESPClient:
         self,
         host: str,
         port: int,
-        chunk_bytes: int,
         num_workers: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         self.loop = loop or asyncio.get_running_loop()
-        self._client = LMCacheRedisClient(host, port, chunk_bytes, num_workers)
+        self._client = LMCacheRedisClient(host, port, num_workers)
         self._fd = int(self._client.event_fd())
         self._closed = False
 

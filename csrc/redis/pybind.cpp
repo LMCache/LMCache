@@ -37,8 +37,8 @@ completion
 
 PYBIND11_MODULE(lmcache_redis, m) {
   py::class_<MultiRESPClient>(m, "LMCacheRedisClient")
-      .def(py::init<std::string, int, size_t, int>(), py::arg("host"),
-           py::arg("port"), py::arg("chunk_bytes"), py::arg("num_workers"))
+      .def(py::init<std::string, int, int>(), py::arg("host"), py::arg("port"),
+           py::arg("num_workers"))
       // event_fd: Get file descriptor for async notification
       // fd = client.event_fd()
       .def("event_fd", &MultiRESPClient::event_fd)
@@ -57,10 +57,11 @@ PYBIND11_MODULE(lmcache_redis, m) {
             std::vector<std::string> keys = {key};
             std::vector<void*> bufs = {info.ptr};
             std::vector<size_t> lens = {static_cast<size_t>(info.size)};
+            size_t chunk_bytes = static_cast<size_t>(info.size);
 
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_get(keys, bufs, lens);
+            return self.submit_batch_get(keys, bufs, lens, chunk_bytes);
           },
           py::arg("key"), py::arg("memoryview"))
       // submit_set: Submit a SET operation for a single key
@@ -78,10 +79,11 @@ PYBIND11_MODULE(lmcache_redis, m) {
             std::vector<std::string> keys = {key};
             std::vector<void*> bufs = {info.ptr};
             std::vector<size_t> lens = {static_cast<size_t>(info.size)};
+            size_t chunk_bytes = static_cast<size_t>(info.size);
 
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_set(keys, bufs, lens);
+            return self.submit_batch_set(keys, bufs, lens, chunk_bytes);
           },
           py::arg("key"), py::arg("memoryview"))
       // submit_exists: Check if a single key exists
@@ -105,6 +107,9 @@ PYBIND11_MODULE(lmcache_redis, m) {
             if (keys.size() != memviews.size()) {
               throw std::runtime_error("keys and memviews size mismatch");
             }
+            if (keys.empty()) {
+              throw std::runtime_error("keys list is empty");
+            }
 
             // extract all buffer info under GIL
             std::vector<void*> bufs;
@@ -124,9 +129,12 @@ PYBIND11_MODULE(lmcache_redis, m) {
               lens.push_back(static_cast<size_t>(info.size));
             }
 
+            // use the first buffer's size as chunk_bytes (all must match)
+            size_t chunk_bytes = lens[0];
+
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_get(keys, bufs, lens);
+            return self.submit_batch_get(keys, bufs, lens, chunk_bytes);
           },
           py::arg("keys"), py::arg("memoryviews"))
       // submit_batch_set: Submit SET operations for multiple keys
@@ -139,6 +147,9 @@ PYBIND11_MODULE(lmcache_redis, m) {
             if (keys.size() != memviews.size()) {
               throw std::runtime_error("keys and memviews size mismatch");
             }
+            if (keys.empty()) {
+              throw std::runtime_error("keys list is empty");
+            }
 
             // extract all buffer info under GIL
             std::vector<void*> bufs;
@@ -158,9 +169,12 @@ PYBIND11_MODULE(lmcache_redis, m) {
               lens.push_back(static_cast<size_t>(info.size));
             }
 
+            // use the first buffer's size as chunk_bytes (all must match)
+            size_t chunk_bytes = lens[0];
+
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_set(keys, bufs, lens);
+            return self.submit_batch_set(keys, bufs, lens, chunk_bytes);
           },
           py::arg("keys"), py::arg("memoryviews"))
       // submit_batch_exists: Check if multiple keys exist

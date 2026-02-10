@@ -64,6 +64,10 @@ struct Request {
 
   // for batch exists tiles, track which indices this tile is responsible for
   size_t start_idx = 0;
+
+  // chunk_bytes for GET/SET operations (passed per-operation, not
+  // per-connection)
+  size_t chunk_bytes = 0;
 };
 
 struct Completion {
@@ -85,8 +89,7 @@ struct Completion {
 
 class MultiRESPClient {
  public:
-  MultiRESPClient(std::string host, int port, size_t chunk_bytes,
-                  int num_workers);
+  MultiRESPClient(std::string host, int port, int num_workers);
   ~MultiRESPClient();
 
   MultiRESPClient(const MultiRESPClient&) = delete;
@@ -96,10 +99,12 @@ class MultiRESPClient {
 
   uint64_t submit_batch_get(const std::vector<std::string>& keys,
                             const std::vector<void*>& bufs,
-                            const std::vector<size_t>& lens);
+                            const std::vector<size_t>& lens,
+                            size_t chunk_bytes);
   uint64_t submit_batch_set(const std::vector<std::string>& keys,
                             const std::vector<void*>& bufs,
-                            const std::vector<size_t>& lens);
+                            const std::vector<size_t>& lens,
+                            size_t chunk_bytes);
   uint64_t submit_batch_exists(const std::vector<std::string>& keys);
 
   std::vector<Completion> drain_completions();
@@ -115,7 +120,6 @@ class MultiRESPClient {
 
   std::string host_;
   int port_;
-  size_t chunk_bytes_;
   int num_workers_;
 
   int efd_ = -1;

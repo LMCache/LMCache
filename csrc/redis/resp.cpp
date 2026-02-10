@@ -53,17 +53,15 @@ struct WorkerConn {
   int fd = -1;
   std::string host;
   int port;
-  size_t chunk_bytes;
 
   // pre-computed headers
-  std::string size_header;
   std::string get_prefix;
   std::string set_prefix;
   std::string exists_prefix;
 
-  // reusable buffer for building key headers (avoids repeated dynamic
-  // allocations)
+  // reusable buffers for building headers (avoids repeated dynamic allocations)
   std::string key_header_buf;
+  std::string size_header_buf;
 
   // pre-computed constants (for comparisons)
   static constexpr std::string_view crlf = "\r\n";
@@ -92,20 +90,17 @@ struct WorkerConn {
     // RESP header overhead: $<len>\r\n<key>\r\n = ~8 bytes
     // reserve 512 bytes to handle typical keys plus margin
     key_header_buf.reserve(512);
+
+    // pre-allocate size_header_buf for chunk size headers
+    // typical format: $<chunk_bytes>\r\n
+    // typical chunk_bytes: 1MB-4MB = 7-8 digit number
+    // reserve 32 bytes to handle up to 20+ digit numbers with margin
+    size_header_buf.reserve(32);
   }
 
-  void connect(const std::string& host, int port, size_t chunk_bytes) {
+  void connect(const std::string& host, int port) {
     this->host = host;
     this->port = port;
-    this->chunk_bytes = chunk_bytes;
-
-    // reusable headers (for scatter/gather)
-
-    {
-      std::ostringstream oss;
-      oss << "$" << chunk_bytes << "\r\n";
-      size_header = oss.str();
-    }
 
     // 1. create socket
     fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -254,6 +249,20 @@ struct WorkerConn {
 
     return key_header_buf;
   }
+
+  const std::string& make_size_header(size_t chunk_bytes) {
+    // reuse the buffer to avoid repeated allocations
+    // format: $<chunk_bytes>\r\n
+    // clear() preserves capacity (pre-allocated 32 bytes, enough for any
+    // realistic chunk size)
+    size_header_buf.clear();
+
+    size_header_buf += '$';
+    size_header_buf += std::to_string(chunk_bytes);
+    size_header_buf += crlf;
+
+    return size_header_buf;
+  }
 };
 
 /*
@@ -264,13 +273,14 @@ this by actually parsing the headers and trailers.
 
 // RESP GET
 static void do_get_into(WorkerConn& conn, const std::string& key, void* buf,
-                        size_t len) {
+                        size_t len, size_t chunk_bytes) {
   // we only read exactly chunk_bytes bytes (save_unfull_chunk must be off)
-  if (len != conn.chunk_bytes) {
+  if (len != chunk_bytes) {
     throw std::runtime_error("buffer size mismatch");
   }
 
-  // build key header using reusable buffer
+  // build headers using reusable buffers
+  const std::string& size_header = conn.make_size_header(chunk_bytes);
   const std::string& key_header = conn.make_key_header(key);
 
   // send GET cmd
@@ -281,10 +291,10 @@ static void do_get_into(WorkerConn& conn, const std::string& key, void* buf,
   // parse in 3 steps
 
   // 1. parse the size header and validate
-  std::vector<char> size_header_buf(conn.size_header.size());
-  conn.recv_exactly(size_header_buf.data(), size_header_buf.size());
-  if (std::memcmp(size_header_buf.data(), conn.size_header.data(),
-                  conn.size_header.size()) != 0) {
+  std::vector<char> recv_size_header_buf(size_header.size());
+  conn.recv_exactly(recv_size_header_buf.data(), recv_size_header_buf.size());
+  if (std::memcmp(recv_size_header_buf.data(), size_header.data(),
+                  size_header.size()) != 0) {
     throw std::runtime_error("GET: size header mismatch");
   }
 
@@ -302,20 +312,21 @@ static void do_get_into(WorkerConn& conn, const std::string& key, void* buf,
 
 // RESP SET
 static void do_set_from(WorkerConn& conn, const std::string& key,
-                        const void* buf, size_t len) {
+                        const void* buf, size_t len, size_t chunk_bytes) {
   // we only write exactly chunk_bytes bytes (save_unfull_chunk must be off)
-  if (len != conn.chunk_bytes) {
+  if (len != chunk_bytes) {
     throw std::runtime_error("buffer size mismatch");
   }
 
-  // build key header using reusable buffer
+  // build headers using reusable buffers
+  const std::string& size_header = conn.make_size_header(chunk_bytes);
   const std::string& key_header = conn.make_key_header(key);
 
   // send SET cmd
   // iovec let's us combine pre-built parts and dynamic strings
   conn.send_multipart({{conn.set_prefix.data(), conn.set_prefix.size()},
                        {key_header.data(), key_header.size()},
-                       {conn.size_header.data(), conn.size_header.size()},
+                       {size_header.data(), size_header.size()},
                        {buf, len},
                        {WorkerConn::crlf.data(), WorkerConn::crlf_len}});
 
@@ -357,12 +368,8 @@ static bool do_exists(WorkerConn& conn, const std::string& key) {
 
 // MultiRESP means multi-threaded RESP (multiple workers)
 // constructor
-MultiRESPClient::MultiRESPClient(std::string host, int port, size_t chunk_bytes,
-                                 int num_workers)
-    : host_(std::move(host)),
-      port_(port),
-      chunk_bytes_(chunk_bytes),
-      num_workers_(num_workers) {
+MultiRESPClient::MultiRESPClient(std::string host, int port, int num_workers)
+    : host_(std::move(host)), port_(port), num_workers_(num_workers) {
   if (num_workers_ <= 0) {
     throw std::runtime_error("num threads must > 0");
   }
@@ -394,7 +401,8 @@ int MultiRESPClient::event_fd() const { return efd_; }
 
 uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
                                            const std::vector<void*>& bufs,
-                                           const std::vector<size_t>& lens) {
+                                           const std::vector<size_t>& lens,
+                                           size_t chunk_bytes) {
   if (keys.size() != bufs.size() || keys.size() != lens.size()) {
     throw std::runtime_error("keys, bufs, and lens size mismatch");
   }
@@ -426,6 +434,7 @@ uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
     tile_req.op = Op::BATCH_TILE_GET;
     tile_req.future_id = batch_future_id;
     tile_req.batch = batch_state;
+    tile_req.chunk_bytes = chunk_bytes;
 
     for (size_t i = start; i < end; ++i) {
       tile_req.keys.push_back(keys[i]);
@@ -441,7 +450,8 @@ uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
 
 uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
                                            const std::vector<void*>& bufs,
-                                           const std::vector<size_t>& lens) {
+                                           const std::vector<size_t>& lens,
+                                           size_t chunk_bytes) {
   if (keys.size() != bufs.size() || keys.size() != lens.size()) {
     throw std::runtime_error("keys, bufs, and lens size mismatch");
   }
@@ -473,6 +483,7 @@ uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
     tile_req.op = Op::BATCH_TILE_SET;
     tile_req.future_id = batch_future_id;
     tile_req.batch = batch_state;
+    tile_req.chunk_bytes = chunk_bytes;
 
     for (size_t i = start; i < end; ++i) {
       tile_req.keys.push_back(keys[i]);
@@ -692,8 +703,7 @@ void MultiRESPClient::signal_eventfd_() {
 void MultiRESPClient::worker_loop() {
   try {
     WorkerConn conn;
-    conn.connect(host_, port_,
-                 chunk_bytes_);  // one RESP session per worker/thread
+    conn.connect(host_, port_);  // one RESP session per worker/thread
 
     // register socket fd so close() can shutdown this socket
     {
@@ -728,13 +738,15 @@ void MultiRESPClient::worker_loop() {
         switch (req.op) {
           case Op::BATCH_TILE_GET:
             for (size_t i = 0; i < req.keys.size(); ++i) {
-              do_get_into(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i]);
+              do_get_into(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
+                          req.chunk_bytes);
             }
             comp.ok = true;
             break;
           case Op::BATCH_TILE_SET:
             for (size_t i = 0; i < req.keys.size(); ++i) {
-              do_set_from(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i]);
+              do_set_from(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
+                          req.chunk_bytes);
             }
             comp.ok = true;
             break;
