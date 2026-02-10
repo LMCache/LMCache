@@ -237,7 +237,19 @@ class PlainGPUCacheContext:
         """
         Returns the shape of the KV buffer for the given number of tokens
         """
-        return torch.size((2, self._num_layers, num_tokens, self._hidden_dim_size))
+        return torch.Size((2, self._num_layers, num_tokens, self._hidden_dim_size))
+
+    def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
+        """
+        Returns the temporary GPU buffer for transfers
+        """
+        return self._tmp_gpu_buffer[:, :, :num_tokens, :]
+
+    def slice_kv_cache_on_tokens(self, start: int, end: int) -> torch.Tensor:
+        """
+        Slices the KV cache tensor on the token dimension
+        """
+        return self._kv_cache[:, :, start:end, :]
 
     @property
     def dtype(self) -> torch.dtype:
@@ -266,3 +278,7 @@ class PlainGPUCacheContext:
     @property
     def hidden_dim_size(self) -> int:
         return self._hidden_dim_size
+
+    @property
+    def kv_cache_tensor(self) -> torch.Tensor:
+        return self._kv_cache

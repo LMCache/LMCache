@@ -42,10 +42,15 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - key: IPCCacheEngineKey - The key containing the token ids
         #   - offset: int - The starting offset in the CB KV cache buffer
-        # Returns: None
+        #   - instance_id: int - Unique identifier for the vLLM instance
+        #   - event_ipc_handle: bytes - IPC handle for event notification
+        #                       when the pre-computed chunks are ready
+        # Returns:
+        #   - IPC handle bytes
+        #   - boolean flag indicating if the store is successful
         "CB_STORE_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[IPCCacheEngineKey, int],
-            response_class=None,
+            payload_classes=[IPCCacheEngineKey, int, int, bytes],
+            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve pre-computed chunks
@@ -54,20 +59,30 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - ranges: List[tuple[int, int]] - List of tuples (start, end) indicating
         #                                     the match ranges to retrieve
         #   - offset: int - The starting offset in the CB KV cache buffer
-        # Returns: bool indicating the success of the retrieval
+        #   - instance_id: int - Unique identifier for the vLLM instance
+        #   - event_ipc_handle: bytes - IPC handle for event notification when the
+        #                       retrieval is complete
+        # Returns:
+        #   - IPC handle bytes
+        #   - boolean flag indicating if the retrieval is successful
         "CB_RETRIEVE_PRE_COMPUTED": ProtocolDefinition(
-            payload_classes=[IPCCacheEngineKey, list[tuple[int, int]], int],
-            response_class=bool,
+            payload_classes=[IPCCacheEngineKey, list[tuple[int, int]], int, int, bytes],
+            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Store final chunks after processing
         # Payload:
         #   - key: IPCCacheEngineKey - The key containing the token ids
         #   - offset: int - The starting offset in the CB KV cache buffer
-        # Returns: None
+        #   - instance_id: int - Unique identifier for the vLLM instance
+        #   - event_ipc_handle: bytes - IPC handle for event notification
+        #                       when the final chunks are stored
+        # Returns:
+        #   - IPC handle bytes
+        #   - boolean flag indicating if the store is successful
         "CB_STORE_FINAL": ProtocolDefinition(
-            payload_classes=[IPCCacheEngineKey, int],
-            response_class=None,
+            payload_classes=[IPCCacheEngineKey, int, int, bytes],
+            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Register CB KV Cache

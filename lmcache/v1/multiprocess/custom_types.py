@@ -189,12 +189,14 @@ class IPCCacheEngineKey:
             request_id=self.request_id,
         )
 
-    def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:
+    def to_hash_keys(
+        self, hasher: "TokenHasher", prefix_hash: int | None = None
+    ) -> list["IPCCacheEngineKey"]:
         """Compute chunk hashes and return one IPCCacheEngineKey per chunk.
 
         Preserves all fields in generated keys.
         """
-        chunk_hashes = hasher.compute_chunk_hashes(list(self.token_ids))
+        chunk_hashes = hasher.compute_chunk_hashes(list(self.token_ids), prefix_hash)
         return [
             IPCCacheEngineKey(
                 model_name=self.model_name,
