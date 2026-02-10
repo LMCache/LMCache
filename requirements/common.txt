@@ -19,7 +19,7 @@ pyyaml
 pyzmq >= 25.0.0
 redis
 safetensors
-setuptools>=77.0.3,<81.0.0
+setuptools>=77.0.3,<83.0.0
 setuptools_scm>=8
 sortedcontainers
 # 1. avoid pinning torch version in the runtime dependencies so that 
