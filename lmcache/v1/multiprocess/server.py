@@ -543,7 +543,7 @@ class MPCacheEngine:
         self,
         keys: list[IPCCacheEngineKey],
     ) -> int:
-        """Lookup cache hits for the given keys.
+        """Lookup prefix cache hits for the given keys.
 
         Args:
             keys: List of cache keys.
