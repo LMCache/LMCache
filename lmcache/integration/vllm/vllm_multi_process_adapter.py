@@ -374,26 +374,16 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        if op.block_hashes is not None:
-            # Hash mode
-            chunk_hashes = list(
-                striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
-            )
-            keys = [
-                self._create_hash_key(ch, request_id=request_id) for ch in chunk_hashes
-            ]
-        else:
-            # Token mode
-            assert op.token_ids is not None
-            keys = [
-                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
-            ]
+        assert op.token_ids is not None
+        key = self._create_key(
+            op.token_ids, op.start, op.end, request_id=request_id
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
+            [key, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
-        self.store_futures[request_id] = (future, [])
+        self.store_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -408,26 +398,16 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        if op.block_hashes is not None:
-            # Hash mode
-            chunk_hashes = list(
-                striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
-            )
-            keys = [
-                self._create_hash_key(ch, request_id=request_id) for ch in chunk_hashes
-            ]
-        else:
-            # Token mode
-            assert op.token_ids is not None
-            keys = [
-                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
-            ]
+        assert op.token_ids is not None
+        key = self._create_key(
+            op.token_ids, op.start, op.end, request_id=request_id
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
+            [key, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
-        self.retrieve_futures[request_id] = (future, [])
+        self.retrieve_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -446,37 +426,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        all_keys: list[IPCCacheEngineKey] = []
-        block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
-            if op.block_hashes is not None:
-                chunk_hashes = list(
-                    striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
-                )
-                keys = [
-                    self._create_hash_key(ch, request_id=request_id)
-                    for ch in chunk_hashes
-                ]
-                all_keys.extend(keys)
-            else:
-                assert op.token_ids is not None
-                all_keys.append(
-                    self._create_key(
-                        op.token_ids, op.start, op.end, request_id=request_id
-                    )
-                )
-            block_ids.extend(op.block_ids)
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.STORE,
-            [
-                all_keys,
-                self.instance_id,
-                block_ids,
-                event.ipc_handle(),
-            ],
-        ).to_cuda_future()
-        self.store_futures[request_ids[0]] = (future, list(request_ids[1:]))
+            self.submit_store_request(request_id, op, event)
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -495,37 +446,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        all_keys: list[IPCCacheEngineKey] = []
-        block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
-            if op.block_hashes is not None:
-                chunk_hashes = list(
-                    striding_block_hashes(op.block_hashes, self.blocks_in_chunk)
-                )
-                keys = [
-                    self._create_hash_key(ch, request_id=request_id)
-                    for ch in chunk_hashes
-                ]
-                all_keys.extend(keys)
-            else:
-                assert op.token_ids is not None
-                all_keys.append(
-                    self._create_key(
-                        op.token_ids, op.start, op.end, request_id=request_id
-                    )
-                )
-            block_ids.extend(op.block_ids)
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.RETRIEVE,
-            [
-                all_keys,
-                self.instance_id,
-                block_ids,
-                event.ipc_handle(),
-            ],
-        ).to_cuda_future()
-        self.retrieve_futures[request_ids[0]] = (future, list(request_ids[1:]))
+            self.submit_retrieve_request(request_id, op, event)
 
     @_lmcache_nvtx_annotate
     def get_finished(
@@ -553,13 +475,12 @@ class LMCacheMPWorkerAdapter:
         """
         finished_stores = set()
         finished_retrieves = set()
-        for request_id, (s_future, other_reqs) in self.store_futures.items():
+        for request_id, s_future in self.store_futures.items():
             if not s_future.query():
                 continue
 
             s_result = s_future.result()
             finished_stores.add(request_id)
-            finished_stores.update(other_reqs)
 
             if not s_result:
                 # TODO: add error handling here
@@ -569,15 +490,14 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, other_reqs) in self.retrieve_futures.items():
+        for request_id, r_future in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
             r_result = r_future.result()
             finished_retrieves.add(request_id)
-            finished_retrieves.update(other_reqs)
 
-            if not all(r_result):
+            if not r_result:
                 # TODO: add error handing here
                 logger.error(
                     "Something went wrong when processing the "

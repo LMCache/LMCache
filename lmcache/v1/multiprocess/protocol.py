@@ -19,13 +19,13 @@ functions are supported:
     instance_id: int
 
 - STORE:
-    keys: list[KeyType]
+    key: KeyType
     instance_id: int
     gpu_block_ids: list[int]
     event_ipc_handle: bytes
 
 - RETRIEVE:
-    keys: list[KeyType]
+    key: KeyType
     instance_id: int
     gpu_block_ids: list[int]
     event_ipc_handle: bytes
@@ -122,25 +122,25 @@ _PROTOCOL_DEFINTIONS = {
         handler_type=HandlerType.SYNC,
     ),
     # Store
-    # - keys: list[KeyType]
+    # - key: KeyType
     # - instance_id: int
     # - gpu_block_ids: list[int]
     # - event_ipc_handle: bytes
     # Returns: cuda event handle, bool (success)
     RequestType.STORE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int], bytes],
+        payload_classes=[KeyType, int, list[int], bytes],
         response_class=tuple[bytes, bool],
         handler_type=HandlerType.BLOCKING,
     ),
     # Retrieve
-    # - keys: list[KeyType]
+    # - key: KeyType
     # - instance_id: int
     # - gpu_block_ids: list[int]
     # - event_ipc_handle: bytes
-    # Returns: cuda event handle, list[bool]
+    # Returns: cuda event handle, bool
     RequestType.RETRIEVE: ProtocolDefinition(
-        payload_classes=[list[KeyType], int, list[int], bytes],
-        response_class=tuple[bytes, list[bool]],
+        payload_classes=[KeyType, int, list[int], bytes],
+        response_class=tuple[bytes, bool],
         handler_type=HandlerType.BLOCKING,
     ),
     # Lookup
