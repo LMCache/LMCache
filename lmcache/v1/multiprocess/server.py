@@ -54,21 +54,14 @@ def update_session_for_key(
 ) -> None:
     """Update session state for a token-mode key.
 
-    For token-mode keys, sets the token sequence on the session and
-    computes hashes so they are cached for resolve_keys.
-
-    For hash-mode keys, this is a no-op.
+    Sets the token sequence on the session and computes hashes so they
+    are cached for resolve_keys.
 
     Args:
-        key: An IPC cache engine key (token or hash mode).
+        key: An IPC cache engine key.
         session_manager: The session manager to use.
     """
-    if not key.is_token_mode():
-        return
-    assert key.token_ids is not None
-    request_id = key.request_id
-    assert request_id is not None, "Token mode requires request_id in key"
-    session = session_manager.get_or_create(request_id)
+    session = session_manager.get_or_create(key.request_id)
     session.set_tokens(list(key.token_ids))
     session.get_hashes(key.start, key.end)
 
@@ -79,14 +72,12 @@ def resolve_keys(
 ) -> list[IPCCacheEngineKey]:
     """Convert token-mode keys to hash-mode keys.
 
-    For token-mode keys: uses session to retrieve pre-computed rolling
-    hashes, then creates hash-mode IPCCacheEngineKey instances.
+    Uses session to retrieve pre-computed rolling hashes, then creates
+    hash-mode IPCCacheEngineKey instances.
     update_session_for_key must be called before this function.
 
-    For hash-mode keys: passes through directly.
-
     Args:
-        keys: List of IPC keys (token or hash mode).
+        keys: List of IPC keys.
         session_manager: The session manager to use.
 
     Returns:
@@ -94,23 +85,21 @@ def resolve_keys(
     """
     resolved: list[IPCCacheEngineKey] = []
     for key in keys:
-        if key.is_token_mode():
-            assert key.token_ids is not None
-            request_id = key.request_id
-            assert request_id is not None, "Token mode requires request_id in key"
-            session = session_manager.get_or_create(request_id)
-            hashes = session.get_hashes(key.start, key.end)
-            resolved.extend(
-                IPCCacheEngineKey(
-                    model_name=key.model_name,
-                    world_size=key.world_size,
-                    worker_id=key.worker_id,
-                    chunk_hash=TokenHasher.hash_to_bytes(h),
-                )
-                for h in hashes
+        session = session_manager.get_or_create(key.request_id)
+        hashes = session.get_hashes(key.start, key.end)
+        resolved.extend(
+            IPCCacheEngineKey(
+                model_name=key.model_name,
+                world_size=key.world_size,
+                worker_id=key.worker_id,
+                token_ids=key.token_ids,
+                start=key.start,
+                end=key.end,
+                request_id=key.request_id,
+                chunk_hash=TokenHasher.hash_to_bytes(h),
             )
-        else:
-            resolved.append(key)
+            for h in hashes
+        )
     return resolved
 
 
@@ -377,7 +366,7 @@ class MPCacheEngine:
         self,
         keys: list[IPCCacheEngineKey],
     ) -> int:
-        """Lookup cache hits for the given keys.
+        """Lookup prefix cache hits for the given keys.
 
         Args:
             keys: List of cache keys.
@@ -388,10 +377,7 @@ class MPCacheEngine:
         """
         ipc_keys: list[IPCCacheEngineKey] = []
         for key in keys:
-            if key.is_token_mode():
-                ipc_keys.extend(key.to_hash_keys(self.token_hasher))
-            else:
-                ipc_keys.append(key)
+            ipc_keys.extend(key.to_hash_keys(self.token_hasher))
         if not ipc_keys:
             return 0
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
