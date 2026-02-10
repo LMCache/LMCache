@@ -129,6 +129,9 @@ class BlendEngine(MPCacheEngine):
 
         Returns:
             bool indicating the success of the retrieval and copy operation.
+
+        Note:
+            We must call `cb_lookup_pre_computed` first before calling this function
         """
         # TODO: placeholder
         logger.warning(
