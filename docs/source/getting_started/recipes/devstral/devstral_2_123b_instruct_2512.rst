@@ -29,7 +29,7 @@ Launching Devstral-2-123B-Instruct-2512 on 8xH200
 
 .. note::
    ``Prefix caching`` is disabled so that all reuse comes from LMCache, making cache hits and TTFT deltas easier to interpret. For real deployments, keep vLLM prefix caching enabled and size the CPU cache appropriately.
-   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances.
+   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances. You can remove it in production. 
 
 
 Test LMCache in Action
@@ -83,3 +83,36 @@ Expected LMCache logs (warm):
    External prefix cache hit rate: 47.9%
 
 This is expected: vLLM labels KV supplied by external connectors (LMCache) as **external prefix cache**.
+
+
+Benchmark  
+----------------------------------
+
+.. code-block:: bash
+
+   vllm bench serve \
+  --model mistralai/Devstral-2-123B-Instruct-2512 \
+  --dataset-name random \
+  --random-input 2048 \
+  --random-output 1024 \
+  --request-rate 10 \
+  --num-prompt 100  
+
+
+Vllm + LMCache 
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: text
+
+   ---------------Time to First Token----------------
+   Mean TTFT (ms):                          1769.38
+   Median TTFT (ms):                        1776.92
+   P99 TTFT (ms):                           2520.77
+   -----Time per Output Token (excl. 1st token)------
+   Mean TPOT (ms):                          22.12
+   Median TPOT (ms):                        22.10
+   P99 TPOT (ms):                           27.05
+   ---------------Inter-token Latency----------------
+   Mean ITL (ms):                           22.12
+   Median ITL (ms):                         17.41
+   P99 ITL (ms):                            418.66

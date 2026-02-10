@@ -32,7 +32,7 @@ Launching Kimi-K2-Thinking on 8xH200
 
 .. note::
    ``Prefix caching`` is disabled so that all reuse comes from LMCache, making cache hits and TTFT deltas easier to interpret. For real deployments, keep vLLM prefix caching enabled and size the CPU cache appropriately.
-   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances.
+   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances. You can remove it in production.
 
 
 
@@ -80,12 +80,46 @@ Expected LMCache logs (warm):
    (EngineCore_DP0 pid=39720) [2026-01-28 06:26:43,758] LMCache INFO: Reqid: cmpl-b65f9fb259c1af7b-0-be16654c, Total tokens 2005, LMCache hit tokens: 1792, need to load: 1792 (vllm_v1_adapter.py:1602:lmcache.integration.vllm.vllm_v1_adapter)
    (Worker_TP0 pid=39937) [2026-01-28 06:26:43,791] LMCache INFO: Retrieved 1792 out of 1792 required tokens (from 1792 total tokens). size: 0.1173 gb, cost 28.8691 ms, throughput: 4.0624 GB/s; (cache_engine.py:742:lmcache.v1.cache_engine)
    (APIServer pid=39503) INFO:     127.0.0.1:34028 - "POST /v1/completions HTTP/1.1" 200 OK
-   (APIServer pid=39503) INFO 01-28 06:26:43 [loggers.py:257] Engine 000: Avg prompt throughput: 481.2 tokens/s, Avg generation throughput: 5.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%, External prefix cache hit rate: 47.9%
+   (APIServer pid=39503) INFO 01-28 06:26:43 [loggers.py:257] Engine 000: Avg prompt throughput: 300.8 tokens/s, Avg generation throughput: 4.8 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, External prefix cache hit rate: 44.7%
 
 
 
 .. code-block:: text
 
-   External prefix cache hit rate: 47.9%
+   External prefix cache hit rate: 44.7%
 
 This is expected: vLLM labels KV supplied by external connectors (LMCache) as **external prefix cache**.
+
+
+Benchmark  
+----------------------------------
+
+.. code-block:: bash
+
+   vllm bench serve \
+  --model moonshotai/Kimi-K2-Thinking \
+  --dataset-name random \
+  --random-input 2048 \
+  --random-output 1024 \
+  --request-rate 10 \
+  --num-prompt 100  \
+  --trust-remote-code
+
+
+Vllm + LMCache 
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: text
+
+   ---------------Time to First Token----------------
+   Mean TTFT (ms):                          1287.33
+   Median TTFT (ms):                        1171.87
+   P99 TTFT (ms):                           2664.99
+   -----Time per Output Token (excl. 1st token)------
+   Mean TPOT (ms):                          35.81
+   Median TPOT (ms):                        35.79
+   P99 TPOT (ms):                           41.15
+   ---------------Inter-token Latency----------------
+   Mean ITL (ms):                           35.81
+   Median ITL (ms):                         30.87
+   P99 ITL (ms):                            363.07

@@ -61,7 +61,7 @@ The chat-template changes in the DeepSeek-V3.2 are quite significant. vLLM adapt
 
 .. note::
    ``Prefix caching`` is disabled so that all reuse comes from LMCache, making cache hits and TTFT deltas easier to interpret. For real deployments, keep vLLM prefix caching enabled and size the CPU cache appropriately.
-   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances. Please remove it in production. 
+   Setting ``PYTHONHASHSEED=0`` is recommended for deterministic chunk hashing, especially when scaling to multiple processes or instances. You can remove it in production. 
 
  
 
@@ -137,6 +137,16 @@ Benchmark
 Vllm (Prefix Caching)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. code-block:: bash
+
+   vllm serve deepseek-ai/DeepSeek-V3.2 \
+   --tensor-parallel-size 8 \
+   --tokenizer-mode deepseek_v32 \
+   --tool-call-parser deepseek_v32 \
+   --enable-auto-tool-choice \
+   --reasoning-parser deepseek_v3
+
+
 .. code-block:: text
 
    ---------------Time to First Token----------------
@@ -151,6 +161,7 @@ Vllm (Prefix Caching)
    Mean ITL (ms):                           72.13
    Median ITL (ms):                         59.73
    P99 ITL (ms):                            787.12
+
 
 Vllm + LMCache 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
