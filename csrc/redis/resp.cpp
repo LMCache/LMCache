@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "resp.h"
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/eventfd.h>
@@ -21,8 +19,6 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
-
-namespace py = pybind11;
 
 /*
 There are two sources of overhead in a python integration:
@@ -47,14 +43,7 @@ Therefore, we have:
 
 // tiling refers to dividing work for batched operations between threads
 // beforehand
-enum class Op : uint8_t {
-  GET,
-  SET,
-  EXISTS,
-  BATCH_TILE_GET,
-  BATCH_TILE_SET,
-  BATCH_TILE_EXISTS
-};
+enum class Op : uint8_t { BATCH_TILE_GET, BATCH_TILE_SET, BATCH_TILE_EXISTS };
 
 // shared communication state between threads executing a single batch operation
 // all threads need to complete before the completion is sent
@@ -75,30 +64,27 @@ struct BatchState {
   Op batch_op;
 };
 
+/*
+LIFETIME GUARANTEE:
+we have a strict assumption that Python will NOT clean up any buffer memory
+before all C++ operations finish (the caller holds references to all buffers
+until drain_completions() returns the corresponding future_id). Therefore, we do
+NOT need to track buf_owner references or acquire the GIL to prevent premature
+cleanup. We can safely use raw pointers extracted under the GIL without
+additional lifetime management on the C++ side.
+*/
+
 struct Request {
   // the completion also has a future_id
   // the caller is responsible for matching the request to the completion
   uint64_t future_id = 0;
   Op op;
-  std::string key;
 
-  void* buf_ptr = nullptr;
-  size_t buf_len = 0;
-
-  // python passes in a memoryview or bytearray
-  // following the buffer protocol
-  py::object buf_owner;
-
-  /*
-  for tiling batched operations
-  */
-
-  // these will be the keys and buffers that this Request is responsible for
+  // all operations are batched
   std::vector<std::string> keys;
   std::vector<void*> buf_ptrs;
-  std::vector<py::object> buf_owners;
+  std::vector<size_t> buf_lens;
 
-  uint64_t batch_future_id = 0;
   // shared batch state between threads executing a single batch operation
   // so that they can coordinate when to send the completion
   std::shared_ptr<BatchState> batch;
@@ -387,7 +373,7 @@ static bool do_exists(WorkerConn& conn, const std::string& key) {
   conn.send_multipart({{conn.exists_prefix.data(), conn.exists_prefix.size()},
                        {key_header.data(), key_header.size()}});
 
-  // parse response (either :0\r\n or :1\r\n for non-batched EXISTS)
+  // parse response (either :0\r\n or :1\r\n)
   char response[WorkerConn::exists_response_len];
   conn.recv_exactly(response, WorkerConn::exists_response_len);
 
@@ -438,49 +424,22 @@ MultiRESPClient::MultiRESPClient(std::string host, int port, size_t chunk_bytes,
 // destructor
 MultiRESPClient::~MultiRESPClient() { close(); }
 
-// python interface
-// fd = client.event_fd()
-// asyncio.get_running_loop().add_reader(fd, callback_that_drains_completions)
 int MultiRESPClient::event_fd() const { return efd_; }
 
-// python interface (non-blocking)
-// future_id = client.submit_get(key: str, mv: memoryview)
-uint64_t MultiRESPClient::submit_get(const std::string& key,
-                                     py::memoryview mv) {
-  return submit_with_buffer(Op::GET, key, mv);
-}
-
-// python interface (non-blocking)
-// future_id = client.submit_set(key: str, mv: memoryview)
-uint64_t MultiRESPClient::submit_set(const std::string& key,
-                                     py::memoryview mv) {
-  return submit_with_buffer(Op::SET, key, mv);
-}
-
-// python interface (non-blocking)
-// future_id = client.submit_exists(key: str)
-uint64_t MultiRESPClient::submit_exists(const std::string& key) {
-  Request req;
-  req.future_id = next_future_id_.fetch_add(1, std::memory_order_relaxed);
-  req.op = Op::EXISTS;
-  req.key = key;
-
-  enqueue_request(std::move(req));
-  return req.future_id;
-}
-
-// python interface (non-blocking)
-// future_id = client.submit_batch_get(keys: list[str], memviews:
-// list[memoryview])
 uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
-                                           py::list memviews) {
-  if (keys.size() != memviews.size()) {
-    throw std::runtime_error("keys and memviews size mismatch");
+                                           const std::vector<void*>& bufs,
+                                           const std::vector<size_t>& lens) {
+  if (keys.size() != bufs.size() || keys.size() != lens.size()) {
+    throw std::runtime_error("keys, bufs, and lens size mismatch");
+  }
+
+  size_t num_items = keys.size();
+  if (num_items == 0) {
+    throw std::runtime_error("keys list is empty");
   }
 
   // divide work evenly between workers into tiles (round up, the last tile
   // will be clipped)
-  size_t num_items = keys.size();
   size_t num_tiles =
       std::min<size_t>(num_workers_, num_items);  // avoid empty tiles
   size_t tile_size = (num_items + num_tiles - 1) / num_tiles;  // round up
@@ -503,18 +462,9 @@ uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
     tile_req.batch = batch_state;
 
     for (size_t i = start; i < end; ++i) {
-      py::memoryview mv = memviews[i].cast<py::memoryview>();
-      py::buffer_info info = py::buffer(mv).request();
-
-      if (info.ndim != 1) throw std::runtime_error("buffer must be 1D");
-      if (info.itemsize != 1)
-        throw std::runtime_error("buffer must be byte addressable");
-      if ((size_t)info.size != chunk_bytes_)
-        throw std::runtime_error("buffer size != chunk_bytes");
-
       tile_req.keys.push_back(keys[i]);
-      tile_req.buf_ptrs.push_back(info.ptr);
-      tile_req.buf_owners.push_back(mv);
+      tile_req.buf_ptrs.push_back(bufs[i]);
+      tile_req.buf_lens.push_back(lens[i]);
     }
 
     enqueue_request(std::move(tile_req));
@@ -523,18 +473,20 @@ uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
   return batch_future_id;
 }
 
-// python interface (non-blocking)
-// future_id = client.submit_batch_set(keys: list[str], memviews:
-// list[memoryview])
 uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
-                                           py::list memviews) {
-  if (keys.size() != memviews.size()) {
-    throw std::runtime_error("keys and memviews size mismatch");
+                                           const std::vector<void*>& bufs,
+                                           const std::vector<size_t>& lens) {
+  if (keys.size() != bufs.size() || keys.size() != lens.size()) {
+    throw std::runtime_error("keys, bufs, and lens size mismatch");
+  }
+
+  size_t num_items = keys.size();
+  if (num_items == 0) {
+    throw std::runtime_error("keys list is empty");
   }
 
   // divide work evenly between workers into tiles (round up, the last tile
   // will be clipped)
-  size_t num_items = keys.size();
   size_t num_tiles =
       std::min<size_t>(num_workers_, num_items);  // avoid empty tiles
   size_t tile_size = (num_items + num_tiles - 1) / num_tiles;  // round up
@@ -557,18 +509,9 @@ uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
     tile_req.batch = batch_state;
 
     for (size_t i = start; i < end; ++i) {
-      py::memoryview mv = memviews[i].cast<py::memoryview>();
-      py::buffer_info info = py::buffer(mv).request();
-
-      if (info.ndim != 1) throw std::runtime_error("buffer must be 1D");
-      if (info.itemsize != 1)
-        throw std::runtime_error("buffer must be byte addressable");
-      if ((size_t)info.size != chunk_bytes_)
-        throw std::runtime_error("buffer size != chunk_bytes");
-
       tile_req.keys.push_back(keys[i]);
-      tile_req.buf_ptrs.push_back(info.ptr);
-      tile_req.buf_owners.push_back(mv);
+      tile_req.buf_ptrs.push_back(bufs[i]);
+      tile_req.buf_lens.push_back(lens[i]);
     }
 
     enqueue_request(std::move(tile_req));
@@ -577,8 +520,6 @@ uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
   return batch_future_id;
 }
 
-// python interface (non-blocking)
-// future_id = client.submit_batch_exists(keys: list[str])
 uint64_t MultiRESPClient::submit_batch_exists(
     const std::vector<std::string>& keys) {
   size_t num_items = keys.size();
@@ -623,20 +564,13 @@ uint64_t MultiRESPClient::submit_batch_exists(
   return batch_future_id;
 }
 
-/*
-Crucial: drain_completions *ALSO* drains the eventfd
-*/
-// python interface (non-blocking)
-// the python caller needs to manage its own futures
-// [[future_id, ok, result_bool, error]] = client.drain_completions()
-// fut = pending_futures[future_id]
-// fut.set_result(result_bool or None)
-py::list MultiRESPClient::drain_completions() {
+// crucial: drain_completions *ALSO* drains the eventfd
+std::vector<Completion> MultiRESPClient::drain_completions() {
   // drain the eventfd that cause this drain_completions callback to be
   // invoked
   drain_eventfd_();
 
-  py::list completions_list;
+  std::vector<Completion> completions_list;
 
   for (;;) {
     Completion c;
@@ -658,25 +592,12 @@ py::list MultiRESPClient::drain_completions() {
       c = std::move(completions_.front());
       completions_.pop();
     }
-    // convert Completion to python tuple: (future_id, ok, result_bool, error,
-    // result_bools) result_bools will be None for non-batch-exists operations
-    py::object bools_obj = py::none();
-    if (!c.result_bytes.empty()) {
-      py::list bools_list;
-      for (uint8_t b : c.result_bytes) {
-        bools_list.append(bool(b));
-      }
-      bools_obj = bools_list;
-    }
-    completions_list.append(
-        py::make_tuple(c.future_id, c.ok, c.result_bool, c.error, bools_obj));
+    completions_list.push_back(std::move(c));
   }
 
   return completions_list;
 }
 
-// python interface (blocking)
-// client.close()
 void MultiRESPClient::close() {
   if (closed_.exchange(true, std::memory_order_acq_rel)) {
     return;
@@ -707,24 +628,17 @@ void MultiRESPClient::close() {
     efd_ = -1;
   }
 
-  // clear queues
+  // clear queues (no GIL needed - python guarantees buffers stay alive)
   {
-    py::gil_scoped_acquire gil;
-    {
-      std::lock_guard<std::mutex> lk(req_mu_);
-      while (!requests_.empty()) {
-        requests_.front().buf_owner = py::none();
-        for (auto& owner : requests_.front().buf_owners) {
-          owner = py::none();
-        }
-        requests_.pop();
-      }
+    std::lock_guard<std::mutex> lk(req_mu_);
+    while (!requests_.empty()) {
+      requests_.pop();
     }
-    {
-      std::lock_guard<std::mutex> lk(comp_mu_);
-      while (!completions_.empty()) {
-        completions_.pop();
-      }
+  }
+  {
+    std::lock_guard<std::mutex> lk(comp_mu_);
+    while (!completions_.empty()) {
+      completions_.pop();
     }
   }
 }
@@ -736,28 +650,6 @@ void MultiRESPClient::enqueue_request(Request&& req) {
     requests_.push(std::move(req));
   }
   req_cv_.notify_one();
-}
-
-uint64_t MultiRESPClient::submit_with_buffer(Op op, const std::string& key,
-                                             py::memoryview mv) {
-  py::buffer_info info = py::buffer(mv).request();
-  if (info.ndim != 1) throw std::runtime_error("memoryview must be 1D");
-  if (info.itemsize != 1)
-    throw std::runtime_error("memoryview must be byte addressable");
-  if ((size_t)info.size != chunk_bytes_)
-    throw std::runtime_error("buffer size != chunk_bytes");
-
-  Request req;
-  req.future_id = next_future_id_.fetch_add(1, std::memory_order_relaxed);
-  req.op = op;
-  req.key = key;
-  req.buf_ptr = info.ptr;
-  req.buf_len = (size_t)info.size;
-  // need to ref count down later under GIL
-  req.buf_owner = mv;
-
-  enqueue_request(std::move(req));
-  return req.future_id;
 }
 
 // the first completion after the eventfd signal is consumed will send another
@@ -868,27 +760,15 @@ void MultiRESPClient::worker_loop() {
       // 2. do the requested operation
       try {
         switch (req.op) {
-          case Op::GET:
-            do_get_into(conn, req.key, req.buf_ptr, req.buf_len);
-            comp.ok = true;
-            break;
-          case Op::SET:
-            do_set_from(conn, req.key, req.buf_ptr, req.buf_len);
-            comp.ok = true;
-            break;
-          case Op::EXISTS:
-            comp.result_bool = do_exists(conn, req.key);
-            comp.ok = true;
-            break;
           case Op::BATCH_TILE_GET:
             for (size_t i = 0; i < req.keys.size(); ++i) {
-              do_get_into(conn, req.keys[i], req.buf_ptrs[i], chunk_bytes_);
+              do_get_into(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i]);
             }
             comp.ok = true;
             break;
           case Op::BATCH_TILE_SET:
             for (size_t i = 0; i < req.keys.size(); ++i) {
-              do_set_from(conn, req.keys[i], req.buf_ptrs[i], chunk_bytes_);
+              do_set_from(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i]);
             }
             comp.ok = true;
             break;
@@ -906,79 +786,53 @@ void MultiRESPClient::worker_loop() {
         comp.error = e.what();
         // if we're shutting down, socket errors are expected
         if (stop_.load(std::memory_order_acquire)) {
-          // cleanup and exit without pushing completion
-          py::gil_scoped_acquire gil;
-          if (req.op == Op::BATCH_TILE_GET || req.op == Op::BATCH_TILE_SET) {
-            for (auto& owner : req.buf_owners) {
-              owner = py::none();
-            }
-          } else if (req.op == Op::GET || req.op == Op::SET) {
-            req.buf_owner = py::none();
-          }
-          // BATCH_TILE_EXISTS and EXISTS have no Python refs to clean up
+          // exit without pushing completion (no cleanup needed - Python
+          // guarantees lifetime)
           break;  // exit loop
         }
       }
 
       // 3. push completion to CQ
 
-      // batch completions need to be "joined"
-      if (req.op == Op::BATCH_TILE_GET || req.op == Op::BATCH_TILE_SET ||
-          req.op == Op::BATCH_TILE_EXISTS) {
-        if (!comp.ok) {
-          req.batch->any_failed.store(true, std::memory_order_relaxed);
-          std::lock_guard<std::mutex> lk(req.batch->err_mu);
-          if (req.batch->first_error.empty()) {
-            req.batch->first_error = comp.error;
-          }
-        }
-        // release Python refs for this tile under GIL (only for GET/SET tiles)
-        if (req.op == Op::BATCH_TILE_GET || req.op == Op::BATCH_TILE_SET) {
-          py::gil_scoped_acquire gil;
-          for (auto& owner : req.buf_owners) {
-            owner = py::none();
-          }
-        }
-
-        uint32_t tiles_left =
-            req.batch->remaining_tiles.fetch_sub(1, std::memory_order_relaxed) -
-            1;
-        if (tiles_left == 0) {
-          // last tile to finish -- emit single completion for batch
-          Completion batch_comp;
-          batch_comp.future_id = req.future_id;
-          batch_comp.ok =
-              !req.batch->any_failed.load(std::memory_order_relaxed);
-          if (!batch_comp.ok) {
-            std::lock_guard<std::mutex> lk(req.batch->err_mu);
-            batch_comp.error = req.batch->first_error;
-          }
-          // for batch exists, copy the results (use batch_op to determine type)
-          if (req.batch->batch_op == Op::BATCH_TILE_EXISTS) {
-            batch_comp.result_bytes = std::move(req.batch->exists_results);
-          }
-          push_completion(std::move(batch_comp));
+      // All operations are batched tiles that need to be "joined"
+      // (multiple worker threads coordinate to complete a single batch
+      // operation)
+      if (!comp.ok) {
+        req.batch->any_failed.store(true, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(req.batch->err_mu);
+        if (req.batch->first_error.empty()) {
+          req.batch->first_error = comp.error;
         }
       }
+      // No GIL or python ref cleanup needed - python guarantees lifetime
 
-      // single completions
-      else {
-        // Only release buf_owner if it was actually used (GET/SET/EXISTS with
-        // buffer)
-        if (req.op == Op::GET || req.op == Op::SET) {
-          py::gil_scoped_acquire gil;
-          req.buf_owner = py::none();
+      uint32_t tiles_left =
+          req.batch->remaining_tiles.fetch_sub(1, std::memory_order_relaxed) -
+          1;
+      if (tiles_left == 0) {
+        // last tile to finish -- emit single completion for batch
+        Completion batch_comp;
+        batch_comp.future_id = req.future_id;
+        batch_comp.ok = !req.batch->any_failed.load(std::memory_order_relaxed);
+        if (!batch_comp.ok) {
+          std::lock_guard<std::mutex> lk(req.batch->err_mu);
+          batch_comp.error = req.batch->first_error;
         }
-
-        push_completion(std::move(comp));
+        // for batch exists, copy the results (use batch_op to determine type)
+        if (req.batch->batch_op == Op::BATCH_TILE_EXISTS) {
+          batch_comp.result_bytes = std::move(req.batch->exists_results);
+        }
+        push_completion(std::move(batch_comp));
       }
     }
   } catch (const std::exception& e) {
     // catch any exception from connect() or other unexpected errors
     // log error and exit thread gracefully
     // we can't throw from here as it would call std::terminate
-    (void)e;  // suppress unused warning
+    fprintf(stderr, "[LMCache RESP Worker Error] Caught exception: %s\n",
+            e.what());
   } catch (...) {
     // catch any non-standard exception
+    fprintf(stderr, "[LMCache RESP Worker Error] Caught unknown exception\n");
   }
 }

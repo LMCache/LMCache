@@ -12,10 +12,6 @@
 #include <thread>
 #include <vector>
 
-#include <pybind11/pybind11.h>
-
-namespace py = pybind11;
-
 enum class Op : uint8_t;
 struct Request;
 struct Completion;
@@ -31,23 +27,20 @@ class MultiRESPClient {
 
   int event_fd() const;
 
-  uint64_t submit_get(const std::string& key, py::memoryview mv);
-  uint64_t submit_set(const std::string& key, py::memoryview mv);
-  uint64_t submit_exists(const std::string& key);
-
   uint64_t submit_batch_get(const std::vector<std::string>& keys,
-                            py::list memviews);
+                            const std::vector<void*>& bufs,
+                            const std::vector<size_t>& lens);
   uint64_t submit_batch_set(const std::vector<std::string>& keys,
-                            py::list memviews);
+                            const std::vector<void*>& bufs,
+                            const std::vector<size_t>& lens);
   uint64_t submit_batch_exists(const std::vector<std::string>& keys);
 
-  py::list drain_completions();
+  std::vector<Completion> drain_completions();
 
   void close();
 
  private:
   void enqueue_request(Request&& req);
-  uint64_t submit_with_buffer(Op op, const std::string& key, py::memoryview mv);
   void push_completion(Completion&& c);
   void drain_eventfd_();
   void signal_eventfd_();
