@@ -87,7 +87,7 @@ class LoadStoreOp:
 
 
 StoreResult = bool
-RetrieveResult = list[bool]
+RetrieveResult = bool
 LookupResult = int
 
 
@@ -266,13 +266,9 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches: dict[str, torch.Tensor] = {}
 
         # Request futures
-        # request_id -> (future, other merged requests)
-        self.store_futures: dict[
-            str, tuple[MessagingFuture[StoreResult], list[str]]
-        ] = {}
-        self.retrieve_futures: dict[
-            str, tuple[MessagingFuture[RetrieveResult], list[str]]
-        ] = {}
+        # request_id -> future
+        self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
+        self.retrieve_futures: dict[str, MessagingFuture[RetrieveResult]] = {}
 
         # The store requests that have finished execution in LMCache
         self.finished_stores: set[str] = set()
@@ -336,9 +332,7 @@ class LMCacheMPWorkerAdapter:
                 model inference step
         """
         assert op.token_ids is not None
-        key = self._create_key(
-            op.token_ids, op.start, op.end, request_id=request_id
-        )
+        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
@@ -360,9 +354,7 @@ class LMCacheMPWorkerAdapter:
                 model inference step
         """
         assert op.token_ids is not None
-        key = self._create_key(
-            op.token_ids, op.start, op.end, request_id=request_id
-        )
+        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
