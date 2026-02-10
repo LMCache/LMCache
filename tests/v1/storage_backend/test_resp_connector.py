@@ -10,6 +10,7 @@ These tests verify the RESP protocol client implementation, including:
 """
 
 # Standard
+from unittest.mock import patch
 import asyncio
 
 # Third Party
@@ -22,9 +23,9 @@ from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
-from lmcache.v1.storage_backend.resp_client import REDIS_AVAILABLE
 
 # Local
+from ...conftest import MockRESPClient
 from ..utils import (
     check_mem_obj_equal,
     close_asyncio_loop,
@@ -32,11 +33,15 @@ from ..utils import (
     init_asyncio_loop,
 )
 
-# Skip all tests if Redis C++ extension is not available
-pytestmark = pytest.mark.skipif(
-    not REDIS_AVAILABLE,
-    reason="RESP C++ extension not built : (requires: pip install -e .)",
-)
+
+@pytest.fixture(autouse=True)
+def mock_resp_client():
+    """Use in-memory MockRESPClient so tests never hit real Redis (no 6379)."""
+    with patch(
+        "lmcache.v1.storage_backend.connector.redis_connector.RESPClient",
+        MockRESPClient,
+    ):
+        yield
 
 
 def _get_metadata(use_mla: bool = False):
@@ -73,8 +78,8 @@ def _create_local_cpu_backend(memory_allocator, use_mla=False, config=None):
 
 @pytest.fixture
 def resp_url():
-    """Default RESP URL for testing."""
-    return "resp://localhost:6379"
+    """RESP URL for testing; mock only, no real port (no 6379)."""
+    return "resp://mock.local:0"
 
 
 @pytest.fixture
@@ -164,9 +169,9 @@ def test_resp_connector_batch_operations(
             CreateConnector(resp_url, async_loop, local_backend, resp_config)
         )
 
-        # Create multiple keys
+        # Create multiple keys (unique chunk_hash per key so each put/get pair matches)
         num_keys = 10
-        keys = [dumb_cache_engine_key() for _ in range(num_keys)]
+        keys = [dumb_cache_engine_key(i) for i in range(num_keys)]
 
         # Test 1: Batch exists - all should be False initially
         future = asyncio.run_coroutine_threadsafe(
@@ -233,6 +238,7 @@ def test_resp_connector_different_chunk_sizes(resp_url, autorelease_v1):
     )
 
     # Metadata with larger chunks
+    # (chunk_size must match kv_shape token dim for get_shapes())
     kv_shape = (32, 2, 512, 8, 128)  # Larger chunk size
     dtype = torch.bfloat16
     metadata = LMCacheMetadata(
@@ -244,6 +250,7 @@ def test_resp_connector_different_chunk_sizes(resp_url, autorelease_v1):
         kv_dtype=dtype,
         kv_shape=kv_shape,
         use_mla=False,
+        chunk_size=512,
     )
     local_backend = LocalCPUBackend(
         config=config, metadata=metadata, memory_allocator=memory_allocator
@@ -375,8 +382,9 @@ def test_resp_connector_concurrent_operations(
         )
 
         # Submit multiple operations concurrently
+        # (unique keys so each get matches its put)
         num_concurrent = 5
-        keys = [dumb_cache_engine_key() for _ in range(num_concurrent)]
+        keys = [dumb_cache_engine_key(i) for i in range(num_concurrent)]
         memory_objs = []
 
         num_tokens = 256
