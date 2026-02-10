@@ -66,41 +66,38 @@ def update_session_for_key(
     session.get_hashes(key.start, key.end)
 
 
-def resolve_keys(
-    keys: list[IPCCacheEngineKey],
+def resolve_key(
+    key: IPCCacheEngineKey,
     session_manager: SessionManager,
 ) -> list[IPCCacheEngineKey]:
-    """Convert token-mode keys to hash-mode keys.
+    """Convert a token-mode key to hash-mode keys.
 
     Uses session to retrieve pre-computed rolling hashes, then creates
     hash-mode IPCCacheEngineKey instances.
     update_session_for_key must be called before this function.
 
     Args:
-        keys: List of IPC keys.
+        key: An IPC cache engine key.
         session_manager: The session manager to use.
 
     Returns:
-        List of hash-mode IPCCacheEngineKey.
+        List of IPCCacheEngineKey with hash, one per chunk.
     """
-    resolved: list[IPCCacheEngineKey] = []
-    for key in keys:
-        session = session_manager.get_or_create(key.request_id)
-        hashes = session.get_hashes(key.start, key.end)
-        resolved.extend(
-            IPCCacheEngineKey(
-                model_name=key.model_name,
-                world_size=key.world_size,
-                worker_id=key.worker_id,
-                token_ids=key.token_ids,
-                start=key.start,
-                end=key.end,
-                request_id=key.request_id,
-                chunk_hash=TokenHasher.hash_to_bytes(h),
-            )
-            for h in hashes
+    session = session_manager.get_or_create(key.request_id)
+    hashes = session.get_hashes(key.start, key.end)
+    return [
+        IPCCacheEngineKey(
+            model_name=key.model_name,
+            world_size=key.world_size,
+            worker_id=key.worker_id,
+            token_ids=key.token_ids,
+            start=key.start,
+            end=key.end,
+            request_id=key.request_id,
+            chunk_hash=TokenHasher.hash_to_bytes(h),
         )
-    return resolved
+        for h in hashes
+    ]
 
 
 # Main class for the mp cache engine
@@ -183,7 +180,7 @@ class MPCacheEngine:
                 element indicates whether the store operation was successful.
         """
         update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_keys([key], self.session_manager)
+        ipc_keys = resolve_key(key, self.session_manager)
 
         st = time.perf_counter()
 
@@ -284,7 +281,7 @@ class MPCacheEngine:
                 element indicates whether the key was successfully retrieved.
         """
         update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_keys([key], self.session_manager)
+        ipc_keys = resolve_key(key, self.session_manager)
 
         st = time.perf_counter()
 
