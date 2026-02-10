@@ -33,7 +33,7 @@ configure two lmcache instances:
 
     # cache controller configurations
     enable_controller: True
-    enable_kv_events: True
+    enable_kv_events: True  # Required to track KV cache events for move operations by controller.
     lmcache_instance_id: "lmcache_instance_1"
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
@@ -56,7 +56,7 @@ configure two lmcache instances:
 
     # cache controller configurations
     enable_controller: True
-    enable_kv_events: True
+    enable_kv_events: True  # Required to track KV cache events for move operations by controller.
     lmcache_instance_id: "lmcache_instance_2"
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
