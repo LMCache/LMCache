@@ -19,14 +19,14 @@ import uvicorn
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.distributed.config import (
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.server import MPCacheEngine, run_cache_server
 
 logger = init_logger(__name__)

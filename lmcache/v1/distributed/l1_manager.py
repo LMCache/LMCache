@@ -11,12 +11,12 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import TTLLock
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import L1ManagerConfig
+from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ManagerListener
+from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.multiprocess.distributed.config import L1ManagerConfig
-from lmcache.v1.multiprocess.distributed.error import L1Error
-from lmcache.v1.multiprocess.distributed.internal_api import L1ManagerListener
-from lmcache.v1.multiprocess.distributed.memory_manager import L1MemoryManager
 
 logger = init_logger(__name__)
 
