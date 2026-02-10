@@ -141,54 +141,6 @@ class IPCCacheEngineKey:
 
     chunk_hash: bytes | None = None
 
-    # === Helper methods for hash conversion (used by tests) ===
-    @staticmethod
-    def IntHash2Bytes(chunk_hash: int) -> bytes:
-        """Convert int hash to bytes. Used by tests."""
-        return chunk_hash.to_bytes(4, byteorder="big")
-
-    @staticmethod
-    def Bytes2IntHash(chunk_hash: bytes) -> int:
-        """Convert bytes hash to int. Used by tests."""
-        return int.from_bytes(chunk_hash, byteorder="big") & ((1 << 64) - 1)
-
-    @classmethod
-    def from_int_hash(
-        cls,
-        model_name: str,
-        world_size: int,
-        worker_id: int | None,
-        chunk_hash: int,
-        token_ids: tuple[int, ...] = (),
-        start: int = 0,
-        end: int = 0,
-        request_id: str = "",
-    ) -> "IPCCacheEngineKey":
-        """Create a key with an int hash. Used by tests."""
-        return cls(
-            model_name=model_name,
-            world_size=world_size,
-            worker_id=worker_id,
-            token_ids=token_ids,
-            start=start,
-            end=end,
-            request_id=request_id,
-            chunk_hash=cls.IntHash2Bytes(chunk_hash),
-        )
-
-    def no_worker_id_version(self) -> "IPCCacheEngineKey":
-        """Create a copy with worker_id=None for lookup requests."""
-        return IPCCacheEngineKey(
-            model_name=self.model_name,
-            world_size=self.world_size,
-            worker_id=None,
-            token_ids=self.token_ids,
-            start=self.start,
-            end=self.end,
-            chunk_hash=self.chunk_hash,
-            request_id=self.request_id,
-        )
-
     def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:
         """Compute chunk hashes and return one IPCCacheEngineKey per chunk.
 
@@ -216,6 +168,42 @@ class IPCCacheEngineKey:
     @staticmethod
     def Deserialize(data: bytes) -> "IPCCacheEngineKey":
         return msgspec.msgpack.decode(data, type=IPCCacheEngineKey)
+
+    # Helper function for unit tests only
+    @classmethod
+    def from_token_ids(
+        cls,
+        model_name: str,
+        world_size: int,
+        worker_id: int | None,
+        token_ids: list[int],
+        start: int = 0,
+        end: int = 0,
+        request_id: str = "",
+    ) -> "IPCCacheEngineKey":
+        """Create a key from token ids. Only used by the tests."""
+        return cls(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=worker_id,
+            token_ids=tuple(token_ids),
+            start=start,
+            end=end,
+            request_id=request_id,
+        )
+
+    def no_worker_id_version(self) -> "IPCCacheEngineKey":
+        """Create a copy with worker_id=None for lookup requests."""
+        return IPCCacheEngineKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=None,
+            token_ids=self.token_ids,
+            start=self.start,
+            end=self.end,
+            chunk_hash=self.chunk_hash,
+            request_id=self.request_id,
+        )
 
 
 # Type exports

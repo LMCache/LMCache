@@ -40,11 +40,12 @@ DEFAULT_TIMEOUT = 5.0
 
 def _has_working_new_shared_cuda() -> bool:
     if not torch.cuda.is_available():
+        print("CUDA is not available, skipping tests that require new_shared_cuda")
         return False
     try:
         # Minimal sanity check — adapt to your real API
-        buf = torch.empty(1, device="cuda")
-        shared = buf.untyped_storage()._new_shared_cuda()  # or your exact call
+        buf = torch.empty(1024, device="cuda")
+        shared = buf.untyped_storage()._share_cuda_()  # or your exact call
         return shared is not None
     except Exception:
         return False
@@ -129,7 +130,17 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
     """
     Create a cache key for testing.
     """
-    return IPCCacheEngineKey.from_int_hash(model, 1, 0, index)
+    global CHUNK_SIZE
+    token_ids = [index] * CHUNK_SIZE
+    return IPCCacheEngineKey.from_token_ids(
+        model,
+        1,
+        0,
+        token_ids,
+        start=0,
+        end=CHUNK_SIZE,
+        request_id=f"test_request_{index}",
+    )
 
 
 def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
