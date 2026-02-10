@@ -115,24 +115,12 @@ class CudaIPCWrapper:
 
 @dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
-    """Unified cache key supporting BOTH token-based and hash-based modes.
-
-    # TODO(yuwei): update this docstring after cleaning up token mode —
-    # once token mode is removed, this class only needs hash mode.
+    """Cache key for the IPC (multiprocess) protocol.
 
     This key type is sent by the client over ZMQ (serialized via msgspec).
-    It supports two modes:
 
-    1. Token mode (token_ids is set, chunk_hash is None):
-       - Client sends token_ids
-       - Server computes chunk hashes via TokenHasher
-       - Converts to hash-mode keys, then to ObjectKey for storage
-
-    2. Hash mode (chunk_hash is set, token_ids is None):
-       - Client sends pre-computed chunk_hash directly
-       - Server converts to ObjectKey for storage operations
-
-    The server checks which field is set to determine the mode.
+    The client sends token_ids, start, and end. The server computes chunk
+    hashes via TokenHasher and converts to ObjectKey for storage operations.
 
     The optional request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
@@ -143,13 +131,9 @@ class IPCCacheEngineKey:
     world_size: int
     worker_id: int | None
 
-    # === Mode selection: ONE of these should be set ===
-    # Token mode fields
     token_ids: tuple[int, ...] | None = None  # frozen tuple for hashability
     start: int = 0
     end: int = 0
-
-    # Hash mode field
     chunk_hash: bytes | None = None
 
     # === Session tracking (not part of cache identity) ===
@@ -184,14 +168,6 @@ class IPCCacheEngineKey:
             request_id=request_id,
         )
 
-    def is_token_mode(self) -> bool:
-        """Check if this key is in token mode."""
-        return self.token_ids is not None
-
-    def is_hash_mode(self) -> bool:
-        """Check if this key is in hash mode."""
-        return self.chunk_hash is not None
-
     def no_worker_id_version(self) -> "IPCCacheEngineKey":
         """Create a copy with worker_id=None for lookup requests."""
         return IPCCacheEngineKey(
@@ -206,14 +182,10 @@ class IPCCacheEngineKey:
         )
 
     def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:
-        """Compute chunk hashes and return one hash-mode IPCCacheEngineKey per chunk.
+        """Compute chunk hashes and return one IPCCacheEngineKey per chunk.
 
-        Only valid for token mode. Preserves request_id in generated keys.
+        Preserves request_id in generated keys.
         """
-        if not self.is_token_mode():
-            raise ValueError(
-                "Cannot compute hashes for hash-mode key. Key is already in hash mode."
-            )
         assert self.token_ids is not None
         chunk_hashes = hasher.compute_chunk_hashes(list(self.token_ids))
         return [
