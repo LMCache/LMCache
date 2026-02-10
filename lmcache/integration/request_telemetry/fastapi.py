@@ -33,11 +33,12 @@ class FastAPIRequestTelemetry(RequestTelemetry):
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
-        # NOTE: the default value here is set to specific value for feature testing.
-        # In the future it needs to be passed down from vLLM.
-        endpoint = config.get("endpoint", "http://localhost:5768/api/v1/telemetry")
+        endpoint = config.get("endpoint", None)
         if endpoint is None:
-            raise ValueError("FastAPIRequestTelemetry requires 'endpoint' in config")
+            raise ValueError(
+                "FastAPIRequestTelemetry requires setting endpoint. "
+                "Please set LMCACHE_REQUEST_TELEMETRY_ENDPOINT envvar."
+            )
 
         self._endpoint = endpoint
         self._timeout = config.get("timeout", 5.0)
@@ -85,6 +86,7 @@ class FastAPIRequestTelemetry(RequestTelemetry):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
+            # TODO: this introduces blocking IO, should use asyncio.
             with urlopen(request, timeout=self._timeout) as response:
                 if response.status >= 400:
                     logger.warning(

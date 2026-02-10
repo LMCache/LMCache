@@ -19,20 +19,6 @@ class RequestTelemetry(ABC):
     This class defines the interface for capturing request-level telemetry
     events. Implementations can log events, emit metrics, or perform other
     actions when specific request lifecycle events occur.
-
-    Example:
-        class LoggingTelemetry(RequestTelemetry):
-            def on_request_store_finished(
-                self,
-                request_ids_set: set[str],
-                model_name: str,
-                world_size: int,
-                kv_rank: int,
-            ) -> None:
-                logger.info(
-                    f"Requests {request_ids_set} store finished "
-                    f"on model={model_name}, rank={kv_rank}"
-                )
     """
 
     @abstractmethod
@@ -47,6 +33,14 @@ class RequestTelemetry(ABC):
         world_size: int,
         kv_rank: int,
     ) -> None:
+        """
+        Callback when request finishes AND all its KV cache store ops completes.
+
+        This method ensures that request_ids_set is not empty.
+
+        Technically this function is implemented by inspecting the return value
+        of `get_finished` method.
+        """
         pass
 
     @abstractmethod

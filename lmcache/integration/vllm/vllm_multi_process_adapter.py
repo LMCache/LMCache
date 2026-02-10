@@ -272,9 +272,17 @@ class LMCacheMPWorkerAdapter:
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
 
+        # request telemetry, used for prefill-decode disagg
+        # TODO: pass down the configuration via vLLM connector config
+        # instead of env var
         self.request_telemetry = RequestTelemetryFactory.create(
-            telemetry_type="fastapi",
-            config={},
+            telemetry_type=os.getenv("LMCACHE_REQUEST_TELEMETRY_TYPE", "noop"),
+            config={
+                "endpoint": os.getenv(
+                    "LMCACHE_REQUEST_TELEMETRY_ENDPOINT",
+                    "http://localhost:5768/api/v1/telemetry",
+                ),
+            },
         )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):

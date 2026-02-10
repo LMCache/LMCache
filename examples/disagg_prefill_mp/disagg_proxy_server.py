@@ -294,8 +294,8 @@ async def _handle_disagg_request(request: Request, endpoint: str):
             notify_time = time.monotonic()
             notify_wait_duration = notify_time - prefill_first_response_time
             logger.info(
-                f"Request {request_id}: wait for notify after prefill response"
-                f" = {notify_wait_duration * 1000:.2f}ms"
+                f"Request {request_id}: finished saving KV caches after prefill"
+                f" response = {notify_wait_duration * 1000:.2f}ms"
             )
             logger.debug(f"Event signaled for {request_id}, forwarding to decoder")
 
@@ -330,12 +330,6 @@ async def _handle_disagg_request(request: Request, endpoint: str):
         else:
             response = await send_request_to_decoder(
                 decode_client.client, endpoint, req_data
-            )
-            decode_first_response_time = time.monotonic()
-            latency = decode_first_response_time - prefill_first_response_time
-            logger.info(
-                f"Request {request_id}: latency between prefill first response "
-                f"and decode first response = {latency * 1000:.2f}ms"
             )
             return JSONResponse(content=response.json())
 
