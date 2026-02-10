@@ -372,8 +372,18 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu, gpu_kv_format):
 
     allocator = PinMemoryAllocator(1024 * 1024 * 1024)
 
-    gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
-    gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
+    gpu_kv_src = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        device=device,
+        block_size=block_size,
+        gpu_kv_format=gpu_kv_format,
+    )
+    gpu_kv_dst = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        device=device,
+        block_size=block_size,
+        gpu_kv_format=gpu_kv_format,
+    )
     dtype = get_dtype(gpu_kv_src, gpu_kv_format)
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
