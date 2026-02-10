@@ -374,10 +374,13 @@ class MemoryObj(metaclass=abc.ABCMeta):
 def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
+    shm_name: Optional[str] = None,
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
-    if numa_mapping:
+    if shm_name:
+        ptr = lmc_ops.alloc_shm_pinned_ptr(size, shm_name)
+    elif numa_mapping:
         if torch.cuda.is_available():
             current_device_id = torch.cuda.current_device()
         else:
@@ -402,10 +405,13 @@ def _free_cpu_memory(
     buffer: torch.Tensor,
     size: int | None = None,
     numa_mapping: Optional[NUMAMapping] = None,
-) -> torch.Tensor:
+    shm_name: Optional[str] = None,
+) -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-    if numa_mapping:
+    if shm_name:
+        lmc_ops.free_shm_pinned_ptr(buffer.data_ptr(), size, shm_name)
+    elif numa_mapping:
         lmc_ops.free_pinned_numa_ptr(buffer.data_ptr(), size)
     else:
         lmc_ops.free_pinned_ptr(buffer.data_ptr())
@@ -1902,9 +1908,18 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.numa_mapping = kwargs.get("numa_mapping", None)
 
+        # Extract shm_name from config.extra_config if available
+        config = kwargs.get("config", None)
+        if config is not None:
+            self.shm_name: Optional[str] = config.get_extra_config_value(
+                "shm_name", None
+            )
+        else:
+            self.shm_name = kwargs.get("shm_name", None)
+
         self.size = size
 
-        self.buffer = _allocate_cpu_memory(size, self.numa_mapping)
+        self.buffer = _allocate_cpu_memory(size, self.numa_mapping, self.shm_name)
 
         self._unregistered = False
 
@@ -2025,10 +2040,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 torch.cuda.synchronize()
             if self.buffer.numel() == 0:
                 return
-            if self.numa_mapping:
-                lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
-            else:
-                lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
+            _free_cpu_memory(
+                self.buffer,
+                self.size,
+                self.numa_mapping,
+                self.shm_name,
+            )
             self._unregistered = True
 
     def __str__(self):

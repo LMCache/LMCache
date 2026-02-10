@@ -421,6 +421,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return MixedMemoryAllocator(
                 int(cpu_size * 1024**3),
                 numa_mapping=numa_mapping,
+                config=config,
             )
 
     @_lmcache_nvtx_annotate
