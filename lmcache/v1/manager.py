@@ -19,6 +19,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.health_monitor.base import HealthMonitor
 from lmcache.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
@@ -39,7 +40,6 @@ if TYPE_CHECKING:
         LMCacheAsyncLookupServer,
     )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -289,6 +289,7 @@ class LMCacheManager:
         # First Party
         from lmcache.integration.vllm.utils import (
             ENGINE_NAME,
+            calculate_local_rank_and_world_size,
             mla_enabled,
         )
 
@@ -296,9 +297,6 @@ class LMCacheManager:
             return curr_engine
 
         assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        # Third Party
-        from vllm.platforms import current_platform
 
         try:
             # Third Party
@@ -343,9 +341,6 @@ class LMCacheManager:
             num_draft_layers,
         )
 
-        # Determine device
-        device, torch_dev, dev_name = self._get_device_info(current_platform)
-
         # Extract engine_id and kv_connector_extra_config from vllm_config
         engine_id = None
         kv_connector_extra_config = None
@@ -358,12 +353,15 @@ class LMCacheManager:
                 )
 
         # Create metadata
+        local_worker_id, local_world_size = calculate_local_rank_and_world_size(
+            self._vllm_config
+        )
         metadata = LMCacheMetadata(
             model_name=model_config.model,
             world_size=parallel_config.world_size,
-            local_world_size=parallel_config.world_size,
+            local_world_size=local_world_size,
             worker_id=parallel_config.rank,
-            local_worker_id=parallel_config.rank,
+            local_worker_id=local_worker_id,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=use_mla,
@@ -374,18 +372,15 @@ class LMCacheManager:
             kv_connector_extra_config=kv_connector_extra_config,
         )
 
-        # Create GPU connector
-        vllm_gpu_connector = self._create_gpu_connector(
-            role, use_mla, metadata, device, current_platform
-        )
-
         # Get tensor parallel group
         if role == "scheduler":
             tpg = SimpleNamespace()
             tpg.broadcast = lambda tensor, src: tensor
             tpg.broadcast_object = lambda obj, src: obj
+            vllm_gpu_connector = None
         else:
             tpg = get_tp_group()
+            vllm_gpu_connector = CreateGPUConnector(self._config, metadata, "vllm")
 
         engine = LMCacheEngineBuilder.get_or_create(
             ENGINE_NAME,
@@ -451,72 +446,6 @@ class LMCacheManager:
                     )
                     num_draft_layers = 1
         return num_draft_layers
-
-    def _get_device_info(self, current_platform):
-        """Get device information based on platform."""
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        if current_platform.is_cuda_alike():
-            logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-            torch_dev = torch.cuda
-            dev_name = "cuda"
-        elif current_platform.is_xpu():
-            logger.info("XPU device is available. Using XPU for LMCache engine.")
-            torch_dev = torch.xpu
-            dev_name = "xpu"
-        else:
-            raise RuntimeError("Unsupported device platform for LMCache engine.")
-
-        num_gpus = torch_dev.device_count()
-        local_rank = self._vllm_config.parallel_config.rank % num_gpus
-        torch_dev.set_device(local_rank)
-        device = torch.device(f"{dev_name}:{local_rank}")
-
-        return device, torch_dev, dev_name
-
-    def _create_gpu_connector(self, role, use_mla, metadata, device, current_platform):
-        """Create the GPU connector based on configuration."""
-        # First Party
-        from lmcache.v1.gpu_connector import (
-            VLLMBufferLayerwiseGPUConnector,
-            VLLMPagedMemGPUConnectorV2,
-            VLLMPagedMemGPUConnectorV3,
-            VLLMPagedMemLayerwiseGPUConnector,
-        )
-        from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
-
-        use_gpu = self._need_gpu_interm_buffer()
-
-        if role == "scheduler":
-            return None
-
-        if self._config.use_layerwise:
-            if self._config.enable_blending:
-                return VLLMBufferLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-
-        if current_platform.is_cuda_alike():
-            if self._config.use_gpu_connector_v3:
-                return VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
-                )
-        elif current_platform.is_xpu():
-            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
-        else:
-            raise RuntimeError("No supported connector found for the current platform.")
-
-    def _need_gpu_interm_buffer(self) -> bool:
-        """Check if GPU intermediate buffer is needed."""
-        return not self._config.enable_pd
 
     def start_services(self) -> None:
         """

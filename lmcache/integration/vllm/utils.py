@@ -7,7 +7,7 @@ import string
 import threading
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
 
@@ -288,3 +288,56 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
         shape.numel() * kv_dtype.itemsize
         for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
     )
+
+
+def get_vllm_torch_dev():
+    """
+    Returns the torch device and device name for the vLLM engine.
+    e.g. (torch.cuda, "cuda") or (torch.xpu, "xpu")
+    """
+    # Third Party
+    from vllm.platforms import current_platform
+
+    if current_platform.is_cuda_alike():
+        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
+        torch_dev = torch.cuda
+        dev_name = "cuda"
+    elif current_platform.is_xpu():
+        logger.info("XPU device is available. Using XPU for LMCache engine.")
+        torch_dev = torch.xpu
+        dev_name = "xpu"
+    else:
+        raise RuntimeError("Unsupported device platform for LMCache engine.")
+    return torch_dev, dev_name
+
+
+def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
+    """
+    Calculate the local worker id and local world size.
+
+    Current assumption (TODO: add custom logic in the future):
+    - Tensor Parallel is intra-node
+    - Pipeline Parallel is inter-node
+
+    Returns:
+        Tuple[int, int]: (local_worker_id, local_world_size)
+    """
+    parallel_config = vllm_config.parallel_config
+    global_rank = parallel_config.rank
+    global_world_size = parallel_config.world_size
+    torch_dev, dev_name = get_vllm_torch_dev()
+    num_gpus = torch_dev.device_count()
+    if global_world_size <= num_gpus:
+        # single node case
+        return parallel_config.rank, parallel_config.world_size
+    else:
+        tp_size = parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
+        local_world_size = global_world_size // pp_size
+        assert local_world_size == tp_size, (
+            "LMCache is operating under the assumption that the "
+            "local world size is equal to the tensor parallel size "
+            "in multi-node deployment."
+        )
+        local_worker_id = global_rank % local_world_size
+        return local_worker_id, local_world_size
