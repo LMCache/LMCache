@@ -181,6 +181,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                         lookup_id,
                         self.timeout_ms // 1000,
                     )
+                    self.cancel_lookup(lookup_id)
                     self.first_lookup_time.pop(lookup_id, None)
                     return 0
 
