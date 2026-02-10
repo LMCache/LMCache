@@ -2,7 +2,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -12,7 +12,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -25,6 +24,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.transfer_channel import CreateTransferChannel
@@ -83,7 +83,7 @@ class PDConfig:
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         tp_rank: int,
     ) -> "PDConfig":
         """Convert the LMCacheEngineConfig to PDConfig"""
@@ -143,7 +143,7 @@ class PDBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         self.running = True
 
@@ -151,6 +151,11 @@ class PDBackend(AllocatorBackendInterface):
 
         self.pd_config = PDConfig.from_cache_engine_config(
             config, metadata, self.tp_rank
+        )
+
+        self.corrected_device = get_correct_device(
+            config.pd_buffer_device,
+            metadata.worker_id,
         )
 
         # NOTE(Jiayi): sender/prefiller will not use this pool;
@@ -179,16 +184,22 @@ class PDBackend(AllocatorBackendInterface):
                 self.pd_config.peer_init_port
             )
 
+        allocator = (
+            self.memory_allocator.cpu_allocator
+            if self.corrected_device == "cpu"
+            else self.memory_allocator.gpu_allocator
+        )
         self.transfer_channel = CreateTransferChannel(
             async_mode=False,
             channel_type=config.transfer_channel,
             role=self.pd_config.role,
-            buffer_ptr=self.memory_allocator.gpu_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.gpu_allocator.buffer_size,
-            align_bytes=self.memory_allocator.gpu_allocator.align_bytes,
+            buffer_ptr=allocator.buffer_ptr,
+            buffer_size=allocator.buffer_size,
+            align_bytes=allocator.align_bytes,
             tp_rank=self.tp_rank,
             peer_init_url=peer_init_url,
             backends=config.nixl_backends,
+            device=self.corrected_device,
         )
 
         if self.pd_config.role == "sender":
@@ -206,27 +217,27 @@ class PDBackend(AllocatorBackendInterface):
         return self.__class__.__name__
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         # First Party
-        from lmcache.v1.transfer_channel.transfer_utils import (
-            get_correct_device,
-        )
 
-        corrected_device = get_correct_device(
-            config.pd_buffer_device,
-            metadata.worker_id,
-        )
-        logger.info(f"Setting cuda device to {corrected_device} ")
-        torch.cuda.set_device(corrected_device)
+        if self.corrected_device != "cpu":
+            logger.info(f"Setting cuda device to {self.corrected_device} ")
+            torch.cuda.set_device(self.corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-        paged_mem_allocator.init_gpu_memory_allocator(
+
+        init_func = (
+            paged_mem_allocator.init_cpu_memory_allocator
+            if self.corrected_device == "cpu"
+            else paged_mem_allocator.init_gpu_memory_allocator
+        )
+
+        init_func(
             config.pd_buffer_size,
             [torch.Size(metadata.kv_shape)],
             [metadata.kv_dtype],
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
-            corrected_device,
         )
 
         return paged_mem_allocator
@@ -248,8 +259,9 @@ class PDBackend(AllocatorBackendInterface):
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
         # NOTE: no eviction and busy_loop in PD
+        alloc_type = "cpu" if self.corrected_device == "cpu" else "gpu"
         return self.memory_allocator.allocate(
-            shapes, dtypes, fmt=fmt, allocator_type="gpu"
+            shapes, dtypes, fmt=fmt, allocator_type=alloc_type
         )
 
     # TODO(Jiayi): Please implement batched allocate to reduce memory
@@ -265,8 +277,9 @@ class PDBackend(AllocatorBackendInterface):
     ):
         if fmt is None:
             fmt = MemoryFormat.KV_2LTD
+        alloc_type = "cpu" if self.corrected_device == "cpu" else "gpu"
         return self.memory_allocator.batched_allocate(
-            shapes, dtypes, batch_size, fmt, allocator_type="gpu"
+            shapes, dtypes, batch_size, fmt, allocator_type=alloc_type
         )
 
     # NOTE(Jiayi): If two requests have overlapped keys, will
@@ -372,7 +385,14 @@ class PDBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """
+        Submit batched put tasks to transfer KV caches to peer.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after the transfer completes. Callback exceptions are caught and logged.
+        """
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
@@ -432,6 +452,14 @@ class PDBackend(AllocatorBackendInterface):
             notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
             notif_msg_bytes = msgspec.msgpack.encode(notif_msg)
             self.proxy_side_channel.send(notif_msg_bytes)
+
+        # Call completion callback for all keys after transfer completes
+        if on_complete_callback is not None:
+            for key in keys:
+                try:
+                    on_complete_callback(key)
+                except Exception as e:
+                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     ############################################################
     # Prefiller functions end

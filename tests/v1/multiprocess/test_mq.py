@@ -469,8 +469,7 @@ def test_mq_retrieve():
 def test_mq_lookup():
     """
     Test MessageQueue with LOOKUP request type.
-    LOOKUP takes (keys: list[KeyType], lock: Optional[bool])
-    and returns list[bool].
+    LOOKUP takes (keys: list[KeyType]) and returns int.
     """
     # Create test keys
     keys = [
@@ -479,10 +478,9 @@ def test_mq_lookup():
         )
         for i in range(4)
     ]
-    lock = True
 
-    # Expected response: alternating True/False for each key
-    expected_response = [True, False, True, False]
+    # Expected response: count of even-indexed keys (0, 2) = 2
+    expected_response = 2
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
@@ -491,16 +489,16 @@ def test_mq_lookup():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys, lock],
+        payloads=[keys],
         expected_response=expected_response,
         num_requests=1,
     )
 
 
-def test_mq_lookup_with_none_lock():
+def test_mq_lookup_with_different_key_count():
     """
-    Test MessageQueue with LOOKUP request type with None lock parameter.
-    Tests that Optional[bool] parameter works correctly with None value.
+    Test MessageQueue with LOOKUP request type with different number of keys.
+    Tests that the handler correctly counts matched keys.
     """
     # Create test keys
     keys = [
@@ -509,19 +507,18 @@ def test_mq_lookup_with_none_lock():
         )
         for i in range(3)
     ]
-    lock = None
 
-    # Expected response: alternating True/False for each key
-    expected_response = [True, False, True]
+    # Expected response: count of even-indexed keys (0, 2) = 2
+    expected_response = 2
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
     helper.register_handler(RequestType.LOOKUP, test_mq_handler_helpers.lookup_handler)
 
-    # Run test with LOOKUP request with None lock
+    # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys, lock],
+        payloads=[keys],
         expected_response=expected_response,
         num_requests=1,
     )

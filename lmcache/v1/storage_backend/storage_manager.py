@@ -23,7 +23,6 @@ import threading
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
@@ -37,6 +36,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
@@ -94,7 +94,17 @@ def allocate_and_copy_objects(
             busy_loop=False,
         )
 
-        if memory_obj is None or memory_obj.tensor is None:
+        if memory_obj is None:
+            break
+
+        if memory_obj.tensor is None:
+            # This should not happen with current implementation,
+            # but handle it defensively to avoid memory leak
+            logger.warning(
+                "Allocated MemoryObj has None tensor, this is unexpected. "
+                "Releasing the memory object."
+            )
+            memory_obj.ref_count_down()
             break
 
         with torch.cuda.stream(stream):
@@ -210,7 +220,7 @@ class StorageManager:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         event_manager: EventManager,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
@@ -249,8 +259,8 @@ class StorageManager:
         self.allocator_backend = None
         if metadata.role != "scheduler":
             self.allocator_backend = self._get_allocator_backend(config)
-        if config.local_cpu:
-            self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
+
+        self.local_cpu_backend = self.storage_backends.get("LocalCPUBackend", None)
 
         self.manager_lock = threading.Lock()
 
@@ -475,7 +485,7 @@ class StorageManager:
         self,
         keys: List[CacheEngineKey],
         location: Optional[str] = None,
-    ) -> Optional[List[Optional[MemoryObj]]]:
+    ) -> List[Optional[MemoryObj]]:
         """
         Blocking function to get the memory objects from the storages.
         """
@@ -504,7 +514,7 @@ class StorageManager:
                     memory_objs_no_none = cast(List[MemoryObj], memory_objs)
                     local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
                 return memory_objs
-        return None
+        return [None] * len(keys)
 
     def layerwise_batched_get(
         self,

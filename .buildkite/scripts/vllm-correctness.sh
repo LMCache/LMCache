@@ -55,20 +55,6 @@ uv pip install -e . --reinstall-package lmcache
 # these packages are pretty stable so should not need to
 uv pip install aiohttp tqdm pandas huggingface_hub
 
-# 2. the model weights already exist on the CI machine
-export HF_HUB_OFFLINE=1 # this forces the model weights to be local
-unset HF_HOME
-unset HF_HUB_CACHE
-unset HF_ASSETS_CACHE
-unset HF_XET_CACHE
-unset XDG_CACHE_HOME
-echo "[INFO] Verifying model weights exist in global cache on the CI machine..."
-if ! hf download "$MODEL" --quiet; then
-    echo "[ERROR] Model weights for '$MODEL' not found in ~/.cache/huggingface"
-    echo "[FIX] Please manually download the model weights on the CI machine"
-    exit 1
-fi
-
 # 3. the sharegpt dataset already exists on the CI machine
 # wget -q \
 #   https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json \
@@ -134,7 +120,7 @@ echo "=== DIAGNOSTICS: GPU STATE before CI ==="
 nvidia-smi
 
 echo "[INFO] Selecting free GPU for this build..."
-source .buildkite/scripts/pick-free-gpu.sh 120000 1
+source .buildkite/scripts/pick-free-gpu.sh 90000 1
 echo "[INFO] Using GPU(s): ${CUDA_VISIBLE_DEVICES}"
 
 echo "[INFO] Converting ShareGPT dataset to OpenAI format..."
@@ -147,12 +133,12 @@ PORT=$(find_free_port)
 echo "[INFO] Starting BASE vLLM server on port ${PORT}..."
 
 VLLM_SERVER_DEV_MODE=1 \
-VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 VLLM_BATCH_INVARIANT=1 \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --enforce-eager \
+    --attention-backend FLASH_ATTN \
     --gpu-memory-utilization 0.8 \
     -cc.level=0 \
     >"${VLLM_LOG}" 2>&1 &
@@ -199,11 +185,11 @@ echo "[INFO] Starting LMCACHE vLLM server on port ${PORT}..."
 LMCACHE_CONFIG_FILE=cpu.yaml \
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
-VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 vllm serve "${MODEL}" \
     --port "${PORT}" \
     --trust-remote-code \
     --enforce-eager \
+    --attention-backend FLASH_ATTN \
     --gpu-memory-utilization 0.8 \
     -cc.level=0 \
     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \

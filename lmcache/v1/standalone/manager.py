@@ -10,11 +10,11 @@ removing vLLM dependencies and simplifying the initialization logic.
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.manager import LMCacheManager
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # Fir
@@ -34,7 +34,7 @@ class StandaloneLMCacheManager(LMCacheManager):
     def __init__(
         self,
         config: Any,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         gpu_connector: Any,
         broadcast_fn: Callable,
         broadcast_object_fn: Callable,
@@ -45,7 +45,7 @@ class StandaloneLMCacheManager(LMCacheManager):
 
         Args:
             config: LMCache engine configuration
-            metadata: Pre-constructed LMCacheEngineMetadata
+            metadata: Pre-constructed LMCacheMetadata
             gpu_connector: GPU connector instance
             broadcast_fn: Broadcast function for tensor parallel
             broadcast_object_fn: Broadcast function for objects
@@ -91,11 +91,22 @@ class StandaloneLMCacheManager(LMCacheManager):
 
     def post_init(self) -> None:
         """Post-initialization for standalone mode."""
-        if self._lmcache_engine is None:
+        # If initialization already failed, mark engine and return early
+        if self._init_failed:
+            if self._lmcache_engine is not None:
+                self._lmcache_engine.mark_init_failed(self._init_failed_reason)
+            logger.warning("Skipping post_init due to previous initialization failure")
             return
+        try:
+            if self._lmcache_engine is not None:
+                # Standalone mode post-init is simpler (no async_lookup_server)
+                self._lmcache_engine.post_init()
 
-        # Standalone mode post-init is simpler (no async_lookup_server)
-        self._lmcache_engine.post_init()
+            # Initialize health monitor after engine post_init completes
+            # This also sets up PeriodicThreadRegistry metrics
+            self._init_health_monitor()
+        except Exception as e:
+            self._handle_post_init_failure(e)
 
     def stop_services(self) -> None:
         """Shutdown for standalone mode with simplified logic."""

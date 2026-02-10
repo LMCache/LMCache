@@ -363,6 +363,13 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        """
+        Get the allocator that allocates this memory object
+        """
+        raise NotImplementedError
+
 
 def _allocate_cpu_memory(
     size: int,
@@ -451,6 +458,24 @@ class TensorMemoryObj(MemoryObj):
                 self.group_prefix_sum.append(size_in_bytes)
         else:
             self.group_prefix_sum.append(self.meta.get_size())
+
+    def __del__(self):
+        """
+        Destructor to ensure memory is released when the object is garbage collected.
+        This acts as a safety net to prevent memory leaks if ref_count_down() is not
+        called properly somewhere in the code path.
+        """
+        if self.parent_allocator is not None and self.is_valid():
+            if self.meta.ref_count > 0 or self.meta.pin_count > 0:
+                logger.warning(
+                    "MemoryObj at %s is being garbage collected "
+                    "with ref_count=%d, pin_count=%d. "
+                    "This indicates ref_count_down()/unpin() was not called properly.",
+                    self.meta.address,
+                    self.meta.ref_count,
+                    self.meta.pin_count,
+                )
+            self.parent_allocator.free(self)
 
     def invalidate(self):
         self.valid = False
@@ -632,6 +657,9 @@ class TensorMemoryObj(MemoryObj):
             .view(self.meta.shapes[index])
         )
 
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        return self.parent_allocator
+
 
 class BytesBufferMemoryObj(MemoryObj):
     """
@@ -751,6 +779,11 @@ class BytesBufferMemoryObj(MemoryObj):
         return None
 
     def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        return None
+
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        # NOTE: BytesBufferMemoryObj may not be allocated by any allocator,
+        # so just return None here
         return None
 
 

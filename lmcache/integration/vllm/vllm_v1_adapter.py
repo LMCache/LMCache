@@ -91,7 +91,7 @@ tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
     request_configs = None
-    if sampling_params.extra_args is not None:
+    if sampling_params and sampling_params.extra_args is not None:
         if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
             for k, v in kv_transfer_params.items():
                 if k.startswith("lmcache."):
@@ -827,7 +827,6 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
                     request_configs=request.request_configs,
                     req_id=request.req_id,
-                    skip_contains_check=True,
                 )
 
                 # Check the result

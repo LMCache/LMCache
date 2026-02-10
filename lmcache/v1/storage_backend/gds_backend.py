@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
 import json
@@ -20,7 +20,6 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
@@ -29,6 +28,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
@@ -182,7 +182,7 @@ class GdsBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         dst_device: str = "cuda",
     ):
@@ -424,7 +424,18 @@ class GdsBackend(AllocatorBackendInterface):
         with self.put_lock:
             return key in self.put_tasks
 
-    def submit_put_task(self, key: CacheEngineKey, memory_obj: MemoryObj) -> Future:
+    def submit_put_task(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+    ) -> Future:
+        """
+        Submit a put task to store KV cache to GDS asynchronously.
+
+        :param on_complete_callback: Optional callback invoked after the GDS
+            write completes. Callback exceptions are caught and logged.
+        """
         assert memory_obj.tensor is not None
         memory_obj.ref_count_up()
 
@@ -432,7 +443,8 @@ class GdsBackend(AllocatorBackendInterface):
             self.put_tasks.add(key)
 
         future = asyncio.run_coroutine_threadsafe(
-            self._async_save_bytes_to_disk(key, memory_obj), self.loop
+            self._async_save_bytes_to_disk(key, memory_obj, on_complete_callback),
+            self.loop,
         )
         return future
 
@@ -441,10 +453,19 @@ class GdsBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Union[List[Future], None]:
+        """
+        Submit batched put tasks to store KV caches to GDS asynchronously.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's write completes (not once per batch).
+        """
         futures = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            future = self.submit_put_task(key, memory_obj)
+            future = self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
             futures.append(future)
         return futures
 
@@ -452,9 +473,13 @@ class GdsBackend(AllocatorBackendInterface):
         self,
         key: CacheEngineKey,
         memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Convert KV to bytes and async store bytes to disk.
+
+        :param on_complete_callback: Optional callback invoked after the GDS
+            write completes for this key. Callback exceptions are caught.
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
@@ -491,6 +516,13 @@ class GdsBackend(AllocatorBackendInterface):
         task.add_done_callback(self.save_metadata_tasks.discard)
         with self.put_lock:
             self.put_tasks.discard(key)
+
+        # Call the completion callback if provided
+        if on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
@@ -838,7 +870,7 @@ class GdsBackend(AllocatorBackendInterface):
         raise NotImplementedError("Remote backend does not support remove now.")
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> CuFileMemoryAllocator:
         assert config.cufile_buffer_size is not None
         return CuFileMemoryAllocator(config.cufile_buffer_size * 1024**2)
