@@ -78,6 +78,17 @@ def resp_url():
 
 
 @pytest.fixture
+def resp_config():
+    """Create a config for RESP connector testing."""
+    return LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "save_chunk_meta": False,  # RESP requires this
+            "resp_num_threads": 4,
+        }
+    )
+
+
+@pytest.fixture
 def local_backend():
     """Create a local CPU backend for testing."""
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)  # 1GB
@@ -86,12 +97,16 @@ def local_backend():
     backend.close()
 
 
-def test_resp_connector_basic_operations(resp_url, local_backend, autorelease_v1):
+def test_resp_connector_basic_operations(
+    resp_url, local_backend, resp_config, autorelease_v1
+):
     """Test basic RESP operations: exists, put, get."""
     async_loop, async_thread = init_asyncio_loop()
 
     try:
-        connector = autorelease_v1(CreateConnector(resp_url, async_loop, local_backend))
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, resp_config)
+        )
 
         random_key = dumb_cache_engine_key()
 
@@ -138,12 +153,16 @@ def test_resp_connector_basic_operations(resp_url, local_backend, autorelease_v1
         close_asyncio_loop(async_loop, async_thread)
 
 
-def test_resp_connector_batch_operations(resp_url, local_backend, autorelease_v1):
+def test_resp_connector_batch_operations(
+    resp_url, local_backend, resp_config, autorelease_v1
+):
     """Test RESP batch operations: batch_put, batch_get, batch_exists."""
     async_loop, async_thread = init_asyncio_loop()
 
     try:
-        connector = autorelease_v1(CreateConnector(resp_url, async_loop, local_backend))
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, resp_config)
+        )
 
         # Create multiple keys
         num_keys = 10
@@ -231,7 +250,9 @@ def test_resp_connector_different_chunk_sizes(resp_url, autorelease_v1):
     )
 
     try:
-        connector = autorelease_v1(CreateConnector(resp_url, async_loop, local_backend))
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, config)
+        )
 
         # Test with larger chunk
         key1 = dumb_cache_engine_key()
@@ -261,12 +282,16 @@ def test_resp_connector_different_chunk_sizes(resp_url, autorelease_v1):
         local_backend.close()
 
 
-def test_resp_connector_nonexistent_key(resp_url, local_backend, autorelease_v1):
+def test_resp_connector_nonexistent_key(
+    resp_url, local_backend, resp_config, autorelease_v1
+):
     """Test getting a non-existent key returns None."""
     async_loop, async_thread = init_asyncio_loop()
 
     try:
-        connector = autorelease_v1(CreateConnector(resp_url, async_loop, local_backend))
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, resp_config)
+        )
 
         nonexistent_key = dumb_cache_engine_key()
 
@@ -293,12 +318,16 @@ def test_resp_connector_nonexistent_key(resp_url, local_backend, autorelease_v1)
         close_asyncio_loop(async_loop, async_thread)
 
 
-def test_resp_connector_sequential_operations(resp_url, local_backend, autorelease_v1):
+def test_resp_connector_sequential_operations(
+    resp_url, local_backend, resp_config, autorelease_v1
+):
     """Test multiple sequential put/get operations work correctly."""
     async_loop, async_thread = init_asyncio_loop()
 
     try:
-        connector = autorelease_v1(CreateConnector(resp_url, async_loop, local_backend))
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, resp_config)
+        )
 
         # Perform 5 sequential put/get cycles
         num_ops = 5
@@ -334,12 +363,16 @@ def test_resp_connector_sequential_operations(resp_url, local_backend, autorelea
         close_asyncio_loop(async_loop, async_thread)
 
 
-def test_resp_connector_concurrent_operations(resp_url, local_backend, autorelease_v1):
+def test_resp_connector_concurrent_operations(
+    resp_url, local_backend, resp_config, autorelease_v1
+):
     """Test that concurrent operations are handled correctly."""
     async_loop, async_thread = init_asyncio_loop()
 
     try:
-        connector = autorelease_v1(CreateConnector(resp_url, async_loop, local_backend))
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, resp_config)
+        )
 
         # Submit multiple operations concurrently
         num_concurrent = 5
@@ -401,7 +434,9 @@ def test_resp_connector_thread_scaling(resp_url, num_threads, autorelease_v1):
     local_backend = _create_local_cpu_backend(memory_allocator, False, config)
 
     try:
-        connector = autorelease_v1(CreateConnector(resp_url, async_loop, local_backend))
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, config)
+        )
 
         # Test basic operation with different thread counts
         key = dumb_cache_engine_key()
