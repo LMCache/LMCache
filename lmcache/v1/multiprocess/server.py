@@ -237,10 +237,7 @@ def update_session_for_key(
         key: An IPC cache engine key.
         session_manager: The session manager to use.
     """
-    assert key.token_ids is not None
-    request_id = key.request_id
-    assert request_id is not None, "request_id is required"
-    session = session_manager.get_or_create(request_id)
+    session = session_manager.get_or_create(key.request_id)
     session.set_tokens(list(key.token_ids))
     session.get_hashes(key.start, key.end)
 
@@ -264,16 +261,17 @@ def resolve_keys(
     """
     resolved: list[IPCCacheEngineKey] = []
     for key in keys:
-        assert key.token_ids is not None
-        request_id = key.request_id
-        assert request_id is not None, "request_id is required"
-        session = session_manager.get_or_create(request_id)
+        session = session_manager.get_or_create(key.request_id)
         hashes = session.get_hashes(key.start, key.end)
         resolved.extend(
             IPCCacheEngineKey(
                 model_name=key.model_name,
                 world_size=key.world_size,
                 worker_id=key.worker_id,
+                token_ids=key.token_ids,
+                start=key.start,
+                end=key.end,
+                request_id=key.request_id,
                 chunk_hash=TokenHasher.hash_to_bytes(h),
             )
             for h in hashes

@@ -18,9 +18,9 @@ Defines the types and the customized encoder/decoders for inter-process
 communications.
 
 Key Types:
-- IPCCacheEngineKey: Unified key supporting BOTH token-based and hash-based modes
-  - Token mode: contains token_ids, server hashes them
-  - Hash mode: contains chunk_hash directly
+- IPCCacheEngineKey: Token-based cache key
+  - Contains token_ids, start, end, request_id (all required)
+  - chunk_hash is optionally set after hashing by the server
   - Converted to ObjectKey for storage operations via ipc_keys_to_object_keys()
 """
 
@@ -119,10 +119,11 @@ class IPCCacheEngineKey:
 
     This key type is sent by the client over ZMQ (serialized via msgspec).
 
-    The client sends token_ids, start, and end. The server computes chunk
-    hashes via TokenHasher and converts to ObjectKey for storage operations.
+    The client sends token_ids, start, end, and request_id (all required).
+    The server computes chunk hashes via TokenHasher and converts to
+    ObjectKey for storage operations.
 
-    The optional request_id field is for session tracking and is NOT included
+    The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
     request_ids are considered equal for cache purposes).
     """
@@ -131,13 +132,14 @@ class IPCCacheEngineKey:
     world_size: int
     worker_id: int | None
 
-    token_ids: tuple[int, ...] | None = None  # frozen tuple for hashability
-    start: int = 0
-    end: int = 0
-    chunk_hash: bytes | None = None
+    token_ids: tuple[int, ...]  # frozen tuple for hashability
+    start: int
+    end: int
 
     # === Session tracking (not part of cache identity) ===
-    request_id: str | None = field(default=None, compare=False)
+    request_id: str = field(compare=False)
+
+    chunk_hash: bytes | None = None
 
     # === Helper methods for hash conversion (used by tests) ===
     @staticmethod
@@ -157,15 +159,21 @@ class IPCCacheEngineKey:
         world_size: int,
         worker_id: int | None,
         chunk_hash: int,
-        request_id: str | None = None,
+        token_ids: tuple[int, ...] = (),
+        start: int = 0,
+        end: int = 0,
+        request_id: str = "",
     ) -> "IPCCacheEngineKey":
-        """Create a hash-mode key from an int hash. Used by tests."""
+        """Create a key with an int hash. Used by tests."""
         return cls(
             model_name=model_name,
             world_size=world_size,
             worker_id=worker_id,
-            chunk_hash=cls.IntHash2Bytes(chunk_hash),
+            token_ids=token_ids,
+            start=start,
+            end=end,
             request_id=request_id,
+            chunk_hash=cls.IntHash2Bytes(chunk_hash),
         )
 
     def no_worker_id_version(self) -> "IPCCacheEngineKey":
@@ -184,17 +192,19 @@ class IPCCacheEngineKey:
     def to_hash_keys(self, hasher: "TokenHasher") -> list["IPCCacheEngineKey"]:
         """Compute chunk hashes and return one IPCCacheEngineKey per chunk.
 
-        Preserves request_id in generated keys.
+        Preserves all fields in generated keys.
         """
-        assert self.token_ids is not None
         chunk_hashes = hasher.compute_chunk_hashes(list(self.token_ids))
         return [
             IPCCacheEngineKey(
                 model_name=self.model_name,
                 world_size=self.world_size,
                 worker_id=self.worker_id,
-                chunk_hash=hasher.hash_to_bytes(h),
+                token_ids=self.token_ids,
+                start=self.start,
+                end=self.end,
                 request_id=self.request_id,
+                chunk_hash=hasher.hash_to_bytes(h),
             )
             for h in chunk_hashes
         ]

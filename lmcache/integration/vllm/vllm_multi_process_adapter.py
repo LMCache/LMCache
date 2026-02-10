@@ -230,9 +230,9 @@ class LMCacheMPSchedulerAdapter:
     def _create_key(
         self,
         token_ids: list[int],
-        start: int = 0,
-        end: int = 0,
-        request_id: str | None = None,
+        start: int,
+        end: int,
+        request_id: str,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
@@ -536,9 +536,9 @@ class LMCacheMPWorkerAdapter:
     def _create_key(
         self,
         token_ids: list[int],
-        start: int = 0,
-        end: int = 0,
-        request_id: str | None = None,
+        start: int,
+        end: int,
+        request_id: str,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
