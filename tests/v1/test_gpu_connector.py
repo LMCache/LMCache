@@ -28,7 +28,26 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.metadata import LMCacheMetadata
 
 if torch.cuda.is_available():
-    import lmcache.c_ops as lmc_ops
+    try:
+        # First Party
+        import lmcache.c_ops as lmc_ops
+    except ImportError:
+        lmc_ops = None
+else:
+    lmc_ops = None
+
+# Mock c_ops when not available
+if lmc_ops is None:
+
+    class MockGPUKVFormat:
+        NL_X_2_NB_BS_NH_HS = 0
+        NL_X_NB_2_BS_NH_HS = 1
+        NL_X_NB_BS_HS = 2
+
+    class MockCOps:
+        GPUKVFormat = MockGPUKVFormat
+
+    lmc_ops = MockCOps()
 
 # Local
 from .utils import (
