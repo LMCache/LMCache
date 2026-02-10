@@ -15,18 +15,19 @@ steps:
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}_flash_attn.log"
 
-  - label: ":rocket: vLLM correctness (FLASHINFER)"
-    key: "correctness-flashinfer"
-    timeout_in_minutes: 60
-    commands:
-      - |
-        set -euo pipefail
+  # flash infer does not have batch invariant mode yet
+  # - label: ":rocket: vLLM correctness (FLASHINFER)"
+  #   key: "correctness-flashinfer"
+  #   timeout_in_minutes: 60
+  #   commands:
+  #     - |
+  #       set -euo pipefail
 
-        echo "[INFO] HOME: $HOME"
-        echo "[INFO] PWD: $PWD"
+  #       echo "[INFO] HOME: $HOME"
+  #       echo "[INFO] PWD: $PWD"
 
-        chmod +x .buildkite/scripts/vllm-correctness.sh
-        BUILD_ID="${BUILDKITE_BUILD_ID}_flashinfer" .buildkite/scripts/vllm-correctness.sh FLASHINFER
+  #       chmod +x .buildkite/scripts/vllm-correctness.sh
+  #       BUILD_ID="${BUILDKITE_BUILD_ID}_flashinfer" .buildkite/scripts/vllm-correctness.sh FLASHINFER
 
-    artifact_paths:
-      - "build_${BUILDKITE_BUILD_ID}_flashinfer.log"
+  #   artifact_paths:
+  #     - "build_${BUILDKITE_BUILD_ID}_flashinfer.log"
