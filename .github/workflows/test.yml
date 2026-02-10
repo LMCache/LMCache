@@ -82,10 +82,6 @@ jobs:
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
 
-      - name: Build C++ extensions
-        run: |
-          python -m pip install --no-build-isolation -e .
-
       - name: "Run non-CUDA unit tests"
         run: |
           pytest --ignore=tests/disagg --ignore=tests/v1/test_nixl_storage.py \

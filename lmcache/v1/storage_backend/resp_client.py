@@ -16,8 +16,16 @@ from typing import Dict, Optional, Tuple, Union
 import asyncio
 import concurrent.futures
 
-# First Party
-from lmcache.lmcache_redis import LMCacheRedisClient
+try:
+    # First Party
+    from lmcache.lmcache_redis import LMCacheRedisClient
+
+    REDIS_AVAILABLE = True
+except ImportError:
+    # C++ extension not built (e.g., in non-CUDA CI environments)
+    # This is fine - RESP tests will be skipped
+    REDIS_AVAILABLE = False
+    LMCacheRedisClient = None  # type: ignore
 
 
 class RESPClient:
@@ -35,6 +43,11 @@ class RESPClient:
         num_workers: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
+        if not REDIS_AVAILABLE:
+            raise RuntimeError(
+                "RESPClient requires the C++ Redis extension. "
+                "Build with: pip install -e ."
+            )
         self.loop = loop or asyncio.get_running_loop()
         self._client = LMCacheRedisClient(host, port, num_workers)
         self._fd = int(self._client.event_fd())
