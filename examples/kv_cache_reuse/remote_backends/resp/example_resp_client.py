@@ -4,12 +4,15 @@ from typing import Dict, Optional, Tuple, Union
 import asyncio
 import concurrent.futures
 
-# First Party
-from lmcache.lmcache_redis import LMCacheRedisClient
-
+# Third Party
 # we need to import torch since LMCacheRedisClient is built
 # with torch.utils.cpp_extension.*Extension
 # so we are linking against libc10.so and libtorch.so
+# this line needs to be before the LMCacheRedisClient import
+import torch  # noqa: F401
+
+# First Party
+from lmcache.lmcache_redis import LMCacheRedisClient
 
 
 # sync and asyncio wrapper around the LMCacheRedisClient
@@ -203,7 +206,7 @@ if __name__ == "__main__":
         port = 6379
         chunk_bytes = 4 * 1024 * 1024  # 4MB chunks
         num_workers = 8
-        num_keys = 100
+        num_keys = 500
 
         client = RESPClient(host, port, chunk_bytes, num_workers)
 
@@ -214,11 +217,15 @@ if __name__ == "__main__":
             print("-" * 60)
 
             # Prepare test data
+            print("starting buffer initialization (this might take a while)")
             keys = [f"bench:key:{i}" for i in range(num_keys)]
             buffers = [bytearray(chunk_bytes) for _ in range(num_keys)]
             for i, buf in enumerate(buffers):
                 for j in range(chunk_bytes):
                     buf[j] = (i + j) % 256
+
+            print("buffer initialization complete")
+            print("starting throughput benchmarks")
 
             # Batch SET
             t0 = time.perf_counter()
