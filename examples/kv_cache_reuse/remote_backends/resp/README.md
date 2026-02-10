@@ -9,7 +9,7 @@ An GET / SET benchmark is in `examples/kv_cache_reuse/remote_backends/resp/bench
 Install lmcache from source, then run a sanity check:
 
 ```bash
-python example_resp_client.py
+python benchmark_resp_client.py
 ```
 
 ## Quickstart
