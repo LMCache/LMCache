@@ -20,7 +20,31 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-import lmcache.c_ops as lmc_ops
+
+# Conditional import for CUDA-only operations
+if torch.cuda.is_available():
+    try:
+        # First Party
+        import lmcache.c_ops as lmc_ops
+    except ImportError:
+        # If c_ops is not built, create a mock
+        lmc_ops = None
+else:
+    # Mock c_ops when CUDA is not available
+    lmc_ops = None
+
+# Define mock GPUKVFormat enum if c_ops is not available
+if lmc_ops is None:
+
+    class MockGPUKVFormat:
+        NL_X_2_NB_BS_NH_HS = 0
+        NL_X_NB_2_BS_NH_HS = 1
+        NL_X_NB_BS_HS = 2
+
+    class MockCOps:
+        GPUKVFormat = MockGPUKVFormat
+
+    lmc_ops = MockCOps()
 
 
 def has_cufile() -> bool:

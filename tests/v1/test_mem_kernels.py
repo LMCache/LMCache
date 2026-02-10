@@ -16,8 +16,8 @@ pytest.importorskip(
 )
 
 # First Party
-import lmcache.c_ops as lmc_ops
-
+if torch.cuda.is_available():
+    import lmcache.c_ops as lmc_ops
 # Local
 from .utils import (
     check_mem_obj_equal,

@@ -26,7 +26,9 @@ from lmcache.v1.memory_management import (
     TensorMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-import lmcache.c_ops as lmc_ops
+
+if torch.cuda.is_available():
+    import lmcache.c_ops as lmc_ops
 
 # Local
 from .utils import (
