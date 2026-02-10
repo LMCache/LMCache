@@ -24,13 +24,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc
-from lmcache.v1.multiprocess.distributed.config import L1MemoryManagerConfig
-from lmcache.v1.multiprocess.distributed.error import L1Error
+from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.config import L1MemoryManagerConfig
+from lmcache.v1.distributed.error import L1Error
 
 try:
     # First Party
-    from lmcache.v1.multiprocess.distributed.memory_manager import (
+    from lmcache.v1.distributed.memory_manager import (
         L1MemoryManager,
     )
 except ImportError:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import enum
 
 # First Party
-from lmcache.v1.multiprocess.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey
 
 
 # For L1 manager event notifications

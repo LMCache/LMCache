@@ -6,9 +6,6 @@ These handlers are defined at module level to allow them to be pickled
 and passed between processes during multiprocessing tests.
 """
 
-# Standard
-from typing import Optional
-
 # First Party
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.multiprocess.protocol import KeyType
@@ -143,22 +140,18 @@ def retrieve_handler(
 # ==============================================================================
 
 
-def lookup_handler(keys: list[KeyType], lock: Optional[bool]) -> list[bool]:
+def lookup_handler(keys: list[KeyType]) -> int:
     """
     Dummy handler for LOOKUP requests.
 
     Args:
-        keys: List of cache keys to look up
-        lock: Optional flag to lock the keys
+        keys: List of cache keys to look up (request_id embedded in each key)
 
     Returns:
-        list[bool]: List indicating whether each key was found
+        int: Number of matched keys (count of even-indexed keys for testing)
     """
     # In a real implementation, this would look up keys in the cache
     # For testing, we just validate the inputs and return dummy results
     assert isinstance(keys, list), f"Expected keys to be list, got {type(keys)}"
-    assert lock is None or isinstance(lock, bool), (
-        f"Expected lock to be None or bool, got {type(lock)}"
-    )
-    # Return a result for each key (alternating True/False for testing)
-    return [i % 2 == 0 for i in range(len(keys))]
+    # Return count of "found" keys (alternating pattern for testing)
+    return sum(1 for i in range(len(keys)) if i % 2 == 0)
