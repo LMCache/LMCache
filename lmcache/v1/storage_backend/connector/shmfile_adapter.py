@@ -31,6 +31,15 @@ class ShmFileConnectorAdapter(ConnectorAdapter):
         shm_name = parse_url.query_params.get("shm_name", [None])[0]
         worker_bin = parse_url.query_params.get("worker_bin", [None])[0]
 
+        # If host:port is specified, use TCP mode
+        worker_addr = None
+        if parse_url.host and parse_url.port:
+            if parse_url.port > 0:
+                worker_addr = "%s:%d" % (
+                    parse_url.host,
+                    parse_url.port,
+                )
+
         # Inject shm_name into config.extra_config so that
         # MixedMemoryAllocator can pick it up during allocation.
         if shm_name and context.config is not None:
@@ -45,4 +54,5 @@ class ShmFileConnectorAdapter(ConnectorAdapter):
             config=context.config,
             shm_name=shm_name,
             worker_binary=worker_bin,
+            worker_addr=worker_addr,
         )

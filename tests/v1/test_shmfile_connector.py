@@ -338,3 +338,90 @@ class TestShmWorkerSubprocess:
             del arr  # Release exported pointer before close
             shm.close()
             shm.unlink()
+
+    def test_worker_tcp_mode(self, worker_binary):
+        """Verify the worker can run in TCP mode and
+        communicate via socket."""
+        # Standard
+        from multiprocessing import shared_memory
+        import ctypes
+        import time
+
+        shm_test_name = "lmcache_tcp_test"
+        shm_test_size = 4096
+        tcp_port = 19800
+
+        shm = shared_memory.SharedMemory(
+            name=shm_test_name,
+            create=True,
+            size=shm_test_size,
+        )
+
+        try:
+            msg = b"Hello TCP Worker!"
+            shm.buf[:17] = msg
+
+            arr_t = ctypes.c_uint8 * shm_test_size
+            arr = arr_t.from_buffer(shm.buf)
+            base_addr = ctypes.addressof(arr)
+
+            # Start worker in TCP mode
+            proc = subprocess.Popen(
+                [
+                    worker_binary,
+                    "--listen",
+                    "127.0.0.1:%d" % tcp_port,
+                ],
+                stderr=subprocess.PIPE,
+            )
+
+            # Wait for worker to start listening
+            time.sleep(0.5)
+
+            # Standard
+            import socket as sock_mod
+
+            conn = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_STREAM)
+            conn.connect(("127.0.0.1", tcp_port))
+
+            def send_tcp(cmd):
+                conn.sendall((cmd + "\n").encode("utf-8"))
+                buf = b""
+                while b"\n" not in buf:
+                    data = conn.recv(4096)
+                    if not data:
+                        return "ERROR connection closed"
+                    buf += data
+                return buf.split(b"\n", 1)[0].decode().strip()
+
+            # Attach
+            resp = send_tcp(
+                "ATTACH /%s %d %d" % (shm_test_name, shm_test_size, base_addr)
+            )
+            assert resp == "OK", "ATTACH failed: %s" % resp
+
+            # Write to file
+            with tempfile.NamedTemporaryFile(delete=False) as f:
+                tmp_path = f.name
+            try:
+                resp = send_tcp("WRITE %s %d 17" % (tmp_path, base_addr))
+                assert resp.startswith("OK"), "WRITE failed: %s" % resp
+
+                with open(tmp_path, "rb") as f:
+                    assert f.read() == msg
+
+                # Zero and read back
+                shm.buf[:17] = b"\x00" * 17
+                resp = send_tcp("READ %s %d 17" % (tmp_path, base_addr))
+                assert resp.startswith("OK"), "READ failed: %s" % resp
+                assert bytes(shm.buf[:17]) == msg
+            finally:
+                os.unlink(tmp_path)
+
+            send_tcp("QUIT")
+            conn.close()
+            proc.wait(timeout=5)
+        finally:
+            del arr
+            shm.close()
+            shm.unlink()
