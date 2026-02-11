@@ -46,10 +46,10 @@ def parse_args():
         help="POSIX shm name (must start with /)",
     )
     p.add_argument(
-        "--shm-size",
+        "--shm-size-gb",
         type=int,
-        default=8 * 1024 * 1024,
-        help="Size of shared memory in bytes (default 8MB)",
+        default=1,
+        help="Size of shared memory in GB (default 1 GB)",
     )
     p.add_argument(
         "--storage-dir",
@@ -57,10 +57,10 @@ def parse_args():
         help="Directory for temporary file storage",
     )
     p.add_argument(
-        "--data-size",
-        type=int,
-        default=1024 * 1024,
-        help="Size of test data in bytes (default 1MB)",
+        "--data-size-gb",
+        type=float,
+        default=0.001,
+        help="Size of test data in GB (default 0.001 GB)",
     )
     return p.parse_args()
 
@@ -143,20 +143,21 @@ def md5(data: bytes) -> str:
 def main():
     args = parse_args()
     os.makedirs(args.storage_dir, exist_ok=True)
-
+    shm_size = int(args.shm_size_gb * 1024 * 1024 * 1024)
+    data_size = int(args.data_size_gb * 1024 * 1024 * 1024)
     print("=" * 60)
     print("SHM File Connector - IDC Verification")
     print("=" * 60)
     print("Worker addr : %s" % args.worker_addr)
     print("SHM name    : %s" % args.shm_name)
-    print("SHM size    : %d bytes" % args.shm_size)
-    print("Data size   : %d bytes" % args.data_size)
+    print("SHM size    : %d GB" % args.shm_size_gb)
+    print("Data size   : %d GB" % args.data_size_gb)
     print("Storage dir : %s" % args.storage_dir)
     print()
 
     # 1. Create shared memory
     print("[Step 1] Creating POSIX shared memory...")
-    shm = ShmRegion(args.shm_name, args.shm_size)
+    shm = ShmRegion(args.shm_name, shm_size)
 
     # 2. Connect to remote worker
     print("[Step 2] Connecting to remote worker...")
@@ -164,9 +165,7 @@ def main():
 
     # 3. ATTACH
     print("[Step 3] Sending ATTACH command...")
-    resp = client.send_cmd(
-        "ATTACH %s %d %d" % (args.shm_name, args.shm_size, shm.base_addr)
-    )
+    resp = client.send_cmd("ATTACH %s %d %d" % (args.shm_name, shm_size, shm.base_addr))
     if not resp.startswith("OK"):
         print("[FAIL] ATTACH failed: %s" % resp)
         sys.exit(1)
@@ -175,7 +174,7 @@ def main():
     # 4. Generate random test data and write to shm
     print("[Step 4] Generating random test data...")
     random.seed(42)
-    test_data = random.randbytes(args.data_size)
+    test_data = random.randbytes(data_size)
     original_md5 = md5(test_data)
     print("  Original data MD5: %s (%d bytes)" % (original_md5, len(test_data)))
 
@@ -187,7 +186,7 @@ def main():
     data_ptr = shm.base_addr + offset
     print("[Step 5] WRITE: shm -> file (%s)..." % file_path)
     t0 = time.time()
-    resp = client.send_cmd("WRITE %s %d %d" % (file_path, data_ptr, args.data_size))
+    resp = client.send_cmd("WRITE %s %d %d" % (file_path, data_ptr, data_size))
     t1 = time.time()
     if not resp.startswith("OK"):
         print("[FAIL] WRITE failed: %s" % resp)
@@ -206,14 +205,14 @@ def main():
 
     # 6. Zero the shm region
     print("[Step 6] Zeroing shm region...")
-    shm.zero(offset, args.data_size)
-    zero_md5 = md5(shm.read_bytes(offset, args.data_size))
+    shm.zero(offset, data_size)
+    zero_md5 = md5(shm.read_bytes(offset, data_size))
     print("  Zeroed shm MD5   : %s" % zero_md5)
 
     # 7. READ: worker reads from file and writes to shm
     print("[Step 7] READ: file -> shm (%s)..." % file_path)
     t0 = time.time()
-    resp = client.send_cmd("READ %s %d %d" % (file_path, data_ptr, args.data_size))
+    resp = client.send_cmd("READ %s %d %d" % (file_path, data_ptr, data_size))
     t1 = time.time()
     if not resp.startswith("OK"):
         print("[FAIL] READ failed: %s" % resp)
@@ -222,7 +221,7 @@ def main():
 
     # 8. Verify data in shm matches original
     print("[Step 8] Verifying data in shm...")
-    read_back = shm.read_bytes(offset, args.data_size)
+    read_back = shm.read_bytes(offset, data_size)
     read_md5 = md5(read_back)
     print("  Read-back MD5    : %s" % read_md5)
     if read_md5 != original_md5:
@@ -234,7 +233,7 @@ def main():
     # 9. Byte-by-byte comparison
     print("[Step 9] Byte-by-byte comparison...")
     if read_back == test_data:
-        print("[OK] All %d bytes match!" % args.data_size)
+        print("[OK] All %d bytes match!" % data_size)
     else:
         # Find first mismatch
         for i in range(len(test_data)):
