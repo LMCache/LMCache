@@ -42,6 +42,10 @@ class RESPConnectorAdapter(ConnectorAdapter):
         # Get number of threads for RESP connection pool (default is 8)
         self.resp_num_threads = int(extra_config.get("resp_num_threads", 8))
 
+        # Get authentication credentials from extra_config
+        username = str(extra_config.get("username", ""))
+        password = str(extra_config.get("password", ""))
+
         logger.info(f"Creating RESP connector for URL: {context.url}")
         parsed_url = parse_remote_url(context.url)
         return RESPConnector(
@@ -50,6 +54,8 @@ class RESPConnectorAdapter(ConnectorAdapter):
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
             num_threads=self.resp_num_threads,
+            username=username,
+            password=password,
         )
 
 

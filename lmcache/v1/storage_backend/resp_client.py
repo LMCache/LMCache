@@ -42,6 +42,8 @@ class RESPClient:
         port: int,
         num_workers: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        username: str = "",
+        password: str = "",
     ):
         if not REDIS_AVAILABLE:
             raise RuntimeError(
@@ -49,7 +51,7 @@ class RESPClient:
                 "Build with: pip install -e ."
             )
         self.loop = loop or asyncio.get_running_loop()
-        self._client = LMCacheRedisClient(host, port, num_workers)
+        self._client = LMCacheRedisClient(host, port, num_workers, username, password)
         self._fd = int(self._client.event_fd())
         self._closed = False
 
@@ -72,7 +74,7 @@ class RESPClient:
                 if not items:
                     return
 
-                for future_id, ok, result_bool, error, result_bools in items:
+                for future_id, ok, error, result_bools in items:
                     fid = int(future_id)
                     entry = self._pending.pop(fid, None)
                     if entry is None:
@@ -87,7 +89,13 @@ class RESPClient:
 
                     if ok:
                         if op == "exists":
-                            fut.set_result(bool(result_bool))
+                            # result_bools is a list with 1 element for single
+                            # exists
+                            if result_bools is not None and len(result_bools) > 0:
+                                fut.set_result(bool(result_bools[0]))
+                            else:
+                                # should not happen but handle gracefully
+                                fut.set_result(False)
                         elif op == "batch_exists":
                             # result_bools is a list of booleans (or None if empty)
                             if result_bools is not None:

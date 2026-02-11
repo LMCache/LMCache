@@ -65,9 +65,9 @@ struct Request {
   // for batch exists tiles, track which indices this tile is responsible for
   size_t start_idx = 0;
 
-  // chunk_bytes for GET/SET operations (passed per-operation, not
+  // batch_chunk_num_bytes for GET/SET operations (passed per-operation, not
   // per-connection)
-  size_t chunk_bytes = 0;
+  size_t batch_chunk_num_bytes = 0;
 };
 
 struct Completion {
@@ -77,10 +77,10 @@ struct Completion {
 
   // did the operation succeed?
   bool ok = true;
-  // for EXISTS only (no result in the completion for SET and GET)
-  bool result_bool = false;
 
-  // for batch EXISTS, store multiple boolean results as bytes (0/1)
+  // for EXISTS operations (both single and batch), store boolean results as
+  // bytes (0/1) single EXISTS will have 1 element, batch EXISTS will have N
+  // elements (no result in the completion for SET and GET)
   std::vector<uint8_t> result_bytes;
 
   // error string if operation failed
@@ -89,7 +89,8 @@ struct Completion {
 
 class MultiRESPClient {
  public:
-  MultiRESPClient(std::string host, int port, int num_workers);
+  MultiRESPClient(std::string host, int port, int num_workers,
+                  std::string username = "", std::string password = "");
   ~MultiRESPClient();
 
   MultiRESPClient(const MultiRESPClient&) = delete;
@@ -100,11 +101,11 @@ class MultiRESPClient {
   uint64_t submit_batch_get(const std::vector<std::string>& keys,
                             const std::vector<void*>& bufs,
                             const std::vector<size_t>& lens,
-                            size_t chunk_bytes);
+                            size_t batch_chunk_num_bytes);
   uint64_t submit_batch_set(const std::vector<std::string>& keys,
                             const std::vector<void*>& bufs,
                             const std::vector<size_t>& lens,
-                            size_t chunk_bytes);
+                            size_t batch_chunk_num_bytes);
   uint64_t submit_batch_exists(const std::vector<std::string>& keys);
 
   std::vector<Completion> drain_completions();
@@ -121,6 +122,8 @@ class MultiRESPClient {
   std::string host_;
   int port_;
   int num_workers_;
+  std::string username_;
+  std::string password_;
 
   int efd_ = -1;
 

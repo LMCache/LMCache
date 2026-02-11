@@ -9,7 +9,18 @@ An GET / SET benchmark is in `examples/kv_cache_reuse/remote_backends/resp/bench
 Install lmcache from source, then run a sanity check:
 
 ```bash
+# Run with defaults: host=127.0.0.1, port=6379, chunk-mb=4.0, num-workers=8, num-keys=500
 python benchmark_resp_client.py
+
+# Or customize parameters:
+python benchmark_resp_client.py \
+    --host 127.0.0.1 \
+    --port 6379 \
+    --chunk-mb 4.0 \
+    --num-workers 8 \
+    --num-keys 500 \
+    --username default \
+    --password YOUR_PASSWORD
 ```
 
 ## Quickstart
@@ -31,6 +42,8 @@ redis-cli -p 6379 DBSIZE
 ```
 
 Deploy LMCache with the custom LMCacheRedis KV Connector
+
+`save_unfull_chunk` must be off (default is off) and also we must not save the chunk metadata. 
 ```bash
 LMCACHE_CONFIG_FILE=resp.yaml \
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
@@ -40,7 +53,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 ```
 
 Coming Soon: 
-MP Mode Controller
+MP Mode Controller. This will support variable size chunks.
 
 Send twice. First time for store. Second time for retrieve. 
 ```bash

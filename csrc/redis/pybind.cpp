@@ -13,7 +13,7 @@ all methods release the GIL as soon as raw buffer pointers are extracted,
 allowing Python to continue executing while C++ workers perform I/O operations.
 
 python surface area:
-  client = LMCacheRedisClient(host, port, chunk_bytes, num_workers)
+  client = LMCacheRedisClient(host, port, num_workers)
   fd = client.event_fd()
   asyncio.get_running_loop().add_reader(fd, callback_that_drains_completions)
 
@@ -28,7 +28,8 @@ request # and matching them to the completions pending_futures = {}
   future_id = client.submit_batch_exists(keys)
 
   completions = client.drain_completions()
-  # Returns: [(future_id, ok, result_bool, error, result_bools), ...]
+  # Returns: [(future_id, ok, error, result_bools), ...]
+  # result_bools is None for get/set, a list for exists operations
   # get and set are side-effectful and have no results to extract in the
 completion
 
@@ -37,8 +38,9 @@ completion
 
 PYBIND11_MODULE(lmcache_redis, m) {
   py::class_<MultiRESPClient>(m, "LMCacheRedisClient")
-      .def(py::init<std::string, int, int>(), py::arg("host"), py::arg("port"),
-           py::arg("num_workers"))
+      .def(py::init<std::string, int, int, std::string, std::string>(),
+           py::arg("host"), py::arg("port"), py::arg("num_workers"),
+           py::arg("username") = "", py::arg("password") = "")
       // event_fd: Get file descriptor for async notification
       // fd = client.event_fd()
       .def("event_fd", &MultiRESPClient::event_fd)
@@ -57,11 +59,12 @@ PYBIND11_MODULE(lmcache_redis, m) {
             std::vector<std::string> keys = {key};
             std::vector<void*> bufs = {info.ptr};
             std::vector<size_t> lens = {static_cast<size_t>(info.size)};
-            size_t chunk_bytes = static_cast<size_t>(info.size);
+            size_t batch_chunk_num_bytes = static_cast<size_t>(info.size);
 
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_get(keys, bufs, lens, chunk_bytes);
+            return self.submit_batch_get(keys, bufs, lens,
+                                         batch_chunk_num_bytes);
           },
           py::arg("key"), py::arg("memoryview"))
       // submit_set: Submit a SET operation for a single key
@@ -79,11 +82,12 @@ PYBIND11_MODULE(lmcache_redis, m) {
             std::vector<std::string> keys = {key};
             std::vector<void*> bufs = {info.ptr};
             std::vector<size_t> lens = {static_cast<size_t>(info.size)};
-            size_t chunk_bytes = static_cast<size_t>(info.size);
+            size_t batch_chunk_num_bytes = static_cast<size_t>(info.size);
 
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_set(keys, bufs, lens, chunk_bytes);
+            return self.submit_batch_set(keys, bufs, lens,
+                                         batch_chunk_num_bytes);
           },
           py::arg("key"), py::arg("memoryview"))
       // submit_exists: Check if a single key exists
@@ -129,12 +133,14 @@ PYBIND11_MODULE(lmcache_redis, m) {
               lens.push_back(static_cast<size_t>(info.size));
             }
 
-            // use the first buffer's size as chunk_bytes (all must match)
-            size_t chunk_bytes = lens[0];
+            // use the first buffer's size as batch_chunk_num_bytes (all must
+            // match)
+            size_t batch_chunk_num_bytes = lens[0];
 
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_get(keys, bufs, lens, chunk_bytes);
+            return self.submit_batch_get(keys, bufs, lens,
+                                         batch_chunk_num_bytes);
           },
           py::arg("keys"), py::arg("memoryviews"))
       // submit_batch_set: Submit SET operations for multiple keys
@@ -169,12 +175,14 @@ PYBIND11_MODULE(lmcache_redis, m) {
               lens.push_back(static_cast<size_t>(info.size));
             }
 
-            // use the first buffer's size as chunk_bytes (all must match)
-            size_t chunk_bytes = lens[0];
+            // use the first buffer's size as batch_chunk_num_bytes (all must
+            // match)
+            size_t batch_chunk_num_bytes = lens[0];
 
             // release GIL for C++ operation (python guarantees buffer lifetime)
             py::gil_scoped_release release;
-            return self.submit_batch_set(keys, bufs, lens, chunk_bytes);
+            return self.submit_batch_set(keys, bufs, lens,
+                                         batch_chunk_num_bytes);
           },
           py::arg("keys"), py::arg("memoryviews"))
       // submit_batch_exists: Check if multiple keys exist
@@ -189,8 +197,8 @@ PYBIND11_MODULE(lmcache_redis, m) {
           py::arg("keys"))
       // drain_completions: Drain and convert completed operations to Python
       // tuples completions = client.drain_completions() Returns: [(future_id,
-      // ok, result_bool, error, result_bools), ...] Note: This also drains the
-      // eventfd
+      // ok, error, result_bools), ...] result_bools is None for get/set, a list
+      // for exists Note: This also drains the eventfd
       .def("drain_completions",
            [](MultiRESPClient& self) {
              // call C++ method without holding GIL
@@ -213,10 +221,9 @@ PYBIND11_MODULE(lmcache_redis, m) {
                  bools_obj = bools_list;
                }
 
-               // Return tuple: (future_id, ok, result_bool, error,
-               // result_bools)
-               result.append(py::make_tuple(c.future_id, c.ok, c.result_bool,
-                                            c.error, bools_obj));
+               // Return tuple: (future_id, ok, error, result_bools)
+               result.append(
+                   py::make_tuple(c.future_id, c.ok, c.error, bools_obj));
              }
 
              return result;

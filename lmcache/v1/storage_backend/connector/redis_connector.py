@@ -47,6 +47,8 @@ class RESPConnector(RemoteConnector):
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         num_threads: int = 8,
+        username: str = "",
+        password: str = "",
     ):
         # this gives us access to self.full_chunk_size_bytes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -57,7 +59,7 @@ class RESPConnector(RemoteConnector):
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
-        self.client = RESPClient(host, port, num_threads, loop)
+        self.client = RESPClient(host, port, num_threads, loop, username, password)
         self.pq_executor = AsyncPQExecutor(loop)
 
     async def _exists(self, key: CacheEngineKey) -> bool:

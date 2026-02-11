@@ -45,7 +45,7 @@ Therefore, we have:
 // a TCP session (one per thread) implementing RESP2
 /*
 Key Optimizations include:
-1. preset chunk_bytes (allows not parsing for \r\n byte-by-byte)
+1. preset batch_chunk_num_bytes (allows not parsing for \r\n byte-by-byte)
 2. scatter/gather sending of data (with pre-allocated buffers)
 3. zero copy (no bounce bufferse)
 */
@@ -53,6 +53,11 @@ struct WorkerConn {
   int fd = -1;
   std::string host;
   int port;
+
+  // authentication
+  std::string username;  // optional; empty => AUTH password
+  std::string password;  // required for auth
+  bool authed = false;
 
   // pre-computed headers
   std::string get_prefix;
@@ -92,8 +97,8 @@ struct WorkerConn {
     key_header_buf.reserve(512);
 
     // pre-allocate size_header_buf for chunk size headers
-    // typical format: $<chunk_bytes>\r\n
-    // typical chunk_bytes: 1MB-4MB = 7-8 digit number
+    // typical format: $<batch_chunk_num_bytes>\r\n
+    // typical batch_chunk_num_bytes: 1MB-4MB = 7-8 digit number
     // reserve 32 bytes to handle up to 20+ digit numbers with margin
     size_header_buf.reserve(32);
   }
@@ -227,6 +232,63 @@ struct WorkerConn {
     }
   }
 
+  std::string recv_line() {
+    // read until CRLF for simple string / error replies
+    // byte-by-byte, but this is only used for AUTH (once per connection)
+    std::string line;
+    line.reserve(128);
+    for (;;) {
+      char c;
+      recv_exactly(&c, 1);
+      line.push_back(c);
+      size_t n = line.size();
+      if (n >= 2 && line[n - 2] == '\r' && line[n - 1] == '\n') {
+        return line;  // includes \r\n
+      }
+    }
+  }
+
+  void authenticate_if_needed() {
+    if (authed) return;
+    if (password.empty()) return;  // no auth required
+
+    if (!username.empty()) {
+      // AUTH username password
+      std::string u =
+          "$" + std::to_string(username.size()) + "\r\n" + username + "\r\n";
+      std::string p =
+          "$" + std::to_string(password.size()) + "\r\n" + password + "\r\n";
+      static constexpr std::string_view auth_prefix = "*3\r\n$4\r\nAUTH\r\n";
+
+      send_multipart({
+          {auth_prefix.data(), auth_prefix.size()},
+          {u.data(), u.size()},
+          {p.data(), p.size()},
+      });
+    } else {
+      // AUTH password
+      std::string p =
+          "$" + std::to_string(password.size()) + "\r\n" + password + "\r\n";
+      static constexpr std::string_view auth_prefix = "*2\r\n$4\r\nAUTH\r\n";
+
+      send_multipart({
+          {auth_prefix.data(), auth_prefix.size()},
+          {p.data(), p.size()},
+      });
+    }
+
+    std::string line = recv_line();
+    if (line.rfind("+OK\r\n", 0) == 0) {
+      authed = true;
+      return;
+    }
+    if (!line.empty() && line[0] == '-') {
+      // line is like "-WRONGPASS ...\r\n"
+      throw std::runtime_error("AUTH failed: " + line);
+    }
+    throw std::runtime_error("AUTH failed: unexpected reply: " + line);
+  }
+
   const std::string& make_key_header(const std::string& key) {
     // reuse the buffer to avoid repeated allocations
     // format: $<key_length>\r\n<key>\r\n
@@ -250,15 +312,15 @@ struct WorkerConn {
     return key_header_buf;
   }
 
-  const std::string& make_size_header(size_t chunk_bytes) {
+  const std::string& make_size_header(size_t batch_chunk_num_bytes) {
     // reuse the buffer to avoid repeated allocations
-    // format: $<chunk_bytes>\r\n
+    // format: $<batch_chunk_num_bytes>\r\n
     // clear() preserves capacity (pre-allocated 32 bytes, enough for any
     // realistic chunk size)
     size_header_buf.clear();
 
     size_header_buf += '$';
-    size_header_buf += std::to_string(chunk_bytes);
+    size_header_buf += std::to_string(batch_chunk_num_bytes);
     size_header_buf += crlf;
 
     return size_header_buf;
@@ -273,14 +335,15 @@ this by actually parsing the headers and trailers.
 
 // RESP GET
 static void do_get_into(WorkerConn& conn, const std::string& key, void* buf,
-                        size_t len, size_t chunk_bytes) {
-  // we only read exactly chunk_bytes bytes (save_unfull_chunk must be off)
-  if (len != chunk_bytes) {
+                        size_t len, size_t batch_chunk_num_bytes) {
+  // we only read exactly batch_chunk_num_bytes bytes (save_unfull_chunk must be
+  // off)
+  if (len != batch_chunk_num_bytes) {
     throw std::runtime_error("buffer size mismatch");
   }
 
   // build headers using reusable buffers
-  const std::string& size_header = conn.make_size_header(chunk_bytes);
+  const std::string& size_header = conn.make_size_header(batch_chunk_num_bytes);
   const std::string& key_header = conn.make_key_header(key);
 
   // send GET cmd
@@ -312,14 +375,16 @@ static void do_get_into(WorkerConn& conn, const std::string& key, void* buf,
 
 // RESP SET
 static void do_set_from(WorkerConn& conn, const std::string& key,
-                        const void* buf, size_t len, size_t chunk_bytes) {
-  // we only write exactly chunk_bytes bytes (save_unfull_chunk must be off)
-  if (len != chunk_bytes) {
+                        const void* buf, size_t len,
+                        size_t batch_chunk_num_bytes) {
+  // we only write exactly batch_chunk_num_bytes bytes (save_unfull_chunk must
+  // be off)
+  if (len != batch_chunk_num_bytes) {
     throw std::runtime_error("buffer size mismatch");
   }
 
   // build headers using reusable buffers
-  const std::string& size_header = conn.make_size_header(chunk_bytes);
+  const std::string& size_header = conn.make_size_header(batch_chunk_num_bytes);
   const std::string& key_header = conn.make_key_header(key);
 
   // send SET cmd
@@ -368,8 +433,13 @@ static bool do_exists(WorkerConn& conn, const std::string& key) {
 
 // MultiRESP means multi-threaded RESP (multiple workers)
 // constructor
-MultiRESPClient::MultiRESPClient(std::string host, int port, int num_workers)
-    : host_(std::move(host)), port_(port), num_workers_(num_workers) {
+MultiRESPClient::MultiRESPClient(std::string host, int port, int num_workers,
+                                 std::string username, std::string password)
+    : host_(std::move(host)),
+      port_(port),
+      num_workers_(num_workers),
+      username_(std::move(username)),
+      password_(std::move(password)) {
   if (num_workers_ <= 0) {
     throw std::runtime_error("num threads must > 0");
   }
@@ -402,7 +472,7 @@ int MultiRESPClient::event_fd() const { return efd_; }
 uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
                                            const std::vector<void*>& bufs,
                                            const std::vector<size_t>& lens,
-                                           size_t chunk_bytes) {
+                                           size_t batch_chunk_num_bytes) {
   if (keys.size() != bufs.size() || keys.size() != lens.size()) {
     throw std::runtime_error("keys, bufs, and lens size mismatch");
   }
@@ -434,7 +504,7 @@ uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
     tile_req.op = Op::BATCH_TILE_GET;
     tile_req.future_id = batch_future_id;
     tile_req.batch = batch_state;
-    tile_req.chunk_bytes = chunk_bytes;
+    tile_req.batch_chunk_num_bytes = batch_chunk_num_bytes;
 
     for (size_t i = start; i < end; ++i) {
       tile_req.keys.push_back(keys[i]);
@@ -451,7 +521,7 @@ uint64_t MultiRESPClient::submit_batch_get(const std::vector<std::string>& keys,
 uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
                                            const std::vector<void*>& bufs,
                                            const std::vector<size_t>& lens,
-                                           size_t chunk_bytes) {
+                                           size_t batch_chunk_num_bytes) {
   if (keys.size() != bufs.size() || keys.size() != lens.size()) {
     throw std::runtime_error("keys, bufs, and lens size mismatch");
   }
@@ -483,7 +553,7 @@ uint64_t MultiRESPClient::submit_batch_set(const std::vector<std::string>& keys,
     tile_req.op = Op::BATCH_TILE_SET;
     tile_req.future_id = batch_future_id;
     tile_req.batch = batch_state;
-    tile_req.chunk_bytes = chunk_bytes;
+    tile_req.batch_chunk_num_bytes = batch_chunk_num_bytes;
 
     for (size_t i = start; i < end; ++i) {
       tile_req.keys.push_back(keys[i]);
@@ -705,6 +775,11 @@ void MultiRESPClient::worker_loop() {
     WorkerConn conn;
     conn.connect(host_, port_);  // one RESP session per worker/thread
 
+    // authenticate if credentials provided
+    conn.username = username_;
+    conn.password = password_;
+    conn.authenticate_if_needed();
+
     // register socket fd so close() can shutdown this socket
     {
       std::lock_guard<std::mutex> lk(worker_fds_mu_);
@@ -739,14 +814,14 @@ void MultiRESPClient::worker_loop() {
           case Op::BATCH_TILE_GET:
             for (size_t i = 0; i < req.keys.size(); ++i) {
               do_get_into(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
-                          req.chunk_bytes);
+                          req.batch_chunk_num_bytes);
             }
             comp.ok = true;
             break;
           case Op::BATCH_TILE_SET:
             for (size_t i = 0; i < req.keys.size(); ++i) {
               do_set_from(conn, req.keys[i], req.buf_ptrs[i], req.buf_lens[i],
-                          req.chunk_bytes);
+                          req.batch_chunk_num_bytes);
             }
             comp.ok = true;
             break;
