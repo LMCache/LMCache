@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
+# Future
 from __future__ import annotations
 
+# Standard
 from collections.abc import Sequence
 from typing import Any
 import inspect
@@ -61,9 +62,7 @@ def _get_signature(method: Any) -> inspect.Signature | None:
 
 
 def _has_var_keyword(sig: inspect.Signature) -> bool:
-    return any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
 
 def _supports_param(sig: inspect.Signature, name: str) -> bool:
@@ -261,7 +260,9 @@ def call_batched_submit_put_task(
     attempts = [
         (
             "canonical",
-            lambda: method(keys, objs, lookup_id=lookup_id, transfer_spec=transfer_spec),
+            lambda: method(
+                keys, objs, lookup_id=lookup_id, transfer_spec=transfer_spec
+            ),
         ),
         ("no-lookup-id", lambda: method(keys, objs, transfer_spec=transfer_spec)),
         ("legacy-minimal", lambda: method(keys, objs)),
