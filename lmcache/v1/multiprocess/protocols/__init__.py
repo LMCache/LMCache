@@ -9,7 +9,7 @@ This module provides the initialize_protocols() function that:
 """
 
 # First Party
-from lmcache.v1.multiprocess.protocols import controller, debug, engine
+from lmcache.v1.multiprocess.protocols import blend, controller, debug, engine
 from lmcache.v1.multiprocess.protocols.base import (
     HandlerType,
     ProtocolDefinition,
@@ -27,6 +27,7 @@ _PROTOCOL_MODULES = [
     ("engine", engine),
     ("controller", controller),
     ("debug", debug),
+    ("blend", blend),
 ]
 
 

@@ -175,18 +175,30 @@ class TokenHasher:
             prefix_hash = self.none_hash
         return self.hash_func((prefix_hash, tuple(tokens), None))
 
-    def compute_chunk_hashes(self, token_ids: list[int]) -> list:
+    def compute_chunk_hashes(
+        self,
+        token_ids: list[int],
+        full_chunk_only: bool = True,
+        prefix_hash: Any = None,
+    ) -> list:
         """Compute all rolling prefix hashes for complete chunks.
 
         Args:
             token_ids: Full token sequence.
+            full_chunk_only: If True, only return hashes for complete chunks.
+                Else, also return hash for the final partial chunk (if any).
+            prefix_hash: Optional initial prefix hash (defaults to none_hash).
 
         Returns:
             List of hash values, one per complete chunk.
         """
         hashes = []
-        prefix_hash = self.none_hash
-        num_complete = len(token_ids) - len(token_ids) % self.chunk_size
+        prefix_hash = self.none_hash if prefix_hash is None else prefix_hash
+        num_complete = (
+            len(token_ids) - len(token_ids) % self.chunk_size
+            if full_chunk_only
+            else len(token_ids)
+        )
         for i in range(0, num_complete, self.chunk_size):
             prefix_hash = self.hash_tokens(
                 token_ids[i : i + self.chunk_size], prefix_hash

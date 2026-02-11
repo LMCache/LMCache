@@ -189,3 +189,96 @@ class GPUCacheContext:
             return torch.Size((1, self.num_layers_, num_tokens, self.hidden_dim_size_))
         else:
             return torch.Size((2, self.num_layers_, num_tokens, self.hidden_dim_size_))
+
+
+class PlainGPUCacheContext:
+    """
+    A plain GPU cache context that have a single contiguous 2LTD buffer
+    """
+
+    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+        assert len(kv_caches) == 1, (
+            "PlainGPUCacheContext only supports a single KV cache tensor"
+        )
+
+        # KV cache basics
+        self._kv_cache = unwrap_kv_cache_tensors(kv_caches)[0]
+        self._device = self._kv_cache.device
+
+        # Shape related
+        shape = self._kv_cache.shape
+        assert len(shape) == 4, "Expected [2, L, T, D] for plain GPU cache"
+
+        self._num_layers = shape[1]
+        self._num_tokens = shape[2]
+        self._hidden_dim_size = shape[3]
+
+        # Temporary buffer
+        tmp_buffer_shape = self.get_kv_buffer_shape(lmcache_chunk_size)
+        self._tmp_gpu_buffer = torch.empty(
+            tmp_buffer_shape, dtype=self.dtype, device=self.device
+        )
+
+        # Cuda streams
+        self._cuda_stream = torch.cuda.Stream(device=self._device)
+        self._cupy_stream = cupy.cuda.ExternalStream(
+            self._cuda_stream.cuda_stream, self._device.index
+        )
+
+        # Extra initialization
+        self._cupy_stream.launch_host_func(
+            lambda logger: logger.info(
+                "Initialized cuda stream on device %s", str(self._device)
+            ),
+            logger,
+        )
+
+    def get_kv_buffer_shape(self, num_tokens: int) -> torch.Size:
+        """
+        Returns the shape of the KV buffer for the given number of tokens
+        """
+        return torch.Size((2, self._num_layers, num_tokens, self._hidden_dim_size))
+
+    def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
+        """
+        Returns the temporary GPU buffer for transfers
+        """
+        return self._tmp_gpu_buffer[:, :, :num_tokens, :]
+
+    def slice_kv_cache_on_tokens(self, start: int, end: int) -> torch.Tensor:
+        """
+        Slices the KV cache tensor on the token dimension
+        """
+        return self._kv_cache[:, :, start:end, :]
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._kv_cache.dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
+
+    @property
+    def stream(self) -> torch.cuda.Stream:
+        return self._cuda_stream
+
+    @property
+    def cupy_stream(self) -> cupy.cuda.Stream:
+        return self._cupy_stream
+
+    @property
+    def num_layers(self) -> int:
+        return self._num_layers
+
+    @property
+    def num_tokens(self) -> int:
+        return self._num_tokens
+
+    @property
+    def hidden_dim_size(self) -> int:
+        return self._hidden_dim_size
+
+    @property
+    def kv_cache_tensor(self) -> torch.Tensor:
+        return self._kv_cache

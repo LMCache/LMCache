@@ -84,6 +84,7 @@ def cuda_extension() -> tuple[list, dict]:
     storage_manager_sources = [
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
+        "csrc/storage_manager/utils.cpp",
     ]
     redis_sources = [
         "csrc/redis/pybind.cpp",
@@ -138,6 +139,7 @@ def rocm_extension() -> tuple[list, dict]:
     storage_manager_sources = [
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
+        "csrc/storage_manager/utils.cpp",
     ]
     redis_sources = [
         "csrc/redis/pybind.cpp",
