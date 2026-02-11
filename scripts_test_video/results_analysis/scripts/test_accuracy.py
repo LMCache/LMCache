@@ -12,55 +12,57 @@ def process_video_jsons(root_dir, output_csv):
     video_data = {}
     video_metadata = {}
 
-    for filename in os.listdir(root_dir):
-        if not filename.endswith(".json"):
-            continue
+    for dirpath, _dirnames, filenames in os.walk(root_dir):
+        for filename in filenames:
+            if not filename.endswith(".json"):
+                continue
+            rel_dir = os.path.relpath(dirpath, root_dir)
+            if rel_dir == ".":
+                # skip jsons directly under root_dir (should be category dir)
+                continue
+            video_base_name = rel_dir.split(os.sep, 1)[0]
+            file_path = os.path.join(dirpath, filename)
 
-        m = re.match(r"^(.*)_w\d+_\d+-\d+\.json$", filename)
-        if not m:
-            continue
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
-        video_base_name = m.group(1)
-        file_path = os.path.join(root_dir, filename)
+                meta = data.get("meta", {}) or {}
 
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                content = extract_message_content(data).strip()
+                content_l = content.lower()
 
-            meta = data.get("meta", {}) or {}
+                if content_l.startswith("yes"):
+                    current_result = "Yes"
+                elif content_l.startswith("no"):
+                    current_result = "No"
+                else:
+                    current_result = "Yes" if "yes" in content_l else "No"
 
-            content = extract_message_content(data).strip()
-            content_l = content.lower()
+                if video_base_name not in video_data:
+                    video_data[video_base_name] = []
+                    video_category = (meta.get("video_category") or "").strip()
+                    is_norm_flag = "Yes" if video_category.lower() == "normal" else "No"
+                    video_metadata[video_base_name] = {
+                        "is_normal": is_norm_flag,
+                        "video_category": video_category,
+                        "sample_fps": meta.get("sample_fps"),
+                        "window_seconds": meta.get("window_seconds"),
+                        "stride_ratio": meta.get("stride_ratio"),
+                        "start_s": meta.get("start_s"),
+                        "end_s": meta.get("end_s"),
+                        "num_frames": int((meta.get("end_s")-meta.get("start_s")) * meta.get("sample_fps"))
+                    }
 
-            if content_l.startswith("yes"):
-                current_result = "Yes"
-            elif content_l.startswith("no"):
-                current_result = "No"
-            else:
-                current_result = "Yes" if "yes" in content_l else "No"
+                video_data[video_base_name].append(current_result)
 
-            if video_base_name not in video_data:
-                video_data[video_base_name] = []
-                is_norm_flag = "True" if video_base_name.startswith("normal") else "False"
-                video_metadata[video_base_name] = {
-                    "is_normal": is_norm_flag,
-                    "sample_fps": meta.get("sample_fps"),
-                    "window_seconds": meta.get("window_seconds"),
-                    "stride_ratio": meta.get("stride_ratio"),
-                    "start_frame_idx": meta.get("start_frame_idx"),
-                    "end_frame_idx": meta.get("end_frame_idx"),
-                    "num_frames": meta.get("num_frames"),
-                }
-
-            video_data[video_base_name].append(current_result)
-
-        except Exception as e:
-            print(f"Error reading {filename}: {e}")
+            except Exception as e:
+                print(f"Error reading {file_path}: {e}")
 
     headers = [
-        "video_name", "is_normal", "final_prediction",
+        "video_name", "is_normal", "video_category", "final_prediction",
         "sample_fps", "window_seconds", "stride_ratio",
-        "start_frame_idx", "end_frame_idx", "num_frames"
+        "start_s", "end_s", "num_frames"
     ]
 
     with open(output_csv, "w", newline="", encoding="utf-8") as csvfile:
@@ -68,8 +70,8 @@ def process_video_jsons(root_dir, output_csv):
         writer.writeheader()
 
         for v_name, results in video_data.items():
-            is_normal_str = (video_metadata.get(v_name, {}).get("is_normal", "False") or "False")
-            is_normal = is_normal_str.strip().lower() == "true"
+            is_normal_str = (video_metadata.get(v_name, {}).get("is_normal", "No") or "No")
+            is_normal = is_normal_str.strip().lower() == "yes"
 
             # === your asymmetric aggregation rule ===
             if is_normal:
@@ -96,7 +98,7 @@ def compute_metrics_from_csv(csv_path: str):
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            is_normal = (row.get("is_normal", "") or "").strip().lower() == "true"
+            is_normal = (row.get("is_normal", "") or "").strip().lower() == "yes"
             y_true = "No" if is_normal else "Yes"   # normal => No, anomaly => Yes
             y_pred = (row.get("final_prediction", "") or "").strip()
 
@@ -118,7 +120,7 @@ def compute_metrics_from_csv(csv_path: str):
     f1        = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
     accuracy  = (TP + TN) / (TP + TN + FP + FN) if (TP + TN + FP + FN) > 0 else 0.0
 
-    print(f"Ratio: {recompute} | TP={TP}, FP={FP}, TN={TN}, FN={FN} | P={precision:.4f}, R={recall:.4f}, F1={f1:.4f}, Acc={accuracy:.4f}")
+    print(f"TP={TP}, FP={FP}, TN={TN}, FN={FN} | P={precision:.4f}, R={recall:.4f}, F1={f1:.4f}, Acc={accuracy:.4f}")
 
     return {
         "TP": TP, "FP": FP, "TN": TN, "FN": FN,
@@ -127,10 +129,7 @@ def compute_metrics_from_csv(csv_path: str):
 
 win=40
 stride=20
-category="shooting"
-recompute_ratios=["0.01", "0.02", "0.03", "0.04","0.05", "0.10", "0.15"]
-recompute_ratios=["0.03"]
-for recompute in recompute_ratios:
-    target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/use_gpu_vlcache_recompute{recompute}/anomaly_win{win}s_stride{stride}pct_fps2.0/{category}"
-    process_video_jsons(target_folder, f"video_analysis_recompute{recompute}_win{win}_stride{stride}.csv")
-    compute_metrics_from_csv(f"video_analysis_recompute{recompute}_win{win}_stride{stride}.csv")
+category="Burglary"
+target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/with_codec/{category}"
+process_video_jsons(target_folder, f"{category}_accuracy_analysis_win{win}_stride{stride}.csv")
+compute_metrics_from_csv(f"{category}_accuracy_analysis_win{win}_stride{stride}.csv")

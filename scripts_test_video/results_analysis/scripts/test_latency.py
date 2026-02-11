@@ -18,37 +18,63 @@ def pct(sorted_vals, p):
 
 def export_prefill_stats(root_dir, out_csv, eps=1e-9):
     rows, ts = [], []
-    for fn in os.listdir(root_dir):
-        if not fn.endswith(".json"): continue
-        try:
-            with open(os.path.join(root_dir, fn), "r", encoding="utf-8") as f: d = json.load(f)
+    for dirpath, _dirnames, filenames in os.walk(root_dir):
+        for filename in filenames:
+            if not filename.endswith(".json"):
+                continue
+            rel_dir = os.path.relpath(dirpath, root_dir)
+            if rel_dir == ".":
+                # skip jsons directly under root_dir (should be category dir)
+                continue
+            video_base_name = rel_dir.split(os.sep, 1)[0]
+            file_path = os.path.join(dirpath, filename)
+
+            try:
+                file_path = os.path.join(dirpath, filename)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception as e:
+                print(f"Error reading {file_path}: {e}")
+                continue
+
             meta = d.get("meta") or {}
+            # print(f"meta is {meta}")
             sample_fps = meta.get("sample_fps")
             window_seconds = meta.get("window_seconds")
             stride_ratio = meta.get("stride_ratio")
-            start_frame_idx = meta.get("start_frame_idx")
-            end_frame_idx = meta.get("end_frame_idx")
-            num_frames = meta.get("num_frames")
-            if start_frame_idx in (None, 0): continue
-            if window_seconds is None or stride_ratio is None or num_frames is None: continue
+            start_s = meta.get("start_s")
+            end_s = meta.get("end_s")
+            num_frames = int((end_s-start_s) * sample_fps)
+            if start_s in (None, 0):
+                continue
+            if window_seconds is None or stride_ratio is None or num_frames is None:
+                continue
             target = float(window_seconds) * float(sample_fps)
             # print(f'target is {target}, num_frames is {num_frames}')
-            if abs(float(num_frames) - target) > eps: continue
+            if abs(float(num_frames) - target) > eps:
+                continue
             t = safe_prefill_time_s(d)
-            row = {"name": fn, "sample_fps": sample_fps, "window_seconds": window_seconds, "stride_ratio": stride_ratio,
-                   "start_frame_idx": start_frame_idx, "end_frame_idx": end_frame_idx, "num_frames": num_frames,
-                   "prefill_time": t}
+            rel_name = os.path.relpath(file_path, root_dir)
+            row = {
+                "name": rel_name,
+                "sample_fps": sample_fps,
+                "window_seconds": window_seconds,
+                "stride_ratio": stride_ratio,
+                "start_s": start_s,
+                "end_s": end_s,
+                "num_frames": num_frames,
+                "prefill_time": t,
+            }
             rows.append(row)
-            if t is not None: ts.append(t)
-        except Exception as e:
-            print(f"Error reading {fn}: {e}")
-    hdr = ["name","sample_fps","window_seconds","stride_ratio","start_frame_idx","end_frame_idx","num_frames","prefill_time"]
+            if t is not None:
+                ts.append(t)
+    hdr = ["name","sample_fps","window_seconds","stride_ratio","start_s","end_s","num_frames","prefill_time"]
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=hdr); w.writeheader(); w.writerows(rows)
     print(f"Saved: {out_csv}; kept={len(rows)}; valid_prefill={len(ts)}")
     if ts:
         ts2 = sorted(ts)
-        print("Prefill(s): recompute={}, count={} mean={:.6f} min={:.6f} p50={:.6f} p90={:.6f} p99={:.6f} max={:.6f}".format(recompute,
+        print("Prefill(s): count={} mean={:.6f} min={:.6f} p50={:.6f} p90={:.6f} p99={:.6f} max={:.6f}".format(
             len(ts2), statistics.mean(ts2), ts2[0], pct(ts2,50), pct(ts2,90), pct(ts2,99), ts2[-1]
         ))
     else:
@@ -56,8 +82,6 @@ def export_prefill_stats(root_dir, out_csv, eps=1e-9):
 
 win=40
 stride=20
-category="shoplifting"
-recompute_ratios=["0.01", "0.02", "0.03", "0.04","0.05", "0.10", "0.15"]
-for recompute in recompute_ratios:
-    target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/use_gpu_vlcache_recompute{recompute}/anomaly_win{win}s_stride{stride}pct_fps2.0/{category}"
-    export_prefill_stats(target_folder, f"prefill_stats_recompute{recompute}_win{win}_stride{stride}.csv")
+category="Burglary"
+target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/with_codec/{category}"
+export_prefill_stats(target_folder, f"{category}_prefill_stats_win{win}_stride{stride}.csv")
