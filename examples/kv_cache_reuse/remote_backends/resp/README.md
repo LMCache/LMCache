@@ -14,11 +14,11 @@ python benchmark_resp_client.py
 
 # Or customize parameters:
 python benchmark_resp_client.py \
-    --host 127.0.0.1 \
+    --host localhost \
     --port 6379 \
-    --chunk-mb 4.0 \
+    --chunk-mb 1.0 \
     --num-workers 8 \
-    --num-keys 500 \
+    --num-keys 1280 \
     --username default \
     --password YOUR_PASSWORD
 ```
@@ -44,6 +44,8 @@ redis-cli -p 6379 DBSIZE
 Deploy LMCache with the custom LMCacheRedis KV Connector
 
 `save_unfull_chunk` must be off (default is off) and also we must not save the chunk metadata. 
+
+The "golden spot" for high throughput transfers for redis is ~4 MB (any higher or lower will cause performance degradation, for a model like meta-llama/Llama-3.1-8B-Instruct, this is around 16 tokens
 ```bash
 LMCACHE_CONFIG_FILE=resp.yaml \
 vllm serve meta-llama/Llama-3.1-8B-Instruct \

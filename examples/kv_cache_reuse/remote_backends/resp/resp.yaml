@@ -1,4 +1,4 @@
-chunk_size: 256
+chunk_size: 16 # the "golden spot" for high throughput transfers for redis is ~4 MB (any higher or lower will cause performance degradation, for a model like meta-llama/Llama-3.1-8B-Instruct, this is around 16 tokens)
 local_cpu: false
 max_local_cpu_size: 20.0
 remote_url: "resp://localhost:6379"
