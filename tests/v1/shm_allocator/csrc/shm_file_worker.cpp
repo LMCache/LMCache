@@ -39,37 +39,49 @@ static uintptr_t g_base_addr = 0;
 
 static bool handle_attach(const std::string& shm_name, size_t size,
                           uintptr_t base_addr, std::ostream& out) {
+  std::cerr << "[LOG] ATTACH shm_name=" << shm_name << " size=" << size
+            << " base_addr=" << base_addr << std::endl;
   int fd = shm_open(shm_name.c_str(), O_RDWR, 0600);
   if (fd < 0) {
+    std::cerr << "[LOG] ATTACH failed: shm_open: " << strerror(errno)
+              << std::endl;
     out << "ERROR shm_open failed: " << strerror(errno) << std::endl;
     return false;
   }
   void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   if (ptr == MAP_FAILED) {
+    std::cerr << "[LOG] ATTACH failed: mmap: " << strerror(errno) << std::endl;
     out << "ERROR mmap failed: " << strerror(errno) << std::endl;
     return false;
   }
   g_shm_ptr = ptr;
   g_shm_size = size;
   g_base_addr = base_addr;
+  std::cerr << "[LOG] ATTACH succeeded" << std::endl;
   out << "OK" << std::endl;
   return true;
 }
 
 static void handle_write(const std::string& file_path, uintptr_t data_ptr,
                          size_t length, std::ostream& out) {
+  std::cerr << "[LOG] WRITE path=" << file_path << " data_ptr=" << data_ptr
+            << " length=" << length << std::endl;
   if (!g_shm_ptr) {
+    std::cerr << "[LOG] WRITE failed: not attached" << std::endl;
     out << "ERROR not attached" << std::endl;
     return;
   }
   size_t offset = data_ptr - g_base_addr;
   if (offset + length > g_shm_size) {
+    std::cerr << "[LOG] WRITE failed: offset+length exceeds shm size"
+              << std::endl;
     out << "ERROR offset+length exceeds shm size" << std::endl;
     return;
   }
   int fd = open(file_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
+    std::cerr << "[LOG] WRITE failed: open: " << strerror(errno) << std::endl;
     out << "ERROR open failed: " << strerror(errno) << std::endl;
     return;
   }
@@ -80,28 +92,37 @@ static void handle_write(const std::string& file_path, uintptr_t data_ptr,
     if (n < 0) {
       if (errno == EINTR) continue;
       close(fd);
+      std::cerr << "[LOG] WRITE failed: write: " << strerror(errno)
+                << std::endl;
       out << "ERROR write failed: " << strerror(errno) << std::endl;
       return;
     }
     written += static_cast<size_t>(n);
   }
   close(fd);
+  std::cerr << "[LOG] WRITE succeeded: " << written << " bytes" << std::endl;
   out << "OK " << written << std::endl;
 }
 
 static void handle_read(const std::string& file_path, uintptr_t data_ptr,
                         size_t length, std::ostream& out) {
+  std::cerr << "[LOG] READ path=" << file_path << " data_ptr=" << data_ptr
+            << " length=" << length << std::endl;
   if (!g_shm_ptr) {
+    std::cerr << "[LOG] READ failed: not attached" << std::endl;
     out << "ERROR not attached" << std::endl;
     return;
   }
   size_t offset = data_ptr - g_base_addr;
   if (offset + length > g_shm_size) {
+    std::cerr << "[LOG] READ failed: offset+length exceeds shm size"
+              << std::endl;
     out << "ERROR offset+length exceeds shm size" << std::endl;
     return;
   }
   int fd = open(file_path.c_str(), O_RDONLY);
   if (fd < 0) {
+    std::cerr << "[LOG] READ failed: open: " << strerror(errno) << std::endl;
     out << "ERROR open failed: " << strerror(errno) << std::endl;
     return;
   }
@@ -109,6 +130,7 @@ static void handle_read(const std::string& file_path, uintptr_t data_ptr,
   struct stat st;
   if (fstat(fd, &st) != 0) {
     close(fd);
+    std::cerr << "[LOG] READ failed: fstat: " << strerror(errno) << std::endl;
     out << "ERROR fstat failed: " << strerror(errno) << std::endl;
     return;
   }
@@ -123,6 +145,7 @@ static void handle_read(const std::string& file_path, uintptr_t data_ptr,
     if (n < 0) {
       if (errno == EINTR) continue;
       close(fd);
+      std::cerr << "[LOG] READ failed: read: " << strerror(errno) << std::endl;
       out << "ERROR read failed: " << strerror(errno) << std::endl;
       return;
     }
@@ -130,6 +153,7 @@ static void handle_read(const std::string& file_path, uintptr_t data_ptr,
     total_read += static_cast<size_t>(n);
   }
   close(fd);
+  std::cerr << "[LOG] READ succeeded: " << total_read << " bytes" << std::endl;
   out << "OK " << total_read << std::endl;
 }
 
@@ -158,9 +182,11 @@ static bool process_line(const std::string& line, std::ostream& out) {
     iss >> path >> data_ptr >> length;
     handle_read(path, data_ptr, length, out);
   } else if (cmd == "QUIT") {
+    std::cerr << "[LOG] QUIT received" << std::endl;
     out << "OK" << std::endl;
     return false;  // signal to exit
   } else {
+    std::cerr << "[LOG] Unknown command: " << cmd << std::endl;
     out << "ERROR unknown command: " << cmd << std::endl;
   }
   return true;  // continue

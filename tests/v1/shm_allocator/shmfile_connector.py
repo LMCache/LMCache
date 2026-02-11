@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
 from typing import List, Optional
 import asyncio
 import os
@@ -21,28 +20,8 @@ from lmcache.v1.storage_backend.local_cpu_backend import (
 
 logger = init_logger(__name__)
 
-
-@dataclass
-class ShmFileConfig:
-    """Configuration for the shared memory file connector."""
-
-    storage_dir: str
-    shm_name: str
-    worker_binary: str
-
-    @staticmethod
-    def from_path_and_shm(
-        storage_dir: str,
-        shm_name: str,
-        worker_binary: Optional[str] = None,
-    ) -> "ShmFileConfig":
-        if worker_binary is None:
-            worker_binary = os.environ.get("SHM_FILE_WORKER_BIN", "shm_file_worker")
-        return ShmFileConfig(
-            storage_dir=storage_dir,
-            shm_name=shm_name,
-            worker_binary=worker_binary,
-        )
+# extra_config key prefix for shmfile connector
+_SHMFS_PREFIX = "shmfs."
 
 
 class ShmFileConnector(RemoteConnector):
@@ -60,32 +39,39 @@ class ShmFileConnector(RemoteConnector):
 
     def __init__(
         self,
-        storage_dir: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         config: Optional[LMCacheEngineConfig] = None,
-        shm_name: Optional[str] = None,
-        worker_binary: Optional[str] = None,
-        worker_addr: Optional[str] = None,
     ):
         super().__init__(
             local_cpu_backend.config,
             local_cpu_backend.metadata,
         )
 
-        self.storage_dir = storage_dir
-        os.makedirs(self.storage_dir, exist_ok=True)
-
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
-        # Resolve shm_name from allocator
+        # Read shmfs.* parameters from extra_config
+        storage_dir = self._shmfs_cfg(config, "storage_dir", "/tmp/lmcache_shmfs")
+        worker_binary = self._shmfs_cfg(config, "worker_binary")
+        worker_addr = self._shmfs_cfg(config, "worker_addr")
+
+        self.storage_dir: str = storage_dir or "/tmp/lmcache_shmfs"
+        os.makedirs(self.storage_dir, exist_ok=True)
+
+        # Resolve shm_name: shmfs.shm_name -> shm_name -> allocator
         allocator = self.local_cpu_backend.memory_allocator
-        self.shm_name = shm_name or getattr(allocator, "shm_name", None)
+        shm_name = (
+            self._shmfs_cfg(config, "shm_name")
+            or self._extra_cfg(config, "shm_name")
+            or getattr(allocator, "shm_name", None)
+        )
+        self.shm_name = shm_name
         if not self.shm_name:
             raise ValueError(
-                "ShmFileConnector requires a shm_name. "
-                "Pass shm_name= or use "
+                "ShmFileConnector requires shm_name. "
+                "Set extra_config shmfs.shm_name or "
+                "shm_name, or use "
                 "MixedMemoryAllocator(shm_name=...)."
             )
 
@@ -128,6 +114,32 @@ class ShmFileConnector(RemoteConnector):
             self.base_addr,
             "tcp" if self._sock else "pipe",
         )
+
+    # -- Config helpers -------------------------------------------
+
+    @staticmethod
+    def _shmfs_cfg(
+        config: Optional[LMCacheEngineConfig],
+        key: str,
+        default: Optional[str] = None,
+    ) -> Optional[str]:
+        """Read extra_config['shmfs.<key>']."""
+        if config is None:
+            return default
+        return config.get_extra_config_value(_SHMFS_PREFIX + key, default)
+
+    @staticmethod
+    def _extra_cfg(
+        config: Optional[LMCacheEngineConfig],
+        key: str,
+        default: Optional[str] = None,
+    ) -> Optional[str]:
+        """Read extra_config['<key>'] (no prefix)."""
+        if config is None:
+            return default
+        return config.get_extra_config_value(key, default)
+
+    # -- Worker init helpers --------------------------------------
 
     def _init_tcp(self, worker_addr: str):
         """Connect to a remote worker via TCP."""
@@ -184,8 +196,11 @@ class ShmFileConnector(RemoteConnector):
         line, self._sock_buf = self._sock_buf.split(b"\n", 1)
         return line.decode("utf-8").strip()
 
+    def _get_file_name(self, key: CacheEngineKey) -> str:
+        return key.to_string().replace("/", "-SEP-") + ".data"
+
     def _file_path(self, key: CacheEngineKey) -> str:
-        return os.path.join(self.storage_dir, key.to_string() + ".data")
+        return os.path.join(self.storage_dir, self._get_file_name(key))
 
     # -- Connector interface --------------------------------------
 
@@ -271,7 +286,11 @@ class ShmFileConnector(RemoteConnector):
 
     async def list(self) -> List[str]:
         files = await asyncio.to_thread(os.listdir, self.storage_dir)
-        return [f.replace(".data", "") for f in files if f.endswith(".data")]
+        return [
+            f.replace(".data", "").replace("-SEP-", "/")
+            for f in files
+            if f.endswith(".data")
+        ]
 
     async def close(self):
         try:

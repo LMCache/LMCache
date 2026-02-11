@@ -9,6 +9,7 @@ This test verifies that:
 """
 
 # Standard
+from typing import Optional
 import asyncio
 import os
 import subprocess
@@ -28,12 +29,12 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 
 # Local
-from .shmfile_connector import ShmFileConnector
-from .utils import (
+from ..utils import (
     close_asyncio_loop,
     dumb_cache_engine_key,
     init_asyncio_loop,
 )
+from .shmfile_connector import ShmFileConnector
 
 logger = init_logger(__name__)
 
@@ -47,8 +48,8 @@ _WORKER_BIN = os.path.join(_BUILD_DIR, "shm_file_worker")
 
 
 def _build_worker_binary() -> str:
-    """Build shm_file_worker from tests/v1/csrc/ and
-    return the path to the compiled binary."""
+    """Build shm_file_worker from tests/v1/shm_allocator/csrc/
+    and return the path to the compiled binary."""
     env_bin = os.environ.get("SHM_FILE_WORKER_BIN")
     if env_bin and os.path.isfile(env_bin):
         return env_bin
@@ -94,6 +95,26 @@ def _get_metadata():
     )
 
 
+def _create_shmfs_config(
+    storage_dir: str,
+    worker_binary: str,
+    shm_name: str = SHM_NAME,
+    worker_addr: Optional[str] = None,
+) -> LMCacheEngineConfig:
+    """Build config with shmfs.* extra_config entries."""
+    extra = {
+        "shmfs.storage_dir": storage_dir,
+        "shmfs.shm_name": shm_name,
+        "shmfs.worker_binary": worker_binary,
+        "shm_name": shm_name,
+    }
+    if worker_addr:
+        extra["shmfs.worker_addr"] = worker_addr
+    return LMCacheEngineConfig.from_defaults(
+        extra_config=extra,
+    )
+
+
 def _create_local_cpu_backend(memory_allocator):
     config = LMCacheEngineConfig.from_defaults()
     metadata = _get_metadata()
@@ -129,12 +150,14 @@ class TestShmFileConnector:
             async_loop, async_thread = init_asyncio_loop()
             try:
                 backend = _create_local_cpu_backend(shm_allocator)
+                cfg = _create_shmfs_config(
+                    tmp_dir,
+                    worker_binary,
+                )
                 connector = ShmFileConnector(
-                    storage_dir=tmp_dir,
                     loop=async_loop,
                     local_cpu_backend=backend,
-                    shm_name=SHM_NAME,
-                    worker_binary=worker_binary,
+                    config=cfg,
                 )
 
                 key = dumb_cache_engine_key()
@@ -199,12 +222,14 @@ class TestShmFileConnector:
             async_loop, async_thread = init_asyncio_loop()
             try:
                 backend = _create_local_cpu_backend(shm_allocator)
+                cfg = _create_shmfs_config(
+                    tmp_dir,
+                    worker_binary,
+                )
                 connector = ShmFileConnector(
-                    storage_dir=tmp_dir,
                     loop=async_loop,
                     local_cpu_backend=backend,
-                    shm_name=SHM_NAME,
-                    worker_binary=worker_binary,
+                    config=cfg,
                 )
 
                 key = dumb_cache_engine_key(id=999)
@@ -223,12 +248,14 @@ class TestShmFileConnector:
             async_loop, async_thread = init_asyncio_loop()
             try:
                 backend = _create_local_cpu_backend(shm_allocator)
+                cfg = _create_shmfs_config(
+                    tmp_dir,
+                    worker_binary,
+                )
                 connector = ShmFileConnector(
-                    storage_dir=tmp_dir,
                     loop=async_loop,
                     local_cpu_backend=backend,
-                    shm_name=SHM_NAME,
-                    worker_binary=worker_binary,
+                    config=cfg,
                 )
 
                 shape = torch.Size([2, 32, 256, 1024])
