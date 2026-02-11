@@ -19,48 +19,65 @@ import pytest
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.connector.shmfile_connector import (
-    ShmFileConnector,
-)
 
 # Local
+from .shmfile_connector import ShmFileConnector
 from .utils import (
     close_asyncio_loop,
     dumb_cache_engine_key,
     init_asyncio_loop,
 )
 
-SHM_NAME = "/a/b/c/lmcache_test_shm"
+logger = init_logger(__name__)
+
+SHM_NAME = "/lmcache_test_shm"
 SHM_BUF_SIZE = 5 * 1024 * 1024 * 1024  # 5 GB
 
 
-def _find_worker_binary() -> str:
-    """Locate the compiled shm_file_worker binary."""
-    # Check env first
+_CSRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csrc")
+_BUILD_DIR = os.path.join(_CSRC_DIR, "build")
+_WORKER_BIN = os.path.join(_BUILD_DIR, "shm_file_worker")
+
+
+def _build_worker_binary() -> str:
+    """Build shm_file_worker from tests/v1/csrc/ and
+    return the path to the compiled binary."""
     env_bin = os.environ.get("SHM_FILE_WORKER_BIN")
     if env_bin and os.path.isfile(env_bin):
         return env_bin
 
-    # Check build directory
-    project_root = os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        )
-    )
-    candidate = os.path.join(project_root, "build", "shm_file_worker")
-    if os.path.isfile(candidate):
-        return candidate
+    if os.path.isfile(_WORKER_BIN):
+        return _WORKER_BIN
 
-    pytest.skip(
-        "shm_file_worker binary not found. Compile it first: see test instructions."
-    )
-    return ""
+    os.makedirs(_BUILD_DIR, exist_ok=True)
+    try:
+        subprocess.check_call(
+            ["cmake", ".."],
+            cwd=_BUILD_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            ["make", "shm_file_worker"],
+            cwd=_BUILD_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip(
+            "Cannot compile shm_file_worker. "
+            "Ensure cmake and a C++ compiler are available."
+        )
+    if not os.path.isfile(_WORKER_BIN):
+        pytest.skip("shm_file_worker build failed.")
+    return _WORKER_BIN
 
 
 def _get_metadata():
@@ -97,7 +114,9 @@ def shm_allocator():
 
 @pytest.fixture
 def worker_binary():
-    return _find_worker_binary()
+    worker_binary_path = _build_worker_binary()
+    logger.info(f"Using shm_file_worker binary: {worker_binary_path}")
+    return worker_binary_path
 
 
 class TestShmFileConnector:

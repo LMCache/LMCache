@@ -12,7 +12,9 @@ Usage
 -----
 
 Step 1 (on the HOST machine):
-  ./build/shm_file_worker --listen 0.0.0.0:9800
+  mkdir -p tests/v1/csrc/build && cd tests/v1/csrc/build
+  cmake .. && make shm_file_worker
+  ./shm_file_worker --listen 0.0.0.0:9800
 
 Step 2 (INSIDE the container):
   python scripts/verify_shmfile_tcp.py \
