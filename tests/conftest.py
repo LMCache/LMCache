@@ -235,10 +235,20 @@ class MockRedisSentinel:
 class MockRESPClient:
     """In-memory mock of RESPClient so RESP connector tests never hit real Redis."""
 
-    def __init__(self, host: str, port: int, num_workers: int, loop=None):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        num_workers: int,
+        loop=None,
+        username: str = "",
+        password: str = "",
+    ):
         self._store: dict[str, bytes] = {}  # key -> bytes
         self._loop = loop
         self._closed = False
+        self._username = username
+        self._password = password
 
     async def exists(self, key: str) -> bool:
         return key in self._store
