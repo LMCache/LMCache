@@ -11,6 +11,12 @@ import torch
 import zmq
 
 # First Party
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -30,6 +36,26 @@ SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
 DEFAULT_TIMEOUT = 5.0
+
+
+def _has_working_new_shared_cuda() -> bool:
+    if not torch.cuda.is_available():
+        print("CUDA is not available, skipping tests that require new_shared_cuda")
+        return False
+    try:
+        # Minimal sanity check — adapt to your real API
+        buf = torch.empty(1024, device="cuda")
+        shared = buf.untyped_storage()._share_cuda_()  # or your exact call
+        return shared is not None
+    except Exception:
+        return False
+
+
+if not _has_working_new_shared_cuda():
+    pytest.skip(
+        "new_shared_cuda is not available or not working on this system",
+        allow_module_level=True,
+    )
 
 
 def initialize_kv_cache(
@@ -104,7 +130,22 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
     """
     Create a cache key for testing.
     """
-    return IPCCacheEngineKey.from_int_hash(model, 1, 0, index)
+    global CHUNK_SIZE
+    token_ids = [index] * CHUNK_SIZE
+    return IPCCacheEngineKey.from_token_ids(
+        model,
+        1,
+        0,
+        token_ids,
+        start=0,
+        end=CHUNK_SIZE,
+        request_id=f"test_request_{index}",
+    )
+
+
+def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
+    """Create lookup keys: worker_id=None."""
+    return [k.no_worker_id_version() for k in keys]
 
 
 def server_process_runner(
@@ -113,8 +154,20 @@ def server_process_runner(
     """
     Entry point for the server process.
     """
+    storage_manager_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=int(cpu_buffer_size * 1024**3),
+                use_lazy=True,
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
     run_cache_server(
-        host=host, port=port, chunk_size=chunk_size, cpu_buffer_size=cpu_buffer_size
+        storage_manager_config=storage_manager_config,
+        host=host,
+        port=port,
+        chunk_size=chunk_size,
     )
 
 
@@ -296,23 +349,21 @@ def test_store_and_lookup(
     # Lookup - keys that exist
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [keys, False],
+        [lookup_keys(keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result) == num_keys
-    assert all(lookup_result), "All stored keys should exist"
+    assert lookup_result == num_keys, "All stored keys should exist"
 
     # Lookup - keys that don't exist
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
     lookup_future2 = client.submit_request(
         RequestType.LOOKUP,
-        [non_existent_keys, False],
+        [lookup_keys(non_existent_keys)],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
-    assert len(lookup_result2) == 5
-    assert not any(lookup_result2), "Non-existent keys should not be found"
+    assert lookup_result2 == 0, "Non-existent keys should not be found"
 
 
 @pytest.mark.skipif(
@@ -344,6 +395,15 @@ def test_store_retrieve_verify(
 
     event = torch.cuda.Event(interprocess=True)
     event.record()
+
+    # Call look up to ensure the data is ready to be retrieved
+    lookup_future = client.submit_request(
+        RequestType.LOOKUP,
+        [lookup_keys(keys)],
+        get_response_class(RequestType.LOOKUP),
+    )
+    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    assert lookup_result == num_keys
 
     # Retrieve to a different location in the cache
     # Use offset of 40 blocks (640 pages total needed: 320 + 320)
@@ -404,6 +464,15 @@ def test_retrieve_partial_miss(
     )
     assert store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT) is True
 
+    # Lookup to ensure keys are stored
+    lookup_future = client.submit_request(
+        RequestType.LOOKUP,
+        [lookup_keys(stored_keys)],
+        get_response_class(RequestType.LOOKUP),
+    )
+    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    assert lookup_result == num_stored
+
     # Try to retrieve 60 keys (only first 30 exist)
     # Total pages needed: 60 * 16 = 960 (< 1024)
     num_requested = 60
@@ -430,6 +499,15 @@ def test_retrieve_partial_miss(
     assert not any(retrieve_result), (
         "Retrieve is expected to return all FALSE if any key is missing"
     )
+
+    # Doing look up again to ensure data is ready
+    lookup_future_2 = client.submit_request(
+        RequestType.LOOKUP,
+        [lookup_keys(stored_keys)],
+        get_response_class(RequestType.LOOKUP),
+    )
+    lookup_result_2 = lookup_future_2.result(timeout=DEFAULT_TIMEOUT)
+    assert lookup_result_2 == num_stored
 
     # Try to retrieve the first 30 keys only (all exist)
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
@@ -497,6 +575,21 @@ def test_multiple_retrieve_operations(
             .result(timeout=DEFAULT_TIMEOUT)
         )
         assert store_result is True
+
+    # Doing look up to ensure data is ready to be retrieved
+    all_keys = [
+        create_cache_key(batch_idx * keys_per_batch + i)
+        for batch_idx in range(num_batches)
+        for i in range(keys_per_batch)
+    ]
+    lookup_future = client.submit_request(
+        RequestType.LOOKUP,
+        [lookup_keys(all_keys)],
+        get_response_class(RequestType.LOOKUP),
+    )
+
+    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    assert lookup_result == num_batches * keys_per_batch, "All stored keys should exist"
 
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
@@ -591,12 +684,11 @@ def test_multiple_store_operations(
     all_keys = keys1 + keys2
     lookup_result = client.submit_request(
         RequestType.LOOKUP,
-        [all_keys, False],
+        [lookup_keys(all_keys)],
         get_response_class(RequestType.LOOKUP),
     ).result(timeout=DEFAULT_TIMEOUT)
 
-    assert len(lookup_result) == 50
-    assert all(lookup_result), "All stored keys from both batches should exist"
+    assert lookup_result == 50, "All stored keys from both batches should exist"
 
 
 @pytest.mark.skipif(

@@ -13,12 +13,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
-from tests.v1.utils import create_test_memory_obj
+from tests.v1.utils import create_test_memory_obj, has_cufile
 
 
 def create_test_config(gds_path: str):
@@ -33,16 +33,24 @@ def create_test_config(gds_path: str):
 
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
-    return CacheEngineKey("vllm", "testmodel", 3, 123, key_id, torch.bfloat16)
+    # NO UNDERSCORE HERE for model_name
+    return CacheEngineKey(
+        model_name="testmodel",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=key_id,
+        dtype=torch.bfloat16,
+    )
 
 
 def create_test_metadata():
-    """Create a test metadata for LMCacheEngineMetadata."""
-    return LMCacheEngineMetadata(
+    """Create a test metadata for LMCacheMetadata."""
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
     )
@@ -82,6 +90,11 @@ def gds_backend(temp_gds_path, async_loop):
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Requires CUDA for TestGdsBackend",
+)
+@pytest.mark.skipif(
+    not has_cufile(),
+    reason="Requires NVIDIA cuFile (libcufile.so). "
+    "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
 )
 @pytest.mark.skipif(sys.platform != "linux", reason="TestGdsBackend runs only on Linux")
 class TestGdsBackend:
@@ -135,6 +148,11 @@ class TestGdsBackend:
     @pytest.mark.skipif(
         not torch.cuda.is_available(),
         reason="Requires CUDA for GdsBackend get_blocking",
+    )
+    @pytest.mark.skipif(
+        not has_cufile(),
+        reason="Requires NVIDIA cuFile (libcufile.so). "
+        "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
     )
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
         key = create_test_key(0)

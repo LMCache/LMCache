@@ -9,9 +9,9 @@ import importlib  # Added for dynamic import
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
+def is_cuda_worker(metadata: LMCacheMetadata) -> bool:
     """
     Check if the current role is worker and CUDA is available.
 
@@ -41,7 +41,7 @@ def is_cuda_worker(metadata: LMCacheEngineMetadata) -> bool:
 
 def storage_plugin_launcher(
     config: LMCacheEngineConfig,
-    metadata: LMCacheEngineMetadata,
+    metadata: LMCacheMetadata,
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: Optional[LocalCPUBackend],
     dst_device: str,
@@ -53,11 +53,18 @@ def storage_plugin_launcher(
     Looks for backend configurations in config.extra_config and instantiates
     them using the specified module and class names.
     """
-    if not config.extra_config:
-        return
-
     # Get the list of allowed external backends if configured
     storage_plugins = set(config.storage_plugins) if config.storage_plugins else set()
+    if storage_plugins and not config.extra_config:
+        logger.warning(
+            "storage_plugins=%s is set but extra_config is empty; "
+            "plugin settings must be provided under extra_config, e.g. "
+            "extra_config.storage_plugin.<name>.module_path/class_name",
+            sorted(storage_plugins),
+        )
+        return
+    if not config.extra_config:
+        return
 
     for storage_plugin in storage_plugins:
         try:
@@ -105,7 +112,7 @@ def storage_plugin_launcher(
 
 def CreateStorageBackends(
     config: LMCacheEngineConfig,
-    metadata: LMCacheEngineMetadata,
+    metadata: LMCacheMetadata,
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
