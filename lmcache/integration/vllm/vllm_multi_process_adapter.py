@@ -156,8 +156,7 @@ class LMCacheMPSchedulerAdapter:
             return
 
         aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
-        if aligned_end == 0:
-            return
+
         keys = [
             self._create_key(
                 token_ids,
