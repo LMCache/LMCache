@@ -20,8 +20,14 @@ from lmcache.v1.multiprocess.custom_types import (
 def test_ipc_cache_engine_key_serialization():
     """Test encoding and decoding of IPCCacheEngineKey using msgspec."""
     # Create a sample IPCCacheEngineKey
-    original_key = IPCCacheEngineKey.from_int_hash(
-        model_name="test_model", world_size=4, worker_id=1, chunk_hash=123456789
+    original_key = IPCCacheEngineKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="test_request",
     )
 
     # Encode the key
