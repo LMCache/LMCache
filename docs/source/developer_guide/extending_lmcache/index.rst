@@ -4,6 +4,7 @@ Extending LMCache
 LMCache is designed to be extensible, allowing integration of custom functionality without modifying the core. The main extension mechanisms are:
 
 - **Storage Plugin Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
+- **External Remote Connector Framework** – integrate new remote KV store connectors for external/distributed storage systems. This is still supported but has a planned deprecation by v0.5.0. It is replaced by **Remote Storage Plugin Framework**.
 - **Remote Storage Plugin Framework** – integrate new remote storage connectors for remote/distributed KV storage systems.
 - **Runtime Plugin Framework** – run custom scripts as separate processes alongside LMCache for added functionality.
 
