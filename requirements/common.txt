@@ -1,5 +1,6 @@
 aiofile
 aiofiles
+blake3
 aiohttp
 awscrt
 cufile-python
