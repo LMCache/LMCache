@@ -318,13 +318,17 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
 
     Args:
         key_str: String in format:
-            model_name@world_size@worker_id@chunk_hash[@layer_id][@tag%value...]
+            CacheEngineKey:      model_name@world_size@worker_id@chunk_hash@dtype[@tag%value...]
+            LayerCacheEngineKey: model_name@world_size@worker_id@chunk_hash@dtype@layer_id[@tag%value...]
 
     Returns:
         CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
     """
     parts = key_str.strip().split("@")
-    if len(parts) >= 5 and parts[4].isdigit():
+    # parts[0]=model, [1]=world_size, [2]=worker_id, [3]=chunk_hash, [4]=dtype
+    # parts[5]=layer_id OR tag%value
+    # If parts[5] exists and is a digit (not containing '%'), it's a LayerCacheEngineKey
+    if len(parts) >= 6 and parts[5].isdigit():
         return LayerCacheEngineKey.from_string(key_str)
     return CacheEngineKey.from_string(key_str)
 
