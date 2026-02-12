@@ -49,7 +49,7 @@ uv pip install -U vllm \
 
 # override previous lmcache from previous jobs
 # the source installation is from this PR
-uv pip install -e . --reinstall-package lmcache
+uv pip install -e . --reinstall-package lmcache --no-build-isolation
 
 # additional dependencies (please update manually if needed)
 # these packages are pretty stable so should not need to
