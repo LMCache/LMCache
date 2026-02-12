@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Test cases for external storage plugin functionality.
+Test cases for remote storage plugin functionality.
 
-This module tests the external storage  plugin loading mechanism in ConnectorManager.
+This module tests the remote storage  plugin loading mechanism in ConnectorManager.
 It creates mock connector adapters extending ConnectorAdapter and verifies that:
 1. Connector adapters are properly loaded via the configuration
 2. The connector adapter's create_connector method is called for matching URLs
@@ -31,7 +31,7 @@ from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
 class MockRemoteConnector(RemoteConnector):
     """
-    A mock remote connector for testing the external storage plugin functionality.
+    A mock remote connector for testing the remote storage plugin functionality.
     This connector tracks method calls for verification.
     """
 
@@ -75,7 +75,7 @@ class MockRemoteConnector(RemoteConnector):
 
 class MockConnectorAdapter(ConnectorAdapter):
     """
-    A mock connector adapter for testing the external storage functionality.
+    A mock connector adapter for testing the remote storage functionality.
     This adapter extends ConnectorAdapter and creates MockRemoteConnector instances.
 
     This adapter uses instance-level storage for call history and connector storage
@@ -114,12 +114,12 @@ MOCK_CONNECTOR_EXTRA_CONFIG = {
     ),
     "remote_connector.mock_connector.class_name": "MockConnectorAdapter",
 }
-MOCK_CONNECTOR_EXTERNAL_STORAGE_PLUGINS = ["mock_connector"]
+MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS = ["mock_connector"]
 
 
 def create_test_config(
     extra_config: Optional[dict] = None,
-    external_storage_plugins: Optional[List[str]] = None,
+    remote_storage_plugins: Optional[List[str]] = None,
 ) -> LMCacheEngineConfig:
     """Create a test configuration for connector plugin testing."""
     config = LMCacheEngineConfig.from_defaults(
@@ -130,8 +130,8 @@ def create_test_config(
     )
     if extra_config:
         config.extra_config = extra_config
-    if external_storage_plugins:
-        config.external_storage_plugins = external_storage_plugins
+    if remote_storage_plugins:
+        config.remote_storage_plugins = remote_storage_plugins
     return config
 
 
@@ -158,7 +158,7 @@ class TestConnectorPluginLauncher:
         """
         config = create_test_config(
             extra_config=MOCK_CONNECTOR_EXTRA_CONFIG,
-            external_storage_plugins=MOCK_CONNECTOR_EXTERNAL_STORAGE_PLUGINS,
+            remote_storage_plugins=MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS,
         )
 
         # Create ConnectorManager with the mock connector URL
@@ -190,7 +190,7 @@ class TestConnectorPluginLauncher:
         """
         config = create_test_config(
             extra_config=MOCK_CONNECTOR_EXTRA_CONFIG,
-            external_storage_plugins=MOCK_CONNECTOR_EXTERNAL_STORAGE_PLUGINS,
+            remote_storage_plugins=MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS,
         )
 
         # Create ConnectorManager and get the connector
@@ -217,7 +217,7 @@ class TestConnectorPluginLauncher:
         """
         config = create_test_config(
             extra_config=MOCK_CONNECTOR_EXTRA_CONFIG,
-            external_storage_plugins=MOCK_CONNECTOR_EXTERNAL_STORAGE_PLUGINS,
+            remote_storage_plugins=MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS,
         )
 
         # Create connector using the CreateConnector function
@@ -236,15 +236,15 @@ class TestConnectorPluginLauncher:
             f"got: {len(MockConnectorAdapter.created_connectors)}"
         )
 
-    def test_connector_plugin_without_external_storage_plugins_config(self, async_loop):
+    def test_connector_plugin_without_remote_storage_plugins_config(self, async_loop):
         """
-        Test that no connector plugin is loaded when external_storage_plugins
+        Test that no connector plugin is loaded when remote_storage_plugins
         is not configured.
         """
-        # Configure extra_config but don't set external_storage_plugins
+        # Configure extra_config but don't set remote_storage_plugins
         config = create_test_config(
             extra_config=MOCK_CONNECTOR_EXTRA_CONFIG,
-            external_storage_plugins=None,
+            remote_storage_plugins=None,
         )
 
         manager = ConnectorManager(
@@ -271,11 +271,11 @@ class TestConnectorPluginLauncher:
             "remote_connector.invalid_connector.module_path": "nonexistent.module.path",
             "remote_connector.invalid_connector.class_name": "NonexistentClass",
         }
-        external_storage_plugins = ["invalid_connector"]
+        remote_storage_plugins = ["invalid_connector"]
 
         config = create_test_config(
             extra_config=extra_config,
-            external_storage_plugins=external_storage_plugins,
+            remote_storage_plugins=remote_storage_plugins,
         )
 
         # Should not raise an exception
@@ -304,11 +304,11 @@ class TestConnectorPluginLauncher:
             ),
             "remote_connector.invalid_connector.class_name": "NonexistentClass",
         }
-        external_storage_plugins = ["invalid_connector"]
+        remote_storage_plugins = ["invalid_connector"]
 
         config = create_test_config(
             extra_config=extra_config,
-            external_storage_plugins=external_storage_plugins,
+            remote_storage_plugins=remote_storage_plugins,
         )
 
         # Should not raise an exception
@@ -336,11 +336,11 @@ class TestConnectorPluginLauncher:
             ),
             "remote_connector.not_adapter.class_name": "NotAConnectorAdapter",
         }
-        external_storage_plugins = ["not_adapter"]
+        remote_storage_plugins = ["not_adapter"]
 
         config = create_test_config(
             extra_config=extra_config,
-            external_storage_plugins=external_storage_plugins,
+            remote_storage_plugins=remote_storage_plugins,
         )
 
         # Should not raise an exception
@@ -367,11 +367,11 @@ class TestConnectorPluginLauncher:
             # Missing module_path
             "remote_connector.missing_path.class_name": "MockConnectorAdapter",
         }
-        external_storage_plugins = ["missing_path"]
+        remote_storage_plugins = ["missing_path"]
 
         config = create_test_config(
             extra_config=extra_config,
-            external_storage_plugins=external_storage_plugins,
+            remote_storage_plugins=remote_storage_plugins,
         )
 
         # Should not raise an exception
@@ -401,11 +401,11 @@ class TestConnectorPluginLauncher:
             ),
             # Missing class_name
         }
-        external_storage_plugins = ["missing_class"]
+        remote_storage_plugins = ["missing_class"]
 
         config = create_test_config(
             extra_config=extra_config,
-            external_storage_plugins=external_storage_plugins,
+            remote_storage_plugins=remote_storage_plugins,
         )
 
         # Should not raise an exception
@@ -431,7 +431,7 @@ class TestConnectorPluginLauncher:
         """
         config = create_test_config(
             extra_config=None,  # No extra_config
-            external_storage_plugins=["some_connector"],
+            remote_storage_plugins=["some_connector"],
         )
 
         # Should not raise an exception
@@ -486,11 +486,11 @@ class TestConnectorPluginLauncher:
             ),
             "remote_connector.mock_connector_2.class_name": "MockConnectorAdapter",
         }
-        external_storage_plugins = ["mock_connector_1", "mock_connector_2"]
+        remote_storage_plugins = ["mock_connector_1", "mock_connector_2"]
 
         config = create_test_config(
             extra_config=extra_config,
-            external_storage_plugins=external_storage_plugins,
+            remote_storage_plugins=remote_storage_plugins,
         )
 
         manager = ConnectorManager(
@@ -515,7 +515,7 @@ class TestConnectorPluginLauncher:
         """
         config = create_test_config(
             extra_config=MOCK_CONNECTOR_EXTRA_CONFIG,
-            external_storage_plugins=MOCK_CONNECTOR_EXTERNAL_STORAGE_PLUGINS,
+            remote_storage_plugins=MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS,
         )
 
         manager = ConnectorManager(

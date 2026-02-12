@@ -1,12 +1,12 @@
-External Storage Plugins
+Remote Storage Plugins
 ========================
 
-LMCache supports built-in external storage connectors for Redis, InfiniStore, MooncakeStore, S3, and more.
-The external storage plugin system provides the ability to add custom storage connectors through dynamic loading. This enables extending remote storage capabilities without modifying core code.
+LMCache supports built-in remote storage connectors for Redis, InfiniStore, MooncakeStore, S3, and more.
+The remote storage plugin system provides the ability to add custom storage connectors through dynamic loading. This enables extending remote storage capabilities without modifying core code.
 
 Connector Definition Requirements
 ---------------------------------
-A custom external storage connector requires two classes:
+A custom remote storage connector requires two classes:
 
 1. **ConnectorAdapter**: Handles URL scheme matching and connector instantiation
 
@@ -25,10 +25,10 @@ A custom external storage connector requires two classes:
 
    The ``create_connector`` method receives a ``ConnectorContext`` object containing the URL, event loop, local CPU backend, config, and metadata.
 
-How to Integrate External Storage with LMCache
+How to Integrate Remote Storage with LMCache
 ----------------------------------------------
 1. Install your connector package in the LMCache environment
-2. Add ``external_storage_plugins`` and its related ``module_path`` and ``class_name`` to the ``extra_config`` section of LMCache configuration as follows:
+2. Add ``remote_storage_plugins`` and its related ``module_path`` and ``class_name`` to the ``extra_config`` section of LMCache configuration as follows:
 
 .. code-block:: yaml
 
@@ -36,12 +36,12 @@ How to Integrate External Storage with LMCache
     local_cpu: False
     max_local_cpu_size: 5
     remote_url: "mystore://localhost:8080"
-    external_storage_plugins: ["mystore"]
+    remote_storage_plugins: ["mystore"]
     extra_config:
-      external_storage_plugin.mystore.module_path: <module_path>
-      external_storage_plugin.mystore.class_name: <adapter_class_name>
+      remote_storage_plugin.mystore.module_path: <module_path>
+      remote_storage_plugin.mystore.class_name: <adapter_class_name>
 
-An example configuration for a custom external storage connector is as follows:
+An example configuration for a custom remote storage connector is as follows:
 
 .. code-block:: yaml
 
@@ -49,16 +49,16 @@ An example configuration for a custom external storage connector is as follows:
     local_cpu: False
     max_local_cpu_size: 5
     remote_url: "mystore://localhost:8080/data"
-    external_storage_plugins: ["mystore"]
+    remote_storage_plugins: ["mystore"]
     extra_config:
-      external_storage_plugin.mystore.module_path: my_package.my_connector
-      external_storage_plugin.mystore.class_name: MyStoreConnectorAdapter
+      remote_storage_plugin.mystore.module_path: my_package.my_connector
+      remote_storage_plugin.mystore.class_name: MyStoreConnectorAdapter
 
 .. note::
 
    - The ``remote_url`` scheme must match the scheme registered by your ``ConnectorAdapter``
-   - ``external_storage_plugin.<connector_name>`` distinguishes different dynamically loaded connectors
-   - Multiple external storage plugins can be loaded simultaneously
+   - ``remote_storage_plugin.<connector_name>`` distinguishes different dynamically loaded connectors
+   - Multiple remote storage plugins can be loaded simultaneously
 
 ConnectorAdapter Implementation
 -------------------------------
@@ -76,7 +76,7 @@ The ``ConnectorAdapter`` class is responsible for:
     from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
     class MyStoreConnectorAdapter(ConnectorAdapter):
-        """Adapter for MyStore external storage."""
+        """Adapter for MyStore remote storage."""
 
         def __init__(self) -> None:
             # Register the URL scheme this adapter handles
@@ -93,7 +93,7 @@ The ``ConnectorAdapter`` class is responsible for:
 
 RemoteConnector Implementation
 ------------------------------
-The ``RemoteConnector`` class defines the interface for external storage operations. Your implementation must provide the following abstract methods:
+The ``RemoteConnector`` class defines the interface for remote storage operations. Your implementation must provide the following abstract methods:
 
 .. code-block:: python
 
@@ -105,7 +105,7 @@ The ``RemoteConnector`` class defines the interface for external storage operati
     from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
     class MyStoreConnector(RemoteConnector):
-        """Custom connector for MyStore external storage."""
+        """Custom connector for MyStore remote storage."""
 
         def __init__(
             self,
@@ -116,7 +116,7 @@ The ``RemoteConnector`` class defines the interface for external storage operati
             # Initialize your connection here
 
         async def exists(self, key: CacheEngineKey) -> bool:
-            """Check if a key exists in the external store."""
+            """Check if a key exists in the remote store."""
             raise NotImplementedError
 
         def exists_sync(self, key: CacheEngineKey) -> bool:
@@ -132,11 +132,11 @@ The ``RemoteConnector`` class defines the interface for external storage operati
             raise NotImplementedError
 
         async def list(self) -> List[str]:
-            """List all keys in the external store."""
+            """List all keys in the remote store."""
             raise NotImplementedError
 
         async def close(self):
-            """Close the connection to the external store."""
+            """Close the connection to the remote store."""
             raise NotImplementedError
 
 Optional Methods
@@ -151,7 +151,7 @@ The ``RemoteConnector`` base class also provides optional methods that can be ov
 
 Implementation Example
 ----------------------
-A complete external storage connector implementation would include both the adapter and connector classes in a single module or package. Here's a minimal working example structure:
+A complete remote storage connector implementation would include both the adapter and connector classes in a single module or package. Here's a minimal working example structure:
 
 .. code-block:: text
 
@@ -186,7 +186,7 @@ Configuration would then reference the adapter:
 
 .. code-block:: yaml
 
-    external_storage_plugins: ["mystore"]
+    remote_storage_plugins: ["mystore"]
     extra_config:
-      external_storage_plugin.mystore.module_path: my_connector_package.adapter
-      external_storage_plugin.mystore.class_name: MyStoreConnectorAdapter
+      remote_storage_plugin.mystore.module_path: my_connector_package.adapter
+      remote_storage_plugin.mystore.class_name: MyStoreConnectorAdapter
