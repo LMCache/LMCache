@@ -16,12 +16,13 @@ enum class TransferDirection : int {
 /*
 Symbol Reference:
 NL: number of layers
-NL2: number of layers * 2
 NB: number of blocks/pages
 BS: block/page size
 NBBS: block/page buffer size = NB * BS
 NH: number of heads
 HS: head size
+TWO: 2
+ONE: 1
 
 _ means a dimension within the same tensor
 _X_ means a dimension across a list
@@ -36,19 +37,19 @@ The logic for identifying the format currently lives in
 `lmcache/v1/gpu_connector/utils.py`
 */
 enum class GPUKVFormat : int {
-  NB_NL_2_BS_NH_HS = 0,
+  NB_NL_TWO_BS_NH_HS = 0,
   /*
   used by:
   - vLLM CROSS_LAYER mode
   */
 
-  NL_X_2_NB_BS_NH_HS = 1,
+  NL_X_TWO_NB_BS_NH_HS = 1,
   /*
   used by:
   - vLLM non-MLA flash attention
   */
 
-  NL_X_NB_2_BS_NH_HS = 2,
+  NL_X_NB_TWO_BS_NH_HS = 2,
   /*
   used by:
   - vLLM non-MLA flash infer
@@ -60,13 +61,15 @@ enum class GPUKVFormat : int {
   - vLLM MLA
   */
 
-  NL2_X_NBBS_NH_HS = 4,
+  TWO_X_NL_X_NBBS_NH_HS = 4,
   /*
+  used by:
   - SGLang MHA (flash attention and flash infer)
   */
 
-  NL_X_NBBS_1_HS = 5,
+  NL_X_NBBS_ONE_HS = 5,
   /*
+  used by:
   - SGLang MLA
   */
 };

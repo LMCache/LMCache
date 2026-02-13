@@ -37,8 +37,8 @@ else:
 if lmc_ops is None:
 
     class MockGPUKVFormat:
-        NL_X_2_NB_BS_NH_HS = 0
-        NL_X_NB_2_BS_NH_HS = 1
+        NL_X_TWO_NB_BS_NH_HS = 0
+        NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
 
     class MockCOps:
@@ -204,7 +204,7 @@ def generate_kv_cache_paged_list_tensors(
     num_layers=32,
     head_size=128,
     # default vllm non-MLA flash attention
-    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,
+    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
@@ -217,9 +217,9 @@ def generate_kv_cache_paged_list_tensors(
     if use_mla:
         shape = [num_blocks, block_size, head_size]
     else:
-        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS:
+        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
             shape = [2, num_blocks, block_size, num_heads, head_size]
-        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS:
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
             shape = [num_blocks, 2, block_size, num_heads, head_size]
 
     for i in range(num_layers):
@@ -345,7 +345,7 @@ def check_paged_kv_cache_equal(
     slot_mapping,
     num_heads=8,
     head_size=128,
-    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,
+    gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
 ):
     """
     check whether two paged kv caches are the same at slot_mapping
@@ -354,13 +354,13 @@ def check_paged_kv_cache_equal(
     token_dim = 0
     num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
-        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS:
+        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
             left_k = left_kv[0].reshape(-1, num_heads, head_size)
             left_v = left_kv[1].reshape(-1, num_heads, head_size)
             right_k = right_kv[0].reshape(-1, num_heads, head_size)
             right_v = right_kv[1].reshape(-1, num_heads, head_size)
 
-        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS:
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
             left_k = left_kv[:, 0].reshape(-1, num_heads, head_size)
             left_v = left_kv[:, 1].reshape(-1, num_heads, head_size)
             right_k = right_kv[:, 0].reshape(-1, num_heads, head_size)

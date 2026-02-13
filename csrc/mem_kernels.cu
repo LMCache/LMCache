@@ -30,8 +30,8 @@ namespace lmc {
 // inline helper to check MLA (callable from device and host)
 __host__ __device__ __forceinline__ bool is_mla(
     const GPUKVFormat gpu_kv_format) {
-  return gpu_kv_format == GPUKVFormat::NL_X_NB_BS_HS ||  // vllm MLA
-         gpu_kv_format == GPUKVFormat::NL_X_NBBS_1_HS;   // SGLang MLA
+  return gpu_kv_format == GPUKVFormat::NL_X_NB_BS_HS ||   // vllm MLA
+         gpu_kv_format == GPUKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
 }
 
 template <typename scalar_t>
@@ -196,12 +196,12 @@ __device__ __forceinline__ int64_t page_buffer_offset(
     const int scalars_per_token, const int page_buffer_size,
     const GPUKVFormat gpu_kv_format, const int block_size) {
   // vllm flash attention
-  if (gpu_kv_format == GPUKVFormat::NL_X_2_NB_BS_NH_HS) {
+  if (gpu_kv_format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
     return k_or_v * page_buffer_size * scalars_per_token +
            token_idx * scalars_per_token + scalar_offset;
   }
   // vllm flash infer
-  if (gpu_kv_format == GPUKVFormat::NL_X_NB_2_BS_NH_HS) {
+  if (gpu_kv_format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
     return block_idx * 2 * block_size * scalars_per_token +
@@ -210,7 +210,7 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   }
   // MLA
   // vLLM: NL_X_NB_BS_HS
-  // SGLang: NL_X_NBBS_1_HS
+  // SGLang: NL_X_NBBS_ONE_HS
   if (is_mla(gpu_kv_format)) {
     return token_idx * scalars_per_token + scalar_offset;
   }
@@ -673,11 +673,11 @@ void single_layer_kv_transfer(
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = 0;  // No separate K/V for MLA
-  } else if (gpu_kv_format == GPUKVFormat::NL_X_2_NB_BS_NH_HS) {
+  } else if (gpu_kv_format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(1) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(0) / elements_per_entry;
-  } else {  // gpu_kv_format == GPUKVFormat::NL_X_NB_2_BS_NH_HS
+  } else {  // gpu_kv_format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(1) / elements_per_entry;

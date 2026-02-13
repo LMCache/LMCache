@@ -40,8 +40,8 @@ else:
 if lmc_ops is None:
 
     class MockGPUKVFormat:
-        NL_X_2_NB_BS_NH_HS = 0
-        NL_X_NB_2_BS_NH_HS = 1
+        NL_X_TWO_NB_BS_NH_HS = 0
+        NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
 
     class MockCOps:
@@ -114,8 +114,8 @@ def patch_pin_allocator():
 @pytest.mark.parametrize(
     "gpu_kv_format",
     [
-        lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS,  # vllm non-MLA flash infer
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
         lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
     ],  # vllm MLA
 )
@@ -235,8 +235,8 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, gpu_kv_format):
 @pytest.mark.parametrize(
     "gpu_kv_format",
     [
-        lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS,  # vllm non-MLA flash infer
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
         lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
     ],  # vllm MLA
 )
@@ -371,8 +371,8 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, num_groups, gpu_kv_fo
 @pytest.mark.parametrize(
     "gpu_kv_format",
     [
-        lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS,  # vllm non-MLA flash infer
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
     ],
 )
 @pytest.mark.skipif(

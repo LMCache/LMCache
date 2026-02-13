@@ -29,8 +29,8 @@ else:
 if lmc_ops is None:
 
     class MockGPUKVFormat:
-        NL_X_2_NB_BS_NH_HS = 0
-        NL_X_NB_2_BS_NH_HS = 1
+        NL_X_TWO_NB_BS_NH_HS = 0
+        NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
 
     class MockTransferDirection:
@@ -196,8 +196,8 @@ def test_extract_and_load_back(num_tokens):
 @pytest.mark.parametrize(
     "gpu_kv_format",
     [
-        lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS,
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ],  # vllm non-MLA flash infer
 )
 def test_multi_layer_kernel(num_tokens, gpu_kv_format):
@@ -480,8 +480,8 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, gpu_kv_format):
 @pytest.mark.parametrize(
     "gpu_kv_format",
     [
-        lmc_ops.GPUKVFormat.NL_X_2_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.GPUKVFormat.NL_X_NB_2_BS_NH_HS,
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ],  # vllm non-MLA flash infer
 )
 def test_single_layer_kernel(num_tokens, token_major, gpu_kv_format):
