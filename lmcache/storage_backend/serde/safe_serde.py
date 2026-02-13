@@ -7,7 +7,6 @@ from safetensors.torch import load, save
 import torch
 
 # First Party
-from lmcache.config import GlobalConfig
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.serde import Deserializer, Serializer
 
@@ -25,7 +24,6 @@ class SafeSerializer(Serializer):
 class SafeDeserializer(Deserializer):
     def __init__(self, dtype):
         super().__init__(dtype)
-        self.debug = GlobalConfig.is_debug()
 
     def from_bytes_normal(self, b: Union[bytearray, bytes]) -> torch.Tensor:
         return load(bytes(b))["tensor_bytes"].to(dtype=self.dtype)

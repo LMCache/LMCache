@@ -10,16 +10,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+from tests.v1.utils import create_test_memory_obj
 
 
 def create_test_config(fs_path: str):
@@ -34,12 +31,13 @@ def create_test_config(fs_path: str):
 
 
 def create_test_metadata():
-    """Create a test metadata for LMCacheEngineMetadata."""
-    return LMCacheEngineMetadata(
+    """Create a test metadata for LMCacheMetadata."""
+    return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
+        local_world_size=1,
         worker_id=0,
-        fmt="vllm",
+        local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(28, 2, 256, 8, 128),
     )
@@ -47,14 +45,13 @@ def create_test_metadata():
 
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
-    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), torch.bfloat16)
-
-
-def create_test_memory_obj(shape=(2, 16, 8, 128), dtype=torch.bfloat16) -> MemoryObj:
-    """Create a test MemoryObj using AdHocMemoryAllocator for testing."""
-    allocator = AdHocMemoryAllocator(device="cpu")
-    memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-    return memory_obj
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=hash(key_id),
+        dtype=torch.bfloat16,
+    )
 
 
 @pytest.fixture
@@ -97,7 +94,8 @@ def async_loop():
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = LMCacheEngineConfig.from_legacy(chunk_size=256)
-    return LocalCPUBackend(config, memory_allocator=memory_allocator)
+    metadata = create_test_metadata()
+    return LocalCPUBackend(config, metadata, memory_allocator=memory_allocator)
 
 
 @pytest.fixture
@@ -286,6 +284,7 @@ class TestFSConnector:
         # Create new backend instance and verify data persists
         new_local_cpu_backend = LocalCPUBackend(
             LMCacheEngineConfig.from_legacy(chunk_size=256),
+            local_cpu_backend.metadata,
             memory_allocator=local_cpu_backend.memory_allocator,
         )
         new_backend = RemoteBackend(

@@ -15,18 +15,15 @@ import torch
 import yaml
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.internal_api_server.api_server import app
-from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import AdHocMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+from tests.v1.utils import create_test_memory_obj
 
 
 class TestLoadFSChunksAPI:
@@ -58,22 +55,23 @@ class TestLoadFSChunksAPI:
         thread.join(timeout=5.0)
 
     @pytest.fixture
-    def local_cpu_backend(self):
+    def local_cpu_backend(self, test_metadata):
         """Create a LocalCPUBackend for testing."""
         config = LMCacheEngineConfig.from_defaults(chunk_size=256)
         allocator = AdHocMemoryAllocator(device="cpu")
-        backend = LocalCPUBackend(config, memory_allocator=allocator)
+        backend = LocalCPUBackend(config, test_metadata, memory_allocator=allocator)
         yield backend
         backend.memory_allocator.close()
 
     @pytest.fixture
     def test_metadata(self):
         """Create test metadata."""
-        return LMCacheEngineMetadata(
+        return LMCacheMetadata(
             model_name="test_model",
             world_size=1,
+            local_world_size=1,
             worker_id=0,
-            fmt="vllm",
+            local_worker_id=0,
             kv_dtype=torch.bfloat16,
             kv_shape=(28, 2, 256, 8, 128),
         )
@@ -123,7 +121,6 @@ class TestLoadFSChunksAPI:
     def _create_test_key(self, key_id: int) -> CacheEngineKey:
         """Create a test CacheEngineKey."""
         return CacheEngineKey(
-            fmt="vllm",
             model_name="test_model",
             world_size=1,
             worker_id=0,
@@ -131,20 +128,12 @@ class TestLoadFSChunksAPI:
             dtype=torch.bfloat16,
         )
 
-    def _create_test_memory_obj(
-        self, shape=(2, 16, 8, 128), dtype=torch.bfloat16
-    ) -> MemoryObj:
-        """Create a test MemoryObj."""
-        allocator = AdHocMemoryAllocator(device="cpu")
-        memory_obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_T2D)
-        return memory_obj
-
     def _prepare_test_data(
         self,
         temp_fs_path: str,
         async_loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        test_metadata: LMCacheEngineMetadata,
+        test_metadata: LMCacheMetadata,
         num_chunks: int = 3,
     ):
         """Prepare test data by putting chunks into FSConnector."""
@@ -164,7 +153,7 @@ class TestLoadFSChunksAPI:
         try:
             for i in range(num_chunks):
                 key = self._create_test_key(i)
-                memory_obj = self._create_test_memory_obj()
+                memory_obj = create_test_memory_obj()
                 future = remote_backend.submit_put_task(key, memory_obj)
                 if future:
                     future.result(timeout=5.0)

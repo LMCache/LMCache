@@ -52,7 +52,6 @@ def test_gds_backend_sanity():
     BASE_DIR = Path(__file__).parent
     GDS_DIR = "/tmp/gds/test-cache"
     TEST_KEY = CacheEngineKey(
-        fmt="vllm",
         model_name="meta-llama/Llama-3.1-70B-Instruct",
         world_size=8,
         worker_id=0,

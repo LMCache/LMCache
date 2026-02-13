@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 
@@ -9,14 +9,12 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lazy_memory_allocator import LazyMixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -24,6 +22,7 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -46,7 +45,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
         dst_device: str = "cuda",
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
@@ -140,12 +139,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return False
 
     def submit_put_task(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Optional[Future]:
         """
         Synchronously put the MemoryObj into the local cpu backend.
-        """
 
+        :param on_complete_callback: Optional callback invoked after the
+            synchronous put completes. Callback exceptions are caught and logged.
+        """
+        stored = False
         with self.cpu_lock:
             if key in self.hot_cache:
                 return None
@@ -161,6 +166,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     op_type=OpType.ADMIT,
                     key=key.chunk_hash,
                 )
+            stored = True
+
+        # Call callback after put completes (outside lock)
+        if stored and on_complete_callback is not None:
+            try:
+                on_complete_callback(key)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
         return None
 
@@ -169,16 +182,22 @@ class LocalCPUBackend(AllocatorBackendInterface):
         keys: Sequence[CacheEngineKey],
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         """
         Synchronously put the MemoryObjs into the local cpu backend.
+
+        :param on_complete_callback: Optional callback invoked once per key
+            after that key's put completes (not once per batch).
         """
         if not self.use_hot:
             return
 
         # TODO(Jiayi): optimize this with batching
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(key, memory_obj)
+            self.submit_put_task(
+                key, memory_obj, on_complete_callback=on_complete_callback
+            )
 
     def get_blocking(
         self,
@@ -272,7 +291,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         configured_cpu_size: float,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> float:
         """
         Calculate the effective CPU memory size based on system available memory
@@ -327,7 +346,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def initialize_allocator(
         self,
         config: LMCacheEngineConfig,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
 
@@ -356,18 +375,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
             # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
             # For now, keep the original P2P implementation
             assert metadata is not None
-            meta_shape = torch.Size(metadata.kv_shape)
-            # TODO(Jiayi): remove this hardcode
-            new_shape = torch.Size(
-                [
-                    meta_shape[1],
-                    meta_shape[0],
-                    meta_shape[2],
-                    meta_shape[3] * meta_shape[4],
-                ]
-            )
+            shapes = metadata.get_shapes()
+            dtypes = metadata.get_dtypes()
+
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-            chunk_size_bytes = get_size_bytes([new_shape], [metadata.kv_dtype])
+            chunk_size_bytes = get_size_bytes(shapes, dtypes)
             origin_cpu_size_bytes = int(cpu_size * 1024**3)
             align_cpu_size_bytes = (
                 origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
@@ -378,8 +390,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             paged_mem_allocator.init_cpu_memory_allocator(
                 align_cpu_size_bytes,
-                shapes=[new_shape],
-                dtypes=[metadata.kv_dtype],
+                shapes=shapes,
+                dtypes=dtypes,
                 fmt=MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
                 numa_mapping=numa_mapping,
             )
@@ -392,35 +404,24 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
             if use_lazy:
+                logger.warning(
+                    "LazyMixedMemoryAllocator is temporarily unavailable; "
+                    "falling back to MixedMemoryAllocator with full allocation. "
+                    "Disable enable_lazy_memory_allocator or reduce "
+                    "max_local_cpu_size to avoid large pinned allocations."
+                )
+            elif config.enable_lazy_memory_allocator:
                 logger.info(
-                    f"Using LazyMixedMemoryAllocator with "
-                    f"initial_ratio={config.lazy_memory_initial_ratio}, "
-                    f"expand_trigger_ratio="
-                    f"{config.lazy_memory_expand_trigger_ratio}, "
-                    f"step_ratio={config.lazy_memory_step_ratio}"
+                    f"LazyMixedMemoryAllocator is disabled because "
+                    f"cpu_size ({cpu_size:.2f} GB) does not exceed "
+                    f"lazy_memory_safe_size "
+                    f"({config.lazy_memory_safe_size:.2f} GB). "
+                    f"Using MixedMemoryAllocator instead."
                 )
-                return LazyMixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
-                    config=config,
-                    numa_mapping=numa_mapping,
-                    memory_limit_callback=lambda: int(
-                        self._calculate_effective_cpu_size(cpu_size, config, metadata)
-                        * 1024**3
-                    ),
-                )
-            else:
-                if config.enable_lazy_memory_allocator:
-                    logger.info(
-                        f"LazyMixedMemoryAllocator is disabled because "
-                        f"cpu_size ({cpu_size:.2f} GB) does not exceed "
-                        f"lazy_memory_safe_size "
-                        f"({config.lazy_memory_safe_size:.2f} GB). "
-                        f"Using MixedMemoryAllocator instead."
-                    )
-                return MixedMemoryAllocator(
-                    int(cpu_size * 1024**3),
-                    numa_mapping=numa_mapping,
-                )
+            return MixedMemoryAllocator(
+                int(cpu_size * 1024**3),
+                numa_mapping=numa_mapping,
+            )
 
     @_lmcache_nvtx_annotate
     def allocate(

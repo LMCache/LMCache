@@ -10,9 +10,9 @@ import inspect
 import pkgutil
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
@@ -113,7 +113,7 @@ class ConnectorContext:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig],
-        metadata: Optional[LMCacheEngineMetadata],
+        metadata: Optional[LMCacheMetadata],
     ):
         self.url = url
         self.loop = loop
@@ -167,7 +167,7 @@ class ConnectorManager:
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig] = None,
-        metadata: Optional[LMCacheEngineMetadata] = None,
+        metadata: Optional[LMCacheMetadata] = None,
     ) -> None:
         logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
@@ -221,10 +221,6 @@ class ConnectorManager:
             if adapter.can_parse(self.context.url):
                 logger.info(f"Creating connector for URL: {self.context.url}")
                 connector = adapter.create_connector(self.context)
-                logger.info(f"initializing chunk meta for connector: {connector}")
-                connector.init_chunk_meta(self.context.config, self.context.metadata)
-                logger.info(f"post-initializing connector: {connector}")
-                connector.post_init()
                 return connector
 
         raise ValueError(f"No adapter found for URL: {self.context.url}")
@@ -235,7 +231,7 @@ def CreateConnector(
     loop: asyncio.AbstractEventLoop,
     local_cpu_backend: Optional[LocalCPUBackend],
     config: Optional[LMCacheEngineConfig] = None,
-    metadata: Optional[LMCacheEngineMetadata] = None,
+    metadata: Optional[LMCacheMetadata] = None,
 ) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.

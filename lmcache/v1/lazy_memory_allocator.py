@@ -1,32 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Lazy memory allocator with async progressive expansion and zero-copy."""
-
 # Standard
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
+from typing import List, Optional, Union
+import ctypes
 import threading
 
 # Third Party
-import sortedcontainers
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import (
-    BufferAllocator,
-    FreeBlock,
+    AddressManager,
+    MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    MixedMemoryAllocator,
     TensorMemoryAllocator,
-    _allocate_cpu_memory,
 )
 from lmcache.v1.system_detection import NUMAMapping
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
 
 if torch.cuda.is_available():
     # First Party
@@ -38,408 +28,243 @@ else:
 logger = init_logger(__name__)
 
 
-class CompositeBuffer:
-    """Manages multiple memory segments with unified view (zero-copy)."""
+# Helper functions
+def get_numa_id(numa_mapping: NUMAMapping) -> int:
+    """
+    Get the NUMA ID for the current GPU
 
-    def __init__(self, initial_buffer: torch.Tensor):
-        self.segments: List[torch.Tensor] = [initial_buffer]
-        self.segment_offsets: List[int] = [0]
-        self.total_size = initial_buffer.numel()
-        self.lock = threading.Lock()
+    Args:
+        numa_mapping (NUMAMapping): The NUMA mapping object.
 
-    def add_segment(self, new_buffer: torch.Tensor) -> int:
-        """Add a new memory segment to the composite buffer.
+    Returns:
+        int: The NUMA ID for the current GPU.
 
-        Thread-safe: Protected by self.lock.
-
-        Returns:
-            int: The offset of the new segment in the unified address space.
-        """
-        with self.lock:
-            offset = self.total_size
-            self.segments.append(new_buffer)
-            self.segment_offsets.append(offset)
-            self.total_size += new_buffer.numel()
-            logger.info(
-                f"Added segment: {new_buffer.numel()} bytes, total: {self.total_size}"
-            )
-            return offset
-
-    def get_slice(self, start: int, size: int) -> torch.Tensor:
-        with self.lock:
-            segment_idx = self._find_segment(start)
-            if segment_idx == -1:
-                raise ValueError(f"Invalid offset: {start}")
-
-            segment_start = self.segment_offsets[segment_idx]
-            segment = self.segments[segment_idx]
-            end = start + size
-
-            if end <= segment_start + segment.numel():
-                local_start = start - segment_start
-                return segment[local_start : local_start + size]
-            else:
-                raise ValueError(
-                    f"Slice spans segments (start={start}, size={size}). "
-                    "Bug in segment-aware coalescing."
-                )
-
-    def _find_segment(self, offset: int) -> int:
-        for i in range(len(self.segments) - 1, -1, -1):
-            if offset >= self.segment_offsets[i]:
-                if offset < self.segment_offsets[i] + self.segments[i].numel():
-                    return i
-        return -1
-
-    def numel(self) -> int:
-        return self.total_size
+    Raises:
+        KeyError: If GPU id is not detected in the numa mapping.
+    """
+    gpu_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
+    return numa_mapping.gpu_to_numa_mapping[gpu_id]
 
 
-class CompositeTensorMemoryAllocator(TensorMemoryAllocator):
-    """TensorMemoryAllocator with segment-aware coalescing for CompositeBuffer."""
+def align_to(size: int, align_size: int) -> int:
+    """
+    Align the given size to the nearest multiple of align_size.
 
-    def __init__(
-        self,
-        composite_buffer: CompositeBuffer,
-        align_bytes: int = TensorMemoryAllocator.ALIGN_BYTES,
-    ):
-        self.composite_buffer = composite_buffer
-        self.buffer = composite_buffer.segments[0].view(torch.uint8).flatten()
-        self.align_bytes = align_bytes
-        self.explicit_list = sortedcontainers.SortedList(key=lambda x: x.start)
-        self.explicit_list.add(FreeBlock(start=0, size=self.buffer.numel()))
-        self.num_active_allocations = 0
-        self.total_allocated_size = 0
-        self.segment_boundaries = [composite_buffer.segments[0].numel()]
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+    Args:
+        size (int): The size to align.
+        align_size (int): The alignment size, MUST BE a power of two.
 
-    def expand_with_new_segment(self, new_buffer: torch.Tensor):
-        """Expand the allocator with a new memory segment.
-
-        Thread Safety:
-        ==============
-        This method modifies shared data structures (explicit_list, segment_boundaries)
-        that are also accessed by allocate/free operations in the main thread.
-
-        The caller MUST hold the host_mem_lock before calling this method to prevent
-        race conditions.
-        """
-        offset = self.composite_buffer.add_segment(new_buffer)
-        new_size = new_buffer.numel()
-        self.segment_boundaries.append(offset + new_size)
-
-        new_free_block = FreeBlock(start=offset, size=new_size)
-        prev_block = self.explicit_list[-1] if len(self.explicit_list) > 0 else None
-        succ_block = None
-
-        if not self._coalesce(new_free_block, prev_block, succ_block):
-            self.explicit_list.add(new_free_block)
-
-        logger.info(
-            f"Expanded: {new_size} bytes, total: {self.composite_buffer.numel()}"
-        )
-
-    def _is_segment_boundary(self, offset: int) -> bool:
-        return offset in self.segment_boundaries
-
-    def _can_merge_with_prev(
-        self, curr_block: FreeBlock, prev_block: FreeBlock
-    ) -> bool:
-        """Override: Add segment boundary check for prev merge."""
-        return super()._can_merge_with_prev(
-            curr_block, prev_block
-        ) and not self._is_segment_boundary(prev_block.start + prev_block.size)
-
-    def _can_merge_with_succ(
-        self, curr_block: FreeBlock, succ_block: FreeBlock
-    ) -> bool:
-        """Override: Add segment boundary check for succ merge."""
-        return super()._can_merge_with_succ(
-            curr_block, succ_block
-        ) and not self._is_segment_boundary(curr_block.start + curr_block.size)
-
-    def _get_buffer_slice(self, start: int, size: int) -> torch.Tensor:
-        """Override: Use composite buffer for multi-segment access."""
-        return self.composite_buffer.get_slice(start, size)
+    Returns:
+        int: The aligned size.
+    """
+    return (size + align_size - 1) & (~(align_size - 1))
 
 
-class AsyncMemoryExpander:
-    """Asynchronously expands memory in background.
+# Main class
+class LazyMemoryAllocator(MemoryAllocatorInterface):
+    """
+    Allocates CPU (numa) pinned memory with a initial size and expand
+    the size to the required size in the background.
 
-    Design Philosophy:
-    ==================
-    This is a ONE-WAY, EXPANSION-ONLY mechanism designed to:
-    1. Reduce startup latency: Start with a small initial allocation
-    2. Minimize initial memory footprint: Avoid allocating full capacity upfront
-    3. Progressive growth: Expand memory as needed in the background
-
-    Key Characteristics:
-    - NO SHRINKING: Once memory is allocated, it is never released back to
-      the system
-    - ONE-TIME EXPANSION: The expander thread runs until target size is
-      reached, then stops
-    - LAZY ALLOCATION: Memory is allocated progressively, not all at once
-
-    This design is optimal for workloads with monotonically increasing memory
-    needs, where the memory will eventually be fully utilized and doesn't need
-    to be reclaimed.
-
-    Thread Safety Overview:
-    =======================
-    This class manages a background daemon thread (_expansion_worker) that
-    progressively allocates and adds new memory segments to the allocator.
-
-    Concurrency Model:
-    - Main thread: Performs allocate/free operations on the allocator
-    - Expander thread: Adds new memory segments via expand_with_new_segment()
+    Background expansion logic:
+    - After registering X GB memory, we call sbrk and updates _curr_size
+    - Once everything is registered, the background thread stops
     """
 
+    PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
+    COMMIT_SIZE = 1 << 30  # Do a commit every 1 GB
+
     def __init__(
         self,
-        composite_buffer: CompositeBuffer,
-        allocator: CompositeTensorMemoryAllocator,
-        total_size: int,
-        step_ratio: float,
-        host_mem_lock: threading.Lock,
-        numa_mapping: Optional[NUMAMapping] = None,
-        memory_limit_callback=None,
+        init_size: int,
+        final_size: int,
+        align_bytes: int = AddressManager.ALIGN_BYTES,
+        numa_mapping: NUMAMapping | None = None,
     ):
-        self.composite_buffer = composite_buffer
-        self.allocator = allocator
-        self.total_size = total_size
-        self.step_ratio = step_ratio
-        self.numa_mapping = numa_mapping
-        self.memory_limit_callback = memory_limit_callback
-        self.host_mem_lock = host_mem_lock
-        self.expansion_thread: Optional[threading.Thread] = None
-        self.stop_flag = threading.Event()
-        self.expansion_lock = threading.Lock()
-        self.is_expanding = False
-
-    def start_expansion(self):
-        with self.expansion_lock:
-            if self.is_expanding:
-                return
-            self.is_expanding = True
-            self.stop_flag.clear()
-            self.expansion_thread = threading.Thread(
-                target=self._expansion_worker, daemon=True, name="MemoryExpander"
-            )
-            self.expansion_thread.start()
-            logger.info("Started async expansion")
-
-    def _get_effective_limit(self, current_size: int) -> Optional[int]:
-        """Calculate the effective memory limit based on callback.
-
+        """
         Args:
-            current_size: Current allocated memory size in bytes
-
-        Returns:
-            Effective memory limit in bytes, or None if expansion should stop
+            init_size (int): Initial size of the memory allocation in bytes.
+            final_size (int): Final size of the memory allocation in bytes.
+            align_bytes (int, optional): Alignment in for the underlying allocations
         """
-        if not self.memory_limit_callback:
-            return self.total_size
+        # Whether using NUMA allocation
+        self._use_numa = numa_mapping is not None
+        # Currently pinned size, only accessed by the expansion thread
+        self._curr_size = align_to(init_size, self.PIN_CHUNK_SIZE)
+        # Final size of the allocation, only accessed by the expansion thread
+        self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
+        # Underlying buffer for the memory allocation
+        self._buffer: torch.Tensor
+        # CUDA runtime API
+        self._cudart = torch.cuda.cudart()
 
-        try:
-            limit_bytes = self.memory_limit_callback()
-            if limit_bytes <= 0:
-                return self.total_size
+        # List of (ptr, size) for pinned memory chunks
+        self._pin_record: list[tuple[int, int]] = []
 
-            effective_limit = min(self.total_size, limit_bytes)
-            if current_size >= effective_limit:
-                logger.warning(
-                    f"Expansion stopped: {current_size} >= {effective_limit}"
-                )
-                return None
-
-            return effective_limit
-        except Exception as e:
-            logger.warning(f"Memory limit callback failed: {e}")
-            return self.total_size
-
-    def _expansion_worker(self):
-        """Background worker that progressively expands memory to target size.
-
-        Runs in daemon thread. Allocates memory in steps (step_ratio at a time)
-        until total_size is reached or memory limit is hit. Never shrinks.
-        """
-        try:
-            current_size = self.composite_buffer.numel()
-            while current_size < self.total_size and not self.stop_flag.is_set():
-                effective_limit = self._get_effective_limit(current_size)
-                if effective_limit is None:
-                    break
-
-                next_size = min(
-                    int(self.total_size * self.step_ratio),
-                    effective_limit - current_size,
-                )
-                if next_size <= 0:
-                    break
-
-                logger.info(
-                    f"Expanding: +{next_size}, current={current_size}, "
-                    f"target={self.total_size}"
-                )
-
-                try:
-                    new_buffer = _allocate_cpu_memory(next_size, self.numa_mapping)
-                except Exception as e:
-                    logger.error(f"Allocation failed: {e}")
-                    break
-
-                with self.host_mem_lock:
-                    self.allocator.expand_with_new_segment(new_buffer)
-
-                current_size += next_size
-
-            logger.info(f"Expansion completed: {self.composite_buffer.numel()} bytes")
-        except Exception as e:
-            logger.error(f"Expansion error: {e}", exc_info=True)
-        finally:
-            with self.expansion_lock:
-                self.is_expanding = False
-
-    def stop(self):
-        self.stop_flag.set()
-        if self.expansion_thread and self.expansion_thread.is_alive():
-            self.expansion_thread.join(timeout=5.0)
-
-
-class LazyMixedMemoryAllocator(MixedMemoryAllocator):
-    """Lazy allocator: starts small, expands async when needed (zero-copy).
-
-    Starts with initial_ratio of target size, triggers one-time background
-    expansion when usage exceeds expand_trigger_ratio. Ideal for fast startup
-    with low initial memory footprint.
-
-    See AsyncMemoryExpander for detailed design philosophy.
-    """
-
-    def __init__(
-        self,
-        size: int,
-        config: "LMCacheEngineConfig",
-        use_paging: bool = False,
-        memory_limit_callback: Optional[Callable] = None,
-        **kwargs,
-    ):
-        # Extract configuration values from config
-        initial_ratio = config.lazy_memory_initial_ratio
-        expand_trigger_ratio = config.lazy_memory_expand_trigger_ratio
-        step_ratio = config.lazy_memory_step_ratio
-
-        self.total_size = size
-        self.initial_ratio = initial_ratio
-        self.expand_trigger_ratio = expand_trigger_ratio
-        self.step_ratio = step_ratio
-        self.memory_limit_callback = memory_limit_callback
-        self.expansion_triggered = False
-        self.initial_size = int(size * initial_ratio)
-        self.numa_mapping = kwargs.get("numa_mapping", None)
-        self.size = self.initial_size
-        self._unregistered = False
-        self.async_expander: Optional[AsyncMemoryExpander]
-
-        if not use_paging:
-            initial_buffer = _allocate_cpu_memory(self.initial_size, self.numa_mapping)
-            self.composite_buffer = CompositeBuffer(initial_buffer)
-            self.buffer = initial_buffer
-            self.pin_allocator = CompositeTensorMemoryAllocator(self.composite_buffer)
-            self.align_bytes = self.pin_allocator.align_bytes
-            self.host_mem_lock = threading.Lock()
-            self.buffer_allocator = BufferAllocator("cpu")
-            self.async_expander = AsyncMemoryExpander(
-                self.composite_buffer,
-                self.pin_allocator,
-                self.total_size,
-                self.step_ratio,
-                self.host_mem_lock,
-                self.numa_mapping,
-                self.memory_limit_callback,
-            )
+        # Detect numa mapping
+        if numa_mapping is not None:
+            numa_id = get_numa_id(numa_mapping)
+            ptr = lmc_ops.alloc_numa_ptr(self._final_size, numa_id)
+            arr_type = ctypes.c_uint8 * self._final_size
+            buf = arr_type.from_address(ptr)
+            self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
         else:
-            logger.warning(
-                "Paged allocation with lazy expansion not fully supported. "
-                "Using initial size only."
+            self._buffer = torch.empty(
+                self._final_size, dtype=torch.uint8, device="cpu", pin_memory=False
             )
-            super().__init__(self.initial_size, use_paging, **kwargs)
-            self.async_expander = None
 
-        logger.info(
-            f"LazyAllocator: initial={self.initial_size}B "
-            f"({initial_ratio * 100:.0f}%), target={self.total_size}B, "
-            f"trigger={expand_trigger_ratio * 100:.0f}%, "
-            f"step={step_ratio * 100:.0f}%"
+        # Pin the first `curr_size` bytes (aligned to the internal chunk size)
+        self._pin_memory_chunk(0, self._curr_size)
+
+        # Create the tensor memory allocator
+        self._allocator = TensorMemoryAllocator(
+            tensor=self._buffer,
+            align_bytes=align_bytes,
+            init_address_space=self._curr_size,
         )
 
-    def _check_and_trigger_expansion(self):
-        if self.expansion_triggered or not self.async_expander:
-            return
-        if not isinstance(self.pin_allocator, CompositeTensorMemoryAllocator):
-            return
+        # Get the address manager
+        # NOTE(ApostaC): this assumes the tensor memory allocator owns the address
+        # manager, which creates extra coupling in the code.
+        # NOTE(ApostaC): this also assumes that the behavior of the allocation is
+        # completely determined by the address manager.
+        self._address_manager = self._allocator.address_manager
 
-        usage_ratio = (
-            self.pin_allocator.total_allocated_size / self.composite_buffer.numel()
+        # Launch the background expansion thread
+        self._stop_expand = threading.Event()
+        self._expand_thread = threading.Thread(
+            target=self._expand_worker, daemon=True, name="lazy-mem-expand-thread"
         )
-        if usage_ratio >= self.expand_trigger_ratio:
-            logger.info(
-                f"Triggering expansion: usage={usage_ratio * 100:.0f}%, "
-                f"threshold={self.expand_trigger_ratio * 100:.0f}%"
-            )
-            self.async_expander.start_expansion()
-            self.expansion_triggered = True
+        self._expand_thread.start()
 
-    @_lmcache_nvtx_annotate
+    # Public methods
     def allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
-        result = super().allocate(shapes, dtypes, fmt, allocator_type)
-        if result and fmt != MemoryFormat.BINARY_BUFFER:
-            self._check_and_trigger_expansion()
-        return result
+        obj = self._allocator.allocate(shapes, dtypes, fmt, allocator_type)
+        # HACK(ApostaC): reset the parent allocator to this lazy allocator
+        # There should be a cleaner way to decouple lazy allocator and
+        # tensor memory allocator
+        if obj is not None:
+            obj.parent_allocator = self
+        return obj
 
-    @_lmcache_nvtx_annotate
     def batched_allocate(
         self,
-        shapes: Union[torch.Size, Tuple[int, ...], list[torch.Size]],
+        shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
         batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
-        result = super().batched_allocate(
+        # HACK(ApostaC): reset the parent allocator to this lazy allocator
+        # There should be a cleaner way to decouple lazy allocator and
+        # tensor memory allocator
+        ret = self._allocator.batched_allocate(
             shapes, dtypes, batch_size, fmt, allocator_type
         )
-        if result and fmt != MemoryFormat.BINARY_BUFFER:
-            self._check_and_trigger_expansion()
-        return result
+
+        if ret is None:
+            return ret
+
+        for obj in ret:
+            obj.parent_allocator = self
+        return ret
+
+    def free(
+        self,
+        memory_obj: MemoryObj,
+        allocator_type: Optional[str] = None,
+    ):
+        self._allocator.free(memory_obj, allocator_type)
+
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
+        self._allocator.batched_free(memory_objs, allocator_type, update_stats)
 
     def close(self):
-        if hasattr(self, "async_expander") and self.async_expander:
-            self.async_expander.stop()
+        # Stop the background expansion thread
+        self._stop_expand.set()
+        self._expand_thread.join()
 
-        if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+        # Unpin all pinned memory chunks
+        for ptr, size in self._pin_record:
+            self._cudart.cudaHostUnregister(ptr)
+        self._pin_record.clear()
 
-            if hasattr(self, "composite_buffer"):
-                for segment in self.composite_buffer.segments:
-                    ptr = segment.data_ptr()
-                    if self.numa_mapping:
-                        lmc_ops.free_pinned_numa_ptr(ptr, segment.numel())
-                    else:
-                        lmc_ops.free_pinned_ptr(ptr)
-                logger.info("LazyMixedMemoryAllocator closed and memory freed")
-            else:
-                # Fall back to parent's close for paging mode
-                super().close()
-                return
-            self._unregistered = True
+        # Free the underlying buffer if using NUMA allocation
+        if self._use_numa:
+            lmc_ops.free_numa_ptr(self._buffer.data_ptr(), self._final_size)
 
-    def __str__(self):
-        return "LazyMixedMemoryAllocator"
+    def memcheck(self) -> bool:
+        return self._allocator.memcheck()
+
+    def get_underlying_buffer(self) -> torch.Tensor:
+        """
+        Get the underlying buffer tensor. Will be used by RDMA registrations.
+        """
+        return self._buffer
+
+    def get_address_manager(self) -> AddressManager:
+        """
+        Get the address manager used by this allocator.
+        """
+        return self._address_manager
+
+    # Helper functions
+    def _pin_memory_chunk(self, offset: int, size: int):
+        """
+        Pin a chunk of memory.
+
+        Args:
+            offset (int): Offset in the buffer to pin.
+            size (int): Size of the memory chunk in bytes.
+        """
+        assert offset & (self.PIN_CHUNK_SIZE - 1) == 0, (
+            "Offset must be aligned to PIN_CHUNK_SIZE"
+        )
+        assert size & (self.PIN_CHUNK_SIZE - 1) == 0, (
+            "Size must be aligned to PIN_CHUNK_SIZE"
+        )
+        assert offset + size <= self._final_size, "Pinning exceeds buffer size"
+
+        ptr = self._buffer.data_ptr() + offset
+        # Use flag: cudaHostRegisterMapped (0x02)
+        self._cudart.cudaHostRegister(ptr, size, 2)
+        self._pin_record.append((ptr, size))
+
+    def _commit_expansion(self, expand_size: int):
+        """
+        Call sbrk in the address manager to commit the expansion.
+        """
+        self._address_manager.sbrk(expand_size)
+        logger.info(
+            "LazyMemoryAllocator: Expanded %s MB pinned memory, now total is %s MB",
+            expand_size >> 20,
+            self._curr_size >> 20,
+        )
+
+    def _expand_worker(self):
+        """
+        Background worker to expand the pinned memory.
+        """
+        last_commit_size = self._curr_size
+        while self._curr_size < self._final_size and not self._stop_expand.is_set():
+            # Expand chunk by chunk and commit
+            for i in range(self.COMMIT_SIZE // self.PIN_CHUNK_SIZE):
+                if self._curr_size >= self._final_size:
+                    break
+                self._pin_memory_chunk(self._curr_size, self.PIN_CHUNK_SIZE)
+                self._curr_size += self.PIN_CHUNK_SIZE
+
+            expand_size = self._curr_size - last_commit_size
+            self._commit_expansion(expand_size)
+            last_commit_size = self._curr_size

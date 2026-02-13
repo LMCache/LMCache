@@ -15,11 +15,11 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.nixl_storage_backend import (
     NixlStorageBackend,
     NixlStorageConfig,
@@ -39,7 +39,6 @@ def generate_test_data(
     for i in range(num_objs):
         keys.append(
             CacheEngineKey(
-                fmt="test",
                 model_name="test_model",
                 world_size=1,
                 worker_id=0,
@@ -78,13 +77,14 @@ def create_test_config(
     return config
 
 
-def create_test_metadata() -> LMCacheEngineMetadata:
+def create_test_metadata() -> LMCacheMetadata:
     """Create test metadata for NixlStorageBackend"""
-    return LMCacheEngineMetadata(
+    return LMCacheMetadata(
         model_name="test_model",
         worker_id=0,
+        local_world_size=1,
+        local_worker_id=0,
         world_size=1,
-        fmt="test",
         kv_dtype=torch.bfloat16,
         kv_shape=(
             32,

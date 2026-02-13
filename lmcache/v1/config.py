@@ -26,7 +26,6 @@ from lmcache.v1.config_base import (
     create_config_class,
     load_config_with_overrides,
 )
-import lmcache.config as orig_config
 
 logger = init_logger(__name__)
 
@@ -229,7 +228,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": str,
     },
     # Storage paths
-    "weka_path": {"type": Optional[str], "default": None, "env_converter": str},
     "gds_path": {"type": Optional[str], "default": None, "env_converter": str},
     "cufile_buffer_size": {
         "type": Optional[int],
@@ -442,6 +440,47 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": False,
         "env_converter": _to_bool,
     },
+    # Memory management configurations
+    "pin_timeout_sec": {
+        "type": int,
+        "default": 300,
+        "env_converter": int,
+        "description": (
+            "Maximum duration in seconds that a memory object can remain pinned. "
+            "If a pinned object exceeds this timeout, it will be forcibly unpinned "
+            "by the PinMonitor to prevent memory leaks. Default is 300 seconds."
+        ),
+    },
+    "pin_check_interval_sec": {
+        "type": int,
+        "default": 30,
+        "env_converter": int,
+        "description": (
+            "Interval in seconds between PinMonitor timeout checks. "
+            "The background thread periodically scans all pinned objects at this "
+            "interval to detect and handle timeouts. Default is 30 seconds."
+        ),
+    },
+    # Remote configuration service
+    "remote_config_url": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+        "description": (
+            "URL of the remote configuration service. When set, LMCache will "
+            "fetch additional configuration from this URL at startup."
+        ),
+    },
+    "app_id": {
+        "type": Optional[str],
+        "default": None,
+        "env_converter": str,
+        "description": (
+            "Application ID to send to the remote configuration service. "
+            "If not set, the remote service may infer it from current config "
+            "and environment variables."
+        ),
+    },
 }
 
 
@@ -528,24 +567,6 @@ def _log_config(self):
 
     logger.info(f"LMCache Configuration: {config_dict}")
     return self
-
-
-def _to_original_config(self):
-    """Convert to original configuration format"""
-    return orig_config.LMCacheEngineConfig(
-        chunk_size=self.chunk_size,
-        local_device="cpu" if self.local_cpu else "cuda",
-        max_local_cache_size=int(self.max_local_cpu_size),
-        remote_url=None,
-        remote_serde=None,
-        pipelined_backend=False,
-        save_decode_cache=self.save_decode_cache,
-        enable_blending=self.enable_blending,
-        blend_recompute_ratio=0.15,
-        blend_min_tokens=self.blend_min_tokens,
-        blend_separator="[BLEND_SEP]",
-        blend_add_special_in_precomp=False,
-    )
 
 
 def _get_extra_config_value(self, key, default_value=None):
@@ -690,22 +711,6 @@ def _update_config_from_env(self):
     return self
 
 
-def _validate_and_set_config_value(config, config_key, value):
-    """Validate and set configuration value"""
-    if not hasattr(config, config_key):
-        logger.warning(f"Config key '{config_key}' does not exist in configuration")
-        return False
-
-    try:
-        setattr(config, config_key, value)
-        return True
-    except Exception as e:
-        logger.error(
-            f"Failed to set config item '{config_key}' with value {value}: {e}"
-        )
-        return False
-
-
 # Create configuration class using the base utility
 LMCacheEngineConfig = create_config_class(
     config_name="LMCacheEngineConfig",
@@ -715,7 +720,6 @@ LMCacheEngineConfig = create_config_class(
     namespace_extras={
         "validate": _validate_config,
         "log_config": _log_config,
-        "to_original_config": _to_original_config,
         "get_extra_config_value": _get_extra_config_value,
         "get_lmcache_worker_ids": _get_lmcache_worker_ids,
         "get_lookup_server_worker_ids": _get_lookup_server_worker_ids,
