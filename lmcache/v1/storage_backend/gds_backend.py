@@ -531,7 +531,7 @@ class GdsBackend(AllocatorBackendInterface):
                     self.put_tasks.discard(key)
                 return
 
-            #Register key in cache
+            # Register key in cache
             logger.debug(
                 f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
                 f"to {path} with metadata {metadata}"
@@ -546,7 +546,8 @@ class GdsBackend(AllocatorBackendInterface):
             except Exception as e:
                 logger.error(
                     f"POSIX metadata write operation failed for key {key} at path "
-                    f"{path + _METADATA_FILE_SUFFIX}: metadata_size_bytes={len(metadata)}, "
+                    f"{path + _METADATA_FILE_SUFFIX}: "
+                    f"metadata_size_bytes={len(metadata)}, "
                     f"tmp_suffix={tmp}, error={e}",
                     exc_info=True,
                 )
@@ -562,7 +563,9 @@ class GdsBackend(AllocatorBackendInterface):
             try:
                 on_complete_callback(key)
             except Exception as e:
-                logger.error(f"on_complete_callback failed for key {key}: {e}", exc_info=True)
+                logger.error(
+                    f"on_complete_callback failed for key {key}: {e}", exc_info=True
+                )
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
@@ -897,7 +900,7 @@ class GdsBackend(AllocatorBackendInterface):
                     "Both cufile and cudart are None, this should not happen"
                 )
         except Exception as e:
-            raise RuntimeError(f"CuFile read failed for {gds_path}: {e}", exc_info=True)
+            raise RuntimeError(f"CuFile read failed for {gds_path}: {e}") from e
 
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
@@ -933,16 +936,16 @@ class GdsBackend(AllocatorBackendInterface):
             logger.warning("GDS Backend does not support eviction")
 
         logger.debug(f"Allocating memory with busy loop: {busy_loop}")
-        
+
         max_attempts = self.max_alloc_attempts if busy_loop else 1
         num_attempts = 0
-        
+
         # try up to max_attempts
         while num_attempts < max_attempts:
             memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
-            if memory_obj is not None: # success
+            if memory_obj is not None:  # success
                 return memory_obj
-            
+
             num_attempts += 1
             if num_attempts < max_attempts:
                 logger.warning(
@@ -951,7 +954,7 @@ class GdsBackend(AllocatorBackendInterface):
                     f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
                 time.sleep(self.alloc_attempt_delay_secs)
-        
+
         logger.error(
             f"GDS allocation failed after {num_attempts} attempt(s). Returning None."
         )
@@ -977,17 +980,21 @@ class GdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        logger.debug(f"Batched allocating memory in GDS backend with busy loop: {busy_loop}")
-        
+        logger.debug(
+            f"Batched allocating memory in GDS backend with busy loop: {busy_loop}"
+        )
+
         max_attempts = self.max_alloc_attempts if busy_loop else 1
         num_attempts = 0
-        
+
         # try up to max_attempts
         while num_attempts < max_attempts:
-            memory_objs = self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
-            if memory_objs is not None: # success
+            memory_objs = self.memory_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt
+            )
+            if memory_objs is not None:  # success
                 return memory_objs
-            
+
             num_attempts += 1
             if num_attempts < max_attempts:
                 logger.warning(
@@ -996,9 +1003,10 @@ class GdsBackend(AllocatorBackendInterface):
                     f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
                 time.sleep(self.alloc_attempt_delay_secs)
-        
+
         logger.error(
-            f"GDS batched allocation failed after {num_attempts} attempt(s). Returning None."
+            f"GDS batched allocation failed after {num_attempts} "
+            f"attempt(s). Returning None."
         )
         if not self.memory_allocator.memcheck():
             logger.error(
