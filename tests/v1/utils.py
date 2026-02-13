@@ -365,10 +365,10 @@ def check_paged_kv_cache_equal(
             right_v = right_kv[1].reshape(-1, num_heads, head_size)
 
         elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-            left_k = left_kv[:, 0].reshape(-1, num_heads, head_size)
-            left_v = left_kv[:, 1].reshape(-1, num_heads, head_size)
-            right_k = right_kv[:, 0].reshape(-1, num_heads, head_size)
-            right_v = right_kv[:, 1].reshape(-1, num_heads, head_size)
+            left_k = left_kv[:, 0].contiguous().reshape(-1, num_heads, head_size)
+            left_v = left_kv[:, 1].contiguous().reshape(-1, num_heads, head_size)
+            right_k = right_kv[:, 0].contiguous().reshape(-1, num_heads, head_size)
+            right_v = right_kv[:, 1].contiguous().reshape(-1, num_heads, head_size)
 
         assert len(left_k.shape) == 3
         assert len(left_v.shape) == 3
