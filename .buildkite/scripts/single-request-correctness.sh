@@ -34,6 +34,9 @@ CORRECTNESS_DIR=".buildkite/correctness"
 # persist uv's cache somewhere stable:
 export UV_CACHE_DIR="$HOME/.cache/uv"
 
+# Fix HuggingFace cache permissions by using a writable directory
+export HF_HOME="$HOME/correctness/.cache/huggingface"
+
 # we will try to reuse as much uv cache as possible across jobs
 # while pulling latest changes from vllm, LMCache, and other wheel dependencies
 source "$HOME/correctness/.venv/bin/activate"
@@ -47,7 +50,7 @@ uv pip install -U vllm \
 
 # override previous lmcache from previous jobs
 # the source installation is from this PR
-uv pip install -e . --reinstall-package lmcache
+uv pip install -e . --reinstall-package lmcache --no-build-isolation
 
 # additional dependencies (please update manually if needed)
 # these packages are pretty stable so should not need to
