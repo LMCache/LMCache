@@ -259,6 +259,11 @@ class GdsBackend(AllocatorBackendInterface):
 
         self.use_direct_io = False
 
+        self.max_alloc_attempts = config.extra_config.get("max_alloc_attempts", 10)
+        self.alloc_attempt_delay_secs = config.extra_config.get(
+            "allocation_attempt_delay_secs", 0.1
+        )
+
         if config.extra_config is not None:
             use_direct_io = get_extra_config_bool("use_direct_io", config)
             if use_direct_io is not None:
@@ -397,6 +402,18 @@ class GdsBackend(AllocatorBackendInterface):
                 return self._read_metadata(key, path, subdir_key)
             except UnsupportedMetadataVersion:
                 logger.error(f"Unsupported metadata version for {path}, ignoring")
+            except (OSError, IOError) as e:
+                logger.error(
+                    f"Failed to read metadata file {path}: {type(e).__name__}: {e}. "
+                    f"File may be corrupted or inaccessible. "
+                    f"Ignoring cache entry for key {key}."
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error reading metadata file {path}: "
+                    f"{type(e).__name__}: {e}. Ignoring cache entry for key {key}."
+                )
+
         return None
 
     def _key_to_path(
@@ -481,48 +498,71 @@ class GdsBackend(AllocatorBackendInterface):
         :param on_complete_callback: Optional callback invoked after the GDS
             write completes for this key. Callback exceptions are caught.
         """
-        kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
-        path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
-        # TODO: maybe remove `metadata_dirs` and insert mkdir calls
-        # only for the case where creating the CuFile fails on ENOENT. It
-        # also makes the code more resilient to out-of-band deletions
-        if subdir_key not in self.metadata_dirs:
-            os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
-            self.metadata_dirs.add(subdir_key)
-        tmp = ".tmp" + rand_suffix(self.rand, 8)
-        fmt = memory_obj.metadata.fmt
-        metadata = await asyncio.to_thread(
-            self._save_gds,
-            path,
-            tmp,
-            kv_chunk,
-            fmt,
-            self.cufile_base_pointer,
-            memory_obj.metadata.address,
-        )
+        try:
+            kv_chunk = memory_obj.tensor
+            assert kv_chunk is not None
+            path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
+            # TODO: maybe remove `metadata_dirs` and insert mkdir calls
+            # only for the case where creating the CuFile fails on ENOENT. It
+            # also makes the code more resilient to out-of-band deletions
+            if subdir_key not in self.metadata_dirs:
+                os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
+                self.metadata_dirs.add(subdir_key)
+            tmp = ".tmp" + rand_suffix(self.rand, 8)
+            fmt = memory_obj.metadata.fmt
+            try:
+                metadata = await asyncio.to_thread(
+                    self._save_gds,
+                    path,
+                    tmp,
+                    kv_chunk,
+                    fmt,
+                    self.cufile_base_pointer,
+                    memory_obj.metadata.address,
+                )
+            except Exception as e:
+                logger.error(
+                    f"GDS/cuFile write operation failed for key {key} at path {path}: "
+                    f"tensor_shape={kv_chunk.shape}, tensor_dtype={kv_chunk.dtype}, "
+                    f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
+                    exc_info=True,
+                )
+                with self.put_lock:
+                    self.put_tasks.discard(key)
+                return
 
-        logger.debug(
-            f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
-            f"to {path} with metadata {metadata}"
-        )
-        self.insert_key(key, memory_obj)
-        memory_obj.ref_count_down()
-
-        task = asyncio.create_task(
-            save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
-        )
-        self.save_metadata_tasks.add(task)
-        task.add_done_callback(self.save_metadata_tasks.discard)
-        with self.put_lock:
-            self.put_tasks.discard(key)
+            #Register key in cache
+            logger.debug(
+                f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
+                f"to {path} with metadata {metadata}"
+            )
+            self.insert_key(key, memory_obj)
+            try:
+                task = asyncio.create_task(
+                    save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
+                )
+                self.save_metadata_tasks.add(task)
+                task.add_done_callback(self.save_metadata_tasks.discard)
+            except Exception as e:
+                logger.error(
+                    f"POSIX metadata write operation failed for key {key} at path "
+                    f"{path + _METADATA_FILE_SUFFIX}: metadata_size_bytes={len(metadata)}, "
+                    f"tmp_suffix={tmp}, error={e}",
+                    exc_info=True,
+                )
+                with self.hot_lock:
+                    self.hot_cache.pop(key, None)
+        finally:
+            memory_obj.ref_count_down()
+            with self.put_lock:
+                self.put_tasks.discard(key)
 
         # Call the completion callback if provided
         if on_complete_callback is not None:
             try:
                 on_complete_callback(key)
             except Exception as e:
-                logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                logger.error(f"on_complete_callback failed for key {key}: {e}", exc_info=True)
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
@@ -615,7 +655,7 @@ class GdsBackend(AllocatorBackendInterface):
         """
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
         if memory_obj is None:
-            logger.debug("Memory allocation failed during sync disk load.")
+            logger.error("Memory allocation failed during sync disk load.")
             return None
         assert memory_obj.tensor is not None
         assert memory_obj.tensor.is_cuda
@@ -814,47 +854,50 @@ class GdsBackend(AllocatorBackendInterface):
         dev_offset: int,
     ) -> int:
         # Read data from disk into a GPU buffer
-        if self.cufile:
-            with self.cufile.CuFile(
-                gds_path, "r", use_direct_io=self.use_direct_io
-            ) as f:
-                return f.read(
-                    gpu_pointer,
-                    size_in_bytes,
-                    file_offset=file_offset,
-                    dev_offset=dev_offset,
+        try:
+            if self.cufile:
+                with self.cufile.CuFile(
+                    gds_path, "r", use_direct_io=self.use_direct_io
+                ) as f:
+                    return f.read(
+                        gpu_pointer,
+                        size_in_bytes,
+                        file_offset=file_offset,
+                        dev_offset=dev_offset,
+                    )
+            elif self.cudart:
+                fd = os.open(gds_path, os.O_RDONLY)
+                file_size = os.fstat(fd).st_size
+                mm = mmap.mmap(
+                    fd,
+                    file_size,
+                    prot=mmap.PROT_READ,
+                    flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
                 )
-        elif self.cudart:
-            fd = os.open(gds_path, os.O_RDONLY)
-            file_size = os.fstat(fd).st_size
-            mm = mmap.mmap(
-                fd,
-                file_size,
-                prot=mmap.PROT_READ,
-                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
-            )
-            os.close(fd)
+                os.close(fd)
 
-            arr = np.frombuffer(mm, dtype=np.uint8)
-            addr = arr.__array_interface__["data"][0]
+                arr = np.frombuffer(mm, dtype=np.uint8)
+                addr = arr.__array_interface__["data"][0]
 
-            assert gpu_pointer.value is not None
-            res = self.cudart.cudaMemcpy(
-                ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
-                ctypes.c_void_p(addr + file_offset),
-                ctypes.c_size_t(size_in_bytes),
-                ctypes.c_int(1),
-            )
+                assert gpu_pointer.value is not None
+                res = self.cudart.cudaMemcpy(
+                    ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
+                    ctypes.c_void_p(addr + file_offset),
+                    ctypes.c_size_t(size_in_bytes),
+                    ctypes.c_int(1),
+                )
 
-            if res != 0:
-                raise RuntimeError(f"cudaMemcpy failed with code {res}")
-            del arr
-            mm.close()
-            return size_in_bytes
-        else:
-            raise RuntimeError(
-                "Both cufile and cudart are None, this should not happen"
-            )
+                if res != 0:
+                    raise RuntimeError(f"cudaMemcpy failed with code {res}")
+                del arr
+                mm.close()
+                return size_in_bytes
+            else:
+                raise RuntimeError(
+                    "Both cufile and cudart are None, this should not happen"
+                )
+        except Exception as e:
+            raise RuntimeError(f"CuFile read failed for {gds_path}: {e}", exc_info=True)
 
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
@@ -883,12 +926,52 @@ class GdsBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
-        if busy_loop:
-            logger.warning("GDS Backend does not support allocation with busy loop")
+        """
+        Allocate a memory object of shape and dtype
+        """
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        return self.memory_allocator.allocate(shapes, dtypes, fmt)
+        logger.debug(
+            f"Allocating memory with busy loop: {busy_loop}"
+        )
+        memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
+        if memory_obj is not None:
+            return memory_obj
+        if not busy_loop:
+            logger.error(
+                "GDS allocation failed and busy loop is disabled. Returning None."
+            )
+            return None
+
+        num_attempts = 0
+        logger.warning(
+            "GDS allocation failed and busy loop is enabled. "
+            f"Waiting for {self.alloc_attempt_delay_secs} seconds before retrying."
+        )
+        while True:
+            time.sleep(self.alloc_attempt_delay_secs)
+
+            memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
+            if memory_obj is not None:
+                break
+            num_attempts += 1
+            logger.warning(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of GDS backend allocate()"
+            )
+            if num_attempts >= self.max_alloc_attempts:
+                logger.error(
+                    "GDS allocation failed after "
+                    f"{self.max_alloc_attempts} attempts. Returning None."
+                )
+                if not self.memory_allocator.memcheck():
+                    logger.error(
+                        "GDS allocation failed and memory allocator "
+                        "is inconsistent. This is a bug in the memory allocator."
+                )
+                return None
+        return memory_obj
 
     def batched_allocate(
         self,
@@ -899,12 +982,60 @@ class GdsBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[list[MemoryObj]]:
-        if busy_loop:
-            logger.warning("GDS Backend does not support allocation with busy loop")
+
+        """
+        Batched allocate `batch_size` memory objects of shape and dtype
+        """
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        return self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
+        logger.debug(
+            f"Batched allocating memory in GDS backend"
+            f" with busy loop: {busy_loop}"
+        )
+
+        memory_objs = self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
+
+        if memory_objs is not None:
+            return memory_objs
+        if not busy_loop:
+            logger.error(
+                "GDS batched allocation failed and "
+                "busy loop is disabled. Returning None."
+            )
+            return None
+
+        num_attempts = 0
+        logger.warning(
+            "GDS batched allocation failed and busy loop is enabled. "
+            f"Waiting for {self.alloc_attempt_delay_secs} seconds before retrying."
+        )
+        while True:
+            time.sleep(self.alloc_attempt_delay_secs)
+
+            memory_objs = self.memory_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt
+            )
+            if memory_objs:
+                break
+
+            num_attempts += 1
+            logger.debug(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of GDS backend batched_allocate()"
+            )
+            if num_attempts >= self.max_alloc_attempts:
+                logger.error(
+                    "GDS batched allocation failed after "
+                    f"{self.max_alloc_attempts} attempts. Returning None."
+                )
+                if not self.memory_allocator.memcheck():
+                    logger.error(
+                        "GDS batched allocation failed and memory allocator "
+                        "is inconsistent. This is a bug in the memory allocator."
+                    )
+                return None
+        return memory_objs
 
     def get_allocator_backend(self):
         return self
