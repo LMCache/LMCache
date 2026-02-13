@@ -1162,7 +1162,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.D2H,
+                        lmc_ops.TransferDirection.H2D,
                         self.gpu_kv_format,
                         token_major=True,
                     )
@@ -1260,7 +1260,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        lmc_ops.TransferDirection.H2D,
+                        lmc_ops.TransferDirection.D2H,
                         self.gpu_kv_format,
                         token_major=True,
                     )
