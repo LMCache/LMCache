@@ -44,3 +44,36 @@ class TTLLock:
     def reset(self) -> None:
         """Reset the lock to initial state (counter = 0, TTL expired)."""
         ...
+
+class ParallelPatternMatcher:
+    """
+    Pattern matcher for integer vectors.
+
+    This class performs pattern matching on a vector of integers.
+    It finds all positions where a given pattern occurs in the input data.
+    """
+
+    def __init__(self, pattern: list[int]) -> None:
+        """
+        Construct a ParallelPatternMatcher with the specified pattern.
+
+        Args:
+            pattern: The pattern to search for. Must not be empty.
+
+        Raises:
+            ValueError: If pattern is empty.
+        """
+        ...
+
+    def match(self, data: list[int]) -> list[int]:
+        """
+        Match the pattern in the given data.
+
+        Args:
+            data: The data to search in.
+
+        Returns:
+            A sorted list of positions where the pattern starts.
+            Returns an empty list if no matches are found.
+        """
+        ...

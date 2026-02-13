@@ -10,6 +10,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -290,6 +291,19 @@ class LMCacheMPWorkerAdapter:
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
 
+        # request telemetry, used for prefill-decode disagg
+        # TODO: pass down the configuration via vLLM connector config
+        # instead of env var
+        self.request_telemetry = RequestTelemetryFactory.create(
+            telemetry_type=os.getenv("LMCACHE_REQUEST_TELEMETRY_TYPE", "noop"),
+            config={
+                "endpoint": os.getenv(
+                    "LMCACHE_REQUEST_TELEMETRY_ENDPOINT",
+                    "http://localhost:5768/api/v1/telemetry",
+                ),
+            },
+        )
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
         Register the kv caches with LMCache server
@@ -500,6 +514,17 @@ class LMCacheMPWorkerAdapter:
         # Calculate the final finished stores
         ret_stores.update(self._update_and_get_finished_store())
 
+        # the invocation of `get_finished` means that
+        # these requests' KV caches are already fully stored.
+        # or the requests normally ends without any store.
+        if ret_stores:
+            self.request_telemetry.on_request_store_finished(
+                request_ids_set=ret_stores,
+                model_name=self.model_name,
+                world_size=self.world_size,
+                kv_rank=self.worker_id,
+            )
+
         return ret_stores, finished_retrieves
 
     def num_blocks_per_chunk(self) -> int:
@@ -519,6 +544,7 @@ class LMCacheMPWorkerAdapter:
         ).result()
 
         self.mq_client.close()
+        self.request_telemetry.close()
 
     # Helper functions
     def _update_and_get_finished_store(

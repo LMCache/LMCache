@@ -53,6 +53,14 @@ class RequestType(enum.Enum):
     # Debug operations
     NOOP = enum.auto()
 
+    # Blend operations
+    CB_REGISTER_KV_CACHE = enum.auto()
+    CB_UNREGISTER_KV_CACHE = enum.auto()
+    CB_STORE_PRE_COMPUTED = enum.auto()
+    CB_LOOKUP_PRE_COMPUTED = enum.auto()
+    CB_RETRIEVE_PRE_COMPUTED = enum.auto()
+    CB_STORE_FINAL = enum.auto()
+
 
 @dataclass
 class ProtocolDefinition:
