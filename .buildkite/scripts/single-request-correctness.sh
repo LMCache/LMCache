@@ -78,7 +78,7 @@ collect_artifact() {
 stop_vllm() {
     if [[ -n "${VLLM_PID:-}" ]]; then
         echo "[DEBUG] Stopping vLLM process (PID: ${VLLM_PID}) at $(date '+%Y-%m-%d %H:%M:%S')"
-        if ps -p ${VLLM_PID} > /dev/null; then
+        if ps -p ${VLLM_PID} > /dev/null 2>&1; then
             echo "[DEBUG] Process ${VLLM_PID} is running, sending kill signal..."
             kill "${VLLM_PID}" >/dev/null 2>&1 || true
             wait "${VLLM_PID}" 2>/dev/null || true
@@ -161,7 +161,7 @@ VLLM_PID=$!
 
 echo "[DEBUG] vLLM process started with PID: ${VLLM_PID} at $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[DEBUG] Checking if process is running..."
-if ps -p ${VLLM_PID} > /dev/null; then
+if ps -p ${VLLM_PID} > /dev/null 2>&1; then
     echo "[DEBUG] Process ${VLLM_PID} is running"
 else
     echo "[ERROR] Process ${VLLM_PID} is not running!"
@@ -178,18 +178,21 @@ while [ $(($(date +%s) - START_TIME)) -lt $SERVER_WAIT_TIMEOUT ]; do
     echo "[DEBUG] Readiness check iteration ${ITERATION} (elapsed: ${ELAPSED}s)"
     
     # Check if process is still running
-    if ! ps -p ${VLLM_PID} > /dev/null; then
+    if ! ps -p ${VLLM_PID} > /dev/null 2>&1; then
         echo "[ERROR] vLLM process ${VLLM_PID} died during startup!"
         echo "[DEBUG] Last 50 lines of vLLM log:"
-        tail -50 "${VLLM_LOG}"
+        tail -50 "${VLLM_LOG}" 2>/dev/null || true
         exit 1
     fi
     
     # Check server endpoint
+    set +e  # Temporarily disable exit on error for curl
     CURL_OUT=$(curl -s "http://localhost:${PORT}/v1/models" 2>&1)
-    echo "[DEBUG] curl response: ${CURL_OUT}"
+    CURL_RC=$?
+    set -e  # Re-enable exit on error
+    echo "[DEBUG] curl response (rc=${CURL_RC}): ${CURL_OUT}"
     
-    if echo "${CURL_OUT}" | grep -q "${MODEL//\//\\/}"; then
+    if [ ${CURL_RC} -eq 0 ] && echo "${CURL_OUT}" | grep -q "${MODEL//\//\\/}"; then
         READY=true
         echo "[DEBUG] Server is ready at $(date '+%Y-%m-%d %H:%M:%S')"
         break
@@ -200,9 +203,9 @@ done
 if [ "$READY" = false ]; then
     echo "[ERROR] LMCache vLLM failed to start after ${SERVER_WAIT_TIMEOUT}s"
     echo "[DEBUG] Final process check:"
-    ps -p ${VLLM_PID} || echo "Process is dead"
+    ps -p ${VLLM_PID} 2>/dev/null || echo "Process is dead"
     echo "[DEBUG] Last 100 lines of vLLM log:"
-    tail -100 "${VLLM_LOG}"
+    tail -100 "${VLLM_LOG}" 2>/dev/null || true
     exit 1
 fi
 
