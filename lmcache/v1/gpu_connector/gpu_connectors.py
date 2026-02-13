@@ -1352,10 +1352,23 @@ class SGLangGPUConnector(GPUConnectorInterface):
             logger.info(f"GPU buffer: {self.gpu_buffer.shape}")
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        assert len(kv_caches) == self.num_kv_cache
+        # Discover format first to handle flattening correctly
+        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, "sglang")
 
-        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
-        device = kv_caches[0].device
+        # For TWO_X_NL_X_NBBS_NH_HS format, kv_caches is [[k_list], [v_list]]
+        # We need to flatten it to [k0, k1, ..., v0, v1, ...]
+        if self.gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+            flat_kv_caches = kv_caches[0] + kv_caches[1]  # [k_list] + [v_list]
+            device = flat_kv_caches[0].device
+        else:
+            flat_kv_caches = kv_caches
+            device = flat_kv_caches[0].device
+
+        assert len(flat_kv_caches) == self.num_kv_cache, (
+            f"Expected {self.num_kv_cache} KV caches, got {len(flat_kv_caches)}"
+        )
+
+        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in flat_kv_caches]
         assert device.type == "cuda", "The device should be CUDA."
         idx = device.index
         if idx not in self.kv_cache_pointers_on_gpu:
@@ -1364,9 +1377,9 @@ class SGLangGPUConnector(GPUConnectorInterface):
             )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, "sglang")
         # sglang MLA kv_caches[0].shape: [num_pages * page_size, 1, head_size]
-        # sglang MHA kv_caches[0].shape: [num_pages * page_size, num_heads, head_size]
+        # sglang MHA kv_caches: [[k_list], [v_list]]
+        # each with shape [num_pages * page_size, num_heads, head_size]
         self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
         return self.kv_cache_pointers_on_gpu[idx]
 
