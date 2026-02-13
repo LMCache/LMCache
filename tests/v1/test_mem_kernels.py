@@ -214,9 +214,12 @@ def test_multi_layer_kernel(num_tokens, gpu_kv_format):
         num_blocks, device, block_size, dtype, gpu_kv_format=gpu_kv_format
     )
     # old deprecated kernels only handle vllm non-MLA flash attention format
-    kv_cache_force_old = [
-        kv_layer.permute(1, 0, 2, 3, 4).contiguous() for kv_layer in kv_cache
-    ]
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+        kv_cache_force_old = [
+            kv_layer.permute(1, 0, 2, 3, 4).contiguous() for kv_layer in kv_cache
+        ]
+    else:
+        kv_cache_force_old = kv_cache
     page_buffer_size = num_blocks * block_size
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
