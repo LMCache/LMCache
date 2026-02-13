@@ -317,9 +317,11 @@ def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
     """Parse a key string into either a CacheEngineKey or LayerCacheEngineKey.
 
     Args:
-        key_str: String in format:
-            CacheEngineKey:      model_name@world_size@worker_id@chunk_hash@dtype[@tag%value...]
-            LayerCacheEngineKey: model_name@world_size@worker_id@chunk_hash@dtype@layer_id[@tag%value...]
+    key_str: String in format:
+        CacheEngineKey:
+            model_name@world_size@worker_id@chunk_hash@dtype[@tag%value...]
+        LayerCacheEngineKey:
+            model_name@world_size@worker_id@chunk_hash@dtype@layer_id[@tag%value...]
 
     Returns:
         CacheEngineKey if no layer_id, LayerCacheEngineKey if valid layer_id
