@@ -222,6 +222,15 @@ def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
     return [k.no_worker_id_version() for k in keys]
 
 
+def create_token_ids_with_sep_tokens(token_ids: list[int]) -> tuple[int, ...]:
+    """Insert separator tokens between token ids."""
+    st_pattern, ed_pattern = get_sep_tokens()
+    len_st = len(st_pattern)
+    len_ed = len(ed_pattern)
+    result = st_pattern + token_ids[len_st : len(token_ids) - len_ed] + ed_pattern
+    return tuple(result)
+
+
 # =============================================================================
 # Server Process Runner
 # =============================================================================
@@ -564,7 +573,7 @@ def test_cb_store_pre_computed_basic(
     Test storing pre-computed chunks with a key and offset.
     """
     # Create a key with some token ids (one "paragraph")
-    token_ids = tuple(range(CHUNK_SIZE))  # One chunk worth of tokens
+    token_ids = create_token_ids_with_sep_tokens(list(range(CHUNK_SIZE)))
     key = create_cb_cache_key(token_ids)
 
     # Create CUDA event
@@ -599,7 +608,7 @@ def test_cb_store_pre_computed_various_offsets(
     """
     Test storing pre-computed chunks at different offsets.
     """
-    token_ids = tuple(range(CHUNK_SIZE))
+    token_ids = create_token_ids_with_sep_tokens(list(range(CHUNK_SIZE)))
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
@@ -614,7 +623,9 @@ def test_cb_store_pre_computed_various_offsets(
     assert result is True, "Store at offset 0 should succeed"
 
     # Test at middle offset
-    token_ids = tuple(range(CHUNK_SIZE, CHUNK_SIZE * 2))
+    token_ids = create_token_ids_with_sep_tokens(
+        list(range(CHUNK_SIZE, CHUNK_SIZE * 2))
+    )
     key2 = create_cb_cache_key(token_ids, request_id="req2")
     middle_offset = cb_client_context.num_tokens // 2
     future = client.submit_request(
@@ -626,7 +637,9 @@ def test_cb_store_pre_computed_various_offsets(
     assert result is True, "Store at middle offset should succeed"
 
     # Test at near-end offset
-    token_ids = tuple(range(CHUNK_SIZE * 2, CHUNK_SIZE * 3))
+    token_ids = create_token_ids_with_sep_tokens(
+        list(range(CHUNK_SIZE * 2, CHUNK_SIZE * 3))
+    )
     key3 = create_cb_cache_key(token_ids, request_id="req3")
     end_offset = cb_client_context.num_tokens - CHUNK_SIZE
     future = client.submit_request(
@@ -652,7 +665,7 @@ def test_cb_store_pre_computed_long_doc(
     """
     # Create token ids that exceed the client's total token capacity
     num_tokens = 1000
-    token_ids = tuple(range(num_tokens))
+    token_ids = create_token_ids_with_sep_tokens(list(range(num_tokens)))
     key = create_cb_cache_key(token_ids, request_id="long-doc")
 
     event = torch.cuda.Event(interprocess=True)
@@ -688,9 +701,10 @@ def test_cb_lookup_after_store_single_paragraph(
     """
     paragraph_size = 1000
     expected_hit_count_per_paragraph = paragraph_size
+
     # Store one paragraph
-    token_ids = tuple(range(100, 100 + paragraph_size))
-    key = create_cb_cache_key(token_ids, request_id="lookup-test-1")
+    token_ids = create_token_ids_with_sep_tokens(list(range(100, 100 + paragraph_size)))
+    key = create_cache_key(token_ids, request_id="store-lookup-single")
 
     event = torch.cuda.Event(interprocess=True)
     event.record()
@@ -746,7 +760,9 @@ def test_cb_lookup_after_store_multiple_paragraphs(
 
     # Store multiple paragraphs
     for i in range(num_paragraphs):
-        token_ids = tuple(range(i * 1000, i * 1000 + paragraph_size))
+        token_ids = create_token_ids_with_sep_tokens(
+            list(range(i * 1000, i * 1000 + paragraph_size))
+        )
         key = create_cb_cache_key(token_ids, request_id=f"multi-para-{i}")
         offset = i * CHUNK_SIZE
 
@@ -759,8 +775,8 @@ def test_cb_lookup_after_store_multiple_paragraphs(
         assert store_result is True, f"Store for paragraph {i} should succeed"
 
     # Lookup first paragraph
-    lookup_token_ids = list(range(0, paragraph_size))
-    lookup_key = create_cb_cache_key(tuple(lookup_token_ids), request_id="multi-lookup")
+    lookup_token_ids = create_token_ids_with_sep_tokens(list(range(0, paragraph_size)))
+    lookup_key = create_cb_cache_key(lookup_token_ids, request_id="multi-lookup")
     lookup_future = client.submit_request(
         RequestType.CB_LOOKUP_PRE_COMPUTED,
         [lookup_key],
@@ -776,15 +792,16 @@ def test_cb_lookup_after_store_multiple_paragraphs(
     )
 
     # Construct a big paragraph with sep tokens
-    sep_tokens = get_sep_tokens()
-    lookup_token_ids = []
+    lookup_token_ids_list: list[int] = []
     for i in range(num_paragraphs):
-        lookup_token_ids.extend(range(i * 1000, i * 1000 + paragraph_size))
-        if i < num_paragraphs - 1:
-            lookup_token_ids.extend(sep_tokens)
+        lookup_token_ids_list.extend(
+            create_token_ids_with_sep_tokens(
+                list(range(i * 1000, i * 1000 + paragraph_size))
+            )
+        )
 
     lookup_key = create_cb_cache_key(
-        tuple(lookup_token_ids), request_id="multi-lookup-all"
+        tuple(lookup_token_ids_list), request_id="multi-lookup-all"
     )
     lookup_future = client.submit_request(
         RequestType.CB_LOOKUP_PRE_COMPUTED,
@@ -798,7 +815,7 @@ def test_cb_lookup_after_store_multiple_paragraphs(
         assert (end - start) == expected_hit_count_per_paragraph, (
             "Each range should correspond to one chunk"
         )
-        assert start == (paragraph_size + len(sep_tokens)) * idx, (
+        assert start == paragraph_size * idx, (
             "Ranges should be correctly spaced with sep tokens"
         )
 
@@ -824,7 +841,9 @@ def test_cb_lookup_partial_match(
     event.record()
 
     for i in range(num_paragraphs):
-        token_ids = tuple(range(i * 1000, i * 1000 + paragraph_size))
+        token_ids = create_token_ids_with_sep_tokens(
+            list(range(i * 1000, i * 1000 + paragraph_size))
+        )
         key = create_cb_cache_key(token_ids, request_id=f"partial-match-{i}")
         offset = i * paragraph_size
 
@@ -837,14 +856,15 @@ def test_cb_lookup_partial_match(
         assert store_result is True, f"Store for paragraph {i} should succeed"
 
     # Lookup with different ending: [A, D, C]
-    sep_tokens = get_sep_tokens()
     lookup_token_ids: list[int] = []
     for i in range(num_paragraphs):
-        lookup_token_ids.extend(range(i * 1000, i * 1000 + paragraph_size))
+        lookup_token_ids.extend(
+            create_token_ids_with_sep_tokens(
+                list(range(i * 1000, i * 1000 + paragraph_size))
+            )
+        )
         if i == 1:  # Replace B with D
             lookup_token_ids[-paragraph_size:] = range(9999, 9999 + paragraph_size)
-        if i < num_paragraphs - 1:
-            lookup_token_ids.extend(sep_tokens)
 
     lookup_key = create_cb_cache_key(
         tuple(lookup_token_ids), request_id="partial-lookup"
@@ -862,8 +882,8 @@ def test_cb_lookup_partial_match(
     expected_ranges = [
         (0, expected_hit_count_per_paragraph),
         (
-            2 * (paragraph_size + len(sep_tokens)),
-            2 * (paragraph_size + len(sep_tokens)) + expected_hit_count_per_paragraph,
+            2 * paragraph_size,
+            2 * paragraph_size + expected_hit_count_per_paragraph,
         ),
     ]
     for expected, actual in zip(expected_ranges, ranges, strict=False):
@@ -974,7 +994,7 @@ def test_cb_retrieve_after_store_and_lookup(
     paragraph_size = 600
     expected_hit_count_per_paragraph = paragraph_size
     # Store pre-computed chunks
-    token_ids = tuple(range(200, 200 + paragraph_size))
+    token_ids = create_token_ids_with_sep_tokens(list(range(200, 200 + paragraph_size)))
     key = create_cb_cache_key(token_ids, request_id="retrieve-test")
 
     event = torch.cuda.Event(interprocess=True)
@@ -1043,7 +1063,7 @@ def test_cb_retrieve_verify_data_correctness(
     cb_client_context.set_tensor_slice(source_offset, paragraph_size, 0.5)
 
     # Store pre-computed chunks
-    token_ids = tuple(range(300, 300 + paragraph_size))
+    token_ids = create_token_ids_with_sep_tokens(list(range(300, 300 + paragraph_size)))
     key = create_cb_cache_key(token_ids, request_id="verify-data")
 
     event = torch.cuda.Event(interprocess=True)
@@ -1142,7 +1162,7 @@ def test_cb_retrieve_empty_ranges(
     Test: Retrieve with empty ranges [].
     Expected: Returns (event_handle, True) (no-op is success).
     """
-    token_ids = tuple(range(CHUNK_SIZE))
+    token_ids = create_token_ids_with_sep_tokens(list(range(CHUNK_SIZE)))
     key = create_cb_cache_key(token_ids, request_id="empty-ranges")
 
     event = torch.cuda.Event(interprocess=True)
@@ -1172,7 +1192,7 @@ def test_cb_retrieve_invalid_ranges(
     Expected: Returns (event_handle, False).
     """
     # Don't store anything, just try to retrieve
-    token_ids = tuple(range(60000, 60000 + CHUNK_SIZE))
+    token_ids = create_token_ids_with_sep_tokens(list(range(60000, 60000 + CHUNK_SIZE)))
     key = create_cb_cache_key(token_ids, request_id="invalid-ranges")
 
     event = torch.cuda.Event(interprocess=True)
@@ -1208,7 +1228,7 @@ def test_cb_store_final_basic(
     Expected: Returns (event_handle, True).
     """
     paragraph_size = 600
-    token_ids = tuple(range(400, 400 + paragraph_size))
+    token_ids = create_token_ids_with_sep_tokens(list(range(400, 400 + paragraph_size)))
     key = create_cb_cache_key(token_ids, request_id="final-basic")
 
     event = torch.cuda.Event(interprocess=True)
@@ -1247,7 +1267,7 @@ def test_cb_store_final_then_normal_lookup_retrieve(
 
     expected_hit_count_per_paragraph = paragraph_size // CHUNK_SIZE * CHUNK_SIZE
     expected_hit_chunks = expected_hit_count_per_paragraph // CHUNK_SIZE
-    token_ids = tuple(range(500, 500 + paragraph_size))
+    token_ids = create_token_ids_with_sep_tokens(list(range(500, 500 + paragraph_size)))
     cb_key = create_cb_cache_key(token_ids, request_id="final-lookup-test")
 
     event = torch.cuda.Event(interprocess=True)
@@ -1331,7 +1351,7 @@ def test_cb_store_final_not_visible_to_cb_lookup(
     """
     # Store via CB_STORE_FINAL
     paragraph_size = 600
-    token_ids = tuple(range(800, 800 + paragraph_size))
+    token_ids = create_token_ids_with_sep_tokens(list(range(800, 800 + paragraph_size)))
     cb_key = create_cb_cache_key(token_ids, request_id="final-not-cb-visible")
 
     event = torch.cuda.Event(interprocess=True)

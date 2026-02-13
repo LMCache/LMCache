@@ -5,13 +5,12 @@ import os
 import time
 
 # Third Party
-from transformers import AutoTokenizer
 import torch
 import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import ParallelPatternMatcher
+from lmcache.native_storage_ops import RangePatternMatcher
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -100,7 +99,7 @@ class BlendEngine(MPCacheEngine):
 
     def __init__(
         self,
-        sep_tokens: list[int],
+        sep_tokens: tuple[list[int], list[int]],
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
     ):
@@ -108,8 +107,9 @@ class BlendEngine(MPCacheEngine):
 
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
 
-        self._sep_token_len = len(sep_tokens)
-        self._token_matcher = ParallelPatternMatcher(sep_tokens)
+        # self._sep_token_len = len(sep_tokens)
+        # self._token_matcher = ParallelPatternMatcher(sep_tokens)
+        self._token_matcher = RangePatternMatcher(sep_tokens[0], sep_tokens[1])
 
     def cb_register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -561,48 +561,38 @@ class BlendEngine(MPCacheEngine):
             paragraph in the input token ids.
         """
         matches = self._token_matcher.match(list(token_ids))
-        if not matches:
-            return [(0, len(token_ids))]
-
-        ranges = []
-        prev_end = 0
-        for match_start in matches:
-            if prev_end < match_start:
-                ranges.append((prev_end, match_start))
-            prev_end = match_start + self._sep_token_len
-        if prev_end < len(token_ids):
-            ranges.append((prev_end, len(token_ids)))
-
         logger.debug(
-            "Separated tokens into %d paragraphs with ranges: %s", len(ranges), ranges
+            "Separated tokens into %d paragraphs with ranges: %s", len(matches), matches
         )
-        return ranges
+        return matches
 
 
-def get_sep_tokens() -> list[int]:
+def get_sep_tokens() -> tuple[list[int], list[int]]:
     """
     Get the separator tokens used for splitting input sequences into paragraphs.
 
     Returns:
-        List of integer token ids that are used as separators.
+        The start pattern and the end pattern in token ids for separating paragraphs.
 
     Environment variables:
-    - `LMCACHE_BLEND_SEP_STR`: the separator string, default is " # # "
     - `LMCACHE_BLEND_MODEL_NAME`: the model name to load the tokenizer, default
         is "openai/gpt-oss-120b"
-    - `LMCACHE_BLEND_TOKENIZER_OFFSET`: the offset to add to the token ids,
-        default is 1
     """
-    sep_tokens_str = os.getenv("LMCACHE_BLEND_SEP_STR", " # # ")
     model_name = os.getenv("LMCACHE_BLEND_MODEL_NAME", "openai/gpt-oss-120b")
-    tokenizer_offset = int(os.getenv("LMCACHE_BLEND_TOKENIZER_OFFSET", "1"))
+    if not model_name.startswith("openai/gpt-oss"):
+        logger.error(
+            "Currently the blend token matching engine only supports "
+            "openai/gpt-oss series models"
+        )
+        raise ValueError(
+            "Currently the blend token matching engine only supports "
+            "openai/gpt-oss series models"
+        )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    sep_tokens = tokenizer.encode(sep_tokens_str)[tokenizer_offset:]
-
-    logger.info("Got sep tokens %s", sep_tokens)
-
-    return sep_tokens
+    # For GPT-OSS models only
+    # TODO: in the future, we should do auto-detection on the special tokens
+    # based on model name
+    return [200006], [200007]
 
 
 def add_handler_helper(
