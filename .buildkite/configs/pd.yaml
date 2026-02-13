@@ -20,6 +20,8 @@ docker-prefiller:
     - "LMCACHE_PD_BUFFER_SIZE=1073741824" # 1GB
     - "LMCACHE_PD_BUFFER_DEVICE=cuda"
     - "PYTHONHASHSEED=0"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
   proxy-port: 7500
 
 docker-decoder:
@@ -33,6 +35,8 @@ docker-decoder:
     - "LMCACHE_PD_BUFFER_SIZE=2147483648" # 2GB
     - "LMCACHE_PD_BUFFER_DEVICE=cuda"
     - "PYTHONHASHSEED=0"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
   init-port: 7300
   alloc-port: 7400
 
