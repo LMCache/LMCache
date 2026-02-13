@@ -13,7 +13,7 @@ set -euo pipefail
 # Configuration
 #######################################
 MODEL="Qwen/Qwen2.5-14B-Instruct"
-ATTENTION_BACKEND="FLASH_ATTN"  # High concurrency tests require FLASH_ATTN
+ATTENTION_BACKEND="FLASH_ATTN"  # High concurrency tests require FLASH_ATTN for batch invariant mode
 WORK_LOG="/tmp/build_${BUILD_ID}_correctness.log"
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 ARTIFACT="build_${BUILD_ID}.log"
@@ -79,15 +79,28 @@ export FLASHINFER_WORKSPACE_DIR="$CI_CACHE_DIR/flashinfer"
 # Helpers
 #######################################
 collect_artifact() {
-    echo "[INFO] Collecting logs into ${ARTIFACT}"
+    echo "[DEBUG] Collecting logs into ${ARTIFACT} at $(date '+%Y-%m-%d %H:%M:%S')"
+    if [[ -f "${WORK_LOG}" ]]; then
+        echo "[DEBUG] WORK_LOG size: $(wc -l < "${WORK_LOG}") lines"
+    fi
+    if [[ -f "${VLLM_LOG}" ]]; then
+        echo "[DEBUG] VLLM_LOG size: $(wc -l < "${VLLM_LOG}") lines"
+    fi
     cat "${WORK_LOG}" "${VLLM_LOG}" > "${ARTIFACT}" 2>/dev/null || true
+    echo "[INFO] Artifact saved: ${ARTIFACT}"
 }
 
 stop_vllm() {
     if [[ -n "${VLLM_PID:-}" ]]; then
-        echo "[INFO] Stopping vLLM process (PID: ${VLLM_PID})"
-        kill "${VLLM_PID}" >/dev/null 2>&1 || true
-        wait "${VLLM_PID}" 2>/dev/null || true
+        echo "[DEBUG] Stopping vLLM process (PID: ${VLLM_PID}) at $(date '+%Y-%m-%d %H:%M:%S')"
+        if ps -p ${VLLM_PID} > /dev/null; then
+            echo "[DEBUG] Process ${VLLM_PID} is running, sending kill signal..."
+            kill "${VLLM_PID}" >/dev/null 2>&1 || true
+            wait "${VLLM_PID}" 2>/dev/null || true
+            echo "[DEBUG] Process ${VLLM_PID} stopped"
+        else
+            echo "[DEBUG] Process ${VLLM_PID} is not running (already dead)"
+        fi
         VLLM_PID=""
         sleep 5
     fi
@@ -106,21 +119,42 @@ trap 'rc=$?; stop_vllm; collect_artifact; exit $rc' EXIT INT TERM
 
 exec > >(tee -a "${WORK_LOG}") 2>&1
 
+echo "=== DEBUG: Script started at $(date '+%Y-%m-%d %H:%M:%S') ==="
+echo "[DEBUG] BUILD_ID: ${BUILD_ID}"
+echo "[DEBUG] ATTENTION_BACKEND: ${ATTENTION_BACKEND}"
+echo "[DEBUG] MODEL: ${MODEL}"
+echo "[DEBUG] PWD: ${PWD}"
+echo "[DEBUG] USER: ${USER}"
+echo "[DEBUG] UV_CACHE_DIR: ${UV_CACHE_DIR}"
+echo "[DEBUG] REQUEST_NUMBER: ${REQUEST_NUMBER}"
+echo "[DEBUG] MAX_CONCURRENCY: ${MAX_CONCURRENCY}"
+
 echo "=== DIAGNOSTICS: GPU STATE before CI ==="
 nvidia-smi
 
 echo "[INFO] Selecting free GPU for this build..."
 source .buildkite/scripts/pick-free-gpu.sh 90000 1
 echo "[INFO] Using GPU(s): ${CUDA_VISIBLE_DEVICES}"
+echo "[DEBUG] GPU selection completed at $(date '+%Y-%m-%d %H:%M:%S')"
 
-echo "[INFO] Converting ShareGPT dataset to OpenAI format..."
+echo "[DEBUG] Converting ShareGPT dataset at $(date '+%Y-%m-%d %H:%M:%S')..."
 python "${CORRECTNESS_DIR}/sharegpt2openai.py" -i "$SHAREGPT_PATH" -o "./shareGPT_dataset.json"
+echo "[DEBUG] Dataset conversion completed"
 
 #######################################
 # Phase 1: Base Server (Baseline)
 #######################################
+echo "[DEBUG] Phase 1 started at $(date '+%Y-%m-%d %H:%M:%S')"
 PORT=$(find_free_port)
 echo "[INFO] Starting BASE vLLM server on port ${PORT}..."
+echo "[DEBUG] VLLM_LOG: ${VLLM_LOG}"
+echo "[DEBUG] Environment variables for Base vLLM:"
+echo "  VLLM_SERVER_DEV_MODE=1"
+echo "  VLLM_BATCH_INVARIANT=1"
+echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+
+echo "[DEBUG] Full vLLM command:"
+echo "vllm serve ${MODEL} --port ${PORT} --trust-remote-code --enforce-eager --attention-backend ${ATTENTION_BACKEND} --gpu-memory-utilization 0.8 -cc.level=0"
 
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT=1 \
@@ -134,21 +168,55 @@ vllm serve "${MODEL}" \
     >"${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!
 
+echo "[DEBUG] Base vLLM process started with PID: ${VLLM_PID} at $(date '+%Y-%m-%d %H:%M:%S')"
+echo "[DEBUG] Checking if process is running..."
+if ps -p ${VLLM_PID} > /dev/null; then
+    echo "[DEBUG] Process ${VLLM_PID} is running"
+else
+    echo "[ERROR] Process ${VLLM_PID} is not running!"
+fi
+
 echo "[INFO] Waiting for Base server readiness..."
+echo "[DEBUG] Server wait timeout: ${SERVER_WAIT_TIMEOUT} seconds"
 READY=false
 START_TIME=$(date +%s)
+ITERATION=0
 while [ $(($(date +%s) - START_TIME)) -lt $SERVER_WAIT_TIMEOUT ]; do
-    if curl -s "http://localhost:${PORT}/v1/models" | grep -q "${MODEL//\//\\/}"; then
-        READY=true; break
+    ITERATION=$((ITERATION + 1))
+    ELAPSED=$(($(date +%s) - START_TIME))
+    echo "[DEBUG] Base server readiness check iteration ${ITERATION} (elapsed: ${ELAPSED}s)"
+    
+    # Check if process is still running
+    if ! ps -p ${VLLM_PID} > /dev/null; then
+        echo "[ERROR] Base vLLM process ${VLLM_PID} died during startup!"
+        echo "[DEBUG] Last 50 lines of vLLM log:"
+        tail -50 "${VLLM_LOG}"
+        exit 1
+    fi
+    
+    # Check server endpoint
+    CURL_OUT=$(curl -s "http://localhost:${PORT}/v1/models" 2>&1)
+    echo "[DEBUG] curl response: ${CURL_OUT}"
+    
+    if echo "${CURL_OUT}" | grep -q "${MODEL//\//\\/}"; then
+        READY=true
+        echo "[DEBUG] Base server is ready at $(date '+%Y-%m-%d %H:%M:%S')"
+        break
     fi
     sleep 5
 done
 
 if [ "$READY" = false ]; then
-    echo "[ERROR] Base vLLM failed to start"; exit 1
+    echo "[ERROR] Base vLLM failed to start after ${SERVER_WAIT_TIMEOUT}s"
+    echo "[DEBUG] Final process check:"
+    ps -p ${VLLM_PID} || echo "Process is dead"
+    echo "[DEBUG] Last 100 lines of vLLM log:"
+    tail -100 "${VLLM_LOG}"
+    exit 1
 fi
 
 echo "[TEST] Running ShareGPT Batch (Base)..."
+echo "[DEBUG] Starting ShareGPT batch at $(date '+%Y-%m-%d %H:%M:%S')..."
 python "${CORRECTNESS_DIR}/async_request.py" \
     --model "${MODEL}" \
     --endpoint "http://localhost:${PORT}/v1/chat/completions" \
@@ -157,11 +225,15 @@ python "${CORRECTNESS_DIR}/async_request.py" \
     --request-number "${REQUEST_NUMBER}" \
     --max-concurrency "${MAX_CONCURRENCY}"
 
+echo "[DEBUG] Base ShareGPT batch completed at $(date '+%Y-%m-%d %H:%M:%S')"
+echo "[DEBUG] Output file size: $(wc -l < sharegpt_base.txt) lines"
+
 stop_vllm
 
 #######################################
 # Phase 2: LMCache Server (Comparison)
 #######################################
+echo "[DEBUG] Phase 2 started at $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[INFO] Preparing LMCache config (cpu.yaml)..."
 cat <<EOF > cpu.yaml
 chunk_size: 16
@@ -169,8 +241,19 @@ local_cpu: true
 max_local_cpu_size: 50
 EOF
 
+echo "[DEBUG] LMCache config written:"
+cat cpu.yaml
+
 PORT=$(find_free_port)
 echo "[INFO] Starting LMCACHE vLLM server on port ${PORT}..."
+echo "[DEBUG] Environment variables for LMCache vLLM:"
+echo "  LMCACHE_CONFIG_FILE=cpu.yaml"
+echo "  VLLM_SERVER_DEV_MODE=1"
+echo "  VLLM_BATCH_INVARIANT=1"
+echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+
+echo "[DEBUG] Full vLLM command:"
+echo "vllm serve ${MODEL} --port ${PORT} --trust-remote-code --enforce-eager --attention-backend ${ATTENTION_BACKEND} --gpu-memory-utilization 0.8 -cc.level=0 --kv-transfer-config '{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}'"
 
 LMCACHE_CONFIG_FILE=cpu.yaml \
 VLLM_SERVER_DEV_MODE=1 \
@@ -186,21 +269,55 @@ vllm serve "${MODEL}" \
     >>"${VLLM_LOG}" 2>&1 &
 VLLM_PID=$!
 
+echo "[DEBUG] LMCache vLLM process started with PID: ${VLLM_PID} at $(date '+%Y-%m-%d %H:%M:%S')"
+echo "[DEBUG] Checking if process is running..."
+if ps -p ${VLLM_PID} > /dev/null; then
+    echo "[DEBUG] Process ${VLLM_PID} is running"
+else
+    echo "[ERROR] Process ${VLLM_PID} is not running!"
+fi
+
 echo "[INFO] Waiting for LMCache server readiness..."
+echo "[DEBUG] Server wait timeout: ${SERVER_WAIT_TIMEOUT} seconds"
 READY=false
 START_TIME=$(date +%s)
+ITERATION=0
 while [ $(($(date +%s) - START_TIME)) -lt $SERVER_WAIT_TIMEOUT ]; do
-    if curl -s "http://localhost:${PORT}/v1/models" | grep -q "${MODEL//\//\\/}"; then
-        READY=true; break
+    ITERATION=$((ITERATION + 1))
+    ELAPSED=$(($(date +%s) - START_TIME))
+    echo "[DEBUG] LMCache server readiness check iteration ${ITERATION} (elapsed: ${ELAPSED}s)"
+    
+    # Check if process is still running
+    if ! ps -p ${VLLM_PID} > /dev/null; then
+        echo "[ERROR] LMCache vLLM process ${VLLM_PID} died during startup!"
+        echo "[DEBUG] Last 50 lines of vLLM log:"
+        tail -50 "${VLLM_LOG}"
+        exit 1
+    fi
+    
+    # Check server endpoint
+    CURL_OUT=$(curl -s "http://localhost:${PORT}/v1/models" 2>&1)
+    echo "[DEBUG] curl response: ${CURL_OUT}"
+    
+    if echo "${CURL_OUT}" | grep -q "${MODEL//\//\\/}"; then
+        READY=true
+        echo "[DEBUG] LMCache server is ready at $(date '+%Y-%m-%d %H:%M:%S')"
+        break
     fi
     sleep 5
 done
 
 if [ "$READY" = false ]; then
-    echo "[ERROR] LMCache vLLM failed to start"; exit 1
+    echo "[ERROR] LMCache vLLM failed to start after ${SERVER_WAIT_TIMEOUT}s"
+    echo "[DEBUG] Final process check:"
+    ps -p ${VLLM_PID} || echo "Process is dead"
+    echo "[DEBUG] Last 100 lines of vLLM log:"
+    tail -100 "${VLLM_LOG}"
+    exit 1
 fi
 
 echo "[TEST] Running ShareGPT Batch (LMCache)..."
+echo "[DEBUG] Starting LMCache ShareGPT batch at $(date '+%Y-%m-%d %H:%M:%S')..."
 python "${CORRECTNESS_DIR}/async_request.py" \
     --model "${MODEL}" \
     --endpoint "http://localhost:${PORT}/v1/chat/completions" \
@@ -209,9 +326,13 @@ python "${CORRECTNESS_DIR}/async_request.py" \
     --request-number "${REQUEST_NUMBER}" \
     --max-concurrency "${MAX_CONCURRENCY}"
 
+echo "[DEBUG] LMCache ShareGPT batch completed at $(date '+%Y-%m-%d %H:%M:%S')"
+echo "[DEBUG] Output file size: $(wc -l < sharegpt_lmcache.txt) lines"
+
 #######################################
 # Phase 3: ShareGPT File Comparison
 #######################################
+echo "[DEBUG] Phase 3 started at $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[INFO] Comparing ShareGPT results..."
 COMPARE_OUT=$(python "${CORRECTNESS_DIR}/compare_files.py" --file1 "sharegpt_base.txt" --file2 "sharegpt_lmcache.txt")
 
@@ -232,3 +353,4 @@ if [[ "${DIFFERENT_COUNT}" -gt 0 ]] || [[ "${ONLY_FILE1_COUNT}" -gt 0 ]] || [[ "
 fi
 
 echo "[PASS] High concurrency correctness test passed with FLASH_ATTN backend."
+echo "[DEBUG] Test completed at $(date '+%Y-%m-%d %H:%M:%S')"
