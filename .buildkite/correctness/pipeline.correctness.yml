@@ -1,7 +1,6 @@
 steps:
-  # High concurrency tests (requires batch invariant mode - FLASH_ATTN only)
-  - label: ":rocket: High Concurrency Correctness (FLASH_ATTN)"
-    key: "high-concurrency-flash-attn"
+  - label: ":rocket: vLLM correctness"
+    key: "correctness"
     timeout_in_minutes: 60
     commands:
       - |
@@ -10,57 +9,8 @@ steps:
         echo "[INFO] HOME: $HOME"
         echo "[INFO] PWD: $PWD"
 
-        chmod +x .buildkite/scripts/high-concurrency-correctness.sh
-        BUILD_ID="${BUILDKITE_BUILD_ID}_high_concurrency" .buildkite/scripts/high-concurrency-correctness.sh
+        chmod +x .buildkite/scripts/vllm-correctness.sh
+        BUILD_ID="${BUILDKITE_BUILD_ID}" .buildkite/scripts/vllm-correctness.sh
 
     artifact_paths:
-      - "build_${BUILDKITE_BUILD_ID}_high_concurrency.log"
-
-  # Single request tests (works with all attention backends)
-  - label: ":test_tube: Single Request Correctness (FLASH_ATTN)"
-    key: "single-request-flash-attn"
-    timeout_in_minutes: 60
-    commands:
-      - |
-        set -euo pipefail
-
-        echo "[INFO] HOME: $HOME"
-        echo "[INFO] PWD: $PWD"
-
-        chmod +x .buildkite/scripts/single-request-correctness.sh
-        BUILD_ID="${BUILDKITE_BUILD_ID}_single_flash_attn" .buildkite/scripts/single-request-correctness.sh FLASH_ATTN
-
-    artifact_paths:
-      - "build_${BUILDKITE_BUILD_ID}_single_flash_attn.log"
-
-  - label: ":test_tube: Single Request Correctness (FLASHINFER)"
-    key: "single-request-flashinfer"
-    timeout_in_minutes: 60
-    commands:
-      - |
-        set -euo pipefail
-
-        echo "[INFO] HOME: $HOME"
-        echo "[INFO] PWD: $PWD"
-
-        chmod +x .buildkite/scripts/single-request-correctness.sh
-        BUILD_ID="${BUILDKITE_BUILD_ID}_single_flashinfer" .buildkite/scripts/single-request-correctness.sh FLASHINFER
-
-    artifact_paths:
-      - "build_${BUILDKITE_BUILD_ID}_single_flashinfer.log"
-
-  - label: ":test_tube: Single Request Correctness (DeepSeek-V2 FLASH_ATTN_MLA)"
-    key: "single-request-deepseek-mla"
-    timeout_in_minutes: 60
-    commands:
-      - |
-        set -euo pipefail
-
-        echo "[INFO] HOME: $HOME"
-        echo "[INFO] PWD: $PWD"
-
-        chmod +x .buildkite/scripts/single-request-correctness.sh
-        BUILD_ID="${BUILDKITE_BUILD_ID}_single_deepseek_mla" .buildkite/scripts/single-request-correctness.sh FLASH_ATTN_MLA "deepseek-ai/DeepSeek-V2-Lite-Chat"
-
-    artifact_paths:
-      - "build_${BUILDKITE_BUILD_ID}_single_deepseek_mla.log"
+      - "build_${BUILDKITE_BUILD_ID}.log"
