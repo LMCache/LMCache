@@ -25,6 +25,7 @@ Step 2 (INSIDE the container):
 """
 
 # Standard
+from multiprocessing import shared_memory
 import argparse
 import ctypes
 import hashlib
@@ -71,9 +72,6 @@ class ShmRegion:
     """Manage a POSIX shared memory region."""
 
     def __init__(self, name: str, size: int):
-        # Standard
-        from multiprocessing import shared_memory
-
         self.name = name.lstrip("/")
         self.size = size
         # Clean up stale segment if any

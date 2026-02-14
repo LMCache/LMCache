@@ -72,8 +72,14 @@ static void handle_write(const std::string& file_path, uintptr_t data_ptr,
     out << "ERROR not attached" << std::endl;
     return;
   }
+  if (data_ptr < g_base_addr) {
+    std::cerr << "[LOG] WRITE failed: data_ptr is before shm base address"
+              << std::endl;
+    out << "ERROR data_ptr is before shm base address" << std::endl;
+    return;
+  }
   size_t offset = data_ptr - g_base_addr;
-  if (offset + length > g_shm_size) {
+  if (offset >= g_shm_size || length > g_shm_size - offset) {
     std::cerr << "[LOG] WRITE failed: offset+length exceeds shm size"
               << std::endl;
     out << "ERROR offset+length exceeds shm size" << std::endl;
@@ -113,8 +119,14 @@ static void handle_read(const std::string& file_path, uintptr_t data_ptr,
     out << "ERROR not attached" << std::endl;
     return;
   }
+  if (data_ptr < g_base_addr) {
+    std::cerr << "[LOG] READ failed: data_ptr is before shm base address"
+              << std::endl;
+    out << "ERROR data_ptr is before shm base address" << std::endl;
+    return;
+  }
   size_t offset = data_ptr - g_base_addr;
-  if (offset + length > g_shm_size) {
+  if (offset >= g_shm_size || length > g_shm_size - offset) {
     std::cerr << "[LOG] READ failed: offset+length exceeds shm size"
               << std::endl;
     out << "ERROR offset+length exceeds shm size" << std::endl;
@@ -260,7 +272,8 @@ static int run_tcp_mode(const std::string& addr) {
   sa.sin_family = AF_INET;
   sa.sin_port = htons(static_cast<uint16_t>(port));
   if (host == "0.0.0.0" || host.empty()) {
-    sa.sin_addr.s_addr = INADDR_ANY;
+    // Default to localhost for security
+    inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
   } else {
     inet_pton(AF_INET, host.c_str(), &sa.sin_addr);
   }

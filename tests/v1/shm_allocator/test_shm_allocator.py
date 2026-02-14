@@ -9,11 +9,14 @@ This test verifies that:
 """
 
 # Standard
+from multiprocessing import shared_memory
 from typing import Optional
 import asyncio
+import ctypes
 import os
 import subprocess
 import tempfile
+import time
 
 # Third Party
 import pytest
@@ -316,9 +319,6 @@ class TestShmWorkerSubprocess:
 
     def test_worker_attach_and_io(self, worker_binary):
         """Verify the worker can attach, write, and read."""
-        # Standard
-        from multiprocessing import shared_memory
-
         shm_test_name = "lmcache_worker_test"
         shm_test_size = 4096
 
@@ -331,9 +331,6 @@ class TestShmWorkerSubprocess:
             # Write known pattern into shm
             msg = b"Hello SHM Worker!"
             shm.buf[:17] = msg
-
-            # Standard
-            import ctypes
 
             # Get the base address of shm buffer
             arr_t = ctypes.c_uint8 * shm_test_size
@@ -388,11 +385,6 @@ class TestShmWorkerSubprocess:
     def test_worker_tcp_mode(self, worker_binary):
         """Verify the worker can run in TCP mode and
         communicate via socket."""
-        # Standard
-        from multiprocessing import shared_memory
-        import ctypes
-        import time
-
         shm_test_name = "lmcache_tcp_test"
         shm_test_size = 4096
         tcp_port = 19800
