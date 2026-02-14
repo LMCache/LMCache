@@ -687,6 +687,7 @@ def test_cb_lookup_after_store_single_paragraph(
     Expected: Returns ranges matching the stored data.
     """
     paragraph_size = 1000
+    expected_hit_count_per_paragraph = paragraph_size
     # Store one paragraph
     token_ids = tuple(range(100, 100 + paragraph_size))
     key = create_cb_cache_key(token_ids, request_id="lookup-test-1")
@@ -715,7 +716,7 @@ def test_cb_lookup_after_store_single_paragraph(
     assert isinstance(ranges, list), "Lookup should return a list"
     # Expected: should return [(0, 1)] for 1 chunk match
     assert len(ranges) > 0, "Lookup should find the stored paragraph"
-    expected_ranges = [(0, paragraph_size // CHUNK_SIZE * CHUNK_SIZE)]
+    expected_ranges = [(0, expected_hit_count_per_paragraph)]
 
     assert len(ranges) == len(expected_ranges), (
         f"Expected {len(expected_ranges)} ranges but got {len(ranges)}"
@@ -739,7 +740,7 @@ def test_cb_lookup_after_store_multiple_paragraphs(
     """
     num_paragraphs = 3
     paragraph_size = 800
-    expected_hit_count_per_paragraph = paragraph_size // CHUNK_SIZE * CHUNK_SIZE
+    expected_hit_count_per_paragraph = paragraph_size
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
@@ -815,9 +816,9 @@ def test_cb_lookup_partial_match(
     Test: Store [A, B, C], then lookup [A, D, C].
     Expected: Get the ranges for A and C
     """
-    # Store tokens [A, B, C] (simulated as ranges 0-256, 256-512, 512-768)
+    # Store tokens [A, B, C]
     paragraph_size = 300
-    expected_hit_count_per_paragraph = paragraph_size // CHUNK_SIZE * CHUNK_SIZE
+    expected_hit_count_per_paragraph = paragraph_size
     num_paragraphs = 3
     event = torch.cuda.Event(interprocess=True)
     event.record()
@@ -971,7 +972,7 @@ def test_cb_retrieve_after_store_and_lookup(
     Expected: Returns (event_handle, True) and data is copied to CB buffer.
     """
     paragraph_size = 600
-    expected_hit_count_per_paragraph = paragraph_size // CHUNK_SIZE * CHUNK_SIZE
+    expected_hit_count_per_paragraph = paragraph_size
     # Store pre-computed chunks
     token_ids = tuple(range(200, 200 + paragraph_size))
     key = create_cb_cache_key(token_ids, request_id="retrieve-test")
@@ -1034,10 +1035,11 @@ def test_cb_retrieve_verify_data_correctness(
     Test: Store known data, retrieve to different offset, verify correctness.
     """
     paragraph_size = 600
-    expected_hit_count_per_paragraph = paragraph_size // CHUNK_SIZE * CHUNK_SIZE
+    expected_hit_count_per_paragraph = paragraph_size
 
     # Set known values in the source region
     source_offset = 0
+    cb_client_context.set_tensor_slice(0, cb_client_context.num_tokens, 1.0)
     cb_client_context.set_tensor_slice(source_offset, paragraph_size, 0.5)
 
     # Store pre-computed chunks
@@ -1054,6 +1056,10 @@ def test_cb_retrieve_verify_data_correctness(
     )
     store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
     assert store_result is True, "Store should succeed"
+
+    # reset other region to 0.0 to catch the retrieve overflow error
+    cb_client_context.set_tensor_slice(0, cb_client_context.num_tokens, 0.0)
+    cb_client_context.set_tensor_slice(source_offset, paragraph_size, 0.5)
 
     # Lookup to get ranges
     lookup_future = client.submit_request(
@@ -1110,6 +1116,16 @@ def test_cb_retrieve_verify_data_correctness(
 
     assert torch.allclose(source_slice, dest_slice, atol=1e-4), (
         "Retrieved data should match stored data"
+    )
+
+    # Verify that only the retrieved range is updated,
+    # and other regions are unchanged
+    other_slice = cb_client_context.get_tensor_slice(
+        dest_offset + expected_hit_count_per_paragraph,
+        cb_client_context.num_tokens - (dest_offset + expected_hit_count_per_paragraph),
+    )
+    assert torch.allclose(other_slice, torch.zeros_like(other_slice), atol=1e-4), (
+        "Other regions of the buffer should be unchanged (zeros)"
     )
 
 
