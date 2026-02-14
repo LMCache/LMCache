@@ -355,33 +355,53 @@ def check_paged_kv_cache_equal(
     check whether two paged kv caches are the same at slot_mapping
     """
 
-    token_dim = 0
-    num_tokens = slot_mapping.shape[0]
-    for left_kv, right_kv in zip(left, right, strict=False):
-        if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
-            left_k = left_kv[0].reshape(-1, num_heads, head_size)
-            left_v = left_kv[1].reshape(-1, num_heads, head_size)
-            right_k = right_kv[0].reshape(-1, num_heads, head_size)
-            right_v = right_kv[1].reshape(-1, num_heads, head_size)
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS:
+        token_dim = 0
+        num_tokens = slot_mapping.shape[0]
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
+            left_k = left_kv_layer[0].reshape(-1, num_heads, head_size)
+            left_v = left_kv_layer[1].reshape(-1, num_heads, head_size)
+            right_k = right_kv_layer[0].reshape(-1, num_heads, head_size)
+            right_v = right_kv_layer[1].reshape(-1, num_heads, head_size)
 
-        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-            left_k = left_kv[:, 0].contiguous().reshape(-1, num_heads, head_size)
-            left_v = left_kv[:, 1].contiguous().reshape(-1, num_heads, head_size)
-            right_k = right_kv[:, 0].contiguous().reshape(-1, num_heads, head_size)
-            right_v = right_kv[:, 1].contiguous().reshape(-1, num_heads, head_size)
+            assert len(left_k.shape) == 3
+            assert len(left_v.shape) == 3
+            assert len(right_k.shape) == 3
+            assert len(right_v.shape) == 3
 
-        assert len(left_k.shape) == 3
-        assert len(left_v.shape) == 3
-        assert len(right_k.shape) == 3
-        assert len(right_v.shape) == 3
+            assert left_k.shape[token_dim] >= num_tokens
+            assert left_v.shape[token_dim] >= num_tokens
+            assert right_k.shape[token_dim] >= num_tokens
+            assert right_v.shape[token_dim] >= num_tokens
 
-        assert left_k.shape[token_dim] >= num_tokens
-        assert left_v.shape[token_dim] >= num_tokens
-        assert right_k.shape[token_dim] >= num_tokens
-        assert right_v.shape[token_dim] >= num_tokens
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
-        assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
-        assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+        token_dim = 0
+        num_tokens = slot_mapping.shape[0]
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=False):
+            left_k = left_kv_layer[:, 0].contiguous().reshape(-1, num_heads, head_size)
+            left_v = left_kv_layer[:, 1].contiguous().reshape(-1, num_heads, head_size)
+            right_k = (
+                right_kv_layer[:, 0].contiguous().reshape(-1, num_heads, head_size)
+            )
+            right_v = (
+                right_kv_layer[:, 1].contiguous().reshape(-1, num_heads, head_size)
+            )
+
+            assert len(left_k.shape) == 3
+            assert len(left_v.shape) == 3
+            assert len(right_k.shape) == 3
+            assert len(right_v.shape) == 3
+
+            assert left_k.shape[token_dim] >= num_tokens
+            assert left_v.shape[token_dim] >= num_tokens
+            assert right_k.shape[token_dim] >= num_tokens
+            assert right_v.shape[token_dim] >= num_tokens
+
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
 
 def check_sglang_paged_kv_cache_equal(
