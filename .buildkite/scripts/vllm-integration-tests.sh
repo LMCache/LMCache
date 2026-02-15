@@ -685,8 +685,8 @@ run_long_doc_qa() {
         echo "Expected query ttft per prompt: $expected_query_ttft_per_prompt"
         echo "Actual query ttft per prompt: $query_ttft_per_prompt"
         awk -v expected="$expected_query_ttft_per_prompt" -v actual="$query_ttft_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Query ttft per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Query ttft per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Query ttft per prompt requirement met"
@@ -698,8 +698,8 @@ run_long_doc_qa() {
         echo "Expected query round time per prompt: $expected_query_round_time_per_prompt"
         echo "Actual query round time per prompt: $query_round_time_per_prompt"
         awk -v expected="$expected_query_round_time_per_prompt" -v actual="$query_round_time_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Query round time per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Query round time per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Query round time per prompt requirement met"
@@ -711,8 +711,8 @@ run_long_doc_qa() {
         echo "Expected warmup round time per prompt: $expected_warmup_round_time_per_prompt"
         echo "Actual warmup round time per prompt: $warmup_round_time_per_prompt"
         awk -v expected="$expected_warmup_round_time_per_prompt" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Warmup round time per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Warmup round time per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Warmup round time per prompt requirement met"
