@@ -164,13 +164,14 @@ class BlendEngine(MPCacheEngine):
         expected_found_count: list[int] = []
         found_ranges: list[tuple[int, int]] = []
         ranges = self._separate_tokens_by_pattern(key.token_ids)
+        world_size = key.world_size
 
         # Submit Lookup for each paragraph
         for start, end in ranges:
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             ipc_keys = temp_ipc_key.to_hash_keys(
                 hasher=self.token_hasher,
-                full_chunk_only=True,
+                full_chunk_only=False,
                 prefix_hash=self.BLEND_HASH_PREFIX,
             )
 
@@ -180,7 +181,7 @@ class BlendEngine(MPCacheEngine):
             prefetch_handles.append(handle)
             expected_found_count.append(len(ipc_keys))
 
-            logger.warning(
+            logger.debug(
                 "DEBUG: Submitted prefetch for obj keys %s for range (%d, %d), ",
                 obj_keys,
                 start,
@@ -198,12 +199,19 @@ class BlendEngine(MPCacheEngine):
                     break
 
             # Real found count after dedup the TP
-            found_count = found_count // ipc_keys[0].world_size
+            found_count = found_count // world_size
 
             # All found or not
-            if found_count > 0:
+            if found_count == exp_count:
+                found_ranges.append((start, end))
+                logger.debug(
+                    "Found all pre-computed chunks for paragraph with range (%d, %d)",
+                    start,
+                    end,
+                )
+            elif found_count > 0:
                 found_ranges.append((start, start + found_count * self.chunk_size))
-                logger.warning(
+                logger.debug(
                     "Partially found pre-computed chunks for paragraph with range "
                     "(%d, %d), found chunk count: %d, real range (%d, %d)",
                     start,
@@ -213,7 +221,7 @@ class BlendEngine(MPCacheEngine):
                     start + found_count * self.chunk_size,
                 )
             else:
-                logger.warning(
+                logger.debug(
                     "No pre-computed chunks found for paragraph with range (%d, %d)",
                     start,
                     end,
@@ -260,7 +268,6 @@ class BlendEngine(MPCacheEngine):
             layout_desc = MemoryLayoutDesc(
                 shapes=[cpu_shape], dtypes=[gpu_context.dtype]
             )
-            logger.warning("Layout desc: %s", layout_desc)
 
             reserved_dict = self.storage_manager.reserve_write(
                 obj_keys, layout_desc, "new"
@@ -274,32 +281,17 @@ class BlendEngine(MPCacheEngine):
 
                 offset_start = idx * self.chunk_size + offset
                 offset_end = offset_start + self.chunk_size
-                logger.warning(
-                    "offset start and end is %d, %d", offset_start, offset_end
-                )
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(offset_end - offset_start)
                 gpu_kv_slice = gpu_context.slice_kv_cache_on_tokens(
                     offset_start, offset_end
                 )
-                logger.warning(
-                    "tmp buffer shape %s, gpu_kv_slice shape %s",
-                    tmp_buffer.shape,
-                    gpu_kv_slice.shape,
-                )
                 with self.lock:
                     tmp_buffer.copy_(gpu_kv_slice, non_blocking=True)
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
                 event.record()
-
-                logger.warn(
-                    "Stored obj key %s from GPU offset (%d, %d)",
-                    obj_key,
-                    offset_start,
-                    offset_end,
-                )
 
         # Call finish_write after the copy is done
         gpu_context.cupy_stream.launch_host_func(
@@ -343,7 +335,7 @@ class BlendEngine(MPCacheEngine):
         # Compute blend-only hash for the keys
         hashed_ipc_keys = key.to_hash_keys(
             hasher=self.token_hasher,
-            full_chunk_only=True,
+            full_chunk_only=False,
             prefix_hash=self.BLEND_HASH_PREFIX,
         )
         # convert to object key
@@ -409,41 +401,45 @@ class BlendEngine(MPCacheEngine):
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             hash_ipc_keys = temp_ipc_key.to_hash_keys(
                 hasher=self.token_hasher,
-                full_chunk_only=True,
+                full_chunk_only=False,
                 prefix_hash=self.BLEND_HASH_PREFIX,
             )
             obj_keys = ipc_keys_to_object_keys(hash_ipc_keys)
             obj_keys_for_paragraphs.append(obj_keys)
 
-        logger.warning("DEBUG object keys to retrieve: %s", obj_keys_for_paragraphs)
+        logger.debug("DEBUG object keys to retrieve: %s", obj_keys_for_paragraphs)
 
         # Now, do the real retrieval job
         def _retrieve_one_paragraph(
             obj_keys: list[ObjectKey],
             memory_objs: list[MemoryObj],
             gpu_offset: int,
+            last_chunk_num_tokens: int,
         ):
             for idx, (key, memory_obj) in enumerate(
                 zip(obj_keys, memory_objs, strict=False)
             ):
                 offset_start = gpu_offset + idx * self.chunk_size
                 offset_end = offset_start + self.chunk_size
-                logger.warning(
-                    "Retrieving obj key %s to GPU offset (%d, %d)",
-                    key,
-                    offset_start,
-                    offset_end,
+                target_buffer_end = (
+                    offset_start + last_chunk_num_tokens
+                    if idx == len(obj_keys) - 1
+                    else offset_end
                 )
+                target_buffer_len = target_buffer_end - offset_start
 
                 # Copy from CPU to GPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(offset_end - offset_start)
                 target_buffer = gpu_context.slice_kv_cache_on_tokens(
-                    offset_start, offset_end
+                    offset_start, target_buffer_end
                 )
 
                 with self.lock:
                     lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
-                    target_buffer.copy_(tmp_buffer, non_blocking=True)
+                    target_buffer.copy_(
+                        tmp_buffer[:, :, :target_buffer_len, :],  # NOTE: 2LTD
+                        non_blocking=True,
+                    )
 
         with (
             torch.cuda.device(gpu_context.device),
@@ -471,7 +467,10 @@ class BlendEngine(MPCacheEngine):
                     strict=False,
                 ):
                     gpu_offset = start + offset
-                    _retrieve_one_paragraph(obj_keys, memory_objs, gpu_offset)
+                    last_chunk_num_tokens = (end - start - 1) % self.chunk_size + 1
+                    _retrieve_one_paragraph(
+                        obj_keys, memory_objs, gpu_offset, last_chunk_num_tokens
+                    )
 
             except Exception as e:
                 logger.error("Error during retrieving prefetched results: %s", e)
@@ -574,7 +573,7 @@ class BlendEngine(MPCacheEngine):
         if prev_end < len(token_ids):
             ranges.append((prev_end, len(token_ids)))
 
-        logger.warning(
+        logger.debug(
             "Separated tokens into %d paragraphs with ranges: %s", len(ranges), ranges
         )
         return ranges

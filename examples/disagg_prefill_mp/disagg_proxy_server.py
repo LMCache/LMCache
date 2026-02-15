@@ -357,6 +357,23 @@ async def handle_chat_completions(request: Request):
     return await _handle_disagg_request(request, "/v1/chat/completions")
 
 
+@app.get("/v1/models")
+async def handle_models():
+    """Handle /v1/models requests by forwarding to the first prefiller."""
+    try:
+        prefill_client = app.state.prefill_clients[0]
+        headers = _build_headers()
+        response = await prefill_client.client.get("/v1/models", headers=headers)
+        response.raise_for_status()
+        return JSONResponse(content=response.json())
+    except Exception as e:
+        logger.error(f"Error in /v1/models endpoint: {e}")
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500,
+        )
+
+
 # ============================================================================
 # Telemetry FastAPI app (runs on separate port)
 # ============================================================================
