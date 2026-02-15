@@ -627,7 +627,7 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
         override: If True, completely replace the value. If False:
             - For 'extra_config': merge with existing dict (new values take
               precedence for conflicting keys).
-            - For other keys: skip if current value is not None.
+            - For other keys: skip if key was user-set.
             Default is True.
 
     Returns:
@@ -642,29 +642,38 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
         if config_key == "extra_config" and isinstance(value, str):
             value = json.loads(value) if value else None
 
-        # Handle extra_config: check for 'override' member in value dict
-        if config_key == "extra_config" and isinstance(value, dict):
-            # Extract and remove 'override' from value dict
-            should_override = value.pop("override", False)
-            if should_override:
+        # Handle extra_config special logic
+        if config_key == "extra_config":
+            current_value = getattr(config, config_key, None)
+
+            # Handle None or empty value when override=False
+            if not override and (value is None or value == ""):
+                # Keep current value
+                logger.info(
+                    "Keeping current extra_config (override=False, value is None/empty)"
+                )
+                return True
+
+            if override:
                 # Full override: replace current value with new value
                 setattr(config, config_key, value)
                 logger.info("Overridden extra_config")
                 return True
-            # Merge mode: merge with existing dict
-            current_value = getattr(config, config_key, None)
-            if current_value is not None and isinstance(current_value, dict):
-                # Merge: current values are preserved, new values override conflicts
-                merged_value = {**current_value, **value}
-                setattr(config, config_key, merged_value)
-                logger.info("Merged extra_config")
+            else:
+                # Merge mode (override=False)
+                if value is not None and isinstance(value, dict):
+                    if current_value is not None and isinstance(current_value, dict):
+                        # Merge: current values preserved, new values override
+                        merged_value = {**current_value, **value}
+                        setattr(config, config_key, merged_value)
+                        logger.info("Merged extra_config")
+                    else:
+                        # Current value is None or not a dict, set new value
+                        setattr(config, config_key, value)
+                        logger.info("Set extra_config")
                 return True
-            # If current value is None or not a dict, just set the new value
-            setattr(config, config_key, value)
-            logger.info("Set extra_config")
-            return True
 
-        # For non-extra_config keys: skip if override is False and key was user-set
+        # For non-extra_config keys: skip if override=False and key user-set
         if not override:
             user_set_keys: set[str] = getattr(config, "_user_set_keys", set())
             if config_key in user_set_keys:
@@ -674,7 +683,8 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
                     config_key,
                     current_value,
                 )
-                return False  # Return False to indicate keep existing value
+                # Return True to indicate operation completed (kept existing)
+                return True
 
         setattr(config, config_key, value)
         logger.info("Set config item '%s'", config_key)
