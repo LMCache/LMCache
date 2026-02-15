@@ -373,7 +373,7 @@ class LMCacheEngine:
         )
 
         if self._is_passive():
-            logger.debug("rank=%s ignore store", self.metadata.worker_id)
+            logger.debug(f"rank={self.metadata.worker_id} ignore store")
             return
 
         assert self.storage_manager is not None
