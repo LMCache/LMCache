@@ -638,6 +638,19 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
         return False
 
     try:
+        # Apply type conversion using env_converter if available
+        # Skip for extra_config which has special handling below
+        if hasattr(config, "_config_definitions") and config_key != "extra_config":
+            original_value = value
+            value = _apply_env_converter_safely(
+                config._config_definitions, config_key, value
+            )
+            # If original value was not None but conversion returned None,
+            # it means conversion failed
+            if original_value is not None and value is None:
+                # _apply_env_converter_safely already logged warning
+                return False
+
         # Convert string to dict for extra_config
         if config_key == "extra_config" and isinstance(value, str):
             value = json.loads(value) if value else None
