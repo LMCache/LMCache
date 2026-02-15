@@ -257,6 +257,10 @@ class LMCacheEngine:
             return self._health_monitor.is_healthy()
         return True
 
+    def _get_req_id(self, kwargs: dict) -> str:
+        """Extracts request ID from kwargs for logging."""
+        return kwargs.get("req_id", "unspecified")
+
     def mark_init_failed(self, reason: str = "") -> None:
         """
         Mark the engine as having failed initialization.
@@ -375,7 +379,7 @@ class LMCacheEngine:
         assert self.storage_manager is not None
 
         # Get req_id for logging
-        req_id = kwargs.get("req_id", "unspecified")
+        req_id = self._get_req_id(kwargs)
 
         # Initialize num_to_store_tokens to avoid reference before assignment
         num_to_store_tokens = 0
@@ -569,7 +573,7 @@ class LMCacheEngine:
         )
 
         # Get req_id for logging
-        req_id = kwargs.get("req_id", "unspecified")
+        req_id = self._get_req_id(kwargs)
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -751,7 +755,7 @@ class LMCacheEngine:
         )
 
         # Get req_id for logging
-        req_id = kwargs.get("req_id", "unspecified")
+        req_id = self._get_req_id(kwargs)
 
         tot_kv_size = 0
 
@@ -901,7 +905,7 @@ class LMCacheEngine:
         )
 
         # Get req_id for logging
-        req_id = kwargs.get("req_id", "unspecified")
+        req_id = self._get_req_id(kwargs)
 
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
