@@ -109,10 +109,10 @@ class NotAConnectorAdapter:
 
 # Module-level constants for connector plugin configuration
 MOCK_CONNECTOR_EXTRA_CONFIG = {
-    "remote_connector.mock_connector.module_path": (
+    "remote_storage_plugin.mock_connector.module_path": (
         "tests.v1.storage_backend.test_connector_plugin"
     ),
-    "remote_connector.mock_connector.class_name": "MockConnectorAdapter",
+    "remote_storage_plugin.mock_connector.class_name": "MockConnectorAdapter",
 }
 MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS = ["mock_connector"]
 
@@ -268,8 +268,8 @@ class TestConnectorPluginLauncher:
         Test that invalid module path is handled gracefully.
         """
         extra_config = {
-            "remote_connector.invalid_connector.module_path": "nonexistent.module.path",
-            "remote_connector.invalid_connector.class_name": "NonexistentClass",
+            "remote_storage_plugin.invalid_connector.module_path": "nonexistent.module.path",  # noqa: E501
+            "remote_storage_plugin.invalid_connector.class_name": "NonexistentClass",
         }
         remote_storage_plugins = ["invalid_connector"]
 
@@ -299,10 +299,10 @@ class TestConnectorPluginLauncher:
         Test that invalid class name is handled gracefully.
         """
         extra_config = {
-            "remote_connector.invalid_connector.module_path": (
+            "remote_storage_plugin.invalid_connector.module_path": (
                 "tests.v1.storage_backend.test_connector_plugin"
             ),
-            "remote_connector.invalid_connector.class_name": "NonexistentClass",
+            "remote_storage_plugin.invalid_connector.class_name": "NonexistentClass",
         }
         remote_storage_plugins = ["invalid_connector"]
 
@@ -331,10 +331,10 @@ class TestConnectorPluginLauncher:
         Test that classes not implementing ConnectorAdapter are rejected.
         """
         extra_config = {
-            "remote_connector.not_adapter.module_path": (
+            "remote_storage_plugin.not_adapter.module_path": (
                 "tests.v1.storage_backend.test_connector_plugin"
             ),
-            "remote_connector.not_adapter.class_name": "NotAConnectorAdapter",
+            "remote_storage_plugin.not_adapter.class_name": "NotAConnectorAdapter",
         }
         remote_storage_plugins = ["not_adapter"]
 
@@ -365,7 +365,7 @@ class TestConnectorPluginLauncher:
         """
         extra_config = {
             # Missing module_path
-            "remote_connector.missing_path.class_name": "MockConnectorAdapter",
+            "remote_storage_plugin.missing_path.class_name": "MockConnectorAdapter",
         }
         remote_storage_plugins = ["missing_path"]
 
@@ -396,7 +396,7 @@ class TestConnectorPluginLauncher:
         Test that missing class_name in extra_config is handled gracefully.
         """
         extra_config = {
-            "remote_connector.missing_class.module_path": (
+            "remote_storage_plugin.missing_class.module_path": (
                 "tests.v1.storage_backend.test_connector_plugin"
             ),
             # Missing class_name
@@ -477,14 +477,14 @@ class TestConnectorPluginLauncher:
         Test that multiple connector plugins can be loaded simultaneously.
         """
         extra_config = {
-            "remote_connector.mock_connector_1.module_path": (
+            "remote_storage_plugin.mock_connector_1.module_path": (
                 "tests.v1.storage_backend.test_connector_plugin"
             ),
-            "remote_connector.mock_connector_1.class_name": "MockConnectorAdapter",
-            "remote_connector.mock_connector_2.module_path": (
+            "remote_storage_plugin.mock_connector_1.class_name": "MockConnectorAdapter",
+            "remote_storage_plugin.mock_connector_2.module_path": (
                 "tests.v1.storage_backend.test_connector_plugin"
             ),
-            "remote_connector.mock_connector_2.class_name": "MockConnectorAdapter",
+            "remote_storage_plugin.mock_connector_2.class_name": "MockConnectorAdapter",
         }
         remote_storage_plugins = ["mock_connector_1", "mock_connector_2"]
 

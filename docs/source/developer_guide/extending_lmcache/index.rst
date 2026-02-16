@@ -63,7 +63,7 @@ To add a custom remote storage connector, you need to:
    - A ``RemoteConnector`` subclass that implements the actual storage operations (get, put, exists, etc.)
 
 2. **Package** as an installable Python module (so that LMCache can import it).
-3. **Configure** LMCache to use it by adding an entry to the ``remote_connector_plugins`` list and specifying the module path and class name in the configuration's ``extra_config``. For example:
+3. **Configure** LMCache to use it by adding an entry to the ``remote_storage_plugins`` list and specifying the module path and class name in the configuration's ``extra_config``. For example:
 
    .. code-block:: yaml
 

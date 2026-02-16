@@ -243,10 +243,10 @@ class ConnectorManager:
                     continue
 
                 module_path = extra_config.get(
-                    f"remote_connector.{remote_storage_plugin}.module_path"
+                    f"remote_storage_plugin.{remote_storage_plugin}.module_path"
                 )
                 class_name = extra_config.get(
-                    f"remote_connector.{remote_storage_plugin}.class_name"
+                    f"remote_storage_plugin.{remote_storage_plugin}.class_name"
                 )
 
                 if not module_path or not class_name:

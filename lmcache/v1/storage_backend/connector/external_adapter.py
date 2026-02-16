@@ -27,7 +27,7 @@ class ExternalConnectorAdapter(ConnectorAdapter):
         - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
         """
         logger.info(f"Creating External connector for URL: {context.url}")
-        logger.info(
+        logger.warning(
             "External connector is due for deprecation in release v0.5.0. "
             "Please use the Remote Storage Plugin Framework instead."
         )
