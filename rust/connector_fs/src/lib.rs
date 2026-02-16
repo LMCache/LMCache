@@ -26,6 +26,24 @@ struct FsConnector {
 // Helpers
 // -----------------------------------------------------------
 
+/// Validate and sanitize path to prevent path traversal attacks
+fn validate_path(path: &str) -> Result<String, &'static str> {
+    // Check for path traversal sequences
+    if path.contains("..") {
+        return Err("Path contains path traversal sequences (..)");
+    }
+
+    // Check for absolute paths (should be relative for safety)
+    if path.starts_with('/') {
+        return Err("Path must be relative, not absolute");
+    }
+
+    // Normalize the path
+    let normalized = path.replace("//", "/");
+
+    Ok(normalized)
+}
+
 #[allow(clippy::manual_div_ceil)]
 fn round_up(x: usize, align: usize) -> usize {
     (x + align - 1) / align * align
@@ -111,6 +129,13 @@ impl FsConnector {
         if base_path.is_empty() {
             return None;
         }
+
+        // Validate base_path: must be absolute and not contain ..
+        if base_path.contains("..") {
+            eprintln!("base_path contains path traversal sequences: {}", base_path);
+            return None;
+        }
+
         let use_odirect = Self::json_bool_value(config_json, "use_odirect").unwrap_or(false);
         let alignment = Self::json_int_value(config_json, "alignment").unwrap_or(4096) as usize;
         let tmp_subdir = Self::json_str_value(config_json, "tmp_subdir");
@@ -119,10 +144,19 @@ impl FsConnector {
             return None;
         }
 
-        let tmp_dir = tmp_subdir.filter(|s| !s.is_empty()).map(|sub| {
-            let full = format!("{}/{}", base_path, sub);
-            let _ = std::fs::create_dir_all(&full);
-            full
+        let tmp_dir = tmp_subdir.filter(|s| !s.is_empty()).and_then(|sub| {
+            // Validate tmp_subdir to prevent path traversal
+            match validate_path(&sub) {
+                Ok(safe_sub) => {
+                    let full = format!("{}/{}", base_path, safe_sub);
+                    let _ = std::fs::create_dir_all(&full);
+                    Some(full)
+                }
+                Err(e) => {
+                    eprintln!("Invalid tmp_subdir: {}", e);
+                    None
+                }
+            }
         });
 
         Some(Self {

@@ -17,7 +17,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 // Buffer protocol flags (CPython C-API).
 const PYBUF_WRITABLE: i32 = 0x0001;
@@ -240,8 +240,15 @@ struct BackendState {
 /// (PyTorch tensor pool) and async scheduling.
 #[pyclass]
 struct RustRemoteBackend {
-    conn: ConnectorHandle,
+    conn: Arc<ConnectorHandle>,
     state: Mutex<BackendState>,
+}
+
+impl RustRemoteBackend {
+    /// Internal helper to clone the connector handle for thread-safe use.
+    fn get_conn_arc(&self) -> Arc<ConnectorHandle> {
+        Arc::clone(&self.conn)
+    }
 }
 
 #[pymethods]
@@ -250,7 +257,7 @@ impl RustRemoteBackend {
     fn new(connector_lib: &str, config_json: &str) -> PyResult<Self> {
         let conn = ConnectorHandle::load(connector_lib, config_json)?;
         Ok(Self {
-            conn,
+            conn: Arc::new(conn),
             state: Mutex::new(BackendState {
                 meta_index: HashMap::new(),
                 put_tasks: HashSet::new(),
@@ -315,7 +322,7 @@ impl RustRemoteBackend {
             return Err(PyValueError::new_err("null buffer pointer"));
         }
         let ptr_val = ptr as usize;
-        let conn = &self.conn;
+        let conn = self.get_conn_arc();
         let res = py.allow_threads(move || {
             let src = ptr_val as *const u8;
             let rc = conn.put(&ckey, src, buf_len);
@@ -352,7 +359,7 @@ impl RustRemoteBackend {
             return Err(PyValueError::new_err("null buffer pointer"));
         }
         let dst_val = ptr as usize;
-        let conn = &self.conn;
+        let conn = self.get_conn_arc();
         let res = py.allow_threads(move || {
             let dst = dst_val as *mut u8;
             let mut out_len: usize = 0;
@@ -390,7 +397,10 @@ impl RustRemoteBackend {
     }
 
     /// Close the backend.
+    /// Note: With Arc<ConnectorHandle>, the connector will be properly cleaned up
+    /// when all references are dropped. This method is kept for compatibility.
     fn close(&mut self) -> PyResult<()> {
+        // The connector will be automatically cleaned up when Arc refcount reaches 0
         Ok(())
     }
 }

@@ -81,10 +81,10 @@ int32_t connector_file_size(ConnectorHandle handle, const char* key,
                             uint64_t* out_size);
 
 /*
- * List all keys.  The connector writes NUL-terminated
- * strings into `out_buf` (total capacity `out_cap`),
- * separated by '\n'.  Writes total bytes used into
- * `*out_len`.
+ * List all keys.  The connector writes keys as a single block of
+ * newline-separated UTF-8 strings into `out_buf`.
+ * The total capacity of `out_buf` is `out_cap`.
+ * It writes the total number of bytes used into `*out_len`.
  *
  * Returns 0 on success, -1 on error.
  */

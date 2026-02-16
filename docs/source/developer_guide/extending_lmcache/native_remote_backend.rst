@@ -131,8 +131,8 @@ Lifecycle:
 
 1. ``connector_create(json_cfg, len)`` → opaque handle
 2. Any number of ``connector_exists / put / get / remove / list_keys``
-   calls (thread-safe is recommended but not required — the Rust
-   backend currently serializes calls per key)
+   calls. The connector implementation **must be thread-safe**, as the
+   backend may invoke it from multiple threads concurrently.
 3. ``connector_destroy(handle)``
 
 Built-in FS Connector

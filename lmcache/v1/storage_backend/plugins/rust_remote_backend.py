@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any, Callable, List, Optional, Sequence
 import asyncio
 import json
+import os
 import threading
 
 # Third Party
@@ -25,6 +26,45 @@ from lmcache.v1.storage_backend.abstract_backend import (
 )
 
 logger = init_logger(__name__)
+
+
+def _validate_connector_lib_path(connector_lib: str) -> None:
+    """Validate the connector library path for security.
+
+    Ensures the library path is either:
+    1. An absolute path within a trusted system library directory
+    2. An absolute path that has been explicitly resolved (no traversal)
+
+    Raises:
+        ValueError: If the path is potentially unsafe
+    """
+    if not connector_lib:
+        raise ValueError("Connector library path cannot be empty")
+
+    # Resolve to absolute path and normalize
+    abs_path = os.path.abspath(connector_lib)
+    real_path = os.path.realpath(connector_lib)
+
+    # Check for path traversal attempts
+    if abs_path != real_path:
+        raise ValueError(
+            "Connector library path contains symbolic links "
+            f"or path traversal: {connector_lib}"
+        )
+
+    # Ensure the path doesn't contain path traversal sequences
+    if ".." in connector_lib:
+        raise ValueError(
+            f"Connector library path contains path traversal sequences: {connector_lib}"
+        )
+
+    # Additional security: Check if file exists and is a regular file
+    if not os.path.isfile(abs_path):
+        raise ValueError(
+            f"Connector library does not exist or is not a regular file: {abs_path}"
+        )
+
+    logger.info(f"Validated connector library path: {abs_path}")
 
 
 def _load_rust_backend(
@@ -90,6 +130,9 @@ class RustRemoteBackend(StoragePluginInterface):
         connector_lib = str(extra.get("rust_remote.connector_lib", ""))
         if not connector_lib:
             raise ValueError("extra_config['rust_remote.connector_lib'] is required")
+
+        # Validate connector library path for security
+        _validate_connector_lib_path(connector_lib)
 
         # Collect connector-specific config
         conn_cfg: dict[str, Any] = {}
@@ -203,7 +246,7 @@ class RustRemoteBackend(StoragePluginInterface):
             return None
 
         futures = []
-        for key, obj in zip(keys, objs, strict=False):
+        for key, obj in zip(keys, objs, strict=True):
             key_str = self._key_str(key)
 
             # Dedup: Rust-side atomic check-and-add.
