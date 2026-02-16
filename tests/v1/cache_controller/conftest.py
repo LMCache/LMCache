@@ -220,7 +220,10 @@ def mock_reg_controller():
     controller = Mock()
     controller.get_workers = Mock(return_value=[0, 1])
     controller.get_socket = Mock()
-    controller.get_peer_init_url = Mock(return_value="tcp://localhost:5000")
+    # Return different URLs for different workers to test TP > 1
+    controller.get_peer_init_url = Mock(
+        side_effect=lambda instance_id, worker_id: f"tcp://localhost:{5000 + worker_id}"
+    )
 
     # Create a mock registry with all required methods
     mock_registry = Mock()
@@ -303,11 +306,14 @@ def mock_reg_controller():
             del mock_registry.seq_tracker[key]
         return True
 
-    def mock_find_kv_with_worker_info(key, exclude_instance_id=None):
+    def mock_find_kv_with_worker_info(key, target_worker_id, exclude_instance_id=None):
         """Find KV and return (kv_info, peer_init_url, current_keys)"""
         for report_id, locations in mock_registry.kv_pool.items():
             instance_id, worker_id = report_id
             if exclude_instance_id and instance_id == exclude_instance_id:
+                continue
+            # Filter by target_worker_id
+            if worker_id != target_worker_id:
                 continue
             for location, keys in locations.items():
                 if key in keys:

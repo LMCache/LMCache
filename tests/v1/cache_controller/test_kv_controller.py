@@ -533,6 +533,73 @@ class TestKVControllerBatchedP2PLookup:
         instance_id, location, num_hits, peer_url = result.layout_info[0]
         assert num_hits == 2
 
+    @pytest.mark.asyncio
+    async def test_batched_p2p_lookup_multi_worker(self, kv_controller):
+        """Test batched P2P lookup with multiple workers (TP=2).
+
+        This test verifies that when the same keys exist in multiple workers,
+        the lookup correctly returns the peer_init_url for the specific
+        target worker, not just the first match found.
+        """
+        # Admit chunks to worker_id 0
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=1000 + i, seq_num=i + 1)
+            for i in range(3)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="remote_instance",
+            worker_id=0,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
+
+        # Admit same chunks to worker_id 1
+        operations = [
+            KVOpEvent(op_type=OpType.ADMIT, key=1000 + i, seq_num=i + 1)
+            for i in range(3)
+        ]
+        msg = BatchedKVOperationMsg(
+            instance_id="remote_instance",
+            worker_id=1,
+            location="LocalCPUBackend",
+            operations=operations,
+        )
+        await kv_controller.handle_batched_kv_operations(msg)
+
+        # Query from worker_id 0 (peer_url should match worker_id 0)
+        lookup_msg = BatchedP2PLookupMsg(
+            hashes=[1000, 1001, 1002],
+            instance_id="query_instance",
+            worker_id=0,
+        )
+
+        result = await kv_controller.batched_p2p_lookup(lookup_msg)
+
+        assert len(result.layout_info) == 1
+        instance_id, location, num_hits, peer_url = result.layout_info[0]
+        assert instance_id == "remote_instance"
+        assert location == "LocalCPUBackend"
+        assert num_hits == 3
+        assert peer_url == "tcp://localhost:5000"
+
+
+        # Query from worker_id 1 (peer_url should match worker_id 1)
+        lookup_msg = BatchedP2PLookupMsg(
+            hashes=[1000, 1001, 1002],
+            instance_id="query_instance",
+            worker_id=1,
+        )
+
+        result = await kv_controller.batched_p2p_lookup(lookup_msg)
+
+        assert len(result.layout_info) == 1
+        instance_id, location, num_hits, peer_url = result.layout_info[0]
+        assert instance_id == "remote_instance"
+        assert location == "LocalCPUBackend"
+        assert num_hits == 3
+        assert peer_url == "tcp://localhost:5001"
+
 
 class TestKVControllerDeregister:
     """Test KVController deregister operations."""
