@@ -19,21 +19,10 @@ from lmcache.utils import (
 )
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import (
-    GPUConnectorInterface,
-    SGLangGPUConnector,
-    SGLangLayerwiseGPUConnector,
-)
+from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
-
-
-def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    if lmcache_config.enable_pd:
-        return False
-    else:
-        return True
 
 
 @dataclass
@@ -85,8 +74,6 @@ def init_lmcache_engine(
     kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
 
     # Change current device using local GPU index
-    torch.cuda.device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
     # Use global rank for metadata (tensor parallel rank)
     metadata = LMCacheMetadata(
         model_name=model_config.model_path,
@@ -98,30 +85,7 @@ def init_lmcache_engine(
         kv_shape=kv_shape,
     )
 
-    use_gpu = need_gpu_interm_buffer(config)
-
-    hidden_dim_size = num_kv_head * head_dim
-
-    gpu_connector: GPUConnectorInterface
-
-    if config.use_layerwise:
-        gpu_connector = SGLangLayerwiseGPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
-    else:
-        gpu_connector = SGLangGPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
+    gpu_connector = CreateGPUConnector(config, metadata, "sglang")
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         config,

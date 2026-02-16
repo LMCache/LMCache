@@ -23,6 +23,9 @@ jobs:
               github.com:443
               pypi.org:443
               files.pythonhosted.org:443
+              crates.io:443
+              index.crates.io:443
+              static.crates.io:443
 
         - name: Checkout code
           uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -41,5 +44,4 @@ jobs:
           uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
           with:
             extra_args: --all-files
-
 

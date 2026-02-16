@@ -19,6 +19,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.health_monitor.base import HealthMonitor
 from lmcache.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
@@ -39,7 +40,6 @@ if TYPE_CHECKING:
         LMCacheAsyncLookupServer,
     )
     from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -97,8 +97,21 @@ class LMCacheManager:
         self._runtime_plugin_launcher: Optional[RuntimePluginLauncher] = None
         self._health_monitor: Optional[HealthMonitor] = None
 
+        # Flag to track if initialization failed
+        self._init_failed = False
+        self._init_failed_reason: str = ""
+
         # Initialize components based on role
-        self._init_components()
+        try:
+            self._init_components()
+        except Exception as e:
+            self._init_failed = True
+            self._init_failed_reason = str(e)
+            logger.error(
+                "Failed to initialize LMCacheManager components: %s. "
+                "System will operate in degraded mode (recompute).",
+                e,
+            )
 
     def _init_components(self) -> None:
         """Initialize components based on the role for vLLM mode."""
@@ -276,6 +289,7 @@ class LMCacheManager:
         # First Party
         from lmcache.integration.vllm.utils import (
             ENGINE_NAME,
+            calculate_local_rank_and_world_size,
             mla_enabled,
         )
 
@@ -283,9 +297,6 @@ class LMCacheManager:
             return curr_engine
 
         assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        # Third Party
-        from vllm.platforms import current_platform
 
         try:
             # Third Party
@@ -330,9 +341,6 @@ class LMCacheManager:
             num_draft_layers,
         )
 
-        # Determine device
-        device, torch_dev, dev_name = self._get_device_info(current_platform)
-
         # Extract engine_id and kv_connector_extra_config from vllm_config
         engine_id = None
         kv_connector_extra_config = None
@@ -345,12 +353,15 @@ class LMCacheManager:
                 )
 
         # Create metadata
+        local_worker_id, local_world_size = calculate_local_rank_and_world_size(
+            self._vllm_config
+        )
         metadata = LMCacheMetadata(
             model_name=model_config.model,
             world_size=parallel_config.world_size,
-            local_world_size=parallel_config.world_size,
+            local_world_size=local_world_size,
             worker_id=parallel_config.rank,
-            local_worker_id=parallel_config.rank,
+            local_worker_id=local_worker_id,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=use_mla,
@@ -361,18 +372,15 @@ class LMCacheManager:
             kv_connector_extra_config=kv_connector_extra_config,
         )
 
-        # Create GPU connector
-        vllm_gpu_connector = self._create_gpu_connector(
-            role, use_mla, metadata, device, current_platform
-        )
-
         # Get tensor parallel group
         if role == "scheduler":
             tpg = SimpleNamespace()
             tpg.broadcast = lambda tensor, src: tensor
             tpg.broadcast_object = lambda obj, src: obj
+            vllm_gpu_connector = None
         else:
             tpg = get_tp_group()
+            vllm_gpu_connector = CreateGPUConnector(self._config, metadata, "vllm")
 
         engine = LMCacheEngineBuilder.get_or_create(
             ENGINE_NAME,
@@ -439,72 +447,6 @@ class LMCacheManager:
                     num_draft_layers = 1
         return num_draft_layers
 
-    def _get_device_info(self, current_platform):
-        """Get device information based on platform."""
-        assert self._vllm_config is not None, "vllm_config required for vLLM mode"
-
-        if current_platform.is_cuda_alike():
-            logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-            torch_dev = torch.cuda
-            dev_name = "cuda"
-        elif current_platform.is_xpu():
-            logger.info("XPU device is available. Using XPU for LMCache engine.")
-            torch_dev = torch.xpu
-            dev_name = "xpu"
-        else:
-            raise RuntimeError("Unsupported device platform for LMCache engine.")
-
-        num_gpus = torch_dev.device_count()
-        local_rank = self._vllm_config.parallel_config.rank % num_gpus
-        torch_dev.set_device(local_rank)
-        device = torch.device(f"{dev_name}:{local_rank}")
-
-        return device, torch_dev, dev_name
-
-    def _create_gpu_connector(self, role, use_mla, metadata, device, current_platform):
-        """Create the GPU connector based on configuration."""
-        # First Party
-        from lmcache.v1.gpu_connector import (
-            VLLMBufferLayerwiseGPUConnector,
-            VLLMPagedMemGPUConnectorV2,
-            VLLMPagedMemGPUConnectorV3,
-            VLLMPagedMemLayerwiseGPUConnector,
-        )
-        from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
-
-        use_gpu = self._need_gpu_interm_buffer()
-
-        if role == "scheduler":
-            return None
-
-        if self._config.use_layerwise:
-            if self._config.enable_blending:
-                return VLLMBufferLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-
-        if current_platform.is_cuda_alike():
-            if self._config.use_gpu_connector_v3:
-                return VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
-                )
-        elif current_platform.is_xpu():
-            return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
-        else:
-            raise RuntimeError("No supported connector found for the current platform.")
-
-    def _need_gpu_interm_buffer(self) -> bool:
-        """Check if GPU intermediate buffer is needed."""
-        return not self._config.enable_pd
-
     def start_services(self) -> None:
         """
         Start all managed services.
@@ -521,30 +463,60 @@ class LMCacheManager:
         if self._runtime_plugin_launcher is not None:
             self._runtime_plugin_launcher.launch_plugins()
 
+    def _handle_post_init_failure(self, e: Exception) -> None:
+        """
+        Handle initialization failure during post_init.
+
+        This method is shared between LMCacheManager and subclasses to avoid
+        code duplication.
+
+        Args:
+            e: The exception that caused the failure
+        """
+        self._init_failed = True
+        self._init_failed_reason = str(e)
+        if self._lmcache_engine is not None:
+            self._lmcache_engine.mark_init_failed(str(e))
+        logger.error(
+            "Failed during post_init: %s. "
+            "System will operate in degraded mode (recompute).",
+            e,
+        )
+
     def post_init(self) -> None:
         """
         Post-initialization after KV caches are registered.
         """
+        # If initialization already failed, mark engine and return early
+        if self._init_failed:
+            if self._lmcache_engine is not None:
+                self._lmcache_engine.mark_init_failed(self._init_failed_reason)
+            logger.warning("Skipping post_init due to previous initialization failure")
+            return
+
         if self._lmcache_engine is None:
             # Initialize health monitor for scheduler (even without engine)
             self._init_health_monitor()
             return
 
-        # vLLM mode post-init
-        # First Party
-        from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
-            LMCacheAsyncLookupServer,
-        )
+        try:
+            # vLLM mode post-init
+            # First Party
+            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+                LMCacheAsyncLookupServer,
+            )
 
-        async_lookup_server = None
-        if self._config.enable_async_loading and self._lookup_server is not None:
-            assert isinstance(self._lookup_server, LMCacheAsyncLookupServer)
-            async_lookup_server = self._lookup_server
+            async_lookup_server = None
+            if self._config.enable_async_loading and self._lookup_server is not None:
+                assert isinstance(self._lookup_server, LMCacheAsyncLookupServer)
+                async_lookup_server = self._lookup_server
 
-        self._lmcache_engine.post_init(async_lookup_server=async_lookup_server)
+            self._lmcache_engine.post_init(async_lookup_server=async_lookup_server)
 
-        # Initialize health monitor after engine post_init completes
-        self._init_health_monitor()
+            # Initialize health monitor after engine post_init completes
+            self._init_health_monitor()
+        except Exception as e:
+            self._handle_post_init_failure(e)
 
     def stop_services(self) -> None:
         """Stop all managed components gracefully."""
@@ -687,12 +659,21 @@ class LMCacheManager:
         """
         Check if the LMCacheManager is healthy.
 
+        Returns False if:
+        - Initialization failed
+        - HealthMonitor reports unhealthy
+        - Engine reports unhealthy
+
         Returns:
             bool: True if healthy, False otherwise
         """
-        if self._health_monitor is None:
-            return True
-        return self._health_monitor.is_healthy()
+        if self._init_failed:
+            return False
+        if self._lmcache_engine is not None and not self._lmcache_engine.is_healthy():
+            return False
+        if self._health_monitor is not None:
+            return self._health_monitor.is_healthy()
+        return True
 
     @property
     def config(self) -> LMCacheEngineConfig:

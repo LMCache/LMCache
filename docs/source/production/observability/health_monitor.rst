@@ -84,6 +84,19 @@ The health monitor runs in a background thread:
 3. When unhealthy, store/retrieve operations are blocked with a warning log
 4. Once all checks pass again, the system is marked as healthy and operations resume
 
+Initialization Failure Handling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When initialization or post-initialization fails irrecoverably:
+
+1. The system is marked with ``_init_failed = True``
+2. ``is_healthy()`` method returns ``False`` permanently
+3. Health monitoring thread will not start (if initialization fails before it starts)
+4. The system operates in degraded mode (recompute-only)
+
+This ensures that irrecoverable initialization errors don't cause cascading failures
+and the system can gracefully fall back to recomputation.
+
 Graceful Degradation
 ~~~~~~~~~~~~~~~~~~~~
 

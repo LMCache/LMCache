@@ -129,6 +129,7 @@ Documentation
    production/kubernetes_deployment
    production/kv_cache_events
    production/observability/index
+   production/performance_tuning
 
 :raw-html:`<br />`
 
