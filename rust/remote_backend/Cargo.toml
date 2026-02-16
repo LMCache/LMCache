@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lmcache_rust_remote_backend_io"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "lmcache_rust_remote_backend_io"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module"] }
+libc = "0.2"
+libloading = "0.8"

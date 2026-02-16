@@ -44,14 +44,38 @@ repos:
 - repo: local
   hooks:
   - id: rust-fmt
-    name: Rust Format Check
+    name: Rust Format Check (raw_block)
     entry: bash -c 'cd rust/raw_block && cargo fmt --check'
     language: system
     types: [text]
     files: ^rust/raw_block/.*\.rs$
   - id: rust-clippy
-    name: Rust Clippy Check
+    name: Rust Clippy Check (raw_block)
     entry: bash -c 'cd rust/raw_block && cargo clippy -- -D warnings'
     language: system
     types: [text]
     files: ^rust/raw_block/.*\.rs$
+  - id: rust-fmt-remote-backend
+    name: Rust Format Check (remote_backend)
+    entry: bash -c 'cd rust/remote_backend && cargo fmt --check'
+    language: system
+    types: [text]
+    files: ^rust/remote_backend/.*\.rs$
+  - id: rust-clippy-remote-backend
+    name: Rust Clippy Check (remote_backend)
+    entry: bash -c 'cd rust/remote_backend && cargo clippy -- -D warnings'
+    language: system
+    types: [text]
+    files: ^rust/remote_backend/.*\.rs$
+  - id: rust-fmt-connector-fs
+    name: Rust Format Check (connector_fs)
+    entry: bash -c 'cd rust/connector_fs && cargo fmt --check'
+    language: system
+    types: [text]
+    files: ^rust/connector_fs/.*\.rs$
+  - id: rust-clippy-connector-fs
+    name: Rust Clippy Check (connector_fs)
+    entry: bash -c 'cd rust/connector_fs && cargo clippy -- -D warnings'
+    language: system
+    types: [text]
+    files: ^rust/connector_fs/.*\.rs$

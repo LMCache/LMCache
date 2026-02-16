@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lmcache_connector_fs"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "lmcache_connector_fs"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
