@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Iterable
 from dataclasses import dataclass
-from itertools import islice
 from typing import Any
 import os
 
@@ -12,6 +10,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -69,40 +68,27 @@ def get_lmcache_chunk_size(
     return chunk_size
 
 
-def striding_block_hashes(
-    block_hashes: list[bytes],
-    blocks_in_chunk,
-) -> Iterable[bytes]:
-    """Striding the block hashes to get the block hashes for each chunk.
-    For example, if blocks_in_chunk is 16, then we will get the block hashes
-    for the 16th, 32nd, 48th, ... blocks.
-    """
-    return islice(block_hashes, blocks_in_chunk - 1, None, blocks_in_chunk)
-
-
 @dataclass
 class LoadStoreOp:
-    block_hashes: list[bytes]
-    """Block hashes for the load/store operation"""
+    token_ids: list[int]
+    """Token IDs for the load/store operation"""
 
     block_ids: list[int]
-    """Block ids for the load/store operation, should be the same 
-    length as self.block_hashes
-    """
+    """Block ids for the load/store operation"""
+
+    start: int = 0
+    """Start token index"""
+
+    end: int = 0
+    """End token index"""
 
     def __len__(self) -> int:
-        return len(self.block_hashes)
-
-    def __post_init__(self):
-        assert len(self.block_hashes) == len(self.block_ids), (
-            "The number of block hashes should be equal to the number of block ids "
-            f"But got {len(self.block_hashes)} and {len(self.block_ids)}"
-        )
+        return len(self.block_ids)
 
 
 StoreResult = bool
 RetrieveResult = list[bool]
-LookupResult = list[bool]
+LookupResult = int
 
 
 class LMCacheMPSchedulerAdapter:
@@ -142,14 +128,18 @@ class LMCacheMPSchedulerAdapter:
         self.blocks_in_chunk = self.chunk_size // vllm_block_size
 
     @_lmcache_nvtx_annotate
-    def maybe_submit_lookup_request(self, request_id: str, block_hashes: list[bytes]):
+    def maybe_submit_lookup_request(
+        self,
+        request_id: str,
+        token_ids: list[int],
+    ):
         """
-        Submit a new lookup request to LMCache if there is no ongoing request
+        Submit a new lookup request to LMCache if there is no ongoing request.
 
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
-            block_hashes: The block hashes to lookup from LMCache
+            token_ids: Token IDs to lookup from LMCache
 
         Returns:
             None
@@ -165,12 +155,21 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        s = striding_block_hashes(block_hashes, self.blocks_in_chunk)
-        keys = [self._create_key(block_hash) for block_hash in s]
+        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+
+        keys = [
+            self._create_key(
+                token_ids,
+                start=0,
+                end=aligned_end,
+                request_id=request_id,
+            ).no_worker_id_version()
+        ]
+
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
-            [keys, True],
+            [keys],
         )
         self.lookup_futures[request_id] = future
 
@@ -197,7 +196,7 @@ class LMCacheMPSchedulerAdapter:
             return None
 
         result = future.result()
-        num_chunks = sum(result)
+        num_chunks = result
         return num_chunks * self.chunk_size
 
     def num_blocks_per_chunk(self) -> int:
@@ -215,14 +214,35 @@ class LMCacheMPSchedulerAdapter:
         """
         self.lookup_futures.pop(request_id, None)
 
+    def end_session(self, request_id: str) -> None:
+        """
+        Notify LMCache server to remove the session for a finished request.
+        Args:
+            request_id: The ID of the finished request.
+        """
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.END_SESSION,
+            [request_id],
+        )
+
     # Helper functions
-    def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
-        """Convert a block hash to an IPC cache engine key"""
+    def _create_key(
+        self,
+        token_ids: list[int],
+        start: int,
+        end: int,
+        request_id: str,
+    ) -> IPCCacheEngineKey:
+        """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
-            chunk_hash=block_hash,
+            token_ids=tuple(token_ids),
+            start=start,
+            end=end,
+            request_id=request_id,
         )
 
 
@@ -270,6 +290,19 @@ class LMCacheMPWorkerAdapter:
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
 
+        # request telemetry, used for prefill-decode disagg
+        # TODO: pass down the configuration via vLLM connector config
+        # instead of env var
+        self.request_telemetry = RequestTelemetryFactory.create(
+            telemetry_type=os.getenv("LMCACHE_REQUEST_TELEMETRY_TYPE", "noop"),
+            config={
+                "endpoint": os.getenv(
+                    "LMCACHE_REQUEST_TELEMETRY_ENDPOINT",
+                    "http://localhost:5768/api/v1/telemetry",
+                ),
+            },
+        )
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
         Register the kv caches with LMCache server
@@ -301,7 +334,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = self._block_hashes_to_keys(op.block_hashes)
+        keys = [self._create_key(op.token_ids, op.start, op.end, request_id=request_id)]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
@@ -322,8 +355,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-
-        keys = self._block_hashes_to_keys(op.block_hashes)
+        keys = [self._create_key(op.token_ids, op.start, op.end, request_id=request_id)]
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
@@ -339,7 +371,7 @@ class LMCacheMPWorkerAdapter:
         event: torch.cuda.Event,
     ):
         """
-        Submit a list of store requests to LMCache
+        Submit a batched store request to LMCache
 
         Args:
             request_ids: The IDs of the requests
@@ -348,17 +380,24 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = []
-        block_ids = []
-        for op in ops:
-            keys.extend(self._block_hashes_to_keys(op.block_hashes))
+        all_keys: list[IPCCacheEngineKey] = []
+        block_ids: list[int] = []
+        for request_id, op in zip(request_ids, ops, strict=False):
+            all_keys.append(
+                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+            )
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [keys, self.instance_id, block_ids, event.ipc_handle()],
+            [
+                all_keys,
+                self.instance_id,
+                block_ids,
+                event.ipc_handle(),
+            ],
         ).to_cuda_future()
-        self.store_futures[request_ids[0]] = (future, request_ids[1:])
+        self.store_futures[request_ids[0]] = (future, list(request_ids[1:]))
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -368,7 +407,7 @@ class LMCacheMPWorkerAdapter:
         event: torch.cuda.Event,
     ):
         """
-        Submit a list of retrieve requests to LMCache
+        Submit a batched retrieve request to LMCache
 
         Args:
             request_ids: The IDs of the requests
@@ -377,18 +416,24 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = []
-        block_ids = []
-
-        for op in ops:
-            keys.extend(self._block_hashes_to_keys(op.block_hashes))
+        all_keys: list[IPCCacheEngineKey] = []
+        block_ids: list[int] = []
+        for request_id, op in zip(request_ids, ops, strict=False):
+            all_keys.append(
+                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
+            )
             block_ids.extend(op.block_ids)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [keys, self.instance_id, block_ids, event.ipc_handle()],
+            [
+                all_keys,
+                self.instance_id,
+                block_ids,
+                event.ipc_handle(),
+            ],
         ).to_cuda_future()
-        self.retrieve_futures[request_ids[0]] = (future, request_ids[1:])
+        self.retrieve_futures[request_ids[0]] = (future, list(request_ids[1:]))
 
     @_lmcache_nvtx_annotate
     def get_finished(
@@ -468,6 +513,17 @@ class LMCacheMPWorkerAdapter:
         # Calculate the final finished stores
         ret_stores.update(self._update_and_get_finished_store())
 
+        # the invocation of `get_finished` means that
+        # these requests' KV caches are already fully stored.
+        # or the requests normally ends without any store.
+        if ret_stores:
+            self.request_telemetry.on_request_store_finished(
+                request_ids_set=ret_stores,
+                model_name=self.model_name,
+                world_size=self.world_size,
+                kv_rank=self.worker_id,
+            )
+
         return ret_stores, finished_retrieves
 
     def num_blocks_per_chunk(self) -> int:
@@ -487,6 +543,7 @@ class LMCacheMPWorkerAdapter:
         ).result()
 
         self.mq_client.close()
+        self.request_telemetry.close()
 
     # Helper functions
     def _update_and_get_finished_store(
@@ -501,18 +558,20 @@ class LMCacheMPWorkerAdapter:
 
         return safe_finished_s
 
-    def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
-        """Convert a block hash to an IPC cache engine key"""
+    def _create_key(
+        self,
+        token_ids: list[int],
+        start: int,
+        end: int,
+        request_id: str,
+    ) -> IPCCacheEngineKey:
+        """Convert token IDs to an IPC cache engine key"""
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
-            chunk_hash=block_hash,
+            token_ids=tuple(token_ids),
+            start=start,
+            end=end,
+            request_id=request_id,
         )
-
-    def _block_hashes_to_keys(
-        self, block_hashes: list[bytes]
-    ) -> list[IPCCacheEngineKey]:
-        """Convert block hashes to IPC cache engine keys"""
-        s = striding_block_hashes(block_hashes, self.blocks_in_chunk)
-        return [self._create_key(block_hash) for block_hash in s]

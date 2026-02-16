@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable
 import pickle
 import threading
 
@@ -9,9 +9,19 @@ import threading
 import msgspec
 import torch
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
 """
-Defines the types and the customized encoder/decoders for inter-process 
+Defines the types and the customized encoder/decoders for inter-process
 communications.
+
+Key Types:
+- IPCCacheEngineKey: Token-based cache key
+  - Contains token_ids, start, end, request_id (all required)
+  - chunk_hash is optionally set after hashing by the server
+  - Converted to ObjectKey for storage operations via ipc_keys_to_object_keys()
 """
 
 
@@ -77,7 +87,9 @@ class CudaIPCWrapper:
             We should call `torch.cuda.init()` before using this function.
         """
         device = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
-        storage = torch.UntypedStorage._new_shared_cuda(device, *self.handle[1:])
+        storage = torch.UntypedStorage._new_shared_cuda(  # noqa: SLF001
+            device, *self.handle[1:]
+        )
         t = torch.tensor(0, device=device, dtype=self.dtype)
         t.set_(storage)
         return t.view(self.shape)
@@ -103,32 +115,64 @@ class CudaIPCWrapper:
 
 @dataclass(order=True, frozen=True)
 class IPCCacheEngineKey:
+    """Cache key for the IPC (multiprocess) protocol.
+
+    This key type is sent by the client over ZMQ (serialized via msgspec).
+
+    The client sends token_ids, start, end, and request_id (all required).
+    The server computes chunk hashes via TokenHasher and converts to
+    ObjectKey for storage operations.
+
+    The request_id field is for session tracking and is NOT included
+    in equality/hash comparisons (two keys with same content but different
+    request_ids are considered equal for cache purposes).
+    """
+
     model_name: str
     world_size: int
-    worker_id: int
-    chunk_hash: bytes
+    worker_id: int | None
 
-    @staticmethod
-    def IntHash2Bytes(chunk_hash: int) -> bytes:
-        # NOTE: this is only used by tests
-        return chunk_hash.to_bytes(4, byteorder="big")
+    token_ids: tuple[int, ...]  # frozen tuple for hashability
+    start: int
+    end: int
 
-    @staticmethod
-    def Bytes2IntHash(chunk_hash: bytes) -> int:
-        # NOTE: this is only used by tests
-        return int.from_bytes(chunk_hash, byteorder="big") & ((1 << 64) - 1)
+    # === Session tracking (not part of cache identity) ===
+    request_id: str = field(compare=False)
 
-    @classmethod
-    def from_int_hash(
-        cls, model_name: str, world_size: int, worker_id: int, chunk_hash: int
-    ) -> "IPCCacheEngineKey":
-        # NOTE: this is only used by tests
-        return cls(
-            model_name=model_name,
-            world_size=world_size,
-            worker_id=worker_id,
-            chunk_hash=cls.IntHash2Bytes(chunk_hash),
+    chunk_hash: bytes | None = None
+
+    def to_hash_keys(
+        self,
+        hasher: "TokenHasher",
+        full_chunk_only: bool = True,
+        prefix_hash: int | None = None,
+    ) -> list["IPCCacheEngineKey"]:
+        """Compute chunk hashes and return one IPCCacheEngineKey per chunk.
+
+        Preserves all fields in generated keys.
+
+        Args:
+            hasher: TokenHasher instance to compute chunk hashes
+            full_chunk_only: If True, only return keys for full chunks .
+                Else, return keys for all chunks (including partial ones).
+            prefix_hash: Optional int hash to combine with token_ids.
+        """
+        chunk_hashes = hasher.compute_chunk_hashes(
+            list(self.token_ids), full_chunk_only, prefix_hash
         )
+        return [
+            IPCCacheEngineKey(
+                model_name=self.model_name,
+                world_size=self.world_size,
+                worker_id=self.worker_id,
+                token_ids=self.token_ids,
+                start=self.start,
+                end=self.end,
+                request_id=self.request_id,
+                chunk_hash=hasher.hash_to_bytes(h),
+            )
+            for h in chunk_hashes
+        ]
 
     @staticmethod
     def Serialize(obj: "IPCCacheEngineKey") -> bytes:
@@ -137,6 +181,42 @@ class IPCCacheEngineKey:
     @staticmethod
     def Deserialize(data: bytes) -> "IPCCacheEngineKey":
         return msgspec.msgpack.decode(data, type=IPCCacheEngineKey)
+
+    # Helper function for unit tests only
+    @classmethod
+    def from_token_ids(
+        cls,
+        model_name: str,
+        world_size: int,
+        worker_id: int | None,
+        token_ids: list[int],
+        start: int = 0,
+        end: int = 0,
+        request_id: str = "",
+    ) -> "IPCCacheEngineKey":
+        """Create a key from token ids. Only used by the tests."""
+        return cls(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=worker_id,
+            token_ids=tuple(token_ids),
+            start=start,
+            end=end,
+            request_id=request_id,
+        )
+
+    def no_worker_id_version(self) -> "IPCCacheEngineKey":
+        """Create a copy with worker_id=None for lookup requests."""
+        return IPCCacheEngineKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=None,
+            token_ids=self.token_ids,
+            start=self.start,
+            end=self.end,
+            chunk_hash=self.chunk_hash,
+            request_id=self.request_id,
+        )
 
 
 # Type exports

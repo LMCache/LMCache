@@ -3,7 +3,6 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -16,6 +15,7 @@ from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
     LMCacheBypassLookupClient,
 )
 from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
+from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party
@@ -33,7 +33,7 @@ class LookupClientFactory:
     @staticmethod
     def create_lookup_client(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         lmcache_engine: Optional[LMCacheEngine] = None,
     ) -> LookupClientInterface:
         """
@@ -42,7 +42,7 @@ class LookupClientFactory:
         Args:
             config: The LMCache engine configuration
             metadata: The LMCache engine metadata (includes engine_id,
-                num_ranks, kv_connector_extra_config)
+                world_size, kv_connector_extra_config)
             lmcache_engine: Optional LMCacheEngine instance for
                 bypass lookup client
 
@@ -91,7 +91,7 @@ class LookupClientFactory:
     @staticmethod
     def create_lookup_server(
         lmcache_engine: LMCacheEngine,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> Optional[Union["LMCacheLookupServer", "LMCacheAsyncLookupServer"]]:
         """
         Create a lookup server based on the configuration.
@@ -99,7 +99,7 @@ class LookupClientFactory:
         Args:
             lmcache_engine: The LMCache engine instance
             metadata: The LMCache engine metadata (includes engine_id,
-                num_ranks, kv_connector_extra_config, worker_id)
+                world_size, kv_connector_extra_config, worker_id)
 
         Returns:
             A lookup server instance, or None if no server should be created
@@ -136,7 +136,7 @@ class LookupClientFactory:
     def _create_external_lookup_client(
         external_lookup_uri: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> LookupClientInterface:
         """
         Create an external lookup client based on the URI format.
@@ -176,7 +176,7 @@ class LookupClientFactory:
     def _create_mooncake_lookup_client(
         master_address: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> "MooncakeLookupClient":
         """Create a MooncakeLookupClient instance."""
         # First Party
