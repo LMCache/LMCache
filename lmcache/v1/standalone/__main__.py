@@ -30,11 +30,9 @@ from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
-from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.standalone.manager import StandaloneLMCacheManager
-from lmcache.v1.xpu_connector import VLLMPagedMemXPUConnectorV2
 
 # Third Party - Platform detection
 try:
@@ -207,8 +205,7 @@ class LMCacheStandaloneStarter:
         self.layer_groups = layer_groups
         self.device = device
 
-        # Construct GPU connector based on platform detection
-        gpu_connector = self._construct_gpu_connector()
+        gpu_connector = CreateGPUConnector(config, metadata, "mock")
 
         # Create standalone manager directly
         self._manager = StandaloneLMCacheManager(
@@ -234,61 +231,6 @@ class LMCacheStandaloneStarter:
     def api_server(self):
         """Get the API server instance."""
         return self._manager.api_server
-
-    def _construct_gpu_connector(self):
-        """Construct GPU connector based on platform detection"""
-
-        # If vLLM platform detection is not available, use MockGPUConnector
-        if current_platform is None:
-            logger.info("vLLM platform detection not available, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=self.metadata.kv_shape)
-
-        # Extract parameters from metadata and config
-        kv_shape = self.metadata.kv_shape
-        num_layer = kv_shape[0]  # number of layers
-        num_kv_head = kv_shape[3]  # number of KV heads
-        head_size = kv_shape[4]  # head size
-        hidden_dim_size = num_kv_head * head_size
-
-        chunk_size = self.config.chunk_size
-        kv_dtype = self.metadata.kv_dtype
-        use_mla = self.metadata.use_mla
-
-        # Determine device based on platform
-        if self.device == "cpu":
-            logger.info("CPU device specified, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=kv_shape)
-        if current_platform.is_cuda_alike():
-            connector_cls = VLLMPagedMemGPUConnectorV2
-            logger.info("CUDA device detected, using VLLMPagedMemGPUConnectorV2")
-        elif current_platform.is_xpu():
-            connector_cls = VLLMPagedMemXPUConnectorV2
-            logger.info("XPU device detected, using VLLMPagedMemXPUConnectorV2")
-        else:
-            logger.info("No GPU device detected, using MockGPUConnector")
-            return MockGPUConnector(kv_shape=kv_shape)
-
-        # Construct the GPU connector
-        gpu_connector = connector_cls(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=False if self.device == "cpu" else True,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=self.device,
-            use_mla=use_mla,
-        )
-
-        logger.info(
-            "Constructed GPU connector: hidden_dim_size=%d, num_layer=%d, "
-            "chunk_size=%d, dtype=%s",
-            hidden_dim_size,
-            num_layer,
-            chunk_size,
-            kv_dtype,
-        )
-
-        return gpu_connector
 
     def _generate_fixed_kvcaches(self, device: str = "cpu") -> dict:
         """Generate fixed pattern kvcaches for testing and MD5 verification.

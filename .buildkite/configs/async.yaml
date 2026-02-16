@@ -16,6 +16,8 @@ docker:
     - "LMCACHE_ENABLE_ASYNC_LOADING=True"
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.01, \"use_odirect\": True}"
     - "LMCACHE_SAVE_UNFULL_CHUNK=False"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
 
 vllm:
   model: "meta-llama/Llama-3.1-8B-Instruct"
