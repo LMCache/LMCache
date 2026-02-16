@@ -8,6 +8,12 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    PeriodicThreadRegistry,
+    ThreadLevel,
+    ThreadRunSummary,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -18,7 +24,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class PinMonitor:
+class PinMonitor(PeriodicThread):
     """
     Global monitor (singleton per process, shared across all cache engines)
     for pinned TensorMemoryObj instances to handle timeout detection.
@@ -27,18 +33,27 @@ class PinMonitor:
     """
 
     _instance = None
-    _lock = threading.Lock()
+    _instance_lock = threading.Lock()  # Class-level lock for singleton pattern
 
     def __init__(self, config: "LMCacheEngineConfig"):
+        # Initialize PeriodicThread base class
+        super().__init__(
+            name="PinMonitor-thread",
+            interval=config.pin_check_interval_sec,
+            level=ThreadLevel.CRITICAL,
+            init_wait=0.0,
+        )
+
         # obj_id is the virtual memory address given by Python's id() function
         self._pinned_objects: dict[
             int, tuple["MemoryObj", float]
         ] = {}  # {obj_id: (memory_obj, register_time)}
         self._objects_lock = threading.Lock()
-        self._monitor_thread = None
-        self._running = False
         self._check_interval = config.pin_check_interval_sec
         self._pin_timeout_sec = config.pin_timeout_sec
+
+        # Register with the global registry
+        PeriodicThreadRegistry.get_instance().register(self)
 
         # Auto-start the monitor on first instance creation
         self.start_monitoring()
@@ -56,7 +71,7 @@ class PinMonitor:
                 for the first time.
         """
         if PinMonitor._instance is None:
-            with PinMonitor._lock:
+            with PinMonitor._instance_lock:
                 if PinMonitor._instance is None:
                     assert config is not None, "config is required"
                     PinMonitor._instance = PinMonitor(config)
@@ -91,8 +106,12 @@ class PinMonitor:
                     obj_id,
                 )
 
-    def _check_timeouts(self):
-        """Check all registered pinned objects for timeout."""
+    def _check_timeouts(self) -> tuple[int, int, int]:
+        """Check all registered pinned objects for timeout.
+
+        Returns:
+            tuple: (pinned_count, timeout_count, force_unpin_success_count)
+        """
         current_time = time.time()
         timeout_objects = []
 
@@ -134,6 +153,8 @@ class PinMonitor:
                 force_unpin_success_count,
             )
 
+        return pinned_count, len(timeout_objects), force_unpin_success_count
+
     def _force_unpin_timeout_object(self, memory_obj: "MemoryObj", elapsed_time: float):
         """Force unpin a timeout object and log the event."""
         # Get current pin_count without holding the lock for unpin calls
@@ -159,28 +180,35 @@ class PinMonitor:
         while memory_obj.meta.pin_count > 0:
             memory_obj.unpin()
 
-    def _monitor_loop(self):
-        """Background thread loop for monitoring pinned objects."""
-        logger.info("Starting PinMonitor background thread")
-        while self._running:
-            try:
-                self._check_timeouts()
-                time.sleep(self._check_interval)
-            except Exception as e:
-                logger.error("Error in PinMonitor loop: %s", e)
-                time.sleep(self._check_interval)  # Continue after error
-        logger.info("PinMonitor background thread stopped")
+    def _execute(self) -> ThreadRunSummary:
+        """
+        Execute one pin monitor check cycle.
+
+        This method is called by the PeriodicThread base class.
+
+        Returns:
+            ThreadRunSummary: Summary of the check cycle
+        """
+        pinned_count, timeout_count, force_unpin_count = self._check_timeouts()
+
+        return ThreadRunSummary(
+            success=True,
+            message=f"Checked {pinned_count} objects, {timeout_count} timeouts, "
+            f"{force_unpin_count} force unpinned",
+            extra_info={
+                "pinned_count": str(pinned_count),
+                "timeout_count": str(timeout_count),
+                "force_unpin_count": str(force_unpin_count),
+            },
+        )
 
     def start_monitoring(self):
         """Start the background monitoring thread."""
-        if self._running:
+        if self.is_running:
             return
 
-        self._running = True
-        self._monitor_thread = threading.Thread(
-            target=self._monitor_loop, daemon=True, name="PinMonitor-thread"
-        )
-        self._monitor_thread.start()
+        # Use base class start method
+        self.start()
         logger.info("PinMonitor started")
 
         # Setup metrics callback
@@ -192,12 +220,14 @@ class PinMonitor:
 
     def stop_monitoring(self):
         """Stop the background monitoring thread."""
-        if not self._running:
+        if not self.is_running:
             return
 
-        self._running = False
-        if self._monitor_thread and self._monitor_thread.is_alive():
-            self._monitor_thread.join(timeout=5.0)
+        # Unregister from the global registry
+        PeriodicThreadRegistry.get_instance().unregister(self.name)
+
+        # Use base class stop method
+        self.stop()
         logger.info("PinMonitor stopped")
 
     def get_monitored_count(self) -> int:
@@ -210,7 +240,7 @@ class PinMonitor:
         """Destroy the singleton instance and stop monitoring.
         This is mainly used for testing to ensure clean state between tests.
         """
-        with PinMonitor._lock:
+        with PinMonitor._instance_lock:
             if PinMonitor._instance is not None:
                 PinMonitor._instance.stop_monitoring()
                 PinMonitor._instance = None

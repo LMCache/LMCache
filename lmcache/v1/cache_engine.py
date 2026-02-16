@@ -28,7 +28,6 @@ import time
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
@@ -41,12 +40,8 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.gpu_connector import (
-    GPUConnectorInterface,
-    SGLangLayerwiseGPUConnector,
-    VLLMBufferLayerwiseGPUConnector,
-    VLLMPagedMemLayerwiseGPUConnector,
-)
+from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -57,6 +52,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
@@ -99,7 +95,7 @@ class LMCacheEngine:
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         token_database: TokenDatabase,
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
@@ -229,6 +225,9 @@ class LMCacheEngine:
         # Health monitor reference (injected by LMCacheManager)
         self._health_monitor: Optional["HealthMonitor"] = None
 
+        # Flag to indicate if initialization failed (irrecoverable error)
+        self._init_failed = False
+
     def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
         """
         Set the health monitor reference.
@@ -245,15 +244,38 @@ class LMCacheEngine:
         """
         Check if the LMCache system is healthy.
 
-        This method delegates to the HealthMonitor if one is set.
-        If no health monitor is set, it returns True (assume healthy).
+        This method returns False if:
+        - Initialization failed (irrecoverable error)
+        - HealthMonitor reports unhealthy
+
+        If no health monitor is set and initialization succeeded,
+        it returns True (assume healthy).
 
         Returns:
             bool: True if healthy, False otherwise
         """
+        if self._init_failed:
+            return False
         if self._health_monitor is not None:
             return self._health_monitor.is_healthy()
         return True
+
+    def mark_init_failed(self, reason: str = "") -> None:
+        """
+        Mark the engine as having failed initialization.
+
+        This is called by LMCacheManager when an irrecoverable error occurs
+        during initialization or post_init. Once marked, is_healthy() will
+        always return False, causing the system to fall back to recomputation.
+
+        Args:
+            reason: Optional reason string for logging
+        """
+        self._init_failed = True
+        if reason:
+            logger.error("LMCacheEngine marked as init failed: %s", reason)
+        else:
+            logger.error("LMCacheEngine marked as init failed")
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
@@ -488,6 +510,10 @@ class LMCacheEngine:
                 keys, memory_objs, transfer_spec=transfer_spec
             )
 
+        self.stats_monitor.on_store_finished(
+            store_stats,
+            tot_token_num,
+        )
         tot_time = store_stats.time_to_store()
 
         logger.info(
@@ -500,11 +526,6 @@ class LMCacheEngine:
             tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
             (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
             store_stats.put_time * 1000,
-        )
-
-        self.stats_monitor.on_store_finished(
-            store_stats,
-            tot_token_num,
         )
 
     @_lmcache_nvtx_annotate
@@ -652,14 +673,7 @@ class LMCacheEngine:
                 mo.get_size() for layer_objs in memory_objs for mo in layer_objs
             )
 
-            assert isinstance(
-                self.gpu_connector,
-                (
-                    VLLMPagedMemLayerwiseGPUConnector,
-                    VLLMBufferLayerwiseGPUConnector,
-                    SGLangLayerwiseGPUConnector,
-                ),
-            )
+            assert_layerwise_gpu_connector(self.gpu_connector)
 
             t_start = time.perf_counter()
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
@@ -803,13 +817,12 @@ class LMCacheEngine:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
-        onload_time = retrieve_stats.time_to_retrieve()
-
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
             retrieve_stats,
             retrieved_tokens,
         )
+        onload_time = retrieve_stats.time_to_retrieve()
         # The retrieved may be larger than the need_to_load
         # Example (page_size=16, chunk_size=256):
         #
@@ -932,14 +945,8 @@ class LMCacheEngine:
                 location=location,
             )
 
-            assert isinstance(
-                self.gpu_connector,
-                (
-                    VLLMPagedMemLayerwiseGPUConnector,
-                    VLLMBufferLayerwiseGPUConnector,
-                    SGLangLayerwiseGPUConnector,
-                ),
-            )
+            assert_layerwise_gpu_connector(self.gpu_connector)
+
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
@@ -1803,7 +1810,7 @@ class LMCacheEngine:
 class LMCacheEngineBuilder:
     _instances: Dict[str, LMCacheEngine] = {}
     _cfgs: Dict[str, LMCacheEngineConfig] = {}
-    _metadatas: Dict[str, LMCacheEngineMetadata] = {}
+    _metadatas: Dict[str, LMCacheMetadata] = {}
     _stat_loggers: Dict[str, LMCacheStatsLogger] = {}
 
     # TODO(Jiayi): Please remove this helper function in the future.
@@ -1811,7 +1818,7 @@ class LMCacheEngineBuilder:
     @staticmethod
     def _Create_memory_allocator(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> MemoryAllocatorInterface:
         # NOTE: should remove this function after fixing the unit tests:
@@ -1886,7 +1893,7 @@ class LMCacheEngineBuilder:
     @staticmethod
     def _Create_token_database(
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ) -> TokenDatabase:
         if config.enable_blending:
             return SegmentTokenDatabase(config, metadata)
@@ -1897,7 +1904,7 @@ class LMCacheEngineBuilder:
         cls,
         instance_id: str,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
