@@ -1,4 +1,5 @@
 local_cpu: False
+save_unfull_chunk: true  # Don't discard partial chunks (< 256 tokens)
 
 enable_pd: True
 transfer_channel: "nixl"
