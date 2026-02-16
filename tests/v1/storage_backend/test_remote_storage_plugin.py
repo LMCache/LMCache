@@ -29,7 +29,7 @@ from lmcache.v1.storage_backend.connector import (
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 
 
-class MockRemoteConnector(RemoteConnector):
+class MockTestRemoteConnector(RemoteConnector):
     """
     A mock remote connector for testing the remote storage plugin functionality.
     This connector tracks method calls for verification.
@@ -70,20 +70,17 @@ class MockRemoteConnector(RemoteConnector):
         self.call_history.append("close")
 
     def __repr__(self) -> str:
-        return "MockRemoteConnector"
+        return "MockTestRemoteConnector"
 
 
-class MockConnectorAdapter(ConnectorAdapter):
+class MockTestConnectorAdapter(ConnectorAdapter):
     """
     A mock connector adapter for testing the remote storage functionality.
-    This adapter extends ConnectorAdapter and creates MockRemoteConnector instances.
+    This adapter extends ConnectorAdapter and creates MockTestRemoteConnector instances.
 
     This adapter uses instance-level storage for call history and connector storage
     to enable proper testing of dynamically loaded connector adapters.
     """
-
-    # Class variable to track created connectors for testing
-    created_connectors: List[MockRemoteConnector] = []
 
     def __init__(self) -> None:
         super().__init__("mockplugin://")
@@ -92,8 +89,7 @@ class MockConnectorAdapter(ConnectorAdapter):
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         """Create a mock remote connector."""
         self.call_history.append(f"create_connector:{context.url}")
-        connector = MockRemoteConnector(context.config, context.metadata)
-        MockConnectorAdapter.created_connectors.append(connector)
+        connector = MockTestRemoteConnector(context.config, context.metadata)
         return connector
 
 
@@ -110,9 +106,9 @@ class NotAConnectorAdapter:
 # Module-level constants for connector plugin configuration
 MOCK_CONNECTOR_EXTRA_CONFIG = {
     "remote_storage_plugin.mock_connector.module_path": (
-        "tests.v1.storage_backend.test_connector_plugin"
+        "tests.v1.storage_backend.test_remote_storage_plugin"
     ),
-    "remote_storage_plugin.mock_connector.class_name": "MockConnectorAdapter",
+    "remote_storage_plugin.mock_connector.class_name": "MockTestConnectorAdapter",
 }
 MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS = ["mock_connector"]
 
@@ -126,13 +122,38 @@ def create_test_config(
         chunk_size=256,
         local_cpu=True,
         max_local_cpu_size=0.1,
-        lmcache_instance_id="test_connector_plugin_instance",
+        lmcache_instance_id="test_remote_storage_plugin_instance",
     )
     if extra_config:
         config.extra_config = extra_config
     if remote_storage_plugins:
         config.remote_storage_plugins = remote_storage_plugins
     return config
+
+
+def isinstance_mock_adapter(x) -> bool:
+    """Tests MockTestConnectorAdapter as isinstance() not identifying the child class"""
+    return (
+        isinstance(x, ConnectorAdapter)
+        and x.__class__.__name__ == "MockTestConnectorAdapter"
+    )
+
+
+def isinstance_mock_connector(x) -> bool:
+    """Tests MockTestRemoteConnector as isinstance() not identifying the child class"""
+    return (
+        isinstance(x, RemoteConnector)
+        and x.__class__.__name__ == "MockTestRemoteConnector"
+    )
+
+
+def isinstance_mock_instrumented_connector(x) -> bool:
+    """Tests InstrumentedRemoteConnector as isinstance() not identifying the child
+    class"""
+    return (
+        isinstance(x, RemoteConnector)
+        and x.__class__.__name__ == "InstrumentedRemoteConnector"
+    )
 
 
 class TestConnectorPluginLauncher:
@@ -145,14 +166,7 @@ class TestConnectorPluginLauncher:
         yield loop
         loop.close()
 
-    @pytest.fixture(autouse=True)
-    def clear_created_connectors(self):
-        """Clear the created connectors list before each test."""
-        MockConnectorAdapter.created_connectors.clear()
-        yield
-        MockConnectorAdapter.created_connectors.clear()
-
-    def test_connector_plugin_adapter_is_loaded(self, async_loop):
+    def test_remote_storage_plugin_adapter_is_loaded(self, async_loop):
         """
         Test that a connector adapter plugin is properly loaded via ConnectorManager.
         """
@@ -171,11 +185,9 @@ class TestConnectorPluginLauncher:
         )
 
         # Verify the mock adapter is loaded
-        mock_adapters = [
-            a for a in manager.adapters if isinstance(a, MockConnectorAdapter)
-        ]
+        mock_adapters = [a for a in manager.adapters if isinstance_mock_adapter(a)]
         assert len(mock_adapters) == 1, (
-            f"Expected 1 MockConnectorAdapter, got: {len(mock_adapters)}"
+            f"Expected 1 MockTestConnectorAdapter, got: {len(mock_adapters)}"
         )
 
         # Verify the adapter can parse the URL
@@ -184,7 +196,7 @@ class TestConnectorPluginLauncher:
             "Expected adapter to be able to parse 'mockplugin://' URLs"
         )
 
-    def test_connector_plugin_creates_connector(self, async_loop):
+    def test_remote_storage_plugin_creates_connector(self, async_loop):
         """
         Test that ConnectorManager creates a connector using the plugin adapter.
         """
@@ -193,9 +205,11 @@ class TestConnectorPluginLauncher:
             remote_storage_plugins=MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS,
         )
 
+        url = "mockplugin://localhost:1234"
+
         # Create ConnectorManager and get the connector
         manager = ConnectorManager(
-            url="mockplugin://localhost:1234",
+            url=url,
             loop=async_loop,
             local_cpu_backend=None,
             config=config,
@@ -206,12 +220,11 @@ class TestConnectorPluginLauncher:
 
         # Verify a connector was created
         assert connector is not None, "Expected a connector to be created"
-        assert len(MockConnectorAdapter.created_connectors) == 1, (
-            f"Expected 1 connector to be created, "
-            f"got: {len(MockConnectorAdapter.created_connectors)}"
+        assert isinstance_mock_connector(connector), (
+            "Expected a MockTestRemoteConnector connector to be created"
         )
 
-    def test_connector_plugin_via_create_connector_function(self, async_loop):
+    def test_remote_storage_plugin_via_create_connector_function(self, async_loop):
         """
         Test that CreateConnector function properly loads and uses connector plugins.
         """
@@ -231,12 +244,13 @@ class TestConnectorPluginLauncher:
 
         # Verify a connector was created (wrapped in InstrumentedRemoteConnector)
         assert connector is not None, "Expected a connector to be created"
-        assert len(MockConnectorAdapter.created_connectors) == 1, (
-            f"Expected 1 connector to be created, "
-            f"got: {len(MockConnectorAdapter.created_connectors)}"
+        assert isinstance_mock_instrumented_connector(connector), (
+            "Expected a InstrumentedRemoteConnector connector to be created"
         )
 
-    def test_connector_plugin_without_remote_storage_plugins_config(self, async_loop):
+    def test_remote_storage_plugin_without_remote_storage_plugins_config(
+        self, async_loop
+    ):
         """
         Test that no connector plugin is loaded when remote_storage_plugins
         is not configured.
@@ -255,15 +269,13 @@ class TestConnectorPluginLauncher:
             metadata=None,
         )
 
-        # Verify no MockConnectorAdapter is loaded
-        mock_adapters = [
-            a for a in manager.adapters if isinstance(a, MockConnectorAdapter)
-        ]
+        # Verify no MockTestConnectorAdapter is loaded
+        mock_adapters = [a for a in manager.adapters if isinstance_mock_adapter(a)]
         assert len(mock_adapters) == 0, (
-            f"Expected 0 MockConnectorAdapter, got: {len(mock_adapters)}"
+            f"Expected 0 MockTestConnectorAdapter, got: {len(mock_adapters)}"
         )
 
-    def test_connector_plugin_with_invalid_module_path(self, async_loop):
+    def test_remote_storage_plugin_with_invalid_module_path(self, async_loop):
         """
         Test that invalid module path is handled gracefully.
         """
@@ -294,13 +306,13 @@ class TestConnectorPluginLauncher:
             f"Expected 'NonexistentClass' not in adapters, got: {adapter_class_names}"
         )
 
-    def test_connector_plugin_with_invalid_class_name(self, async_loop):
+    def test_remote_storage_plugin_with_invalid_class_name(self, async_loop):
         """
         Test that invalid class name is handled gracefully.
         """
         extra_config = {
             "remote_storage_plugin.invalid_connector.module_path": (
-                "tests.v1.storage_backend.test_connector_plugin"
+                "tests.v1.storage_backend.test_remote_storage_plugin"
             ),
             "remote_storage_plugin.invalid_connector.class_name": "NonexistentClass",
         }
@@ -326,13 +338,13 @@ class TestConnectorPluginLauncher:
             f"Expected 'NonexistentClass' not in adapters, got: {adapter_class_names}"
         )
 
-    def test_connector_plugin_with_non_connector_adapter_class(self, async_loop):
+    def test_remote_storage_plugin_with_non_connector_adapter_class(self, async_loop):
         """
         Test that classes not implementing ConnectorAdapter are rejected.
         """
         extra_config = {
             "remote_storage_plugin.not_adapter.module_path": (
-                "tests.v1.storage_backend.test_connector_plugin"
+                "tests.v1.storage_backend.test_remote_storage_plugin"
             ),
             "remote_storage_plugin.not_adapter.class_name": "NotAConnectorAdapter",
         }
@@ -359,13 +371,13 @@ class TestConnectorPluginLauncher:
             f"got: {adapter_class_names}"
         )
 
-    def test_connector_plugin_with_missing_module_path(self, async_loop):
+    def test_remote_storage_plugin_with_missing_module_path(self, async_loop):
         """
         Test that missing module_path in extra_config is handled gracefully.
         """
         extra_config = {
             # Missing module_path
-            "remote_storage_plugin.missing_path.class_name": "MockConnectorAdapter",
+            "remote_storage_plugin.missing_path.class_name": "MockTestConnectorAdapter",
         }
         remote_storage_plugins = ["missing_path"]
 
@@ -384,20 +396,18 @@ class TestConnectorPluginLauncher:
         )
 
         # Adapter with missing module_path should not be loaded
-        mock_adapters = [
-            a for a in manager.adapters if isinstance(a, MockConnectorAdapter)
-        ]
+        mock_adapters = [a for a in manager.adapters if isinstance_mock_adapter(a)]
         assert len(mock_adapters) == 0, (
-            f"Expected 0 MockConnectorAdapter, got: {len(mock_adapters)}"
+            f"Expected 0 MockTestConnectorAdapter, got: {len(mock_adapters)}"
         )
 
-    def test_connector_plugin_with_missing_class_name(self, async_loop):
+    def test_remote_storage_plugin_with_missing_class_name(self, async_loop):
         """
         Test that missing class_name in extra_config is handled gracefully.
         """
         extra_config = {
             "remote_storage_plugin.missing_class.module_path": (
-                "tests.v1.storage_backend.test_connector_plugin"
+                "tests.v1.storage_backend.test_remote_storage_plugin"
             ),
             # Missing class_name
         }
@@ -418,14 +428,12 @@ class TestConnectorPluginLauncher:
         )
 
         # Adapter with missing class_name should not be loaded
-        mock_adapters = [
-            a for a in manager.adapters if isinstance(a, MockConnectorAdapter)
-        ]
+        mock_adapters = [a for a in manager.adapters if isinstance_mock_adapter(a)]
         assert len(mock_adapters) == 0, (
-            f"Expected 0 MockConnectorAdapter, got: {len(mock_adapters)}"
+            f"Expected 0 MockTestConnectorAdapter, got: {len(mock_adapters)}"
         )
 
-    def test_connector_plugin_with_missing_extra_config(self, async_loop):
+    def test_remote_storage_plugin_with_missing_extra_config(self, async_loop):
         """
         Test that missing extra_config is handled gracefully.
         """
@@ -444,14 +452,12 @@ class TestConnectorPluginLauncher:
         )
 
         # No plugin adapter should be loaded when extra_config is None
-        mock_adapters = [
-            a for a in manager.adapters if isinstance(a, MockConnectorAdapter)
-        ]
+        mock_adapters = [a for a in manager.adapters if isinstance_mock_adapter(a)]
         assert len(mock_adapters) == 0, (
-            f"Expected 0 MockConnectorAdapter, got: {len(mock_adapters)}"
+            f"Expected 0 MockTestConnectorAdapter, got: {len(mock_adapters)}"
         )
 
-    def test_connector_plugin_with_none_config(self, async_loop):
+    def test_remote_storage_plugin_with_none_config(self, async_loop):
         """
         Test that None config is handled gracefully.
         """
@@ -465,26 +471,24 @@ class TestConnectorPluginLauncher:
         )
 
         # Only builtin adapters should be loaded
-        mock_adapters = [
-            a for a in manager.adapters if isinstance(a, MockConnectorAdapter)
-        ]
+        mock_adapters = [a for a in manager.adapters if isinstance_mock_adapter(a)]
         assert len(mock_adapters) == 0, (
-            f"Expected 0 MockConnectorAdapter, got: {len(mock_adapters)}"
+            f"Expected 0 MockTestConnectorAdapter, got: {len(mock_adapters)}"
         )
 
-    def test_connector_plugin_multiple_plugins(self, async_loop):
+    def test_remote_storage_plugin_multiple_plugins(self, async_loop):
         """
         Test that multiple connector plugins can be loaded simultaneously.
         """
         extra_config = {
             "remote_storage_plugin.mock_connector_1.module_path": (
-                "tests.v1.storage_backend.test_connector_plugin"
+                "tests.v1.storage_backend.test_remote_storage_plugin"
             ),
-            "remote_storage_plugin.mock_connector_1.class_name": "MockConnectorAdapter",
+            "remote_storage_plugin.mock_connector_1.class_name": "MockTestConnectorAdapter",  # noqa: E501
             "remote_storage_plugin.mock_connector_2.module_path": (
-                "tests.v1.storage_backend.test_connector_plugin"
+                "tests.v1.storage_backend.test_remote_storage_plugin"
             ),
-            "remote_storage_plugin.mock_connector_2.class_name": "MockConnectorAdapter",
+            "remote_storage_plugin.mock_connector_2.class_name": "MockTestConnectorAdapter",  # noqa: E501
         }
         remote_storage_plugins = ["mock_connector_1", "mock_connector_2"]
 
@@ -502,14 +506,12 @@ class TestConnectorPluginLauncher:
         )
 
         # Verify both adapters are loaded
-        mock_adapters = [
-            a for a in manager.adapters if isinstance(a, MockConnectorAdapter)
-        ]
+        mock_adapters = [a for a in manager.adapters if isinstance_mock_adapter(a)]
         assert len(mock_adapters) == 2, (
-            f"Expected 2 MockConnectorAdapter instances, got: {len(mock_adapters)}"
+            f"Expected 2 MockTestConnectorAdapter instances, got: {len(mock_adapters)}"
         )
 
-    def test_connector_plugin_no_matching_url_raises_error(self, async_loop):
+    def test_remote_storage_plugin_no_matching_url_raises_error(self, async_loop):
         """
         Test that ValueError is raised when no adapter matches the URL.
         """
@@ -518,6 +520,7 @@ class TestConnectorPluginLauncher:
             remote_storage_plugins=MOCK_CONNECTOR_REMOTE_STORAGE_PLUGINS,
         )
 
+        # Create ConnectorManager and get the connector
         manager = ConnectorManager(
             url="unknownscheme://localhost:1234",
             loop=async_loop,

@@ -224,6 +224,7 @@ class ConnectorManager:
             logger.warning(
                 "Configuration not available to parse remote connector adapters."
             )
+            return
 
         # Get the list of allowed remote connector adapters if configured
         remote_storage_plugins = (
