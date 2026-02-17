@@ -89,11 +89,9 @@ class LMCacheLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        lookup_id_buf = lookup_id.encode("utf-8")
         request_configs_str = ""
         if request_configs is not None and len(request_configs) != 0:
             request_configs_str = json.dumps(request_configs)
-        request_configs_buf = request_configs_str.encode("utf-8")
 
         # NOTE(Jiayi): We cannot only send hashes when
         # blending enabled because the blender need the
@@ -118,14 +116,14 @@ class LMCacheLookupClient(LookupClientInterface):
             msg_buf = [
                 hashes,
                 offsets,
-                lookup_id_buf,
-                request_configs_buf,
+                lookup_id,
+                request_configs_str,
             ]
         else:
             msg_buf = [
                 token_ids,
-                lookup_id_buf,
-                request_configs_buf,
+                lookup_id,
+                request_configs_str,
             ]
 
         responses = self.transport.send_and_recv_all(msg_buf)
@@ -187,36 +185,76 @@ class LMCacheLookupServer:
 
         def process_request():
             while self.running:
-                result = self.transport.recv_request()
-                if result is None:
-                    continue
+                try:
+                    result = self.transport.recv_request()
+                    if result is None:
+                        continue
 
-                identity, data_frames = result
-                lookup_id = data_frames[-2].decode("utf-8")
-                request_configs_str = data_frames[-1].decode("utf-8")
-                request_configs = (
-                    json.loads(request_configs_str) if request_configs_str else None
-                )
-                if not self.enable_blending:
-                    hashes = data_frames[0]
-                    offsets = data_frames[1]
-                    lookup_result = self.lmcache_engine.lookup(
-                        hashes=hashes,
-                        offsets=offsets,
-                        lookup_id=lookup_id,
-                        pin=True,
-                        request_configs=request_configs,
+                    identity, data_frames = result
+
+                    # Validate frame structure
+                    if len(data_frames) < 3:
+                        logger.warning("Malformed request received: not enough frames.")
+                        continue
+
+                    # Validate and decode lookup_id
+                    lookup_id_bytes = data_frames[-2]
+                    request_configs_bytes = data_frames[-1]
+
+                    if not isinstance(lookup_id_bytes, (bytes, str)):
+                        logger.warning(
+                            "Malformed request received: lookup_id is not bytes or str."
+                        )
+                        continue
+
+                    if not isinstance(request_configs_bytes, (bytes, str)):
+                        logger.warning(
+                            "Malformed request received: "
+                            "request_configs is not bytes or str."
+                        )
+                        continue
+
+                    # Decode to strings
+                    if isinstance(lookup_id_bytes, bytes):
+                        lookup_id = lookup_id_bytes.decode("utf-8")
+                    else:
+                        lookup_id = lookup_id_bytes
+
+                    if isinstance(request_configs_bytes, bytes):
+                        request_configs_str = request_configs_bytes.decode("utf-8")
+                    else:
+                        request_configs_str = request_configs_bytes
+
+                    request_configs = (
+                        json.loads(request_configs_str) if request_configs_str else None
                     )
-                else:
-                    tokens = data_frames[0]
-                    lookup_result = self.lmcache_engine.lookup(
-                        tokens=tokens,
-                        lookup_id=lookup_id,
-                        pin=True,
-                        request_configs=request_configs,
-                    )
-                response = lookup_result.to_bytes(4, "big")
-                self.transport.send_response(identity, response)
+
+                    if not self.enable_blending:
+                        hashes = data_frames[0]
+                        offsets = data_frames[1]
+                        lookup_result = self.lmcache_engine.lookup(
+                            hashes=hashes,
+                            offsets=offsets,
+                            lookup_id=lookup_id,
+                            pin=True,
+                            request_configs=request_configs,
+                        )
+                    else:
+                        tokens = data_frames[0]
+                        lookup_result = self.lmcache_engine.lookup(
+                            tokens=tokens,
+                            lookup_id=lookup_id,
+                            pin=True,
+                            request_configs=request_configs,
+                        )
+                    response = lookup_result.to_bytes(4, "big")
+                    self.transport.send_response(identity, response)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Error decoding JSON in lookup request: {e}")
+                except UnicodeDecodeError as e:
+                    logger.error(f"Error decoding UTF-8 in lookup request: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing lookup request: {e}")
 
         logger.info("lmcache lookup server started")
         self.thread = threading.Thread(

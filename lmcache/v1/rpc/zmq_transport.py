@@ -195,7 +195,7 @@ class ZmqRouterServerTransport(RpcServerTransport):
         identity = frames[0].bytes
         # frames[1] is the empty delimiter from REQ socket
         raw_frames = frames[2:]
-        if len(raw_frames) < 2:
+        if len(raw_frames) < 3:
             logger.warning("Malformed request received: not enough frames.")
             return None
         data_frames = [self.decoder.decode(f) for f in raw_frames]
