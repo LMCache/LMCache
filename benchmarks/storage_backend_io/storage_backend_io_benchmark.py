@@ -193,23 +193,16 @@ def _bench_local_disk(
         for s in slices:
             ex.submit(submit_slice, s[0], s[1])
 
-    # In some environments a completion callback may be dropped under heavy
-    # load even though writes are persisted. Keep the benchmark bounded and use
-    # a file-count fallback so we do not hang forever.
-    timeout_sec = 300.0
-    deadline = start + timeout_sec
+    # Keep a floor for normal runs but scale for large-op runs.
+    # This avoids premature timeout for long single-shot benchmarks.
+    timeout_sec = max(300.0, float(num_ops) / 100.0)
     while not done.wait(timeout=1.0):
         if completed >= num_ops:
             break
-        if time.perf_counter() >= deadline:
-            file_count = 0
-            for _root, _dirs, files in os.walk(local_disk_dir):
-                file_count += len(files)
-            if file_count >= num_ops:
-                break
+        if (time.perf_counter() - start) >= timeout_sec:
             raise TimeoutError(
                 "LocalDisk benchmark timed out: "
-                f"completed={completed}, files={file_count}, expected={num_ops}"
+                f"completed={completed}, expected={num_ops}"
             )
     elapsed = time.perf_counter() - start
 
@@ -292,7 +285,8 @@ def _bench_rust_raw_block(
     )
 
     keys = _make_keys(num_ops)
-    objs = _make_memory_objs(num_ops, False, alignment, [])
+    keepalive: list[torch.Tensor] = []
+    objs = _make_memory_objs(num_ops, use_odirect, alignment, keepalive)
 
     futures = []
     fut_lock = threading.Lock()
