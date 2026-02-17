@@ -16,7 +16,32 @@ pytest.importorskip(
 )
 
 # First Party
-import lmcache.c_ops as lmc_ops
+if torch.cuda.is_available():
+    try:
+        # First Party
+        import lmcache.c_ops as lmc_ops
+    except ImportError:
+        lmc_ops = None
+else:
+    lmc_ops = None
+
+# Mock c_ops when not available
+if lmc_ops is None:
+
+    class MockGPUKVFormat:
+        NL_X_TWO_NB_BS_NH_HS = 0
+        NL_X_NB_TWO_BS_NH_HS = 1
+        NL_X_NB_BS_HS = 2
+
+    class MockTransferDirection:
+        H2D = 0
+        D2H = 1
+
+    class MockCOps:
+        GPUKVFormat = MockGPUKVFormat
+        TransferDirection = MockTransferDirection
+
+    lmc_ops = MockCOps()
 
 # Local
 from .utils import (
@@ -24,7 +49,6 @@ from .utils import (
     check_paged_kv_cache_equal,
     generate_kv_cache_paged,
     generate_kv_cache_paged_list_tensors,
-    generate_mla_kv_cache_paged_list_tensors,
 )
 
 
@@ -71,6 +95,7 @@ def test_extract_and_load_back(num_tokens):
     block_size = 16
     num_heads = 8
     head_size = 128
+    num_layers = 32
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
 
@@ -87,18 +112,20 @@ def test_extract_and_load_back(num_tokens):
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
-    for layer_id in range(32):
+    for layer_id in range(num_layers):
         key_cache = kv_cache[layer_id][0].reshape(-1, num_heads, head_size)
         value_cache = kv_cache[layer_id][1].reshape(-1, num_heads, head_size)
         kv_tuple_list.append((key_cache[slot_mapping], value_cache[slot_mapping]))
     kv_blob = _tuple_kv_to_blob(kv_tuple_list)
     kv_chunked = _slice_kv_at(0, kv_blob, chunk_size)
     for chunk_id, chunk in enumerate(kv_chunked):
-        mem_obj_shape = torch.Size([2, 32, chunk.shape[2], num_heads * head_size])
+        mem_obj_shape = torch.Size(
+            [2, num_layers, chunk.shape[2], num_heads * head_size]
+        )
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         chunk = chunk.contiguous()
-        for layer_id in range(32):
+        for layer_id in range(num_layers):
             memory_obj_old.tensor[0, layer_id].copy_(
                 chunk[layer_id, 0].reshape(-1, 1024)
             )
@@ -119,11 +146,11 @@ def test_extract_and_load_back(num_tokens):
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         mem_obj_shape = torch.Size(
-            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+            [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
         )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
-        for layer_id in range(32):
+        for layer_id in range(num_layers):
             lmc_ops.load_and_reshape_flash(
                 memory_obj_new.tensor,
                 kv_cache[layer_id][0],
@@ -148,7 +175,7 @@ def test_extract_and_load_back(num_tokens):
     # New load back (zero-copy kernels)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
-        for layer_id in range(32):
+        for layer_id in range(num_layers):
             lmc_ops.reshape_and_cache_back_flash(
                 memory_obj_new.tensor,
                 kv_cache_new[layer_id][0],
@@ -166,7 +193,14 @@ def test_extract_and_load_back(num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-def test_multi_layer_kernel(num_tokens):
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
+    ],
+)
+def test_multi_layer_kernel(num_tokens, gpu_kv_format):
     device = "cuda"
 
     num_blocks = 1000
@@ -174,13 +208,22 @@ def test_multi_layer_kernel(num_tokens):
     num_heads = 8
     head_size = 128
     chunk_size = 256
+    num_layers = 32
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, block_size, dtype, gpu_kv_format=gpu_kv_format
     )
+    # old deprecated kernels only handle vllm non-MLA flash attention format
+    if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+        kv_cache_force_old = [
+            kv_layer.clone().permute(1, 0, 2, 3, 4).contiguous()
+            for kv_layer in kv_cache
+        ]
+    else:
+        kv_cache_force_old = kv_cache
     page_buffer_size = num_blocks * block_size
 
-    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = random.sample(range(0, page_buffer_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
@@ -194,15 +237,15 @@ def test_multi_layer_kernel(num_tokens):
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         mem_obj_shape = torch.Size(
-            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+            [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
         )
 
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
-        for layer_id in range(32):
+        for layer_id in range(num_layers):
             lmc_ops.load_and_reshape_flash(
                 memory_obj_old.tensor,
-                kv_cache[layer_id][0],
-                kv_cache[layer_id][1],
+                kv_cache_force_old[layer_id][0],
+                kv_cache_force_old[layer_id][1],
                 slot_mapping_temp,
                 layer_id,
             )
@@ -215,9 +258,9 @@ def test_multi_layer_kernel(num_tokens):
 
     # New extract with multi layer kernel
     kv_cache_pointers = torch.empty(
-        32, dtype=torch.int64, device="cpu", pin_memory=True
+        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
-    for i in range(32):
+    for i in range(num_layers):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
@@ -227,7 +270,7 @@ def test_multi_layer_kernel(num_tokens):
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         mem_obj_shape = torch.Size(
-            [2, 32, len(slot_mapping_temp), num_heads * head_size]
+            [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
         )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
@@ -237,8 +280,9 @@ def test_multi_layer_kernel(num_tokens):
             slot_mapping_temp,
             kv_cache[0].device,
             page_buffer_size,
-            True,
-            False,
+            lmc_ops.TransferDirection.D2H,
+            gpu_kv_format,
+            block_size,
         )
         memory_obj_new_list.append(memory_obj_new)
 
@@ -255,13 +299,13 @@ def test_multi_layer_kernel(num_tokens):
 
     # Generate new paged kv_cache
     kv_cache_new = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, block_size, dtype, gpu_kv_format=gpu_kv_format
     )
 
     kv_cache_pointers_new = torch.empty(
-        32, dtype=torch.int64, device="cpu", pin_memory=True
+        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
-    for i in range(32):
+    for i in range(num_layers):
         kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -272,14 +316,16 @@ def test_multi_layer_kernel(num_tokens):
             slot_mapping_temp,
             kv_cache_new[0].device,
             page_buffer_size,
-            False,
-            False,
+            lmc_ops.TransferDirection.H2D,
+            gpu_kv_format,
+            block_size,
         )
 
     check_paged_kv_cache_equal(
         kv_cache,
         kv_cache_new,
         slot_mapping,
+        gpu_kv_format=gpu_kv_format,
     )
 
     mem_allocator.close()
@@ -287,7 +333,11 @@ def test_multi_layer_kernel(num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 @pytest.mark.parametrize("head_size", [576, 66])  # Use 68 for dsv32 (132x int8)
-def test_multi_layer_kernel_use_mla(num_tokens, head_size):
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [lmc_ops.GPUKVFormat.NL_X_NB_BS_HS],  # vllm MLA
+)
+def test_multi_layer_kernel_use_mla(num_tokens, head_size, gpu_kv_format):
     device = "cuda"
 
     num_blocks = 1000
@@ -295,8 +345,14 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
     chunk_size = 256
     dtype = torch.bfloat16
     num_layers = 32
-    kv_cache = generate_mla_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype, num_layers, head_size
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers,
+        head_size,
+        gpu_kv_format=gpu_kv_format,
     )
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -355,8 +411,9 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             slot_mapping_temp,
             kv_cache[0].device,
             0,
-            True,
-            True,
+            lmc_ops.TransferDirection.D2H,
+            gpu_kv_format,
+            block_size,
         )
         memory_obj_new_list.append(memory_obj_new)
 
@@ -378,8 +435,14 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
         assert (left_kv[:, :, :] == right_kv[:, :, :]).all()
 
     # Generate new paged kv_cache
-    kv_cache_new = generate_mla_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype, num_layers, head_size
+    kv_cache_new = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers,
+        head_size,
+        gpu_kv_format=gpu_kv_format,
     )
 
     kv_cache_pointers_new = torch.empty(
@@ -396,8 +459,9 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
             slot_mapping_temp,
             kv_cache_new[0].device,
             0,
-            False,
-            True,
+            lmc_ops.TransferDirection.H2D,
+            gpu_kv_format,
+            block_size,
         )
 
     for left_kv, right_kv in zip(kv_cache, kv_cache_new, strict=False):
@@ -418,7 +482,14 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 @pytest.mark.parametrize("token_major", [True, False])
-def test_single_layer_kernel(num_tokens, token_major):
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
+    ],  # vllm non-MLA flash infer
+)
+def test_single_layer_kernel(num_tokens, token_major, gpu_kv_format):
     device = "cuda"
 
     num_layers = 32
@@ -429,10 +500,10 @@ def test_single_layer_kernel(num_tokens, token_major):
     hidden_dim_size = num_heads * head_size
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, block_size, dtype, gpu_kv_format=gpu_kv_format
     )
     kv_cache_new = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, block_size, dtype, gpu_kv_format=gpu_kv_format
     )
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
@@ -451,25 +522,24 @@ def test_single_layer_kernel(num_tokens, token_major):
             tmp_gpu_buffer,
             kv_cache[layer_id],
             slot_mapping,
-            True,
+            lmc_ops.TransferDirection.D2H,
+            gpu_kv_format,
             token_major,
-            True,
-            False,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
             kv_cache_new[layer_id],
             slot_mapping,
-            False,
+            lmc_ops.TransferDirection.H2D,
+            gpu_kv_format,
             token_major,
-            True,
-            False,
         )
 
     check_paged_kv_cache_equal(
         kv_cache,
         kv_cache_new,
         slot_mapping,
+        gpu_kv_format=gpu_kv_format,
     )
 
 

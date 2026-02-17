@@ -42,7 +42,10 @@ from lmcache.v1.multiprocess.protocol import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-import lmcache.c_ops as lmc_ops
+
+if torch.cuda.is_available():
+    # First Party
+    import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -239,8 +242,9 @@ class MPCacheEngine:
                         slot_mapping,
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
-                        True,
-                        gpu_context.is_mla,
+                        lmc_ops.TransferDirection.D2H,
+                        gpu_context.gpu_kv_format_,
+                        gpu_context.block_size,
                     )
 
                     assert memory_obj.tensor is not None
@@ -319,8 +323,9 @@ class MPCacheEngine:
                         slot_mapping,
                         gpu_context.device,
                         gpu_context.block_size * gpu_context.num_blocks,
-                        False,
-                        gpu_context.is_mla,
+                        lmc_ops.TransferDirection.H2D,
+                        gpu_context.gpu_kv_format_,
+                        gpu_context.block_size,
                     )
 
         with (
