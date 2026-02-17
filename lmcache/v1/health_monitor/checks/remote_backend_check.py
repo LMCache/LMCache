@@ -132,6 +132,12 @@ class RemoteBackendHealthCheck(HealthCheck):
         """
         return self._backend_name
 
+    def _get_ping_timeout(self) -> float:
+        """Get the ping timeout from the backend config."""
+        return self.backend.config.get_extra_config_value(
+            PING_TIMEOUT_CONFIG_KEY, DEFAULT_PING_TIMEOUT
+        )
+
     def _try_reinitialize_connection(self) -> bool:
         """
         Try to reinitialize the connection if connector is None.
@@ -224,10 +230,7 @@ class RemoteBackendHealthCheck(HealthCheck):
             future = asyncio.run_coroutine_threadsafe(
                 connector.ping(), self.backend.loop
             )
-            ping_timeout = self.backend.config.get_extra_config_value(
-                PING_TIMEOUT_CONFIG_KEY, DEFAULT_PING_TIMEOUT
-            )
-            error_code = future.result(timeout=ping_timeout)
+            error_code = future.result(timeout=self._get_ping_timeout())
             latency = (time.perf_counter() - start_time) * 1000
 
             # Record ping latency
@@ -284,10 +287,7 @@ class RemoteBackendHealthCheck(HealthCheck):
             # put
             put_obj = self.backend.local_cpu_backend.allocate(shapes, dtypes, fmt)
             future = self.backend.submit_put_task(key, put_obj)
-            ping_timeout = self.backend.config.get_extra_config_value(
-                PING_TIMEOUT_CONFIG_KEY, DEFAULT_PING_TIMEOUT
-            )
-            future.result(timeout=ping_timeout)
+            future.result(timeout=self._get_ping_timeout())
             # get
             get_obj = self.backend.get_blocking(key)
             yield put_obj, get_obj
