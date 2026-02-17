@@ -74,14 +74,14 @@ class TestCheckModeRegistry:
         """load_modes should not crash on ImportError."""
         reg = CheckModeRegistry()
 
+        def raiser(name, package=None):
+            raise ImportError("boom")
+
         monkeypatch.setattr(
             "os.listdir",
             lambda _: ["check_mode_bad.py"],
         )
-        monkeypatch.setattr(
-            "importlib.import_module",
-            lambda name, package=None: (_ for _ in ()).throw(ImportError("boom")),
-        )
+        monkeypatch.setattr("importlib.import_module", raiser)
 
         reg.load_modes()
         assert reg.loaded is True
