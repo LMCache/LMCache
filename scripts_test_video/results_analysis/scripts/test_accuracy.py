@@ -129,7 +129,11 @@ def compute_metrics_from_csv(csv_path: str):
 
 win=40
 stride=20
-category="Burglary"
-target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/with_codec/{category}"
-process_video_jsons(target_folder, f"{category}_accuracy_analysis_win{win}_stride{stride}.csv")
-compute_metrics_from_csv(f"{category}_accuracy_analysis_win{win}_stride{stride}.csv")
+gop=2
+categorys=["Abuse", "Arson", "Arrest", "Assault", "Burglary"]
+categorys=["Explosion", "Fighting"]
+for category in categorys:
+    print(f"category is {category}")
+    target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/with_codec_gop{gop}/{category}"
+    process_video_jsons(target_folder, f"{category}_accuracy_analysis_win{win}_stride{stride}.csv")
+    compute_metrics_from_csv(f"{category}_accuracy_analysis_win{win}_stride{stride}.csv")
