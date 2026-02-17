@@ -15,7 +15,7 @@ This crate provides raw block I/O for LMCache via Rust + PyO3.
 4. Benchmark harness reliability improvements:
    - skip `truncate()` for real block devices (`/dev/...`)
    - unique manifest per run (avoid stale-index reuse)
-   - timeout/fallback for local disk completion waits
+   - timeout guard for local disk completion waits (scales with `num_ops`)
 
 ## Zero-Copy Data Path
 
@@ -35,29 +35,17 @@ RawBlockDevice::pwrite_from_buffer / pread_into
 Block device or file
 ```
 
-## Performance Snapshot (O_DIRECT, 5-run median)
+## How To Compare Performance
 
-From `benchmarks/storage_backend_io/README.md`:
+To compare `local_disk` vs `rust_raw_block` on a real NVMe device:
+- Run `local_disk` on an ext4 mount of the device.
+- Unmount it.
+- Run `rust_raw_block` directly on the raw block device.
 
-### Current vs `origin/dev` (median ops/sec)
+Use the benchmark commands in:
+- `benchmarks/storage_backend_io/README.md`
 
-| Concurrency | local_disk (`origin/dev`) | local_disk (`current`) | Delta | rust_raw_block (`origin/dev`) | rust_raw_block (`current`) | Delta |
-|-------------|----------------------------|-------------------------|-------|-------------------------------|----------------------------|-------|
-| 2           | 1012.60                    | 1017.26                 | +0.46% | 1913.52                       | 2604.94                    | +36.13% |
-| 4           | 783.83                     | 831.70                  | +6.11% | 1659.36                       | 2839.63                    | +71.13% |
-| 8           | 672.70                     | 669.05                  | -0.54% | 1793.30                       | 1792.14                    | -0.06% |
-
-### Current branch: rust vs local_disk (median ops/sec)
-
-| Concurrency | local_disk (`current`) | rust_raw_block (`current`) | Rust vs local_disk |
-|-------------|-------------------------|----------------------------|--------------------|
-| 2           | 1017.26                 | 2604.94                    | +156.08% |
-| 4           | 831.70                  | 2839.63                    | +241.43% |
-| 8           | 669.05                  | 1792.14                    | +167.86% |
-
-Real block-device smoke (`/dev/nvme1n1p2`, current branch, O_DIRECT):
-- local_disk: 2149.71 ops/sec
-- rust_raw_block: 3542.56 ops/sec
+No fixed numbers are included here because results are host/device/workload dependent.
 
 ## Limitations
 

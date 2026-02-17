@@ -32,51 +32,67 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 - Local disk backend uses its internal worker pool; completion is tracked via callbacks.
 - Rust raw block benchmark uses a unique manifest path per run to avoid stale-index reuse between runs.
 
-## Sample Results (2026-02-09, O_DIRECT, 5 runs each)
+## How To Compare On Real NVMe
 
-Method:
-- Compare `current` branch vs `origin/dev`.
-- `num_ops=4096`, `concurrency in {2,4,8}`.
-- `--local-disk-odirect` enabled.
-- `--raw-odirect` enabled.
-- Raw path is a file on `/mnt/local_disk_mount` for apples-to-apples same-filesystem comparison.
-- Table uses median ops/sec across 5 runs.
+Use the same physical device for both tests:
+- local_disk on an ext4 mount
+- rust_raw_block on the raw block device (unmounted)
 
-### Current vs origin/dev (median ops/sec)
-
-| Concurrency | local_disk (`origin/dev`) | local_disk (`current`) | Delta | rust_raw_block (`origin/dev`) | rust_raw_block (`current`) | Delta |
-|-------------|----------------------------|-------------------------|-------|-------------------------------|----------------------------|-------|
-| 2           | 1012.60                    | 1017.26                 | +0.46% | 1913.52                       | 2604.94                    | +36.13% |
-| 4           | 783.83                     | 831.70                  | +6.11% | 1659.36                       | 2839.63                    | +71.13% |
-| 8           | 672.70                     | 669.05                  | -0.54% | 1793.30                       | 1792.14                    | -0.06% |
-
-### Current branch (rust_raw_block vs local_disk, median ops/sec)
-
-| Concurrency | local_disk (`current`) | rust_raw_block (`current`) | Rust vs local_disk |
-|-------------|-------------------------|----------------------------|--------------------|
-| 2           | 1017.26                 | 2604.94                    | +156.08% |
-| 4           | 831.70                  | 2839.63                    | +241.43% |
-| 8           | 669.05                  | 1792.14                    | +167.86% |
-
-Interpretation:
-- LocalDiskBackend stays near baseline; changes are small.
-- RustRawBlockBackend shows clear improvement at low-mid concurrency in this setup.
-- At concurrency 8, branch-to-branch rust throughput is effectively unchanged in this sample.
-
-### Real block-device smoke (current branch only)
-
-Single-run sanity check with raw block device:
-- `num_ops=1024`
+Example parameters:
+- `num_ops=65536`
 - `concurrency=4`
-- Local disk path: `/mnt/local_disk_mount/lmcache_local_disk_bench_smoke` (`--local-disk-odirect`)
-- Rust raw path: `/dev/nvme1n1p2` (`--raw-odirect`)
+- `--local-disk-odirect`
+- `--raw-odirect`
 
-| Backend        | Ops/sec |
-|----------------|---------|
-| local_disk     | 2149.71 |
-| rust_raw_block | 3542.56 |
+### 1) Run local_disk on ext4
 
-> Results are host/device dependent. Re-run on your target hardware and queue-depth profile before concluding production impact.
+```bash
+# WARNING: mkfs will erase the target device.
+sudo mkfs.ext4 -F /dev/nvme1n1
+sudo mkdir -p /mnt/local_disk_mount
+sudo mount -t ext4 /dev/nvme1n1 /mnt/local_disk_mount
+sudo chown "$USER":"$USER" /mnt/local_disk_mount
+
+python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+  --num-ops 65536 \
+  --concurrency 4 \
+  --backend local_disk \
+  --local-disk-dir /mnt/local_disk_mount/lmcache_local_disk_bench \
+  --max-local-disk-gb 120 \
+  --local-disk-odirect \
+  --output-json /tmp/local_disk_ext4.json
+```
+
+### 2) Run rust_raw_block on raw device
+
+```bash
+sudo umount /mnt/local_disk_mount
+
+python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+  --num-ops 65536 \
+  --concurrency 4 \
+  --backend rust_raw_block \
+  --raw-device /dev/nvme1n1 \
+  --raw-odirect \
+  --output-json /tmp/rust_raw_block_raw.json
+```
+
+### 3) Compute comparison
+
+```bash
+python - <<'PY'
+import json
+
+with open("/tmp/local_disk_ext4.json") as f:
+    local = json.load(f)[0]["ops_per_sec"]
+with open("/tmp/rust_raw_block_raw.json") as f:
+    rust = json.load(f)[0]["ops_per_sec"]
+
+print(f"local_disk ops/sec: {local:.2f}")
+print(f"rust_raw_block ops/sec: {rust:.2f}")
+print(f"rust vs local: {(rust / local - 1.0) * 100.0:+.2f}%")
+PY
+```
 
 ## Output
 
