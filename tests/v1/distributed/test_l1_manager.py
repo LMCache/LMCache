@@ -49,16 +49,16 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.multiprocess.distributed.config import (
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
 )
-from lmcache.v1.multiprocess.distributed.error import L1Error
+from lmcache.v1.distributed.error import L1Error
 
 try:
     # First Party
-    from lmcache.v1.multiprocess.distributed.l1_manager import L1Manager
+    from lmcache.v1.distributed.l1_manager import L1Manager
 except ImportError:
     # Skip tests if L1Manager cannot be imported
     pytest.skip(
@@ -146,7 +146,8 @@ def large_layout():
 
 def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: int = 0):
     """Helper to create ObjectKey instances."""
-    return ObjectKey(chunk_hash=chunk_hash, model_name=model_name, kv_rank=kv_rank)
+    hash_bytes = ObjectKey.IntHash2Bytes(chunk_hash)
+    return ObjectKey(chunk_hash=hash_bytes, model_name=model_name, kv_rank=kv_rank)
 
 
 # =============================================================================

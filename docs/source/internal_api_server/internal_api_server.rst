@@ -45,7 +45,41 @@ You can test the server by querying the relevant endpoints.
 
 .. code-block:: bash
 
+    # Get current configuration
     curl http://localhost:7000/conf
+
+    # Update one or more config values (Experimental)
+    curl -X POST http://localhost:7000/conf \
+      -H "Content-Type: application/json" \
+      -d '{"min_retrieve_tokens": 512, "save_decode_cache": true}'
+
+.. warning::
+
+    The ``POST /conf`` feature is currently **experimental**. At present,
+    all configuration keys are mutable at runtime by default (unless
+    explicitly marked as ``"mutable": False`` in
+    ``_CONFIG_DEFINITIONS``). Once the feature is stabilized, the default
+    will be changed to **immutable**.
+
+    Note that updating a configuration only modifies the value in the
+    ``LMCacheEngineConfig`` object. If a component has already read and
+    cached the value elsewhere (e.g., stored in a local variable or
+    another object during initialization), the change will **not** take
+    effect for that component.
+
+The request body should be a JSON object with config name-value pairs.
+Type conversion is handled automatically (e.g., string ``"512"`` will
+be converted to integer ``512`` based on the config definition).
+
+The response contains an ``updated`` field with successfully applied
+values, and an ``errors`` field if any keys failed:
+
+.. code-block:: json
+
+    {
+      "updated": {"min_retrieve_tokens": 512, "save_decode_cache": true},
+      "errors": {"unknown_key": "Unknown config"}
+    }
 
 `/meta` endpoint for metadata:
 

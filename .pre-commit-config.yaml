@@ -41,3 +41,17 @@ repos:
       - types-requests
       - types-PyYAML
       - types-aiofiles
+- repo: local
+  hooks:
+  - id: rust-fmt
+    name: Rust Format Check
+    entry: bash -c 'cd rust/raw_block && cargo fmt --check'
+    language: system
+    types: [text]
+    files: ^rust/raw_block/.*\.rs$
+  - id: rust-clippy
+    name: Rust Clippy Check
+    entry: bash -c 'cd rust/raw_block && cargo clippy -- -D warnings'
+    language: system
+    types: [text]
+    files: ^rust/raw_block/.*\.rs$

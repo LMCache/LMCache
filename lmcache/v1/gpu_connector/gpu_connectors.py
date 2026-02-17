@@ -11,7 +11,6 @@ from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
-from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
@@ -21,61 +20,6 @@ if torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-
-
-# Helper functions
-def lmcache_memcpy_async_h2d(
-    memory_obj: MemoryObj,
-    gpu_buffer: torch.Tensor,
-):
-    """Helper function to copy memory object allocated by different
-    allocators to GPU buffer.
-
-    This function is non-blocking and won't do stream synchronization.
-
-    :param MemoryObj memory_obj: The memory object to be copied.
-    :param torch.Tensor gpu_buffer: The GPU buffer to copy the data to.
-    """
-    assert memory_obj.tensor is not None
-    assert memory_obj.tensor.numel() == gpu_buffer.numel()
-    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
-            gpu_buffer.data_ptr(),
-            memory_obj.tensor.data_ptr(),
-            memory_obj.get_size(),
-            lmc_ops.TransferDirection.H2D,
-            memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
-        )
-    else:
-        gpu_buffer.copy_(memory_obj.tensor, non_blocking=True)
-
-
-def lmcache_memcpy_async_d2h(
-    gpu_buffer: torch.Tensor,
-    memory_obj: MemoryObj,
-):
-    """Helper function to copy memory object allocated by different
-    allocators from GPU buffer.
-
-    This function is non-blocking and won't do stream synchronization.
-
-    :param torch.Tensor gpu_buffer: The GPU buffer to copy the data from.
-    :param MemoryObj memory_obj: The memory object to be copied to.
-    """
-    assert memory_obj.tensor is not None
-    assert memory_obj.tensor.numel() == gpu_buffer.numel()
-    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
-        lmc_ops.lmcache_memcpy_async(
-            memory_obj.tensor.data_ptr(),
-            gpu_buffer.data_ptr(),
-            memory_obj.get_size(),
-            lmc_ops.TransferDirection.D2H,
-            memory_obj.meta.address,
-            LazyMemoryAllocator.PIN_CHUNK_SIZE,
-        )
-    else:
-        memory_obj.tensor.copy_(gpu_buffer, non_blocking=True)
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
@@ -136,21 +80,32 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def batched_to_gpu(
         self,
-        memory_objs: Union[List[List[MemoryObj]], List[MemoryObj]],
-        starts: List[int],
-        ends: List[int],
+        memory_objs: Union[
+            List[List[MemoryObj]], List[MemoryObj], List[int], None
+        ] = None,
+        starts: Optional[List[int]] = None,
+        ends: Optional[List[int]] = None,
         **kwargs,
     ):
         """
         Batched store the data from the memory objects to GPU kv cache.
         Sub-classes should define the format of the kwargs.
 
+        For non-layerwise connectors:
         :param Union[List[List[MemoryObj]], List[MemoryObj]] memory_obj:
             The memory objects to store the data to GPU.
         :param List[int] starts: The starting indices of the data in the corresponding
             token sequence.
         :param List[int] ends: The ending indices of the data in the corresponding
             token sequence.
+
+        For layerwise connectors (generator pattern):
+        :param List[int] memory_objs: Actually the starts list
+        (positional compatibility)
+        :param List[int] starts: Actually the ends list
+        (positional compatibility)
+        Note: Layerwise connectors receive memory objects
+        via generator.send()
         """
         raise NotImplementedError
 
