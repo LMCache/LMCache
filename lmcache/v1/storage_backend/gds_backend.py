@@ -932,46 +932,35 @@ class GdsBackend(AllocatorBackendInterface):
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        logger.debug(
-            f"Allocating memory with busy loop: {busy_loop}"
-        )
-        memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
-        if memory_obj is not None:
-            return memory_obj
-        if not busy_loop:
-            logger.error(
-                "GDS allocation failed and busy loop is disabled. Returning None."
-            )
-            return None
-
+        logger.debug(f"Allocating memory with busy loop: {busy_loop}")
+        
+        max_attempts = self.max_alloc_attempts if busy_loop else 1
         num_attempts = 0
-        logger.warning(
-            "GDS allocation failed and busy loop is enabled. "
-            f"Waiting for {self.alloc_attempt_delay_secs} seconds before retrying."
-        )
-        while True:
-            time.sleep(self.alloc_attempt_delay_secs)
-
+        
+        # try up to max_attempts
+        while num_attempts < max_attempts:
             memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
-            if memory_obj is not None:
-                break
+            if memory_obj is not None: # success
+                return memory_obj
+            
             num_attempts += 1
-            logger.warning(
-                f"Unable to allocate memory object after {num_attempts}"
-                " attempts of GDS backend allocate()"
+            if num_attempts < max_attempts:
+                logger.warning(
+                    f"Unable to allocate memory object after {num_attempts} "
+                    f"attempt(s) of GDS backend allocate(). "
+                    f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
+                )
+                time.sleep(self.alloc_attempt_delay_secs)
+        
+        logger.error(
+            f"GDS allocation failed after {num_attempts} attempt(s). Returning None."
+        )
+        if not self.memory_allocator.memcheck():
+            logger.error(
+                "GDS allocation failed and memory allocator "
+                "is inconsistent. This is a bug in the memory allocator."
             )
-            if num_attempts >= self.max_alloc_attempts:
-                logger.error(
-                    "GDS allocation failed after "
-                    f"{self.max_alloc_attempts} attempts. Returning None."
-                )
-                if not self.memory_allocator.memcheck():
-                    logger.error(
-                        "GDS allocation failed and memory allocator "
-                        "is inconsistent. This is a bug in the memory allocator."
-                )
-                return None
-        return memory_obj
+        return None
 
     def batched_allocate(
         self,
@@ -982,60 +971,41 @@ class GdsBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[list[MemoryObj]]:
-
         """
         Batched allocate `batch_size` memory objects of shape and dtype
         """
         if eviction:
             logger.warning("GDS Backend does not support eviction")
 
-        logger.debug(
-            f"Batched allocating memory in GDS backend"
-            f" with busy loop: {busy_loop}"
-        )
-
-        memory_objs = self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
-
-        if memory_objs is not None:
-            return memory_objs
-        if not busy_loop:
-            logger.error(
-                "GDS batched allocation failed and "
-                "busy loop is disabled. Returning None."
-            )
-            return None
-
+        logger.debug(f"Batched allocating memory in GDS backend with busy loop: {busy_loop}")
+        
+        max_attempts = self.max_alloc_attempts if busy_loop else 1
         num_attempts = 0
-        logger.warning(
-            "GDS batched allocation failed and busy loop is enabled. "
-            f"Waiting for {self.alloc_attempt_delay_secs} seconds before retrying."
-        )
-        while True:
-            time.sleep(self.alloc_attempt_delay_secs)
-
-            memory_objs = self.memory_allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt
-            )
-            if memory_objs:
-                break
-
+        
+        # try up to max_attempts
+        while num_attempts < max_attempts:
+            memory_objs = self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
+            if memory_objs is not None: # success
+                return memory_objs
+            
             num_attempts += 1
-            logger.debug(
-                f"Unable to allocate memory object after {num_attempts}"
-                " attempts of GDS backend batched_allocate()"
-            )
-            if num_attempts >= self.max_alloc_attempts:
-                logger.error(
-                    "GDS batched allocation failed after "
-                    f"{self.max_alloc_attempts} attempts. Returning None."
+            if num_attempts < max_attempts:
+                logger.warning(
+                    f"Unable to allocate memory object after {num_attempts} "
+                    f"attempt(s) of GDS backend batched_allocate(). "
+                    f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
-                if not self.memory_allocator.memcheck():
-                    logger.error(
-                        "GDS batched allocation failed and memory allocator "
-                        "is inconsistent. This is a bug in the memory allocator."
-                    )
-                return None
-        return memory_objs
+                time.sleep(self.alloc_attempt_delay_secs)
+        
+        logger.error(
+            f"GDS batched allocation failed after {num_attempts} attempt(s). Returning None."
+        )
+        if not self.memory_allocator.memcheck():
+            logger.error(
+                "GDS batched allocation failed and memory allocator "
+                "is inconsistent. This is a bug in the memory allocator."
+            )
+        return None
 
     def get_allocator_backend(self):
         return self
