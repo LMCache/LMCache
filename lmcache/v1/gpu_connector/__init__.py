@@ -94,8 +94,12 @@ def CreateGPUConnector(
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (
                 VLLMPagedMemXPUConnectorV2,
+                VLLMPagedMemLayerwiseXPUConnector,
             )
-
+            if config.use_layerwise:
+                return VLLMPagedMemLayerwiseXPUConnector.from_metadata(
+                    metadata, use_gpu, device
+                )
             return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
         else:
             raise RuntimeError("No supported connector found for the current platform.")
