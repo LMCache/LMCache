@@ -507,6 +507,10 @@ class LMCacheEngine:
                 keys, memory_objs, transfer_spec=transfer_spec
             )
 
+        self.stats_monitor.on_store_finished(
+            store_stats,
+            tot_token_num,
+        )
         tot_time = store_stats.time_to_store()
 
         logger.info(
@@ -519,11 +523,6 @@ class LMCacheEngine:
             tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
             (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
             store_stats.put_time * 1000,
-        )
-
-        self.stats_monitor.on_store_finished(
-            store_stats,
-            tot_token_num,
         )
 
     @_lmcache_nvtx_annotate
@@ -815,13 +814,12 @@ class LMCacheEngine:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
-        onload_time = retrieve_stats.time_to_retrieve()
-
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
             retrieve_stats,
             retrieved_tokens,
         )
+        onload_time = retrieve_stats.time_to_retrieve()
         # The retrieved may be larger than the need_to_load
         # Example (page_size=16, chunk_size=256):
         #

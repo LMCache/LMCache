@@ -22,14 +22,10 @@ steps:
         test_exit_code=$?
         create_artifact
         exit $test_exit_code
+
+        export TARGET="$PWD"
+        echo "Deleting current workspace $TARGET"
+        cd /
+        sudo rm -rf "$TARGET"
     artifact_paths:
       - "build_${BUILDKITE_BUILD_ID}.log"
-
-  - label: ":broom: Clean up"
-    depends_on: ["test"]
-    allow_dependency_failure: true
-    command: |
-      export TARGET="$PWD"
-      echo "Deleting current workspace $TARGET"
-      cd /
-      sudo rm -rf "$TARGET"

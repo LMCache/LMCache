@@ -84,6 +84,7 @@ def cuda_extension() -> tuple[list, dict]:
     storage_manager_sources = [
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
+        "csrc/storage_manager/utils.cpp",
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
@@ -126,6 +127,7 @@ def rocm_extension() -> tuple[list, dict]:
     storage_manager_sources = [
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
+        "csrc/storage_manager/utils.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
