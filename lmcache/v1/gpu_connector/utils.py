@@ -143,7 +143,7 @@ def discover_gpu_kv_format(
     # list_depth: number of external wrapping lists
     # tensor_dim: number of dimensions of the internal tensor
     list_depth, tensor_dim = _list_depth_tensor_dim(kv_caches)
-    print(f"list_depth: {list_depth}, tensor_dim: {tensor_dim}")
+    logger.info("list_depth: %d, tensor_dim: %d", list_depth, tensor_dim)
     list_dims = []
     ptr = kv_caches
     for _ in range(list_depth):
@@ -154,7 +154,7 @@ def discover_gpu_kv_format(
     dims_str = (
         "".join(f"[{d}]" for d in list_dims) + f"[{', '.join(map(str, tensor_dims))}]"
     )
-    print(f"GPU KV Cache Dimensions: {dims_str}")
+    logger.info("GPU KV Cache Dimensions: %s", dims_str)
 
     detected_format = None
 

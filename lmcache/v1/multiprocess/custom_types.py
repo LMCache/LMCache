@@ -68,31 +68,77 @@ class CudaIPCWrapper:
             )
         return device_index
 
+    @staticmethod
+    def _validate_tensor_for_ipc(tensor: torch.Tensor) -> None:
+        if not tensor.is_cuda:
+            raise ValueError("CudaIPCWrapper only supports CUDA tensors.")
+        if tensor.is_sparse:
+            raise ValueError("sparse tensors are not supported for CUDA IPC sharing.")
+        # disallow negative strides (possible via as_strided)
+        if any(s < 0 for s in tensor.stride()):
+            raise ValueError(
+                "negative strides are not supported for IPC reconstruction."
+            )
+
+        storage = tensor.untyped_storage()
+        if storage.device.type != "cuda":
+            raise ValueError("tensor storage is not CUDA.")
+
+        offset_elems = tensor.storage_offset()
+        sizes = tensor.size()
+        strides = tensor.stride()
+        itemsize = tensor.element_size()
+
+        # edge case: if the tensor is empty, return
+        if tensor.numel() == 0:
+            return
+
+        # compute max idx (in elements) for the strided view
+        # start at the offset
+        max_index = offset_elems
+        for sz, st in zip(sizes, strides, strict=False):
+            # edge case: if any size is 0, then whole tensor is empty, and return
+            if sz == 0:
+                return
+            max_index += (sz - 1) * st
+
+        required_bytes = (max_index + 1) * itemsize
+        if required_bytes > storage.nbytes():
+            raise ValueError(
+                f"tensor view exceeds underlying storage: need {required_bytes} bytes, "
+                f"storage has {storage.nbytes()} bytes."
+            )
+
     def __init__(self, tensor: torch.Tensor):
-        assert tensor.storage_offset() == 0
-        assert tensor.is_contiguous()
+        self._validate_tensor_for_ipc(tensor)
+
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()
 
         self.handle = handle
         self.dtype = tensor.dtype
-        self.shape = tensor.shape
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = int(tensor.storage_offset())
+
         device_index = tensor.device.index
         self.device_uuid = CudaIPCWrapper._get_device_uuid(device_index)
 
-    def to_tensor(self):
+    def to_tensor(self) -> torch.Tensor:
         """
         Note:
             This function may break if torch cuda is not initialized.
             We should call `torch.cuda.init()` before using this function.
         """
-        device = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
+        device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
+
         storage = torch.UntypedStorage._new_shared_cuda(  # noqa: SLF001
-            device, *self.handle[1:]
+            device_index, *self.handle[1:]
         )
-        t = torch.tensor(0, device=device, dtype=self.dtype)
-        t.set_(storage)
-        return t.view(self.shape)
+
+        t = torch.empty((), device=f"cuda:{device_index}", dtype=self.dtype)
+        t.set_(storage, self.storage_offset, self.shape, self.stride)
+        return t
 
     def __eq__(self, other):
         if not isinstance(other, CudaIPCWrapper):
@@ -101,6 +147,8 @@ class CudaIPCWrapper:
             self.handle == other.handle
             and self.dtype == other.dtype
             and self.shape == other.shape
+            and self.stride == other.stride
+            and self.storage_offset == other.storage_offset
             and self.device_uuid == other.device_uuid
         )
 
@@ -173,14 +221,6 @@ class IPCCacheEngineKey:
             )
             for h in chunk_hashes
         ]
-
-    @staticmethod
-    def Serialize(obj: "IPCCacheEngineKey") -> bytes:
-        return msgspec.msgpack.encode(obj)
-
-    @staticmethod
-    def Deserialize(data: bytes) -> "IPCCacheEngineKey":
-        return msgspec.msgpack.decode(data, type=IPCCacheEngineKey)
 
     # Helper function for unit tests only
     @classmethod
