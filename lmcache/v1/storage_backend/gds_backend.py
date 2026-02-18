@@ -8,12 +8,11 @@ import ctypes
 import json
 import mmap
 import os
-import random
-import string
 import struct
 import threading
 import time
 import urllib.parse
+import uuid
 
 # Third Party
 import aiofile
@@ -135,10 +134,9 @@ def unpack_metadata(buffer: bytes):
     return torch.Size(shape), dtype, nbytes, fmt, tensor_meta["__metadata__"]
 
 
-def rand_suffix(rand, n: int):
-    return "".join(
-        rand.choice(string.ascii_uppercase + string.digits) for _ in range(n)
-    )
+def rand_suffix(n: int):
+    # Generates a random UUID hex string (e.g. "a8098c1a")
+    return uuid.uuid4().hex[:n]
 
 
 async def save_metadata(path: str, tmp: str, metadata: bytes):
@@ -285,8 +283,6 @@ class GdsBackend(AllocatorBackendInterface):
 
         self.put_lock = threading.Lock()
         self.put_tasks: set[CacheEngineKey] = set()
-
-        self.rand = random.Random(self.dst_device)
 
         if hasattr(self.memory_allocator, "base_pointer"):
             logger.debug(f"Using base pointer {self.memory_allocator.base_pointer}")
@@ -522,7 +518,7 @@ class GdsBackend(AllocatorBackendInterface):
             if subdir_key not in self.metadata_dirs:
                 os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
                 self.metadata_dirs.add(subdir_key)
-            tmp = ".tmp" + rand_suffix(self.rand, 8)
+            tmp = ".tmp" + rand_suffix(8)
             fmt = memory_obj.metadata.fmt
             try:
                 metadata = await asyncio.to_thread(
