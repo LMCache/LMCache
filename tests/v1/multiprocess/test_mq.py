@@ -31,6 +31,23 @@ from tests.v1.multiprocess import test_mq_handler_helpers
 # ==============================================================================
 
 
+def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
+    """
+    Create a cache key for testing.
+    """
+    chunk_size = 256
+    token_ids = [index] * chunk_size
+    return IPCCacheEngineKey.from_token_ids(
+        model,
+        1,
+        0,
+        token_ids,
+        start=0,
+        end=chunk_size,
+        request_id=f"test_request_{index}",
+    )
+
+
 def _server_process(
     server_url: str,
     ready_event: EventClass,
@@ -411,12 +428,7 @@ def test_mq_store():
     and returns bool.
     """
     # Create test keys
-    keys = [
-        IPCCacheEngineKey.from_int_hash(
-            model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
-        )
-        for i in range(3)
-    ]
+    keys = [create_cache_key(i) for i in range(3)]
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
     test_handle = b"\x00" * 64
@@ -441,12 +453,7 @@ def test_mq_retrieve():
     and returns bool.
     """
     # Create test keys
-    keys = [
-        IPCCacheEngineKey.from_int_hash(
-            model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
-        )
-        for i in range(3)
-    ]
+    keys = [create_cache_key(i) for i in range(3)]
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
     test_handle = b"\x00" * 64
@@ -472,12 +479,7 @@ def test_mq_lookup():
     LOOKUP takes (keys: list[KeyType]) and returns int.
     """
     # Create test keys
-    keys = [
-        IPCCacheEngineKey.from_int_hash(
-            model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
-        )
-        for i in range(4)
-    ]
+    keys = [create_cache_key(i) for i in range(4)]
 
     # Expected response: count of even-indexed keys (0, 2) = 2
     expected_response = 2
@@ -501,12 +503,7 @@ def test_mq_lookup_with_different_key_count():
     Tests that the handler correctly counts matched keys.
     """
     # Create test keys
-    keys = [
-        IPCCacheEngineKey.from_int_hash(
-            model_name="test_model", world_size=1, worker_id=0, chunk_hash=i
-        )
-        for i in range(3)
-    ]
+    keys = [create_cache_key(i) for i in range(3)]
 
     # Expected response: count of even-indexed keys (0, 2) = 2
     expected_response = 2

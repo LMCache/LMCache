@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![allow(unknown_lints)]
 
 //! Raw block device I/O extension for LMCache.
 //! Provides direct block device access with optional O_DIRECT support.
@@ -28,6 +29,12 @@ const PYBUF_ND: i32 = 0x0008; // request N-dimensional buffer
 const PYBUF_STRIDES: i32 = 0x0010 | PYBUF_ND; // request strides info
 const PYBUF_ANY_CONTIGUOUS: i32 = 0x0080 | PYBUF_STRIDES; // accept any contiguous layout
 
+// O_DIRECT is Linux-only; define a no-op fallback for other platforms.
+#[cfg(target_os = "linux")]
+const O_DIRECT: i32 = libc::O_DIRECT;
+#[cfg(not(target_os = "linux"))]
+const O_DIRECT: i32 = 0;
+
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
 #[allow(clippy::manual_div_ceil)]
 // Small helper used to align sizes for O_DIRECT I/O.
@@ -38,7 +45,14 @@ fn round_up(x: usize, align: usize) -> usize {
 // Fetch errno for the last libc call on this thread.
 fn errno() -> i32 {
     // SAFETY: libc call.
-    unsafe { *libc::__errno_location() }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *libc::__errno_location()
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        *libc::__error()
+    }
 }
 
 // Convert errno to a Python OSError with a message.
@@ -230,7 +244,7 @@ impl RawBlockDevice {
             libc::O_RDONLY
         };
         if use_odirect {
-            flags |= libc::O_DIRECT;
+            flags |= O_DIRECT;
         }
         // SAFETY: open returns fd or -1.
         let fd = unsafe { libc::open(cpath.as_ptr(), flags) };
