@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence
 import asyncio
 import json
-import os
+import struct
 import threading
+import time
+import zlib
 
 # Third Party
 import torch
@@ -25,6 +27,11 @@ from lmcache.v1.storage_backend.abstract_backend import (
 )
 
 logger = init_logger(__name__)
+
+
+_DEFAULT_META_MAGIC = b"LMCIDX01"
+_DEFAULT_META_VERSION = 1
+_META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 
 
 def _round_up(x: int, align: int) -> int:
@@ -56,22 +63,11 @@ class RustRawBlockBackend(StoragePluginInterface):
     Features:
     - High-throughput I/O via direct block device access
     - O_DIRECT support to bypass page cache (requires aligned buffers)
-    - Manifest persistence for recovery across restarts
+    - On-device metadata checkpoint for restart recovery
     - Efficient buffer operations via Rust extension
 
     .. warning::
        **This backend currently only supports TP=1 (single GPU) deployments.**
-
-       When using Tensor Parallelism (TP > 1), multiple vLLM workers would
-       independently access the same raw block device without coordination,
-       leading to metadata conflicts and data corruption.
-
-       TP > 1 support will be added in a future release via LMCache
-       Multi-Process (MP) mode integration.
-
-       Current status:
-       - TP=1: Fully supported ✓
-       - TP > 1: Not yet supported (requires MP mode integration)
     """
 
     def __init__(
@@ -96,31 +92,57 @@ class RustRawBlockBackend(StoragePluginInterface):
         if self.config is None:
             raise ValueError("RustRawBlockBackend requires config")
 
-        # TP > 1 not supported: multiple workers would conflict on device access.
-        if self.metadata is not None:
-            is_single_worker = self.metadata.world_size == 1
-
-            if not is_single_worker:
-                raise ValueError(
-                    "RustRawBlockBackend currently only supports TP=1 "
-                    "(single GPU) deployments. "
-                    f"Current world_size={self.metadata.world_size}. "
-                    "TP > 1 support will be added in a future release.\n"
-                    "For now, please use TP=1 or choose a different storage backend."
-                )
+        if self.metadata is not None and self.metadata.world_size != 1:
+            raise ValueError(
+                "RustRawBlockBackend currently only supports TP=1 "
+                "(single GPU) deployments. "
+                f"Current world_size={self.metadata.world_size}."
+            )
 
         extra = self.config.extra_config or {}
         self.device_path: str = extra.get("rust_raw_block.device_path", "")
         if not self.device_path:
             raise ValueError("extra_config['rust_raw_block.device_path'] is required")
 
-        self.manifest_path: Optional[str] = extra.get("rust_raw_block.manifest_path")
-        self.capacity_bytes: int = int(
-            extra.get("rust_raw_block.capacity_bytes", 0)
-        )  # 0 = use full device
+        self.capacity_bytes: int = int(extra.get("rust_raw_block.capacity_bytes", 0))
         self.block_align: int = int(extra.get("rust_raw_block.block_align", 4096))
         self.header_bytes: int = int(extra.get("rust_raw_block.header_bytes", 4096))
         self.use_odirect: bool = bool(extra.get("rust_raw_block.use_odirect", False))
+
+        # On-device metadata region config.
+        self.meta_total_bytes: int = int(
+            extra.get("rust_raw_block.meta_total_bytes", 128 * 1024 * 1024)
+        )
+        meta_magic_raw = extra.get("rust_raw_block.meta_magic", "LMCIDX01")
+        if isinstance(meta_magic_raw, str):
+            self.meta_magic: bytes = meta_magic_raw.encode("ascii")
+        elif isinstance(meta_magic_raw, bytes):
+            self.meta_magic = meta_magic_raw
+        else:
+            raise ValueError("rust_raw_block.meta_magic must be str or bytes")
+        if len(self.meta_magic) != 8:
+            raise ValueError("rust_raw_block.meta_magic must be exactly 8 bytes")
+        try:
+            self.meta_magic_text: str = self.meta_magic.decode("ascii")
+        except UnicodeDecodeError as e:
+            raise ValueError("rust_raw_block.meta_magic must be ASCII bytes") from e
+        self.meta_version: int = int(
+            extra.get("rust_raw_block.meta_version", _DEFAULT_META_VERSION)
+        )
+        if self.meta_version <= 0:
+            raise ValueError("rust_raw_block.meta_version must be > 0")
+        self.meta_checkpoint_interval_sec: int = int(
+            extra.get("rust_raw_block.meta_checkpoint_interval_sec", 60)
+        )
+        self.meta_idle_quiet_ms: int = int(
+            extra.get("rust_raw_block.meta_idle_quiet_ms", 100)
+        )
+        self.meta_enable_periodic: bool = bool(
+            extra.get("rust_raw_block.meta_enable_periodic", True)
+        )
+        self.meta_verify_on_load: bool = bool(
+            extra.get("rust_raw_block.meta_verify_on_load", True)
+        )
 
         full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size())
         default_slot_bytes = _round_up(
@@ -129,6 +151,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         self.slot_bytes: int = int(
             extra.get("rust_raw_block.slot_bytes", default_slot_bytes)
         )
+
         if self.slot_bytes < self.header_bytes + 1:
             raise ValueError("rust_raw_block.slot_bytes too small")
         if self.slot_bytes % self.block_align != 0:
@@ -139,41 +162,25 @@ class RustRawBlockBackend(StoragePluginInterface):
             raise ValueError(
                 "rust_raw_block.header_bytes must be multiple of block_align"
             )
-
-        self._lock = threading.Lock()
-        self._index: dict[
-            CacheEngineKey, _Entry
-        ] = {}  # key -> entry (successfully written)
-        self._pinned: set[CacheEngineKey] = set()  # keys that cannot be evicted
-        self._inflight: dict[
-            CacheEngineKey, _Inflight
-        ] = {}  # keys currently being written
-        self._lru: "OrderedDict[CacheEngineKey, None]" = (
-            OrderedDict()
-        )  # LRU order (oldest first)
-
-        self._next_slot: int = 0  # next slot index to allocate
-        self._free_slots: list[int] = []  # reusable slots from evicted chunks
-        self._max_slots: int = 0  # computed lazily from device size
-
-        # Manifest persistence: save index to disk periodically and on shutdown.
-        # Default interval: every 100 writes. Set to 0 to disable periodic saves.
-        self._manifest_write_interval: int = int(
-            extra.get("rust_raw_block.manifest_write_interval", 100)
-        )
-        self._writes_since_manifest_save: int = 0
-
-        # Default manifest path: /tmp/lmcache_raw_block_<device_name>.manifest.json
-        if not self.manifest_path:
-            device_name = os.path.basename(self.device_path.rstrip("/"))
-            self.manifest_path = f"/tmp/lmcache_raw_block_{device_name}.manifest.json"
-            logger.info(
-                "RustRawBlockBackend: using default manifest_path=%s",
-                self.manifest_path,
+        if self.meta_total_bytes <= 0:
+            raise ValueError("rust_raw_block.meta_total_bytes must be > 0")
+        if self.meta_total_bytes % self.block_align != 0:
+            raise ValueError(
+                "rust_raw_block.meta_total_bytes must align to block_align"
             )
 
-        # Debug logging (rate-limited).
-        # Only emits when LMCache log level is DEBUG.
+        self._lock = threading.Lock()
+        self._index: dict[CacheEngineKey, _Entry] = {}
+        self._pinned: set[CacheEngineKey] = set()
+        self._inflight: dict[CacheEngineKey, _Inflight] = {}
+        self._lru: "OrderedDict[CacheEngineKey, None]" = OrderedDict()
+
+        self._next_slot: int = 0
+        self._free_slots: list[int] = []
+        self._max_slots: int = 0
+        self._effective_capacity_bytes: int = 0
+        self._data_base_offset: int = 0
+
         self._dbg_first_n: int = int(extra.get("rust_raw_block.debug_first_n", 4) or 0)
         self._dbg_every_n: int = int(
             extra.get("rust_raw_block.debug_every_n", 256) or 0
@@ -184,32 +191,47 @@ class RustRawBlockBackend(StoragePluginInterface):
         self._dbg_get_calls: int = 0
         self._dbg_get_bytes: int = 0
 
-        # Lazy import so normal LMCache usage doesn't require Rust extension installed
         self._raw = None
 
-        # Track ongoing put tasks to match exists_in_put_tasks semantics.
         self._put_lock = threading.Lock()
         self._put_tasks: set[CacheEngineKey] = set()
 
+        # Metadata checkpoint state.
+        self._meta_seq: int = 0
+        self._meta_dirty_total: int = 0
+        self._meta_persisted: int = 0
+        self._inflight_io_count: int = 0
+        self._last_io_ts: float = time.monotonic()
+        self._meta_stop_evt = threading.Event()
+        self._meta_thread: Optional[threading.Thread] = None
+
+        self._ensure_capacity_and_layout()
+
         logger.info(
-            "RustRawBlockBackend init: device=%s cap=%s slot=%d align=%d header=%d",
+            "RustRawBlockBackend init: device=%s cap=%s slot=%d align=%d header=%d "
+            "meta_total=%d data_base=%d",
             self.device_path,
             self.capacity_bytes,
             self.slot_bytes,
             self.block_align,
             self.header_bytes,
-        )
-        logger.warning(
-            "RustRawBlockBackend: Currently only TP=1 is supported. "
-            "TP > 1 support will be added in a future release."
+            self.meta_total_bytes,
+            self._data_base_offset,
         )
 
-        # Best-effort restore from manifest (if configured).
-        if self.manifest_path:
-            self._load_manifest(self.manifest_path)
+        # Load latest checkpoint from device (no JSON fallback).
+        self._load_checkpoint_from_device()
+
+        if self.meta_enable_periodic:
+            self._meta_thread = threading.Thread(
+                target=self._checkpoint_loop,
+                name="rust-raw-block-meta-checkpoint",
+                daemon=True,
+            )
+            self._meta_thread.start()
 
     def _dbg_should_log(self, n: int) -> bool:
-        if not logger.isEnabledFor(10):  # logging.DEBUG
+        if not logger.isEnabledFor(10):
             return False
         if self._dbg_first_n and n <= self._dbg_first_n:
             return True
@@ -227,7 +249,6 @@ class RustRawBlockBackend(StoragePluginInterface):
         return "RustRawBlockBackend"
 
     def _rawdev(self):
-        """Lazy init: create single-FD device for synchronous read/write operations."""
         if self._raw is None:
             try:
                 # Third Party
@@ -245,35 +266,50 @@ class RustRawBlockBackend(StoragePluginInterface):
             )
         return self._raw
 
-    def _allocate_slot(self) -> int:
-        """Allocate a slot on device.
+    def _ensure_capacity_and_layout(self) -> None:
+        if self._effective_capacity_bytes > 0 and self._max_slots > 0:
+            return
 
-        Reuses free slots first, then allocates new ones.
-        """
-        if self.capacity_bytes <= 0:
-            self.capacity_bytes = int(self._rawdev().size_bytes())
+        device_size = int(self._rawdev().size_bytes())
+        requested = self.capacity_bytes if self.capacity_bytes > 0 else device_size
+        self._effective_capacity_bytes = min(requested, device_size)
+        self.capacity_bytes = self._effective_capacity_bytes
+
+        if self.meta_total_bytes >= self._effective_capacity_bytes:
+            raise RuntimeError("metadata region exceeds usable device capacity")
+
+        self._data_base_offset = self.meta_total_bytes
+        data_bytes = self._effective_capacity_bytes - self._data_base_offset
+        self._max_slots = data_bytes // self.slot_bytes
         if self._max_slots <= 0:
-            self._max_slots = self.capacity_bytes // self.slot_bytes
-            if self._max_slots <= 0:
-                raise RuntimeError("raw block capacity too small for slot size")
+            raise RuntimeError(
+                "raw block capacity too small for slot size after metadata"
+            )
+
+    def _slot_to_offset(self, slot: int) -> int:
+        return self._data_base_offset + slot * self.slot_bytes
+
+    def _offset_to_slot(self, offset: int) -> int:
+        return (offset - self._data_base_offset) // self.slot_bytes
+
+    def _allocate_slot(self) -> int:
+        self._ensure_capacity_and_layout()
 
         if self._free_slots:
-            return self._free_slots.pop() * self.slot_bytes
+            return self._slot_to_offset(self._free_slots.pop())
 
         if self._next_slot < self._max_slots:
             slot = self._next_slot
             self._next_slot += 1
-            return slot * self.slot_bytes
+            return self._slot_to_offset(slot)
 
         raise RuntimeError("No free slots available; eviction required")
 
     def _touch(self, key: CacheEngineKey) -> None:
-        """Update LRU: move key to most-recently-used position."""
         self._lru.pop(key, None)
         self._lru[key] = None
 
     def _evict_one(self) -> bool:
-        """Evict least recently used chunk that is not pinned or in-flight."""
         for victim in list(self._lru.keys()):
             if victim in self._pinned or victim in self._inflight:
                 continue
@@ -283,7 +319,8 @@ class RustRawBlockBackend(StoragePluginInterface):
                 continue
             self._lru.pop(victim, None)
             self._pinned.discard(victim)
-            self._free_slots.append(int(entry.offset // self.slot_bytes))
+            self._free_slots.append(self._offset_to_slot(int(entry.offset)))
+            self._meta_dirty_total += 1
             return True
         return False
 
@@ -312,13 +349,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 return True
             return key in self._index
 
-    def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
-        """Remove key from index and reclaim slot for reuse.
-
-        If the key is currently in-flight, defer slot reuse until the
-        async write completes to avoid reusing the same offset while the
-        write is still running.
-        """
+    def remove(self, key: CacheEngineKey, force: bool = True) -> bool:  # noqa: ARG002
         with self._lock:
             existed = key in self._index or key in self._inflight
             entry = self._index.pop(key, None)
@@ -326,7 +357,8 @@ class RustRawBlockBackend(StoragePluginInterface):
             self._pinned.discard(key)
             self._lru.pop(key, None)
             if entry is not None:
-                self._free_slots.append(int(entry.offset // self.slot_bytes))
+                self._free_slots.append(self._offset_to_slot(int(entry.offset)))
+                self._meta_dirty_total += 1
             if inflight is not None:
                 inflight.canceled = True
             return existed
@@ -338,11 +370,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         transfer_spec: Any = None,  # noqa: ARG002
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ):
-        """Submit batch of put tasks.
-
-        Allocates slots, encodes headers, and submits async writes.
-        """
-        if logger.isEnabledFor(10):  # DEBUG
+        if logger.isEnabledFor(10):
             self._dbg_put_batches += 1
             self._dbg_put_keys += int(len(keys))
             try:
@@ -414,7 +442,6 @@ class RustRawBlockBackend(StoragePluginInterface):
         memory_obj: MemoryObj,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
-        """Execute write: synchronous blocking write wrapped in async thread."""
         try:
             buf = memory_obj.byte_array
             if hasattr(buf, "cast"):
@@ -426,18 +453,17 @@ class RustRawBlockBackend(StoragePluginInterface):
                 if total_len > (self.slot_bytes - self.header_bytes):
                     raise RuntimeError(f"O_DIRECT payload {total_len} > slot capacity")
 
-            # Synchronous blocking write executed in thread pool
             def _do_write():
+                with self._lock:
+                    self._inflight_io_count += 1
                 try:
                     raw_dev = self._rawdev()
-                    # Write header
                     hdr_total = (
                         _round_up(len(header), self.block_align)
                         if self.use_odirect
                         else len(header)
                     )
                     raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
-                    # Write payload
                     raw_dev.pwrite_from_buffer(
                         offset + self.header_bytes, buf, payload_len, total_len
                     )
@@ -446,6 +472,10 @@ class RustRawBlockBackend(StoragePluginInterface):
                         f"Write failed for key {self._dbg_key_short(key)}: {e}"
                     )
                     raise
+                finally:
+                    with self._lock:
+                        self._inflight_io_count -= 1
+                        self._last_io_ts = time.monotonic()
 
             await asyncio.to_thread(_do_write)
 
@@ -453,7 +483,10 @@ class RustRawBlockBackend(StoragePluginInterface):
                 inflight = self._inflight.pop(key, None)
                 if inflight is not None:
                     if inflight.canceled:
-                        self._free_slots.append(int(inflight.offset // self.slot_bytes))
+                        self._free_slots.append(
+                            self._offset_to_slot(int(inflight.offset))
+                        )
+                        self._meta_dirty_total += 1
                     else:
                         self._index[key] = _Entry(
                             offset=inflight.offset,
@@ -461,8 +494,8 @@ class RustRawBlockBackend(StoragePluginInterface):
                             meta=inflight.meta,
                         )
                         self._touch(key)
+                        self._meta_dirty_total += 1
 
-            self._maybe_save_manifest()
             if on_complete_callback is not None:
                 try:
                     on_complete_callback(key)
@@ -474,7 +507,6 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._put_tasks.discard(key)
 
     def _encode_header(self, key: CacheEngineKey, payload_len: int) -> bytes:
-        """Encode header: magic(8) + chunk_hash(8) + payload_len(8) + zero padding."""
         magic = b"LMCBLK01"
         chunk_hash = int(key.chunk_hash) & ((1 << 64) - 1)
         hdr = bytearray(self.header_bytes)
@@ -483,8 +515,31 @@ class RustRawBlockBackend(StoragePluginInterface):
         hdr[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
         return bytes(hdr)
 
+    def _decode_slot_header(self, hdr: bytes) -> Optional[tuple[int, int]]:
+        if len(hdr) < 24:
+            return None
+        if hdr[0:8] != b"LMCBLK01":
+            return None
+        chunk_hash = int.from_bytes(hdr[8:16], "little", signed=False)
+        payload_len = int.from_bytes(hdr[16:24], "little", signed=False)
+        return chunk_hash, payload_len
+
+    def _read_slot_header(self, offset: int) -> Optional[tuple[int, int]]:
+        raw = self._rawdev()
+        buf = bytearray(self.header_bytes)
+        try:
+            with self._lock:
+                self._inflight_io_count += 1
+            raw.pread_into(offset, buf, self.header_bytes, self.header_bytes)
+            return self._decode_slot_header(buf)
+        except Exception:
+            return None
+        finally:
+            with self._lock:
+                self._inflight_io_count -= 1
+                self._last_io_ts = time.monotonic()
+
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        """Blocking read: lookup key, allocate buffer, read from device."""
         if logger.isEnabledFor(10):
             self._dbg_get_calls += 1
         with self._lock:
@@ -521,12 +576,22 @@ class RustRawBlockBackend(StoragePluginInterface):
             pass
 
         try:
+            with self._lock:
+                self._inflight_io_count += 1
             self._rawdev().pread_into(
-                entry.offset + self.header_bytes, buf, payload_len, total_len
+                entry.offset + self.header_bytes,
+                buf,
+                payload_len,
+                total_len,
             )
         except Exception as e:
             logger.error(f"Read failed for key {self._dbg_key_short(key)}: {e}")
             raise
+        finally:
+            with self._lock:
+                self._inflight_io_count -= 1
+                self._last_io_ts = time.monotonic()
+
         memory_obj.metadata.cached_positions = meta.cached_positions
         with self._lock:
             self._touch(key)
@@ -536,9 +601,8 @@ class RustRawBlockBackend(StoragePluginInterface):
         self,
         lookup_id: str,
         keys: list[CacheEngineKey],
-        pin: bool = False,  # noqa: ARG002
+        pin: bool = False,
     ) -> int:
-        # Prefix semantics: stop at first miss.
         hit = 0
         with self._lock:
             for k in keys:
@@ -564,19 +628,27 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._dbg_get_bytes,
             )
 
-        # Best-effort persist manifest before closing I/O.
-        if self.manifest_path:
-            try:
-                self._save_manifest(self.manifest_path)
-                logger.info(
-                    "RustRawBlockBackend: saved manifest to %s (entries=%d)",
-                    self.manifest_path,
-                    len(self._index),
-                )
-            except Exception as e:
-                logger.warning(f"Failed to save rust_raw_block manifest: {e}")
+        # Stop checkpoint background thread.
+        self._meta_stop_evt.set()
+        if self._meta_thread is not None:
+            self._meta_thread.join(timeout=5)
+            self._meta_thread = None
 
-        # Close rust device fd if opened
+        # Wait briefly for inflight put tasks to drain.
+        deadline = time.monotonic() + 10.0
+        while True:
+            with self._put_lock:
+                pending = len(self._put_tasks)
+            if pending == 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+
+        # Force final metadata checkpoint.
+        try:
+            self._checkpoint_once(force=True)
+        except Exception as e:
+            logger.warning(f"Failed to write final on-device metadata checkpoint: {e}")
+
         if self._raw is not None:
             try:
                 self._raw.close()
@@ -585,34 +657,74 @@ class RustRawBlockBackend(StoragePluginInterface):
             finally:
                 self._raw = None
 
-    def _maybe_save_manifest(self) -> None:
-        """Save manifest periodically (every N writes) for crash recovery."""
-        if self._manifest_write_interval <= 0:
-            return
-        self._writes_since_manifest_save += 1
-        if self._writes_since_manifest_save >= self._manifest_write_interval:
-            self._writes_since_manifest_save = 0
-            if self.manifest_path:
-                try:
-                    self._save_manifest(self.manifest_path)
-                    logger.debug(
-                        "RustRawBlockBackend: manifest saved, entries=%d",
-                        len(self._index),
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to save periodic manifest: {e}")
+    # ------------------- On-device metadata checkpoint -------------------
 
-    def _save_manifest(self, path: str) -> None:
-        """Save index to JSON file for crash recovery (atomic write via temp file)."""
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    def _checkpoint_loop(self) -> None:
+        interval = max(1, self.meta_checkpoint_interval_sec)
+        while not self._meta_stop_evt.wait(interval):
+            try:
+                self._checkpoint_once(force=False)
+            except Exception as e:
+                logger.warning(f"Periodic metadata checkpoint failed: {e}")
+
+    def _meta_payload_capacity(self) -> int:
+        return self.meta_total_bytes - self.block_align
+
+    def _read_meta_header(self, container_offset: int) -> Optional[dict[str, int]]:
+        raw = self._rawdev()
+        buf = bytearray(self.block_align)
+        try:
+            raw.pread_into(container_offset, buf, self.block_align, self.block_align)
+        except Exception:
+            return None
+
+        hdr = bytes(buf[: _META_HEADER_STRUCT.size])
+        magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(hdr)
+        if magic != self.meta_magic or version != self.meta_version:
+            return None
+
+        payload_cap = self._meta_payload_capacity()
+        if payload_len <= 0 or payload_len > payload_cap:
+            return None
+
+        return {
+            "seq": int(seq),
+            "payload_len": int(payload_len),
+            "crc": int(crc),
+            "container_offset": int(container_offset),
+        }
+
+    def _load_meta_payload(self, header: dict[str, int]) -> Optional[bytes]:
+        raw = self._rawdev()
+        payload_len = int(header["payload_len"])
+        payload_off = int(header["container_offset"]) + self.block_align
+        total_len = _round_up(payload_len, self.block_align)
+        buf = bytearray(total_len)
+        try:
+            raw.pread_into(payload_off, buf, payload_len, total_len)
+        except Exception:
+            return None
+
+        payload = bytes(buf[:payload_len])
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        if crc != int(header["crc"]):
+            return None
+        return payload
+
+    def _snapshot_state(self) -> tuple[dict[str, Any], int]:
         with self._lock:
-            data = {
+            dirty_total = self._meta_dirty_total
+            snapshot = {
                 "version": 1,
                 "device_path": self.device_path,
                 "capacity_bytes": self.capacity_bytes,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
                 "slot_bytes": self.slot_bytes,
+                "meta_total_bytes": self.meta_total_bytes,
+                "meta_magic": self.meta_magic_text,
+                "meta_version": self.meta_version,
+                "data_base_offset": self._data_base_offset,
                 "next_slot": self._next_slot,
                 "free_slots": list(self._free_slots),
                 "lru_keys": [k.to_string() for k in self._lru.keys()],
@@ -626,9 +738,9 @@ class RustRawBlockBackend(StoragePluginInterface):
                         "dtype": k._dtype_str,
                         "fmt": (
                             e.meta.fmt.name
-                            if e.meta.fmt and hasattr(e.meta.fmt, "name")
+                            if e.meta.fmt is not None and hasattr(e.meta.fmt, "name")
                             else str(e.meta.fmt)
-                            if e.meta.fmt
+                            if e.meta.fmt is not None
                             else None
                         ),
                         "cached_positions": (
@@ -641,52 +753,122 @@ class RustRawBlockBackend(StoragePluginInterface):
                     for k, e in self._index.items()
                 },
             }
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)  # Atomic rename
+        return snapshot, dirty_total
 
-    def _load_manifest(self, path: str) -> None:
-        """Load index from manifest file (validates compatibility before restoring)."""
-        if not os.path.exists(path):
-            logger.info("RustRawBlockBackend: no manifest found at %s", path)
-            return
-        logger.info("RustRawBlockBackend: loading manifest from %s", path)
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict) or data.get("version") != 1:
-            logger.warning("Ignoring incompatible rust_raw_block manifest")
-            return
-        if data.get("device_path") and data.get("device_path") != self.device_path:
-            logger.warning("Manifest device_path mismatch; ignoring manifest")
-            return
-        if "slot_bytes" in data and int(data["slot_bytes"]) != int(self.slot_bytes):
-            logger.warning("Manifest slot_bytes mismatch; ignoring manifest")
-            return
+    def _write_checkpoint(self, payload: bytes, dirty_total_snapshot: int) -> bool:
+        payload_cap = self._meta_payload_capacity()
+        if len(payload) > payload_cap:
+            logger.warning(
+                "Metadata payload too large (%d > %d), skipping checkpoint",
+                len(payload),
+                payload_cap,
+            )
+            return False
+
+        target = 0
+        current = self._read_meta_header(target)
+        current_seq = int(current["seq"]) if current is not None else 0
+        next_seq = max(current_seq, self._meta_seq) + 1
+
+        payload_len = len(payload)
+        payload_total_len = _round_up(payload_len, self.block_align)
+        payload_off = target + self.block_align
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+
+        header_block = bytearray(self.block_align)
+        header_block[: _META_HEADER_STRUCT.size] = _META_HEADER_STRUCT.pack(
+            self.meta_magic,
+            self.meta_version,
+            int(next_seq),
+            int(payload_len),
+            int(crc),
+        )
+
+        raw = self._rawdev()
+
+        raw.pwrite_from_buffer(payload_off, payload, payload_len, payload_total_len)
+        raw.pwrite_from_buffer(target, header_block, self.block_align, self.block_align)
+
         with self._lock:
-            self.capacity_bytes = int(data.get("capacity_bytes", self.capacity_bytes))
-            self.block_align = int(data.get("block_align", self.block_align))
-            self.header_bytes = int(data.get("header_bytes", self.header_bytes))
-            self.slot_bytes = int(data.get("slot_bytes", self.slot_bytes))
+            self._meta_seq = int(next_seq)
+            self._meta_persisted = max(self._meta_persisted, int(dirty_total_snapshot))
+
+        return True
+
+    def _checkpoint_once(self, force: bool) -> bool:
+        with self._lock:
+            dirty = self._meta_dirty_total > self._meta_persisted
+            idle_ok = self._inflight_io_count == 0 and (
+                time.monotonic() - self._last_io_ts
+            ) >= (self.meta_idle_quiet_ms / 1000.0)
+
+        if not dirty:
+            return False
+        if not force and not idle_ok:
+            return False
+
+        snapshot, dirty_total_snapshot = self._snapshot_state()
+        payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
+            "utf-8"
+        )
+
+        ok = self._write_checkpoint(payload, dirty_total_snapshot)
+        if ok and logger.isEnabledFor(10):
+            logger.debug(
+                "RustRawBlockBackend: checkpoint saved seq=%d entries=%d",
+                self._meta_seq,
+                len(snapshot.get("entries", {})),
+            )
+        return ok
+
+    def _apply_loaded_state(self, data: dict[str, Any]) -> bool:
+        if not isinstance(data, dict):
+            return False
+        if int(data.get("version", 0)) != 1:
+            return False
+        if data.get("device_path") and data.get("device_path") != self.device_path:
+            logger.warning("Device metadata device_path mismatch; ignoring metadata")
+            return False
+        if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:
+            logger.warning("Device metadata slot_bytes mismatch; ignoring metadata")
+            return False
+        if (
+            int(data.get("meta_total_bytes", self.meta_total_bytes))
+            != self.meta_total_bytes
+        ):
+            logger.warning(
+                "Device metadata meta_total_bytes mismatch; ignoring metadata"
+            )
+            return False
+        if str(data.get("meta_magic", self.meta_magic_text)) != self.meta_magic_text:
+            logger.warning("Device metadata meta_magic mismatch; ignoring metadata")
+            return False
+        if int(data.get("meta_version", self.meta_version)) != self.meta_version:
+            logger.warning("Device metadata meta_version mismatch; ignoring metadata")
+            return False
+
+        with self._lock:
             self._next_slot = int(data.get("next_slot", 0))
             self._free_slots = [int(x) for x in data.get("free_slots", [])]
-
-            # Restore entries
             self._index.clear()
             self._lru.clear()
+
             entries = data.get("entries", {})
             if isinstance(entries, dict):
-                for k_str, e in entries.items():
+                for k_str, entry in entries.items():
+                    if not isinstance(entry, dict):
+                        continue
                     try:
                         key = CacheEngineKey.from_string(k_str)
                     except Exception:
                         continue
-                    if not isinstance(e, dict):
-                        continue
-                    offset = int(e.get("offset", 0))
-                    size = int(e.get("size", 0))
-                    shape_list = e.get("shape")
-                    fmt_name = e.get("fmt")
+
+                    offset = int(entry.get("offset", 0))
+                    size = int(entry.get("size", 0))
+                    shape_list = entry.get("shape")
+                    fmt_name = entry.get("fmt")
+                    cached_positions_list = entry.get("cached_positions")
+
                     shape = (
                         torch.Size(list(shape_list)) if shape_list is not None else None
                     )
@@ -696,14 +878,12 @@ class RustRawBlockBackend(StoragePluginInterface):
                         and fmt_name in MemoryFormat.__members__
                         else MemoryFormat.UNDEFINED
                     )
-                    # Restore cached_positions if present
-                    cached_positions_list = e.get("cached_positions")
                     cached_positions = (
                         torch.tensor(cached_positions_list, dtype=torch.long)
                         if cached_positions_list is not None
                         else None
                     )
-                    # Metadata recovery is best-effort.
+
                     meta = DiskCacheMetadata(
                         path=f"{self.device_path}@{offset}",
                         size=size,
@@ -715,7 +895,6 @@ class RustRawBlockBackend(StoragePluginInterface):
                     )
                     self._index[key] = _Entry(offset=offset, size=size, meta=meta)
 
-            # Restore LRU order (fallback to insertion order if missing)
             lru_keys = data.get("lru_keys", [])
             if isinstance(lru_keys, list) and lru_keys:
                 for k_str in lru_keys:
@@ -726,11 +905,83 @@ class RustRawBlockBackend(StoragePluginInterface):
                     if key in self._index:
                         self._lru[key] = None
             else:
-                for k in self._index.keys():
-                    self._lru[k] = None
+                for key in self._index:
+                    self._lru[key] = None
 
+            # Loaded state should start as clean.
+            self._meta_dirty_total = 0
+            self._meta_persisted = 0
+
+        if self.meta_verify_on_load:
+            self._validate_loaded_entries()
+        return True
+
+    def _validate_loaded_entries(self) -> None:
+        to_drop: list[CacheEngineKey] = []
+        with self._lock:
+            entries = list(self._index.items())
+
+        for key, entry in entries:
+            slot_hdr = self._read_slot_header(int(entry.offset))
+            if slot_hdr is None:
+                to_drop.append(key)
+                continue
+            chunk_hash, payload_len = slot_hdr
+            if int(chunk_hash) != (int(key.chunk_hash) & ((1 << 64) - 1)):
+                to_drop.append(key)
+                continue
+            if int(payload_len) != int(entry.size):
+                to_drop.append(key)
+
+        if not to_drop:
+            return
+
+        with self._lock:
+            for key in to_drop:
+                removed_entry: Optional[_Entry] = None
+                if key in self._index:
+                    removed_entry = self._index.pop(key)
+                self._lru.pop(key, None)
+                self._pinned.discard(key)
+                if removed_entry is not None:
+                    self._free_slots.append(
+                        self._offset_to_slot(int(removed_entry.offset))
+                    )
+            self._meta_dirty_total += 1
+
+        logger.warning(
+            "RustRawBlockBackend: dropped %d stale metadata entries after slot-header "
+            "validation",
+            len(to_drop),
+        )
+
+    def _load_checkpoint_from_device(self) -> None:
+        header = self._read_meta_header(0)
+        if header is None:
             logger.info(
-                "RustRawBlockBackend: loaded manifest with %d entries, next_slot=%d",
-                len(self._index),
-                self._next_slot,
+                "RustRawBlockBackend: no valid on-device metadata checkpoint found"
             )
+            return
+        payload = self._load_meta_payload(header)
+        if payload is None:
+            logger.warning(
+                "RustRawBlockBackend: metadata header exists but payload is invalid"
+            )
+            return
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except Exception:
+            logger.warning("RustRawBlockBackend: failed to decode metadata payload")
+            return
+        applied = self._apply_loaded_state(data)
+        if not applied:
+            logger.warning("RustRawBlockBackend: metadata payload rejected by checks")
+            return
+        self._meta_seq = int(header["seq"])
+        logger.info(
+            "RustRawBlockBackend: loaded on-device metadata checkpoint "
+            "(entries=%d, next_slot=%d, seq=%d)",
+            len(self._index),
+            self._next_slot,
+            self._meta_seq,
+        )
