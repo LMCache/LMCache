@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Standard
 from types import SimpleNamespace
 
+# Third Party
+import pytest
 import torch
 
+pytest.importorskip("vllm")
+
+# First Party
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
