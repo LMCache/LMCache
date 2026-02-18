@@ -185,7 +185,7 @@ def _bench_rust_raw_block(
     if not raw_device:
         temp_dir = tempfile.mkdtemp(prefix="raw_block_bench_")
         raw_device = os.path.join(temp_dir, "raw_block.bin")
-    if raw_device:
+    if raw_device and not raw_device.startswith("/dev/"):
         with open(raw_device, "wb") as f:
             f.truncate(int(raw_device_size_gb * 1024**3))
 
