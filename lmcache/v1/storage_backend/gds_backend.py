@@ -424,7 +424,7 @@ class GdsBackend(AllocatorBackendInterface):
         l1_dir = hash[:2]
         l2_dir = hash[2:4]
         key_str = key.to_string()
-        assert "_" not in key_str, "key string should not contain `_`"
+        assert "_" not in key_str, f"key string '{key_str}' should not contain `_`"
         return (
             os.path.join(
                 self.gds_path,
@@ -729,7 +729,7 @@ class GdsBackend(AllocatorBackendInterface):
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
         if self.use_thread_pool:
-            logger.info("Using batched_get_blocking with thread pool implementation")
+            logger.debug("Using batched_get_blocking with thread pool implementation")
             return self._batched_get_blocking_by_thread_pool_impl(keys)
         else:
             return super().batched_get_blocking(keys)
