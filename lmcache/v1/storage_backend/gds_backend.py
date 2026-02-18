@@ -261,8 +261,10 @@ class GdsBackend(AllocatorBackendInterface):
 
         # Values for retrying allocations and loads in case of failures potentially
         # due to memory pressure
-        self.max_alloc_attempts = config.extra_config.get("max_alloc_attempts", 10)
-        self.alloc_attempt_delay_secs = config.extra_config.get(
+        self.max_alloc_attempts = (config.extra_config or {}).get(
+            "max_alloc_attempts", 10
+        )
+        self.alloc_attempt_delay_secs = (config.extra_config or {}).get(
             "allocation_attempt_delay_secs", 0.1
         )
 
@@ -539,8 +541,6 @@ class GdsBackend(AllocatorBackendInterface):
                     f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
                     exc_info=True,
                 )
-                with self.put_lock:
-                    self.put_tasks.discard(key)
                 return
 
             # Register key in cache
@@ -883,6 +883,17 @@ class GdsBackend(AllocatorBackendInterface):
             elif self.cudart:
                 fd = os.open(gds_path, os.O_RDONLY)
                 file_size = os.fstat(fd).st_size
+
+                # Check if file is large enough for the requested read
+                if file_size < file_offset + size_in_bytes:
+                    os.close(fd)
+                    logger.error(
+                        f"File {gds_path} is too small: size={file_size}, "
+                        f"but need at least {file_offset + size_in_bytes} bytes "
+                        f"(offset={file_offset}, requested={size_in_bytes})"
+                    )
+                    return -1
+
                 mm = mmap.mmap(
                     fd,
                     file_size,
@@ -1021,7 +1032,8 @@ class GdsBackend(AllocatorBackendInterface):
                     f"attempt(s) of GDS backend batched_allocate(). "
                     f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
-                time.sleep(self.alloc_attempt_delay_secs)
+                if self.alloc_attempt_delay_secs > 0:
+                    time.sleep(self.alloc_attempt_delay_secs)
             else:  # break to failure case after max attempts is reached
                 break
 
