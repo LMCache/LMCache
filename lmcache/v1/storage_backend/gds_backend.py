@@ -13,6 +13,7 @@ import string
 import struct
 import threading
 import time
+import urllib.parse
 
 # Third Party
 import aiofile
@@ -340,7 +341,7 @@ class GdsBackend(AllocatorBackendInterface):
                         if not fentry.name.endswith(target_suffix):
                             continue
                         filename = os.path.basename(fentry.name)
-                        key_str = filename[: -len(target_suffix)].replace("_", "/")
+                        key_str = urllib.parse.unquote(filename[: -len(target_suffix)])
                         try:
                             key = CacheEngineKey.from_string(key_str)
                         except ValueError as e:
@@ -438,13 +439,12 @@ class GdsBackend(AllocatorBackendInterface):
         l1_dir = hash[:2]
         l2_dir = hash[2:4]
         key_str = key.to_string()
-        assert "_" not in key_str, f"key string '{key_str}' should not contain `_`"
         return (
             os.path.join(
                 self.gds_path,
                 l1_dir,
                 l2_dir,
-                key_str.replace("/", "_") + self.data_suffix,
+                urllib.parse.quote(key_str, safe="") + self.data_suffix,
             ),
             l1_dir + l2_dir,
             l1_dir,
