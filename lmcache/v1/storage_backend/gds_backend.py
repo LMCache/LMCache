@@ -400,6 +400,16 @@ class GdsBackend(AllocatorBackendInterface):
         if os.path.exists(path):
             try:
                 return self._read_metadata(key, path, subdir_key)
+            except FileNotFoundError:
+                logger.warning(
+                    f"[GDS] File not found for key {key} at expected path {path},"
+                    f" returning None"
+                )
+            except PermissionError:
+                logger.warning(
+                    f"[GDS]: Permission Denied for PID {os.getpid()} on {path},"
+                    f" returning None"
+                )
             except UnsupportedMetadataVersion:
                 logger.error(f"Unsupported metadata version for {path}, ignoring")
             except (OSError, IOError) as e:
@@ -856,7 +866,7 @@ class GdsBackend(AllocatorBackendInterface):
         size_in_bytes: int,
         dev_offset: int,
     ) -> int:
-        # Read data from disk into a GPU buffer
+        """Read data from disk into a GPU buffer"""
         try:
             if self.cufile:
                 with self.cufile.CuFile(
@@ -900,7 +910,11 @@ class GdsBackend(AllocatorBackendInterface):
                     "Both cufile and cudart are None, this should not happen"
                 )
         except Exception as e:
-            raise RuntimeError(f"CuFile read failed for {gds_path}: {e}") from e
+            # return -1 on any exception, and log the error.
+            # The caller will handle the error by removing the cache entry and
+            # returning None.
+            logger.error(f"CuFile read failed for {gds_path}: {e}", exc_info=True)
+            return -1
 
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
@@ -941,21 +955,24 @@ class GdsBackend(AllocatorBackendInterface):
         num_attempts = 0
 
         # try up to max_attempts
-        while num_attempts < max_attempts:
+        while True:
             memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
             if memory_obj is not None:  # success
                 return memory_obj
 
             num_attempts += 1
-            if num_attempts < max_attempts:
-                logger.warning(
+            if num_attempts < max_attempts:  # keep trying until max attempts is reached
+                logger.debug(
                     f"Unable to allocate memory object after {num_attempts} "
                     f"attempt(s) of GDS backend allocate(). "
                     f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
-                time.sleep(self.alloc_attempt_delay_secs)
+                if self.alloc_attempt_delay_secs > 0:
+                    time.sleep(self.alloc_attempt_delay_secs)
+            else:  # break to failure case after max attempts is reached
+                break
 
-        logger.error(
+        logger.warning(
             f"GDS allocation failed after {num_attempts} attempt(s). Returning None."
         )
         if not self.memory_allocator.memcheck():
@@ -988,7 +1005,7 @@ class GdsBackend(AllocatorBackendInterface):
         num_attempts = 0
 
         # try up to max_attempts
-        while num_attempts < max_attempts:
+        while True:
             memory_objs = self.memory_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
             )
@@ -996,13 +1013,15 @@ class GdsBackend(AllocatorBackendInterface):
                 return memory_objs
 
             num_attempts += 1
-            if num_attempts < max_attempts:
-                logger.warning(
+            if num_attempts < max_attempts:  # keep trying until max attempts is reached
+                logger.debug(
                     f"Unable to allocate memory object after {num_attempts} "
                     f"attempt(s) of GDS backend batched_allocate(). "
                     f"Waiting {self.alloc_attempt_delay_secs} seconds before retrying."
                 )
                 time.sleep(self.alloc_attempt_delay_secs)
+            else:  # break to failure case after max attempts is reached
+                break
 
         logger.error(
             f"GDS batched allocation failed after {num_attempts} "
