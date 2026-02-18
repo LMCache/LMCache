@@ -17,9 +17,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import EngineType
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import CreateGPUConnector, EngineType
+from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.health_monitor.base import HealthMonitor
 from lmcache.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,

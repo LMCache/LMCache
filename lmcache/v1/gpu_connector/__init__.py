@@ -1,24 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard Library
-# Standard
-from enum import Enum
-
 # Third Party
 import torch
 
 # First Party
 from lmcache.integration.vllm.utils import get_vllm_torch_dev
+from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
 from lmcache.v1.metadata import LMCacheMetadata
-
-
-class EngineType(Enum):
-    VLLM = "vllm"
-    SGLANG = "sglang"
-    MOCK = "mock"
 
 
 def CreateGPUConnector(
