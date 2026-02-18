@@ -30,6 +30,8 @@ class LMCBlendMetadata:
     positions: Optional[torch.Tensor] = None
     tokens_per_frame: Optional[int] = None
     mm_positions: Optional[Sequence[Any]] = None
+    selection_effective_len: Optional[int] = None
+    is_full_selection: bool = False
 
     def clean(self):
         self.imp_indices = None
@@ -37,3 +39,5 @@ class LMCBlendMetadata:
         self.positions = None
         self.tokens_per_frame = None
         self.mm_positions = None
+        self.selection_effective_len = None
+        self.is_full_selection = False

@@ -131,7 +131,7 @@ win=40
 stride=20
 gop=2
 categorys=["Abuse", "Arson", "Arrest", "Assault", "Burglary"]
-categorys=["Explosion", "Fighting"]
+# categorys=["Explosion", "Fighting"]
 for category in categorys:
     print(f"category is {category}")
     target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/with_codec_gop{gop}/{category}"

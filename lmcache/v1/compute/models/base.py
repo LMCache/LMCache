@@ -233,10 +233,6 @@ class LMCBaseModel(nn.Module, ABC):
                     pre_attn_end.record(stream)
                     pre_attn_events = (pre_attn_start, pre_attn_end)
 
-                if timing is not None:
-                    pre_attn_end.record(stream)
-                    pre_attn_events = (pre_attn_start, pre_attn_end)
-
                 # Take attention dimensions for this layer (extracted from vllm_attn_layers, stored in __init__)
                 attn_core = self.vllm_attn_layers[self.start_layer + layer_idx]
                 num_heads = _pick(attn_core, "num_heads")
@@ -289,7 +285,14 @@ class LMCBaseModel(nn.Module, ABC):
                     ffn_start = torch.cuda.Event(enable_timing=True)
                     ffn_end = torch.cuda.Event(enable_timing=True)
                     ffn_start.record(stream)
-                hidden_states = layer.mlp(hidden_states)
+                skip_ffn = bool(getattr(self.blender, "skip_ffn", False))
+                if skip_ffn and bool(getattr(self.blender, "skip_ffn_only_costream", True)):
+                    skip_ffn = bool(getattr(self.blender, "is_costream", False))
+                if skip_ffn:
+                    # Keep shape/flow consistent while skipping the FFN branch.
+                    hidden_states = torch.zeros_like(hidden_states)
+                else:
+                    hidden_states = layer.mlp(hidden_states)
                 if timing is not None:
                     ffn_end.record(stream)
                     ffn_events = (ffn_start, ffn_end)

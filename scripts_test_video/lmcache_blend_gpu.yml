@@ -8,3 +8,7 @@ blend_special_str: "<<SEG>>"
 chunk_size: 16
 blend_check_layers: 1
 blend_recompute_ratios: 0.15
+
+extra_config:
+  skip_ffn: True,
+  skip_ffn_only_costream: True,

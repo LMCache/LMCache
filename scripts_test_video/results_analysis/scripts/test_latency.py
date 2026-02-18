@@ -82,6 +82,6 @@ def export_prefill_stats(root_dir, out_csv, eps=1e-9):
 
 win=40
 stride=20
-category="Burglary"
+category="Abuse"
 target_folder = f"/home/users/ntu/yulin001/scratch/wychen/github/lmcache-multimodal/scripts_test_video/results_analysis/logs/InternVL3-14B/small_dataset/with_codec/{category}"
 export_prefill_stats(target_folder, f"{category}_prefill_stats_win{win}_stride{stride}.csv")

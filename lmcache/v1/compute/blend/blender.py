@@ -54,6 +54,21 @@ class LMCBlender:
             is_costream=config.is_costream,
             GOP=config.GOP,
         )
+        self.is_costream = bool(config.is_costream)
+        self.gop = max(int(config.GOP), 1)
+        self.skip_ffn = False
+        self.skip_ffn_only_costream = True
+        self._single_zero_idx: dict[torch.device, torch.Tensor] = {}
+        if config.extra_config is not None:
+            self.skip_ffn = bool(config.extra_config.get("skip_ffn", False))
+            self.skip_ffn_only_costream = bool(
+                config.extra_config.get("skip_ffn_only_costream", True)
+            )
+        if self.skip_ffn:
+            logger.warning(
+                "FFN skip is enabled (only_costream=%s). This may reduce output quality.",
+                self.skip_ffn_only_costream,
+            )
 
         # This will be set during the blending process
         self.metadata = LMCBlendMetadata(
@@ -61,6 +76,9 @@ class LMCBlender:
             attn_mask=None,
             positions=None,
         )
+        self._rotary_by_layer = [
+            self._get_rotary_emb(layer.self_attn) for layer in self.layers
+        ]
 
     def _get_rotary_emb(self, attn_layer):
         # 兼容不同实现的 rotary 暴露方式
@@ -83,7 +101,7 @@ class LMCBlender:
         """
         layer_id 为全局层号（与 layerwise_model 内部一致），支持 Qwen2.5-VL。
         """
-        logger.info(f"Blender is processing KV for layer {layer_id}")
+        logger.debug("Blender is processing KV for layer %d", layer_id)
         try:
             old_k, old_v = self.gpu_connector.get_kv(layer_id)
         except ValueError:
@@ -110,76 +128,65 @@ class LMCBlender:
                 q.shape[0], device=q.device, dtype=torch.int64
             )
 
-        # Retrieves the current layer by using the parsed layers, avoiding hard-coding of vllm_model.model.layers
-        layer = self.layers[layer_id]
-        attn_layer = layer.self_attn
-
         # Rotary (common in the Qwen family)
-        rotary = self._get_rotary_emb(attn_layer)
+        rotary = self._rotary_by_layer[layer_id]
 
         # CoStream: recompute only key-frame tokens
-        if bool(getattr(self.common_metadata, "is_costream", False)):
+        if self.is_costream:
             # Build recompute indices once, then keep using the same reduced path
             # for following layers in this request.
             if self.metadata.imp_indices is None:
                 num_tokens = q.shape[0]
                 cache_len = old_k.shape[0]
                 effective_len = min(num_tokens, cache_len)
-                logger.info(f'num_tokens is {num_tokens}, cache_len is {cache_len}')
-                all_indices = torch.arange(
-                    effective_len, device=q.device, dtype=torch.long
-                )
-                hit_mask = torch.ones(
-                    effective_len, device=q.device, dtype=torch.bool
-                )
-
+                logger.debug("num_tokens=%d, cache_len=%d", num_tokens, cache_len)
                 # Gap positions are cache-miss token positions; the remaining
                 # tokens are cache-hit positions.
                 gap_positions = getattr(
                     self.gpu_connector, "current_gap_positions", None
                 )
-                if gap_positions is not None and gap_positions.numel() > 0:
-                    gap_positions = gap_positions.to(device=q.device, dtype=torch.long)
+                if gap_positions is None or gap_positions.numel() == 0:
+                    hit_indices = torch.arange(
+                        effective_len, device=q.device, dtype=torch.long
+                    )
+                else:
+                    hit_mask = torch.ones(
+                        effective_len, device=q.device, dtype=torch.bool
+                    )
+                    if gap_positions.device != q.device or gap_positions.dtype != torch.long:
+                        gap_positions = gap_positions.to(
+                            device=q.device, dtype=torch.long
+                        )
                     valid_gap = gap_positions[
                         (gap_positions >= 0) & (gap_positions < effective_len)
                     ]
                     hit_mask[valid_gap] = False
-                hit_indices = all_indices[hit_mask]
+                    hit_indices = torch.where(hit_mask)[0]
 
-                gop = max(int(getattr(self.common_metadata, "GOP", 1)), 1)
+                gop = self.gop
                 tokens_per_frame = int(self.metadata.tokens_per_frame or 0)
                 mm_positions: Optional[Sequence[Any]] = self.metadata.mm_positions
                 # logger.info(f'tokens_per_frame is {tokens_per_frame}, gop is {gop}')
 
                 if mm_positions:
                     # Precise alignment using mm_positions (offset/length per frame).
-                    frame_mask = torch.zeros(
-                        effective_len, device=q.device, dtype=torch.bool
-                    )
-                    frame_ranges: list[tuple[int, int, int]] = []
+                    selected_chunks = []
+                    first_key_start: Optional[int] = None
                     for frame_id, placeholder in enumerate(mm_positions):
                         start = int(getattr(placeholder, "offset", 0))
                         length = int(getattr(placeholder, "length", 0))
-                        # logger.info(f"frame_id is {frame_id}, start is {start}, length is {length}")
                         if length <= 0 or start >= effective_len:
                             continue
                         end = min(start + length, effective_len)
-                        frame_mask[start:end] = True
-                        frame_ranges.append((frame_id, start, end))
-
-                    selected_chunks = []
-                    key_frame_ranges: list[tuple[int, int]] = []
-                    for frame_id, start, end in frame_ranges:
                         if gop > 1 and ((frame_id+1) % gop) != 0:
                             continue
-                        key_frame_ranges.append((start, end))
-                        frame_hit_offsets = torch.nonzero(
-                            hit_mask[start:end],
-                            as_tuple=True,
-                        )[0]
-                        logger.info(f'frame_id: {frame_id}, hit count: {len(frame_hit_offsets)}')
-                        if frame_hit_offsets.numel() > 0:
-                            selected_chunks.append(frame_hit_offsets + start)
+                        if first_key_start is None:
+                            first_key_start = start
+                        hit_in_range = hit_indices[
+                            (hit_indices >= start) & (hit_indices < end)
+                        ]
+                        if hit_in_range.numel() > 0:
+                            selected_chunks.append(hit_in_range)
 
                     if selected_chunks:
                         selected_indices = torch.cat(selected_chunks, dim=0)
@@ -188,35 +195,24 @@ class LMCBlender:
 
                     # If no hit tokens in key frames, keep one token from the first
                     # key frame range to avoid empty selection.
-                    if selected_indices.numel() == 0 and key_frame_ranges:
-                        first_start, _ = key_frame_ranges[0]
-                        if first_start < effective_len:
+                    if selected_indices.numel() == 0 and first_key_start is not None:
+                        if first_key_start < effective_len:
                             selected_indices = torch.tensor(
-                                [first_start], device=q.device, dtype=torch.long
+                                [first_key_start], device=q.device, dtype=torch.long
                             )
-                    selected_indices = torch.unique(selected_indices, sorted=True)
-                    logger.info(f"selected_indices length is {len(selected_indices)}")
+                    logger.debug("selected_indices length=%d", len(selected_indices))
                 # Recompute key frames by GOP at frame granularity based on tokens_per_frame.
                 elif tokens_per_frame > 0:
-                    num_frames = (effective_len + tokens_per_frame - 1) // tokens_per_frame
-                    selected_chunks = []
-                    for frame_id in range(0, num_frames, gop):
-                        # logger.info(f'frame_id: {frame_id}, num_frames: {num_frames}')
-                        start = frame_id * tokens_per_frame
-                        end = min(start + tokens_per_frame, effective_len)
-                        frame_hit_offsets = torch.nonzero(
-                            hit_mask[start:end],
-                            as_tuple=True,
-                        )[0]
-                        if frame_hit_offsets.numel() > 0:
-                            selected_chunks.append(frame_hit_offsets + start)
-                    if selected_chunks:
-                        selected_indices = torch.cat(selected_chunks, dim=0)
-                    elif hit_indices.numel() > 0:
-                        selected_indices = hit_indices[:1]
+                    if gop > 1:
+                        frame_ids = hit_indices // tokens_per_frame
+                        selected_indices = hit_indices[(frame_ids % gop) == 0]
                     else:
                         selected_indices = hit_indices
-                    logger.info(f"selected_indices length is {len(selected_indices)}")    
+                    if selected_indices.numel() == 0 and hit_indices.numel() > 0:
+                        selected_indices = hit_indices[:1]
+                    elif selected_indices.numel() == 0:
+                        selected_indices = hit_indices
+                    logger.debug("selected_indices length=%d", len(selected_indices))
                 elif gop > 1:
                     # Fallback: no frame info, degrade to token-based selection.
                     selected_indices = hit_indices[(hit_indices % gop) == 0]
@@ -227,8 +223,9 @@ class LMCBlender:
 
                 self.metadata.imp_indices = selected_indices
                 self.metadata.positions = self.metadata.positions[selected_indices]
-                attn_metadata.update_from_top_indices(selected_indices)
-                logger.info(
+                self.metadata.selection_effective_len = effective_len
+                self.metadata.is_full_selection = selected_indices.numel() == effective_len
+                logger.debug(
                     "CoStream mode selected %d/%d hit tokens for recompute (GOP=%d).",
                     int(selected_indices.numel()),
                     int(num_tokens),
@@ -238,20 +235,37 @@ class LMCBlender:
             imp_indices = self.metadata.imp_indices
             assert imp_indices is not None
             effective_len = min(q.shape[0], old_k.shape[0])
-            valid_mask = imp_indices < effective_len
-            layer_imp = imp_indices[valid_mask]
-            layer_positions = self.metadata.positions[valid_mask]
+            selection_effective_len = int(self.metadata.selection_effective_len or 0)
+            if selection_effective_len > 0 and effective_len >= selection_effective_len:
+                # Fast path: indices are already valid for this layer.
+                layer_imp = imp_indices
+                layer_positions = self.metadata.positions
+            else:
+                valid_mask = imp_indices < effective_len
+                layer_imp = imp_indices[valid_mask]
+                layer_positions = self.metadata.positions[valid_mask]
             if layer_imp.numel() == 0 and effective_len > 0:
-                layer_imp = torch.tensor([0], device=q.device, dtype=torch.long)
-                layer_positions = torch.tensor([0], device=q.device, dtype=torch.long)
+                if q.device not in self._single_zero_idx:
+                    self._single_zero_idx[q.device] = torch.tensor(
+                        [0], device=q.device, dtype=torch.long
+                    )
+                layer_imp = self._single_zero_idx[q.device]
+                layer_positions = self._single_zero_idx[q.device]
 
             # Each layer gets a fresh attention metadata object; keep it aligned
             # with the reduced token set.
-            attn_metadata.update_from_top_indices(layer_imp)
-            k, v = k[layer_imp], v[layer_imp]
-            q = q[layer_imp]
-            residual = residual[layer_imp]
-            attn_output = attn_output[: len(layer_imp)]
+            full_range_selected = (
+                self.metadata.is_full_selection
+                and effective_len == q.shape[0]
+                and selection_effective_len == q.shape[0]
+            )
+            if not full_range_selected:
+                attn_metadata.update_from_top_indices(layer_imp)
+                k = k.index_select(0, layer_imp)
+                v = v.index_select(0, layer_imp)
+                q = q.index_select(0, layer_imp)
+                residual = residual.index_select(0, layer_imp)
+                attn_output = attn_output[: len(layer_imp)]
             # Apply rotary after selecting tokens to keep positions aligned.
             q, k = rotary(layer_positions, q, k)
             write_indices = layer_imp
@@ -260,7 +274,7 @@ class LMCBlender:
             write_indices = self.metadata.imp_indices
 
         # Recomputation/selection logic for important layers
-        if layer_id in self.common_metadata.check_layers and not self.common_metadata.is_costream:
+        if layer_id in self.common_metadata.check_layers and not self.is_costream:
             logger.info(f'layer_id is {layer_id}, len(layers) is {len(self.layers)}')   
             # Select the KV rows that need to be recalculated based on L2 differences
             diff_k = torch.sum(
@@ -313,8 +327,24 @@ class LMCBlender:
         layerwise_retriever = self.cache_engine.retrieve_layer(tokens, mask, **kwargs)
 
         # warmup retriever
-        next(layerwise_retriever)
+        warmup_retrieved = next(layerwise_retriever)
+        has_retrieved_tokens = False
+        if warmup_retrieved is not None:
+            if torch.is_tensor(warmup_retrieved):
+                has_retrieved_tokens = int(warmup_retrieved.item()) > 0
+            else:
+                has_retrieved_tokens = int(warmup_retrieved) > 0
         yield
+
+        if not has_retrieved_tokens:
+            logger.debug("No retrievable tokens in layerwise retrieve; skip blending compute.")
+            for _ in range(self.num_layers):
+                next(layerwise_retriever)
+                yield
+            next(layerwise_retriever)
+            self.metadata.clean()
+            yield
+            return
 
         for _ in range(self.num_layers):
             next(layerwise_retriever)

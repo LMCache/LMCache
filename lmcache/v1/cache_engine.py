@@ -621,19 +621,31 @@ class LMCacheEngine:
 
             keys_multi_layer = key.split_layers(self.num_layers)
 
-            # NOTE: Only check the first layer
-            if current_location := self.storage_manager.contains(keys_multi_layer[0]):
-                if location is None:
-                    location = current_location
-                else:
-                    # TODO(Jiayi): Support multi-location retrieval in the future
-                    assert location == current_location, (
-                        "All retrieved keys should be from the same location "
-                        "when use layerwise retrieval."
-                        "Please support multi-location retrieval in the future."
-                    )
-            else:
+            # Require all layers to exist in the same location to avoid
+            # lookup/retrieve mismatch and partial-layer retrieval.
+            current_location = None
+            all_layers_found = True
+            for key_single_layer in keys_multi_layer:
+                found_location = self.storage_manager.contains(key_single_layer)
+                if not found_location:
+                    all_layers_found = False
+                    break
+                if current_location is None:
+                    current_location = found_location
+                elif current_location != found_location:
+                    all_layers_found = False
+                    break
+            if not all_layers_found or current_location is None:
                 break
+            if location is None:
+                location = current_location
+            else:
+                # TODO(Jiayi): Support multi-location retrieval in the future
+                assert location == current_location, (
+                    "All retrieved keys should be from the same location "
+                    "when use layerwise retrieval."
+                    "Please support multi-location retrieval in the future."
+                )
 
             starts.append(start)
             ends.append(end)
@@ -823,14 +835,15 @@ class LMCacheEngine:
                     # of one layer
                     key_all_layers = key.split_layers(self.num_layers)
 
-                    found = False
+                    all_layers_found = True
                     for key_single_layer in key_all_layers:
-                        # logger.info(f"Looking up single layer key={key_single_layer}, search_range={search_range}, pin={pin}")  
-                        if self.storage_manager.contains(
+                        # logger.info(f"Looking up single layer key={key_single_layer}, search_range={search_range}, pin={pin}")
+                        if not self.storage_manager.contains(
                             key_single_layer, search_range, pin
                         ):
-                            found = True
-                    if found:
+                            all_layers_found = False
+                            break
+                    if all_layers_found:
                         if pin:
                             assert lookup_id is not None, (
                                 "lookup_id is required when pin is True"
