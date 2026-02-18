@@ -257,6 +257,10 @@ class LMCacheEngine:
             return self._health_monitor.is_healthy()
         return True
 
+    def _get_req_id(self, kwargs: dict) -> str:
+        """Extracts request ID from kwargs for logging."""
+        return kwargs.get("req_id", "unspecified")
+
     def mark_init_failed(self, reason: str = "") -> None:
         """
         Mark the engine as having failed initialization.
@@ -373,6 +377,9 @@ class LMCacheEngine:
             return
 
         assert self.storage_manager is not None
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         # Initialize num_to_store_tokens to avoid reference before assignment
         num_to_store_tokens = 0
@@ -514,8 +521,10 @@ class LMCacheEngine:
         tot_time = store_stats.time_to_store()
 
         logger.info(
-            "Stored %d out of total %d tokens. size: %.4f GB, cost %.4f ms, "
-            "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
+            "[req_id=%s] Stored %d out of total %d tokens. "
+            "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
+            "offload_time: %.4f ms, put_time: %.4f ms",
+            req_id,
             tot_token_num,
             num_to_store_tokens,
             tot_kv_size / 1024**3,
@@ -562,6 +571,9 @@ class LMCacheEngine:
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
         )
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -686,8 +698,9 @@ class LMCacheEngine:
 
             tot_time = time.perf_counter() - t_start
             logger.info(
-                "Stored %d out of total %d tokens. "
+                "[req_id=%s] Stored %d out of total %d tokens. "
                 "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s",
+                req_id,
                 tot_token_num,
                 len(tokens),
                 tot_kv_size / 1024**3,
@@ -740,6 +753,9 @@ class LMCacheEngine:
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve operation"
         )
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         tot_kv_size = 0
 
@@ -834,9 +850,10 @@ class LMCacheEngine:
         # retrieved: 256 tokens
         if not self._is_passive():
             logger.info(
-                "Retrieved %d out of %d required tokens (from %d total tokens)."
-                " size: %.4f gb,"
-                " cost %.4f ms, throughput: %.4f GB/s;",
+                "[req_id=%s] Retrieved %d out of %d required tokens "
+                "(from %d total tokens). size: %.4f gb, "
+                "cost %.4f ms, throughput: %.4f GB/s;",
+                req_id,
                 retrieved_tokens,
                 num_required_tokens,
                 len(tokens),
@@ -886,6 +903,9 @@ class LMCacheEngine:
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
         )
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
@@ -981,9 +1001,11 @@ class LMCacheEngine:
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         if not self._is_passive():
             logger.info(
-                f"Retrieved {retrieved_tokens} "
-                f"out of {num_required_tokens} "
-                f"out of total {len(tokens)} tokens"
+                "[req_id=%s] Retrieved %d out of %d out of total %d tokens",
+                req_id,
+                retrieved_tokens,
+                num_required_tokens,
+                len(tokens),
             )
 
         yield ret_mask
