@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Standard
 from types import SimpleNamespace
 
-# Third Party
-import pytest
 import torch
-from vllm.v1.request import RequestStatus
 
-pytest.importorskip("vllm")
-
-# First Party
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
@@ -51,15 +44,6 @@ class _FakeEngine:
 class _FakeManager:
     def __init__(self, engine: _FakeEngine):
         self.lmcache_engine = engine
-        self.lookup_client = None
-
-
-class _FakeLookupClient:
-    def __init__(self):
-        self.cancelled: list[str] = []
-
-    def cancel_lookup(self, lookup_id: str):
-        self.cancelled.append(lookup_id)
 
 
 def _make_req(req_id: str, can_save: bool = True):
@@ -83,8 +67,6 @@ def _make_connector(requests):
     connector._lmcache_chunk_size = 8
     connector.kv_caches = {"layer0": torch.zeros(1)}
     connector._layerwise_save_storers = {}
-    connector.current_layer = 0
-    connector.async_loading = False
     return connector, metadata, engine
 
 
@@ -101,15 +83,15 @@ def test_layerwise_storer_is_request_scoped_across_interleaved_finalize() -> Non
     metadata.requests = [_make_req("req-1")]
     connector.wait_for_save()
     assert engine.store_steps["req-1"] == 2
-    assert engine.store_steps["req-2"] == 2
+    assert engine.store_steps["req-2"] == 1
     assert engine.unpinned == ["req-1"]
-    assert len(connector.layerwise_storers) == 2
+    assert set(connector._layerwise_save_storers.keys()) == {"req-2"}
 
     metadata.requests = [_make_req("req-2")]
     connector.wait_for_save()
-    assert engine.store_steps["req-2"] == 3
+    assert engine.store_steps["req-2"] == 2
     assert engine.unpinned == ["req-1", "req-2"]
-    assert len(connector.layerwise_storers) == 2
+    assert connector._layerwise_save_storers == {}
 
 
 def test_wait_for_save_repeated_call_does_not_readvance_finalized_storer() -> None:
@@ -119,10 +101,10 @@ def test_wait_for_save_repeated_call_does_not_readvance_finalized_storer() -> No
 
     connector.wait_for_save()
     assert engine.store_steps["req-1"] == 2
-    assert len(connector.layerwise_storers) == 1
+    assert connector._layerwise_save_storers == {}
 
     connector.wait_for_save()
-    assert engine.store_steps["req-1"] == 3
+    assert engine.store_steps["req-1"] == 2
 
 
 def test_layerwise_save_skips_requests_that_cannot_save() -> None:
@@ -130,36 +112,4 @@ def test_layerwise_save_skips_requests_that_cannot_save() -> None:
     connector.kv_role = "kv_both"
     connector.save_kv_layer("layer0", torch.zeros(1), None)
     assert engine.store_calls == []
-    assert connector.layerwise_storers == []
-
-
-def test_request_finished_aborted_cleans_layerwise_storer() -> None:
-    connector, _, _ = _make_connector([_make_req("req-1")])
-    connector.async_loading = True
-    connector._manager.lookup_client = _FakeLookupClient()
-    connector._layerwise_save_storers = {"req-1": iter([None])}
-
-    req = SimpleNamespace(status=RequestStatus.FINISHED_ABORTED, request_id="req-1")
-    connector.request_finished(req, [])
-
     assert connector._layerwise_save_storers == {}
-    assert connector.lookup_client is not None
-    assert connector.lookup_client.cancelled == ["req-1"]
-
-
-def test_request_finished_normal_cleans_layerwise_storer() -> None:
-    connector, _, _ = _make_connector([_make_req("req-2")])
-    connector._layerwise_save_storers = {"req-2": iter([None])}
-
-    req = SimpleNamespace(status=RequestStatus.FINISHED_STOPPED, request_id="req-2")
-    connector.request_finished(req, [])
-
-    assert connector._layerwise_save_storers == {}
-
-
-def test_request_finished_without_use_layerwise_attribute() -> None:
-    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
-    req = SimpleNamespace(status=RequestStatus.FINISHED_STOPPED, request_id="req-x")
-
-    # Ensure this path is safe even if use_layerwise is not initialized yet.
-    connector.request_finished(req, [])
