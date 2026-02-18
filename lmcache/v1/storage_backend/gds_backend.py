@@ -259,6 +259,8 @@ class GdsBackend(AllocatorBackendInterface):
 
         self.use_direct_io = False
 
+        # Values for retrying allocations and loads in case of failures potentially
+        # due to memory pressure
         self.max_alloc_attempts = config.extra_config.get("max_alloc_attempts", 10)
         self.alloc_attempt_delay_secs = config.extra_config.get(
             "allocation_attempt_delay_secs", 0.1
