@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
+from typing import Any, Optional, Union
 import threading
 import time
 
@@ -195,7 +195,13 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
-        hashes: list[int] = []
+        # TODO(ziruiliu) num_computed_tokens is passed in
+        # Due to complexity in preemption or eviction in async mode
+        # We will handle skipping logic in future.
+
+        hashes: list[Any] = []
+        # OFER: Check if we can keep this as list[int] after we
+        # remove support for bytes in chunk_hash
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
             token_ids, make_key=False

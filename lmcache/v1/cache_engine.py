@@ -455,7 +455,7 @@ class LMCacheEngine:
                 )
                 if memory_obj is None:
                     logger.warning(
-                        "Local cpu memory under pressure so"
+                        "Memory allocator under pressure so"
                         " choosing to store only "
                         f" {len(memory_objs)}"
                         " total chunks of KV cache."
@@ -636,7 +636,7 @@ class LMCacheEngine:
 
             if memory_objs_multi_layer is None:
                 logger.warning(
-                    "Local cpu memory under pressure so"
+                    "Memory allocator under pressure so"
                     " choosing to not store the KV cache."
                 )
                 break
@@ -1202,7 +1202,7 @@ class LMCacheEngine:
         self,
         lookup_id: str,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Any]] = None,
         offsets: Optional[List[int]] = None,
         search_range: Optional[List[str]] = None,
         pin: bool = False,

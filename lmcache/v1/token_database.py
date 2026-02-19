@@ -171,7 +171,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
     def process_tokens(
         self,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Any]] = None,
         offsets: Optional[List[int]] = None,
         mask: Optional[torch.Tensor] = None,
         make_key: bool = True,
