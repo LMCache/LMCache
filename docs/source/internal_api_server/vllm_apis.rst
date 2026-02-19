@@ -131,7 +131,7 @@ Get current LMCache engine configuration values.
   ``names`` str     (Optional) Comma-separated list of config names to filter
   ========= ======= =============================================
 
-- **Response**: ``text/plain`` — JSON object of configuration key-value pairs.
+- **Response**: ``application/json`` — JSON object of configuration key-value pairs.
 
 .. code-block:: bash
 
@@ -212,7 +212,7 @@ Get metadata of the LMCache engine (e.g., worker_id, model_name, kv_shape).
   ``names`` str     (Optional) Comma-separated list of attribute names to filter
   ========= ======= =============================================
 
-- **Response**: ``text/plain`` — JSON object of metadata attributes.
+- **Response**: ``application/json`` — JSON object of metadata attributes.
 
 .. code-block:: bash
 

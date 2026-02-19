@@ -18,7 +18,7 @@ Get all environment variables of the running process.
 - **Method**: ``GET``
 - **Path**: ``/env``
 - **Parameters**: None
-- **Response**: ``text/plain`` — JSON object of all environment variables (sorted by key).
+- **Response**: ``application/json`` — JSON object of all environment variables (sorted by key).
 
 .. code-block:: bash
 
