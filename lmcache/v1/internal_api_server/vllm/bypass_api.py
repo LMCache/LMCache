@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-import json
-
 # Third Party
 from fastapi import APIRouter
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse
 
 router = APIRouter()
 
@@ -25,9 +22,8 @@ def _get_storage_manager(request: Request):
             "error": "Bypass API is unavailable",
             "message": "LMCache engine not configured.",
         }
-        return None, PlainTextResponse(
-            content=json.dumps(error_info, indent=2),
-            media_type="application/json",
+        return None, JSONResponse(
+            content=error_info,
             status_code=503,
         )
     sm = lmcache_engine.storage_manager
@@ -36,9 +32,8 @@ def _get_storage_manager(request: Request):
             "error": "Bypass API is unavailable",
             "message": "StorageManager not initialized.",
         }
-        return None, PlainTextResponse(
-            content=json.dumps(error_info, indent=2),
-            media_type="application/json",
+        return None, JSONResponse(
+            content=error_info,
             status_code=503,
         )
     return sm, None
@@ -54,7 +49,7 @@ async def list_bypassed_backends(request: Request):
         request: The FastAPI request object.
 
     Returns:
-        PlainTextResponse: JSON with bypassed and all backends.
+        JSONResponse: JSON with bypassed and all backends.
     """
     try:
         sm, err = _get_storage_manager(request)
@@ -66,18 +61,14 @@ async def list_bypassed_backends(request: Request):
             "bypassed_backends": sm.get_bypassed_backends(),
             "all_backends": sm.get_all_backend_names(),
         }
-        return PlainTextResponse(
-            content=json.dumps(result, indent=2),
-            media_type="application/json",
-        )
+        return JSONResponse(content=result)
     except Exception as e:
         error_info = {
             "error": "Failed to list bypassed backends",
             "message": str(e),
         }
-        return PlainTextResponse(
-            content=json.dumps(error_info, indent=2),
-            media_type="application/json",
+        return JSONResponse(
+            content=error_info,
             status_code=500,
         )
 
@@ -94,7 +85,7 @@ async def add_bypass_backend(request: Request):
         request: The FastAPI request object.
 
     Returns:
-        PlainTextResponse: JSON with operation result.
+        JSONResponse: JSON with operation result.
     """
     try:
         sm, err = _get_storage_manager(request)
@@ -107,9 +98,8 @@ async def add_bypass_backend(request: Request):
                 "error": "Missing parameter",
                 "message": "backend_name is required",
             }
-            return PlainTextResponse(
-                content=json.dumps(error_info, indent=2),
-                media_type="application/json",
+            return JSONResponse(
+                content=error_info,
                 status_code=400,
             )
 
@@ -120,9 +110,8 @@ async def add_bypass_backend(request: Request):
                 "message": "Backend '%s' not found. "
                 "Available: %s" % (backend_name, all_names),
             }
-            return PlainTextResponse(
-                content=json.dumps(error_info, indent=2),
-                media_type="application/json",
+            return JSONResponse(
+                content=error_info,
                 status_code=400,
             )
 
@@ -137,18 +126,14 @@ async def add_bypass_backend(request: Request):
             "was_already_bypassed": already,
             "bypassed_backends": sm.get_bypassed_backends(),
         }
-        return PlainTextResponse(
-            content=json.dumps(result, indent=2),
-            media_type="application/json",
-        )
+        return JSONResponse(content=result)
     except Exception as e:
         error_info = {
             "error": "Failed to add bypass backend",
             "message": str(e),
         }
-        return PlainTextResponse(
-            content=json.dumps(error_info, indent=2),
-            media_type="application/json",
+        return JSONResponse(
+            content=error_info,
             status_code=500,
         )
 
@@ -166,7 +151,7 @@ async def remove_bypass_backend(request: Request):
         request: The FastAPI request object.
 
     Returns:
-        PlainTextResponse: JSON with operation result.
+        JSONResponse: JSON with operation result.
     """
     try:
         sm, err = _get_storage_manager(request)
@@ -179,9 +164,8 @@ async def remove_bypass_backend(request: Request):
                 "error": "Missing parameter",
                 "message": "backend_name is required",
             }
-            return PlainTextResponse(
-                content=json.dumps(error_info, indent=2),
-                media_type="application/json",
+            return JSONResponse(
+                content=error_info,
                 status_code=400,
             )
 
@@ -192,9 +176,8 @@ async def remove_bypass_backend(request: Request):
                 "message": "Backend '%s' not found. "
                 "Available: %s" % (backend_name, all_names),
             }
-            return PlainTextResponse(
-                content=json.dumps(error_info, indent=2),
-                media_type="application/json",
+            return JSONResponse(
+                content=error_info,
                 status_code=400,
             )
 
@@ -209,17 +192,13 @@ async def remove_bypass_backend(request: Request):
             "was_bypassed": was_bypassed,
             "bypassed_backends": sm.get_bypassed_backends(),
         }
-        return PlainTextResponse(
-            content=json.dumps(result, indent=2),
-            media_type="application/json",
-        )
+        return JSONResponse(content=result)
     except Exception as e:
         error_info = {
             "error": "Failed to remove bypass backend",
             "message": str(e),
         }
-        return PlainTextResponse(
-            content=json.dumps(error_info, indent=2),
-            media_type="application/json",
+        return JSONResponse(
+            content=error_info,
             status_code=500,
         )
