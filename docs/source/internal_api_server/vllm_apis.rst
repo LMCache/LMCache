@@ -595,6 +595,89 @@ Get the current freeze mode status.
     }
 
 
+Hot Cache
+----------
+
+These endpoints control the hot cache feature of LocalCPUBackend.
+When hot cache is enabled, frequently accessed KV cache data will be kept
+in CPU memory for faster retrieval.
+
+``PUT /hot_cache/enable`` — Enable Hot Cache
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Enable hot cache for the LocalCPUBackend.
+
+- **Method**: ``PUT``
+- **Path**: ``/hot_cache/enable``
+- **Parameters**: None
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl -X PUT http://localhost:7000/hot_cache/enable
+
+**Example Response**:
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "hot_cache": true,
+      "message": "Hot cache enabled successfully"
+    }
+
+
+``PUT /hot_cache/disable`` — Disable Hot Cache
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Disable hot cache for the LocalCPUBackend. Existing hot cache entries
+will be cleared and no new data will be written.
+
+- **Method**: ``PUT``
+- **Path**: ``/hot_cache/disable``
+- **Parameters**: None
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl -X PUT http://localhost:7000/hot_cache/disable
+
+**Example Response**:
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "hot_cache": false,
+      "message": "Hot cache disabled successfully"
+    }
+
+
+``GET /hot_cache/status`` — Hot Cache Status
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Get the current hot cache status of LocalCPUBackend.
+
+- **Method**: ``GET``
+- **Path**: ``/hot_cache/status``
+- **Parameters**: None
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl http://localhost:7000/hot_cache/status
+
+**Example Response**:
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "hot_cache": true,
+      "message": "Hot cache is enabled"
+    }
+
+
 Chunk Statistics
 -----------------
 
