@@ -12,7 +12,6 @@ Tests cover:
 # Standard
 from collections import OrderedDict
 from unittest.mock import MagicMock
-import json
 
 # Third Party
 from fastapi.testclient import TestClient
@@ -93,7 +92,7 @@ class TestListBackends:
     def test_list_success(self, client_with_engine, mock_storage_manager):
         resp = client_with_engine.get("/backends")
         assert resp.status_code == 200
-        data = json.loads(resp.text)
+        data = resp.json()
         assert "LocalCPUBackend" in data
         assert "RemoteBackend" in data
 
@@ -105,7 +104,7 @@ class TestListBackends:
         mock_storage_manager.list_backends.side_effect = RuntimeError("boom")
         resp = client_with_engine.get("/backends")
         assert resp.status_code == 500
-        data = json.loads(resp.text)
+        data = resp.json()
         assert "boom" in data["message"]
 
 

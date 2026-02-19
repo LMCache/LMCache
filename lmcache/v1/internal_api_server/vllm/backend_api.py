@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-import json
-
 # Third Party
 from fastapi import APIRouter
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse
 
 # First Party
 from lmcache.logging import init_logger
@@ -31,17 +28,13 @@ def _get_storage_manager(request: Request):
     return getattr(engine, "storage_manager", None)
 
 
-def _unavailable_response(endpoint: str) -> PlainTextResponse:
+def _unavailable_response(endpoint: str) -> JSONResponse:
     """Return a 503 response when the engine is unavailable."""
-    return PlainTextResponse(
-        content=json.dumps(
-            {
-                "error": "%s API is unavailable" % endpoint,
-                "message": "LMCache engine not configured.",
-            },
-            indent=2,
-        ),
-        media_type="application/json",
+    return JSONResponse(
+        content={
+            "error": "%s API is unavailable" % endpoint,
+            "message": "LMCache engine not configured.",
+        },
         status_code=503,
     )
 
@@ -51,7 +44,7 @@ async def list_backends(request: Request):
     """List all active storage backends.
 
     Returns:
-        PlainTextResponse: JSON dict mapping backend name
+        JSONResponse: JSON dict mapping backend name
         to class name.
 
     Example:
@@ -65,20 +58,14 @@ async def list_backends(request: Request):
 
     try:
         backends = sm.list_backends()
-        return PlainTextResponse(
-            content=json.dumps(backends, indent=2),
-            media_type="application/json",
-        )
+        return JSONResponse(content=backends)
     except Exception as e:
-        return PlainTextResponse(
-            content=json.dumps(
-                {
-                    "error": "Failed to list backends",
-                    "message": str(e),
-                },
-                indent=2,
-            ),
-            media_type="application/json",
+        logger.exception("Failed to list backends")
+        return JSONResponse(
+            content={
+                "error": "Failed to list backends",
+                "message": str(e),
+            },
             status_code=500,
         )
 
@@ -126,6 +113,7 @@ async def close_backend(request: Request, backend_name: str):
             status_code=404,
         )
     except Exception as e:
+        logger.exception("Failed to close backend: %s", backend_name)
         return JSONResponse(
             content={
                 "error": "Failed to close backend",
