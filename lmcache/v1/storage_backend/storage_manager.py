@@ -1161,38 +1161,31 @@ class StorageManager:
         """
         Create new storage backends based on current config.
 
-        Backends that are already present will be skipped so that
-        only missing backends are created.  This allows callers to
-        close a subset of backends, update config via ``/conf``,
-        and then call this method to bring up the new backends.
+        Backends that are already present will be skipped
+        **before** instantiation so that no unnecessary
+        resources are allocated.  This allows callers to close
+        a subset of backends, update config via ``/conf``,
+        and then call this method to bring up only the missing
+        backends.
 
         Returns:
-            Dict mapping newly created backend name to its class
-            name.
+            Dict mapping newly created backend name to its
+            class name.
         """
         with self.manager_lock:
+            existing_names = set(self.storage_backends)
             new_backends = CreateStorageBackends(
                 self.config,
                 self.metadata,
                 self.loop,
                 dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
                 lmcache_worker=self.lmcache_worker,
+                skip_backends=existing_names,
+                existing_backends=self.storage_backends,
             )
 
             created: Dict[str, str] = {}
             for name, backend in new_backends.items():
-                if name in self.storage_backends:
-                    # Backend already exists, close the newly
-                    # created one to avoid resource leak.
-                    try:
-                        backend.close()
-                    except Exception:
-                        logger.debug(
-                            "Ignoring error when closing duplicate backend %s",
-                            name,
-                        )
-                    continue
-
                 self.storage_backends[name] = backend
                 created[name] = type(backend).__name__
                 logger.info(
