@@ -792,9 +792,9 @@ class StorageManager:
             logger.warning("Cannot set hot_cache: LocalCPUBackend not available")
             return
 
-        backend.use_hot = enabled
         if not enabled:
             backend.clear()
+        backend.use_hot = enabled
         logger.info("LocalCPUBackend hot_cache set to %s", enabled)
 
     def is_hot_cache_enabled(self) -> bool:
