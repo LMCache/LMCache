@@ -777,6 +777,38 @@ class StorageManager:
             )
         )
 
+    def set_hot_cache(self, enabled: bool) -> None:
+        """
+        Dynamically enable or disable the hot cache on LocalCPUBackend.
+
+        When disabled, the existing hot cache entries will be cleared
+        and no new data will be written to the hot cache.
+
+        Args:
+            enabled: True to enable hot cache, False to disable
+        """
+        backend = self.local_cpu_backend
+        if not isinstance(backend, LocalCPUBackend):
+            logger.warning("Cannot set hot_cache: LocalCPUBackend not available")
+            return
+
+        backend.use_hot = enabled
+        if not enabled:
+            backend.clear()
+        logger.info("LocalCPUBackend hot_cache set to %s", enabled)
+
+    def is_hot_cache_enabled(self) -> bool:
+        """
+        Get the current hot cache status of LocalCPUBackend.
+
+        Returns:
+            bool: True if hot cache is enabled, False otherwise
+        """
+        backend = self.local_cpu_backend
+        if not isinstance(backend, LocalCPUBackend):
+            return False
+        return backend.use_hot
+
     def set_freeze(self, enabled: bool) -> None:
         """
         Set freeze mode.
