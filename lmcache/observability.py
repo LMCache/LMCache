@@ -24,14 +24,16 @@ logger = init_logger(__name__)
 class LMCacheStats:
     # Counter (Note that these are incremental values,
     # which will accumulate over time in Counter)
-    interval_retrieve_requests: int
-    interval_store_requests: int
-    interval_lookup_requests: int
-    interval_requested_tokens: int
-    interval_hit_tokens: int
-    interval_stored_tokens: int
-    interval_lookup_tokens: int
-    interval_lookup_hits: int
+    interval_num_retrieve_requests: int
+    interval_num_store_requests: int
+    interval_num_lookup_requests: int
+
+    interval_num_requested_tokens: int
+    interval_num_retrieved_tokens: int
+    interval_num_stored_tokens: int
+    interval_num_lookup_tokens: int
+    interval_num_lookup_hit_tokens: int
+
     interval_vllm_hit_tokens: int
     interval_prompt_tokens: int
 
@@ -104,8 +106,8 @@ class LMCacheStats:
 @dataclass
 class LookupRequestStats:
     request_id: int
-    num_tokens: int
-    hit_tokens: int
+    num_lookup_tokens: int
+    num_hit_tokens: int
     is_finished: bool
     start_time: float = 0
     end_time: float = 0
@@ -116,15 +118,15 @@ class LookupRequestStats:
         return self.end_time - self.start_time
 
     def hit_rate(self):
-        if self.num_tokens == 0:
+        if self.num_lookup_tokens == 0:  # This is not expected to happen
             return 0
-        return self.hit_tokens / self.num_tokens
+        return self.num_hit_tokens / self.num_lookup_tokens
 
 
 @dataclass
 class RetrieveRequestStats:
     request_id: int
-    num_tokens: int
+    num_requested_tokens: int
     local_hit_tokens: int
     remote_hit_tokens: int  # Not used for now
     start_time: float
@@ -174,7 +176,7 @@ class RetrieveRequestStats:
 @dataclass
 class StoreRequestStats:
     request_id: int
-    num_tokens: int
+    num_requested_tokens: int
     start_time: float
     end_time: float
     process_tokens_time: float = 0
@@ -189,7 +191,7 @@ class StoreRequestStats:
     def store_speed(self):
         if self.time_to_store() == 0:
             return 0
-        return self.num_tokens / self.time_to_store()
+        return self.num_requested_tokens / self.time_to_store()
 
     @contextmanager
     def profile_process_tokens(self):
@@ -237,17 +239,19 @@ class LMCStatsMonitor:
     def __init__(self):
         # Interval metrics that will be reset after each log
         # Accumulate incremental values in the Prometheus Counter
-        self.interval_retrieve_requests = 0
-        self.interval_store_requests = 0
-        self.interval_lookup_requests = 0
-        self.interval_requested_tokens = 0  # total requested tokens retrieve
-        self.interval_hit_tokens = 0  # total hit tokens retrieve
-        self.interval_stored_tokens = 0  # total tokens tored in LMCache
-        self.interval_lookup_tokens = 0  # total requested tokens lookup
-        self.interval_lookup_hits = 0  # total hit tokens lookup
+        self.interval_num_retrieve_requests = 0
+        self.interval_num_store_requests = 0
+        self.interval_num_lookup_requests = 0
+
+        self.interval_num_requested_tokens = 0  # total requested tokens retrieve
+        self.interval_num_retrieved_tokens = 0  # total hit tokens retrieve
+        self.interval_num_stored_tokens = 0  # total tokens stored in LMCache
+        self.interval_num_lookup_tokens = 0  # total requested tokens lookup
+        self.interval_num_lookup_hit_tokens = 0  # total hit tokens lookup
+        self.interval_lookup_0_hit_requests = 0
+
         self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
         self.interval_prompt_tokens = 0  # total prompt tokens
-        self.interval_lookup_0_hit_requests = 0
 
         self.interval_num_slow_retrieval_by_time = 0
         self.interval_num_slow_retrieval_by_speed = 0
@@ -289,9 +293,15 @@ class LMCStatsMonitor:
         self.active_memory_objs_count = 0
         self.pinned_memory_objs_count = 0
 
-        self.retrieve_requests: Dict[int, RetrieveRequestStats] = {}
-        self.store_requests: Dict[int, StoreRequestStats] = {}
-        self.lookup_requests: Dict[int, LookupRequestStats] = {}
+        # Maps request ID to request statistics for tracking
+        # ongoing and completed requests
+        self.retrieve_requests: Dict[
+            int, RetrieveRequestStats
+        ] = {}  # key: retrieve_request_id
+        self.store_requests: Dict[int, StoreRequestStats] = {}  # key: store_request_id
+        self.lookup_requests: Dict[
+            int, LookupRequestStats
+        ] = {}  # key: lookup_request_id
 
         self.retrieve_request_id = 0
         self.store_request_id = 0
@@ -324,13 +334,11 @@ class LMCStatsMonitor:
         curr_time = time.perf_counter()
         lookup_stats = LookupRequestStats(
             request_id=self.lookup_request_id,
-            num_tokens=num_tokens,
-            hit_tokens=0,
+            num_lookup_tokens=num_tokens,
+            num_hit_tokens=0,
             is_finished=False,
             start_time=curr_time,
         )
-        self.interval_lookup_requests += 1
-        self.interval_lookup_tokens += num_tokens
         self.lookup_requests[self.lookup_request_id] = lookup_stats
         self.lookup_request_id += 1
         return lookup_stats
@@ -351,16 +359,18 @@ class LMCStatsMonitor:
         """
         curr_time = time.perf_counter()
         assert stats.request_id in self.lookup_requests
-        stats.hit_tokens = num_hit_tokens
+        stats.num_hit_tokens = num_hit_tokens
         stats.is_finished = True
         if stats.end_time == 0:
             stats.end_time = curr_time
-        self.interval_lookup_hits += num_hit_tokens
+        self.interval_num_lookup_requests += 1
+        self.interval_num_lookup_tokens += stats.num_lookup_tokens
+        self.interval_num_lookup_hit_tokens += num_hit_tokens
         if num_hit_tokens == 0:
             self.interval_lookup_0_hit_requests += 1
 
     @thread_safe
-    def on_retrieve_request(self, num_tokens: int) -> RetrieveRequestStats:
+    def on_retrieve_request(self, num_requested_tokens: int) -> RetrieveRequestStats:
         """
         Returns the internal "request id" that will be used in
         on_retrieve_finished
@@ -368,14 +378,12 @@ class LMCStatsMonitor:
         curr_time = time.perf_counter()
         retrieve_stats = RetrieveRequestStats(
             request_id=self.retrieve_request_id,
-            num_tokens=num_tokens,
+            num_requested_tokens=num_requested_tokens,
             local_hit_tokens=0,
             remote_hit_tokens=0,
             start_time=curr_time,
             end_time=0,
         )
-        self.interval_requested_tokens += num_tokens
-        self.interval_retrieve_requests += 1
         self.retrieve_requests[self.retrieve_request_id] = retrieve_stats
         self.retrieve_request_id += 1
         self.set_current_retrieve_stats(retrieve_stats)
@@ -392,7 +400,9 @@ class LMCStatsMonitor:
         retrieve_stats.local_hit_tokens = num_retrieved_tokens
         if retrieve_stats.end_time == 0:
             retrieve_stats.end_time = curr_time
-        self.interval_hit_tokens += num_retrieved_tokens
+        self.interval_num_requested_tokens += retrieve_stats.num_requested_tokens
+        self.interval_num_retrieved_tokens += num_retrieved_tokens
+        self.interval_num_retrieve_requests += 1
         self.clear_current_retrieve_stats()
 
         time_to_retrieve = retrieve_stats.time_to_retrieve()
@@ -417,7 +427,8 @@ class LMCStatsMonitor:
                     "retrieve_speed=%.2f tokens/s (threshold=%.2f tokens/s). "
                     "Skipped %d slow retrieval logs in the last %.1f seconds. "
                     "Detailed metrics: "
-                    "num_tokens=%d, local_hit_tokens=%d, remote_hit_tokens=%d, "
+                    "num_requested_tokens=%d, local_hit_tokens=%d, "
+                    "remote_hit_tokens=%d, "
                     "process_tokens_time=%.5f s, "
                     "broadcast_time=%.5f s, "
                     "to_gpu_time=%.5f s, "
@@ -429,7 +440,7 @@ class LMCStatsMonitor:
                     self.retrieve_token_speed_threshold,
                     self.skipped_retrieve_warning_count,
                     curr_time - self.last_retrieve_warning_time,
-                    retrieve_stats.num_tokens,
+                    retrieve_stats.num_requested_tokens,
                     retrieve_stats.local_hit_tokens,
                     retrieve_stats.remote_hit_tokens,
                     retrieve_stats.process_tokens_time,
@@ -450,12 +461,10 @@ class LMCStatsMonitor:
         curr_time = time.perf_counter()
         store_stats = StoreRequestStats(
             request_id=self.store_request_id,
-            num_tokens=num_tokens,
+            num_requested_tokens=num_tokens,
             start_time=curr_time,
             end_time=0,
         )
-        self.interval_store_requests += 1
-        self.interval_stored_tokens += num_tokens
         self.store_requests[self.store_request_id] = store_stats
         self.store_request_id += 1
         return store_stats
@@ -471,7 +480,9 @@ class LMCStatsMonitor:
         if store_stats.end_time == 0:
             store_stats.end_time = curr_time
         if num_stored_tokens >= 0:
-            store_stats.num_tokens = num_stored_tokens
+            store_stats.num_requested_tokens = num_stored_tokens
+        self.interval_num_store_requests += 1
+        self.interval_num_stored_tokens += store_stats.num_requested_tokens
 
     @thread_safe
     def on_p2p_transfer_request(self, num_tokens: int) -> int:
@@ -581,15 +592,15 @@ class LMCStatsMonitor:
         """
         Clear all the distribution stats
         """
-        self.interval_retrieve_requests = 0
-        self.interval_store_requests = 0
-        self.interval_lookup_requests = 0
+        self.interval_num_retrieve_requests = 0
+        self.interval_num_store_requests = 0
+        self.interval_num_lookup_requests = 0
 
-        self.interval_requested_tokens = 0
-        self.interval_hit_tokens = 0
-        self.interval_stored_tokens = 0
-        self.interval_lookup_tokens = 0
-        self.interval_lookup_hits = 0
+        self.interval_num_requested_tokens = 0
+        self.interval_num_retrieved_tokens = 0
+        self.interval_num_stored_tokens = 0
+        self.interval_num_lookup_tokens = 0
+        self.interval_num_lookup_hit_tokens = 0
         self.interval_vllm_hit_tokens = 0
         self.interval_prompt_tokens = 0
 
@@ -661,11 +672,12 @@ class LMCStatsMonitor:
             s for s in self.retrieve_requests.values() if s.end_time != 0
         ]
         sum_finished_retrieve_requested_tokens = sum(
-            s.num_tokens for s in finished_retrieve_stats
+            s.num_requested_tokens for s in finished_retrieve_stats
         )
         sum_finished_retrieve_hit_tokens = sum(
             s.local_hit_tokens + s.remote_hit_tokens for s in finished_retrieve_stats
         )
+        # Interval retrieve success rate measured in tokens, summed across all requests
         retrieve_hit_rate = (
             1
             if len(finished_retrieve_stats) == 0
@@ -678,12 +690,14 @@ class LMCStatsMonitor:
         finished_lookup_stats = [
             s for s in self.lookup_requests.values() if s.is_finished
         ]
-        sum_finished_lookup_requested = sum(s.num_tokens for s in finished_lookup_stats)
-        sum_finished_lookup_hit = sum(s.hit_tokens for s in finished_lookup_stats)
-        lookup_hit_rate = (
+        sum_lookup_requested_tokens = sum(
+            s.num_lookup_tokens for s in finished_lookup_stats
+        )
+        sum_lookup_hit_tokens = sum(s.num_hit_tokens for s in finished_lookup_stats)
+        interval_lookup_hit_rate_in_tokens = (
             0
-            if sum_finished_lookup_requested == 0
-            else sum_finished_lookup_hit / sum_finished_lookup_requested
+            if sum_lookup_requested_tokens == 0
+            else sum_lookup_hit_tokens / sum_lookup_requested_tokens
         )
 
         def filter_out_zeros(stats: Iterable[float]) -> List[float]:
@@ -754,14 +768,14 @@ class LMCStatsMonitor:
         request_lifespan = list(self.interval_request_cache_lifespan.values())
 
         ret = LMCacheStats(
-            interval_retrieve_requests=self.interval_retrieve_requests,
-            interval_store_requests=self.interval_store_requests,
-            interval_lookup_requests=self.interval_lookup_requests,
-            interval_requested_tokens=self.interval_requested_tokens,
-            interval_hit_tokens=self.interval_hit_tokens,
-            interval_stored_tokens=self.interval_stored_tokens,
-            interval_lookup_tokens=self.interval_lookup_tokens,
-            interval_lookup_hits=self.interval_lookup_hits,
+            interval_num_retrieve_requests=self.interval_num_retrieve_requests,
+            interval_num_store_requests=self.interval_num_store_requests,
+            interval_num_lookup_requests=self.interval_num_lookup_requests,
+            interval_num_requested_tokens=self.interval_num_requested_tokens,
+            interval_num_retrieved_tokens=self.interval_num_retrieved_tokens,
+            interval_num_stored_tokens=self.interval_num_stored_tokens,
+            interval_num_lookup_tokens=self.interval_num_lookup_tokens,
+            interval_num_lookup_hit_tokens=self.interval_num_lookup_hit_tokens,
             interval_remote_read_requests=self.interval_remote_read_requests,
             interval_remote_read_bytes=self.interval_remote_read_bytes,
             interval_remote_write_requests=self.interval_remote_write_requests,
@@ -774,7 +788,7 @@ class LMCStatsMonitor:
             interval_remote_ping_success=self.interval_remote_ping_success,
             interval_remote_ping_error_code=self.interval_remote_ping_error_code,
             retrieve_hit_rate=retrieve_hit_rate,
-            lookup_hit_rate=lookup_hit_rate,
+            lookup_hit_rate=interval_lookup_hit_rate_in_tokens,
             interval_local_cpu_evict_count=self.interval_local_cpu_evict_count,
             interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
             interval_local_cpu_evict_failed_count=self.interval_local_cpu_evict_failed_count,
@@ -1619,22 +1633,31 @@ class PrometheusLogger:
 
     def log_prometheus(self, stats: LMCacheStats):
         self._log_counter(
-            self.counter_num_retrieve_requests, stats.interval_retrieve_requests
+            self.counter_num_retrieve_requests, stats.interval_num_retrieve_requests
         )
         self._log_counter(
-            self.counter_num_store_requests, stats.interval_store_requests
+            self.counter_num_store_requests, stats.interval_num_store_requests
         )
         self._log_counter(
-            self.counter_num_lookup_requests, stats.interval_lookup_requests
+            self.counter_num_lookup_requests, stats.interval_num_lookup_requests
         )
 
         self._log_counter(
-            self.counter_num_requested_tokens, stats.interval_requested_tokens
+            self.counter_num_requested_tokens,
+            stats.interval_num_requested_tokens,
         )
-        self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
-        self._log_counter(self.counter_num_stored_tokens, stats.interval_stored_tokens)
-        self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
-        self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
+        self._log_counter(
+            self.counter_num_hit_tokens, stats.interval_num_retrieved_tokens
+        )
+        self._log_counter(
+            self.counter_num_stored_tokens, stats.interval_num_stored_tokens
+        )
+        self._log_counter(
+            self.counter_num_lookup_tokens, stats.interval_num_lookup_tokens
+        )
+        self._log_counter(
+            self.counter_num_lookup_hits, stats.interval_num_lookup_hit_tokens
+        )
         self._log_counter(self.counter_num_prompt_tokens, stats.interval_prompt_tokens)
         self._log_counter(
             self.counter_num_vllm_hit_tokens, stats.interval_vllm_hit_tokens

@@ -388,8 +388,8 @@ class ContinuousUsageContext:
         self.cache_lifespan_data.extend(stats.interval_request_cache_lifespan)
         if os.getenv("LMCACHE_TRACK_USAGE") == "false":
             return None
-        self.interval_num_hit_tokens += stats.interval_hit_tokens
-        self.interval_num_stored_tokens += stats.interval_stored_tokens
+        self.interval_num_hit_tokens += stats.interval_num_retrieved_tokens
+        self.interval_num_stored_tokens += stats.interval_num_stored_tokens
 
         cur_ts: float = time.monotonic()
         if cur_ts - self.last_logged_ts >= self.min_logging_interval:
