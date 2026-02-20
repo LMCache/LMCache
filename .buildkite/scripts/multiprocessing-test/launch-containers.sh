@@ -18,9 +18,30 @@ CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 
+# Pick 2 free GPUs dynamically for the test
+echo "=== Selecting free GPUs for testing ==="
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$REPO_ROOT/.buildkite/scripts/pick-free-gpu.sh" 70000 2
+if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+    echo "❌ Failed to select 2 free GPUs"
+    exit 1
+fi
+
+# Parse the selected GPUs into an array
+IFS=',' read -ra SELECTED_GPUS <<< "$CUDA_VISIBLE_DEVICES"
+if [ ${#SELECTED_GPUS[@]} -ne 2 ]; then
+    echo "❌ Expected 2 GPUs, but got ${#SELECTED_GPUS[@]}: ${CUDA_VISIBLE_DEVICES}"
+    exit 1
+fi
+
+GPU_FOR_VLLM="${SELECTED_GPUS[0]}"
+GPU_FOR_BASELINE="${SELECTED_GPUS[1]}"
+echo "Selected GPU ${GPU_FOR_VLLM} for vLLM with LMCache"
+echo "Selected GPU ${GPU_FOR_BASELINE} for vLLM baseline"
+
 # Check GPU memory and set gpu-memory-utilization if > 100GB
 GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1 | tr -d ' ')
+GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_FOR_VLLM}" | tr -d ' ')
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
@@ -36,7 +57,7 @@ echo "Port: $LMCACHE_PORT"
 docker run -d \
     --name "$LMCACHE_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus all \
+    --gpus "device=${GPU_FOR_VLLM}" \
     --network host \
     --ipc host \
     --entrypoint /opt/venv/bin/python3 \
@@ -60,11 +81,10 @@ echo "Model: $MODEL"
 docker run -d \
     --name "$VLLM_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus all \
+    --gpus "device=${GPU_FOR_VLLM}" \
     --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
     --ipc host \
-    --env CUDA_VISIBLE_DEVICES=0 \
     --env VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     --env VLLM_BATCH_INVARIANT=1 \
     --env PYTHONHASHSEED=0 \
@@ -85,11 +105,10 @@ echo "Port: $VLLM_BASELINE_PORT"
 docker run -d \
     --name "$VLLM_BASELINE_CONTAINER_NAME" \
     --runtime nvidia \
-    --gpus all \
+    --gpus "device=${GPU_FOR_BASELINE}" \
     --volume ~/.cache/huggingface:/root/.cache/huggingface \
     --network host \
     --ipc host \
-    --env CUDA_VISIBLE_DEVICES=1 \
     --env VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     --env VLLM_BATCH_INVARIANT=1 \
     --env PYTHONHASHSEED=0 \
