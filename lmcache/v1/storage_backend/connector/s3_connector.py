@@ -93,7 +93,9 @@ class S3Connector(RemoteConnector):
 
         endpoint, _, path = s3_endpoint.removeprefix("s3://").partition("/")
         self.s3_endpoint = endpoint
-        self.s3_base_path = f"/{path.strip('/')}/" if path != "" else "/"
+        self.s3_base_path = (
+            f"/{url_quote(path.strip('/'), safe='/')}/" if path != "" else "/"
+        )
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
