@@ -43,15 +43,24 @@ while true; do
         | head -n"${REQUESTED_GPU_COUNT}" \
         | awk -F',' '{print $3}'
     )
+
+    mapfile -t top_gpus_UUID < <(
+      printf "%s\n" "${candidates[@]}" \
+        | sort -t',' -k1,1 -nr \
+        | head -n"${REQUESTED_GPU_COUNT}" \
+        | awk -F',' '{print $3}'
+    )
     
     if [ "${#top_gpus[@]}" -eq 1 ]; then
       # Only one GPU found/requested
       export CUDA_VISIBLE_DEVICES="${top_gpus[0]}"
+      export CUDA_VISIBLE_DEVICES_UUID="${top_gpus_UUID[0]}"
       echo "✅ Selected GPU #${top_gpus[0]} (CUDA_VISIBLE_DEVICES=${top_gpus[0]})"
     else
       # Multiple GPUs found/requested
       chosen_gpus=$(IFS=','; echo "${top_gpus[*]}")
       export CUDA_VISIBLE_DEVICES="${chosen_gpus}"
+      export CUDA_VISIBLE_DEVICES_UUID="${top_gpus_UUID}"
       gpu_list=$(printf "#%s," "${top_gpus[@]}")
       echo "✅ Selected GPUs ${gpu_list%,} (CUDA_VISIBLE_DEVICES=${chosen_gpus})"
     fi
