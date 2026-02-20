@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import EngineType
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import CreateGPUConnector
@@ -380,7 +381,9 @@ class LMCacheManager:
             vllm_gpu_connector = None
         else:
             tpg = get_tp_group()
-            vllm_gpu_connector = CreateGPUConnector(self._config, metadata, "vllm")
+            vllm_gpu_connector = CreateGPUConnector(
+                self._config, metadata, EngineType.VLLM
+            )
 
         engine = LMCacheEngineBuilder.get_or_create(
             ENGINE_NAME,
