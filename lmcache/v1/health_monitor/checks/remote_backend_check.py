@@ -92,6 +92,7 @@ class RemoteBackendHealthCheck(HealthCheck):
         self.failure_time: Optional[float] = None
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         self._backend_name: Optional[str] = None
+        self._last_get_blocking_failed_count = 0
 
     @classmethod
     def create(cls, manager: "LMCacheManager") -> List[HealthCheck]:
@@ -204,9 +205,11 @@ class RemoteBackendHealthCheck(HealthCheck):
                 return False
 
         # Check read failed
+        current_get_blocking_failed_count = self.backend.get_blocking_failed_count
         get_blocking_failed_count = (
-            self.backend.get_and_clear_interval_get_blocking_failed_count()
+            current_get_blocking_failed_count - self._last_get_blocking_failed_count
         )
+        self._last_get_blocking_failed_count = current_get_blocking_failed_count
         if get_blocking_failed_count >= self.get_blocking_failed_threshold:
             logger.warning(
                 "Detected %s get blocking failed in interval, threshold: %s",
