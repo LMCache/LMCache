@@ -20,7 +20,6 @@
 # Note: The script should be run from the LMCache code base root.
 # Note: L4 CI runners cannot use Flash Infer
 
-
 set -e
 trap 'cleanup $?' EXIT INT TERM
 
@@ -155,6 +154,8 @@ run_lmcache_vllmopenai_container() {
     )
     cmd_args+=("${vllm_cli_args[@]}")
     cmd_args+=("--port" "$PORT")
+
+    echo "Executing: docker run -d ${docker_args[@]} ${cmd_args[@]}"
 
     # Start docker
     CID=$(
