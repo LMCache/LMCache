@@ -134,7 +134,7 @@ run_lmcache_vllmopenai_container() {
     # docker args
     docker_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus '"device='"$CUDA_VISIBLE_DEVICES_UUID"'"'
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
@@ -183,7 +183,7 @@ run_pd_lmcache() {
     # docker args
     prefiller_docker_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus '"device='"$GPU_0_UUID"'"'
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -226,7 +226,7 @@ run_pd_lmcache() {
     # docker args
     decoder_docker_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus '"device='"$GPU_1_UUID"'"'
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -269,7 +269,7 @@ run_pd_lmcache() {
 
     ########## Proxy ##########
     if [ ! -d ".venv" ]; then
-        UV_PYTHON=python3 uv -q venv
+        UV_PYTHON=python3.12 uv -q venv
     fi
     source .venv/bin/activate
     uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
@@ -300,7 +300,7 @@ run_p2p_lmcache() {
     # docker args
     docker1_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus '"device='"$GPU_0_UUID"'"'
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -329,7 +329,7 @@ run_p2p_lmcache() {
 
     ##### Controller part start #####
     if [ ! -d ".venv" ]; then
-        UV_PYTHON=python3 uv -q venv
+        UV_PYTHON=python3.12 uv -q venv
     fi
     source .venv/bin/activate
     uv pip install -r "$ORIG_DIR/requirements/build.txt" > /dev/null 2>&1
@@ -362,7 +362,7 @@ run_p2p_lmcache() {
     # docker args
     docker2_args=(
         --runtime nvidia
-        --network host
+        --network "container:$(hostname)"
         --gpus '"device='"$GPU_1_UUID"'"'
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -481,7 +481,7 @@ run_long_doc_qa() {
     )
 
     if [ ! -d ".venv" ]; then
-        UV_PYTHON=python3 uv -q venv
+        UV_PYTHON=python3.12 uv -q venv
     fi
     source .venv/bin/activate
     uv -q pip install openai pandas matplotlib
