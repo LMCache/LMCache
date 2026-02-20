@@ -71,26 +71,7 @@ def CreateGPUConnector(
         torch_dev.set_device(local_worker_id)
         device = torch.device(f"{dev_name}:{local_worker_id}")
 
-        if config.use_layerwise:
-            if config.enable_blending:
-                return VLLMBufferLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
-                    metadata, use_gpu, device
-                )
-
-        if dev_name == "cuda":
-            if config.use_gpu_connector_v3:
-                return VLLMPagedMemGPUConnectorV3.from_metadata(
-                    metadata, use_gpu, device
-                )
-            else:
-                return VLLMPagedMemGPUConnectorV2.from_metadata(
-                    metadata, use_gpu, device
-                )
-        elif dev_name == "xpu":
+        if dev_name == "xpu":
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (
                 VLLMPagedMemXPUConnectorV2,
@@ -101,6 +82,26 @@ def CreateGPUConnector(
                     metadata, use_gpu, device
                 )
             return VLLMPagedMemXPUConnectorV2.from_metadata(metadata, use_gpu, device)
+
+        if config.use_layerwise:
+            if config.enable_blending:
+                return VLLMBufferLayerwiseGPUConnector.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                return VLLMPagedMemLayerwiseGPUConnector.from_metadata(
+                    metadata, use_gpu, device
+                )
+
+        elif dev_name == "cuda":
+            if config.use_gpu_connector_v3:
+                return VLLMPagedMemGPUConnectorV3.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                return VLLMPagedMemGPUConnectorV2.from_metadata(
+                    metadata, use_gpu, device
+                )
         else:
             raise RuntimeError("No supported connector found for the current platform.")
 

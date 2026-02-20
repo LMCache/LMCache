@@ -27,9 +27,8 @@ def _make_unique_slot_mapping(
     # Unique indices avoids overwriting the same slot multiple times.
     return torch.randperm(total_slots, device=device, dtype=torch.int64)[:num_tokens]
 
-
-# @pytest.mark.xpu
-def test_xpu_connector_roundtrip_non_layerwise():
+@pytest.mark.parametrize("use_gpu", [False, True])
+def test_xpu_connector_roundtrip_non_layerwise(use_gpu: bool):
     _skip_if_no_xpu()
     device = torch.device("xpu:0")
 
@@ -45,7 +44,6 @@ def test_xpu_connector_roundtrip_non_layerwise():
         num_layers=num_layers,
         head_size=head_size,
         device=device,
-        use_mla=False,
     )
 
     # Derive actual dims from generated KV (avoid helper defaults mismatch)
@@ -72,7 +70,6 @@ def test_xpu_connector_roundtrip_non_layerwise():
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(num_layers, 2, num_tokens, num_heads_actual, head_size_actual),
-        use_mla=False,
     )
     conn = VLLMPagedMemXPUConnectorV2.from_metadata(meta, use_gpu=False, device=device)
 
@@ -93,7 +90,6 @@ def test_xpu_connector_roundtrip_non_layerwise():
             num_layers=num_layers,
             head_size=head_size_actual,
             device=device,
-            use_mla=False,
         )
         for t in kvcaches_dst:
             t.zero_()
@@ -117,9 +113,8 @@ def test_xpu_connector_roundtrip_non_layerwise():
         memobj.ref_count_down()
         pin_alloc.close()
 
-
-# @pytest.mark.xpu
-def test_xpu_connector_roundtrip_layerwise():
+@pytest.mark.parametrize("use_gpu", [False, True])
+def test_xpu_connector_roundtrip_layerwise(use_gpu: bool):
     _skip_if_no_xpu()
     device = torch.device("xpu:0")
 
@@ -135,7 +130,6 @@ def test_xpu_connector_roundtrip_layerwise():
         num_layers=num_layers,
         head_size=head_size,
         device=device,
-        use_mla=False,
     )
 
     # Derive actual dims from generated KV
@@ -155,7 +149,6 @@ def test_xpu_connector_roundtrip_layerwise():
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
         kv_shape=(num_layers, 2, num_tokens, num_heads_actual, head_size_actual),
-        use_mla=False,
     )
 
     conn = VLLMPagedMemLayerwiseXPUConnector.from_metadata(
@@ -198,7 +191,6 @@ def test_xpu_connector_roundtrip_layerwise():
             num_layers=num_layers,
             head_size=head_size_actual,
             device=device,
-            use_mla=False,
         )
         for t in kvcaches_dst:
             t.zero_()

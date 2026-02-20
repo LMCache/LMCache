@@ -369,8 +369,8 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         if self.use_gpu and self.gpu_buffer_allocator is None:
             # Import here to avoid circulars
             from lmcache.v1.memory_management import GPUMemoryAllocator
-
-            self.gpu_buffer_allocator = GPUMemoryAllocator()
+            staging_bytes = 256 * 1024 * 1024
+            self.gpu_buffer_allocator = GPUMemoryAllocator(size=staging_bytes)
 
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         raise NotImplementedError("Layerwise uses batched_to_gpu(generator).")
@@ -395,14 +395,23 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
         self._lazy_initialize_buffer(self.kvcaches)
 
+        # Build a single contiguous mapping in the SAME order we will pack chunks.
         slot_mapping_chunks = [slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)]
         slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
 
-        # Ensure mapping is on same device as paged cache
+        # Move mapping ONCE to device (fixes multiple small H2D copies).
         slot_mapping_full = slot_mapping_full.to(self.device)
 
         num_tokens = int(slot_mapping_full.numel())
-        offset = starts[0]
+        if num_tokens <= 0:
+            # Nothing to load; still need to consume layer sends.
+            for _ in range(self.num_layers):
+                _ = yield
+            yield
+            if sync:
+                torch.xpu.current_stream().wait_stream(self.load_stream)
+            yield
+            return
 
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
@@ -424,44 +433,35 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                 current_stream.wait_stream(self.load_stream)
 
             with torch.xpu.stream(self.load_stream):
-                # Destination paged KV views
+                # Destination paged KV views (on XPU)
                 dst_layer = self.kvcaches[layer_id]
-
                 if self.use_mla:
                     dst_flat = _get_paged_kv_views(dst_layer, use_mla=True)
                 else:
                     dst_k_flat, dst_v_flat = _get_paged_kv_views(dst_layer, use_mla=False)
 
-                # For each chunk, scatter into paged by mapping
-                for s, e, mem in zip(starts, ends, memory_objs_layer, strict=False):
-                    assert mem.tensor is not None
-                    src = mem.tensor.to(self.device, non_blocking=True)
+                # Pack/copy in the exact same order as slot_mapping_full was built.
+                cursor = 0
 
-                    if self.use_gpu:
-                        # stage into tmp buffer first
-                        tmp_gpu_buffer_obj.tensor[s - offset : e - offset].copy_(
-                            src, non_blocking=True
-                        )
-                    else:
-                        # direct scatter per chunk
-                        sl = slot_mapping_full[s - offset : e - offset]
-                        if self.use_mla:
-                            # src expected [T, D] or [1, T, D]? keep it simple:
-                            if src.dim() == 2:
-                                dst_flat.index_copy_(0, sl, src)
-                            elif src.dim() == 3 and src.shape[0] == 1:
-                                dst_flat.index_copy_(0, sl, src[0])
-                            else:
-                                raise ValueError(f"Unexpected MLA token tensor: {src.shape}")
-                        else:
-                            k_tok, v_tok = _split_token2d_kv(src)
-                            dst_k_flat.index_copy_(0, sl, k_tok)
-                            dst_v_flat.index_copy_(0, sl, v_tok)
-
-                # If staged, scatter once from the staged buffer
                 if self.use_gpu:
+                    # Stage ALL chunks into tmp buffer, then do ONE batched scatter.
                     staged = tmp_gpu_buffer_obj.tensor
-                    sl = slot_mapping_full
+
+                    for s, e, mem in zip(starts, ends, memory_objs_layer, strict=False):
+                        assert mem.tensor is not None
+                        n = int(e - s)
+                        if n <= 0:
+                            continue
+
+                        src = mem.tensor.to(self.device, non_blocking=True)
+
+                        # src is token2d; keep packing contiguous into staged[cursor:cursor+n]
+                        staged[cursor:cursor + n].copy_(src, non_blocking=True)
+                        cursor += n
+
+                    # Batched scatter once
+                    sl = slot_mapping_full  # already on device, length=num_tokens
+
                     if self.use_mla:
                         if staged.dim() == 2:
                             dst_flat.index_copy_(0, sl, staged)
@@ -471,8 +471,49 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             raise ValueError(f"Unexpected MLA staged tensor: {staged.shape}")
                     else:
                         k_tok, v_tok = _split_token2d_kv(staged)
+
+                        # If token2d returns flattened D, reshape to match paged view [T, H, HS]
+                        if k_tok.dim() == 2 and dst_k_flat.dim() == 3 and \
+                        k_tok.shape[1] == dst_k_flat.shape[1] * dst_k_flat.shape[2]:
+                            k_tok = k_tok.view(k_tok.shape[0], dst_k_flat.shape[1], dst_k_flat.shape[2])
+                        if v_tok.dim() == 2 and dst_v_flat.dim() == 3 and \
+                        v_tok.shape[1] == dst_v_flat.shape[1] * dst_v_flat.shape[2]:
+                            v_tok = v_tok.view(v_tok.shape[0], dst_v_flat.shape[1], dst_v_flat.shape[2])
+
                         dst_k_flat.index_copy_(0, sl, k_tok)
                         dst_v_flat.index_copy_(0, sl, v_tok)
+
+                else:
+                    # No staging: scatter per chunk (still use mapping that is already on device).
+                    for s, e, mem in zip(starts, ends, memory_objs_layer, strict=False):
+                        assert mem.tensor is not None
+                        n = int(e - s)
+                        if n <= 0:
+                            continue
+
+                        src = mem.tensor.to(self.device, non_blocking=True)
+                        sl = slot_mapping_full[cursor:cursor + n]
+                        cursor += n
+
+                        if self.use_mla:
+                            if src.dim() == 2:
+                                dst_flat.index_copy_(0, sl, src)
+                            elif src.dim() == 3 and src.shape[0] == 1:
+                                dst_flat.index_copy_(0, sl, src[0])
+                            else:
+                                raise ValueError(f"Unexpected MLA token tensor: {src.shape}")
+                        else:
+                            k_tok, v_tok = _split_token2d_kv(src)
+
+                            if k_tok.dim() == 2 and dst_k_flat.dim() == 3 and \
+                            k_tok.shape[1] == dst_k_flat.shape[1] * dst_k_flat.shape[2]:
+                                k_tok = k_tok.view(k_tok.shape[0], dst_k_flat.shape[1], dst_k_flat.shape[2])
+                            if v_tok.dim() == 2 and dst_v_flat.dim() == 3 and \
+                            v_tok.shape[1] == dst_v_flat.shape[1] * dst_v_flat.shape[2]:
+                                v_tok = v_tok.view(v_tok.shape[0], dst_v_flat.shape[1], dst_v_flat.shape[2])
+
+                            dst_k_flat.index_copy_(0, sl, k_tok)
+                            dst_v_flat.index_copy_(0, sl, v_tok)
 
         yield  # after last layer
 
@@ -509,20 +550,97 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
         current_stream = torch.xpu.current_stream()
 
-        # Optional staging buffer
+        # ---- helpers (keep local to minimize file-wide changes) ----
+        def _flatten_last2_if_needed(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+            """
+            Make src match dst for the common KV layouts:
+            - src: [..., H, HS] -> dst: [..., H*HS]
+            - or already matches
+            """
+            if src.shape == dst.shape:
+                return src
+
+            # dst has one less trailing dim: [..., D] where D=H*HS
+            if src.dim() == dst.dim() + 1:
+                # e.g., src [..., 8, 128] -> dst [..., 1024]
+                if dst.shape == (*src.shape[:-2], src.shape[-2] * src.shape[-1]):
+                    return src.reshape(*src.shape[:-2], -1)
+
+            # same ndim but dst last dim is flattened (dst ends with D)
+            if src.dim() == dst.dim():
+                if dst.shape[:-1] == src.shape[:-2] and dst.shape[-1] == src.shape[-2] * src.shape[-1]:
+                    return src.reshape(*src.shape[:-2], -1)
+
+            return src  # caller will error if still incompatible
+
+        def _copy_kv_into_mem(mem_tensor: torch.Tensor, k_src: torch.Tensor, v_src: torch.Tensor) -> None:
+            """
+            Copy K/V into mem.tensor supporting:
+            - [2, ..., D]  (K in 0, V in 1)
+            - [..., 2, D]  (K in [:,0,:], V in [:,1,:])
+            - [2, ..., H, HS] or [..., 2, H, HS] similarly
+            """
+            if mem_tensor.dim() < 3:
+                raise ValueError(f"Unexpected output token2d layout: {mem_tensor.shape}")
+
+            # Case A: mem is [2, ...]
+            if mem_tensor.shape[0] == 2:
+                k_dst = mem_tensor[0]
+                v_dst = mem_tensor[1]
+                k_src2 = _flatten_last2_if_needed(k_src, k_dst)
+                v_src2 = _flatten_last2_if_needed(v_src, v_dst)
+                if k_src2.shape != k_dst.shape or v_src2.shape != v_dst.shape:
+                    raise ValueError(
+                        f"KV shape mismatch after reshape: "
+                        f"k src {k_src.shape}->{k_src2.shape} vs dst {k_dst.shape}; "
+                        f"v src {v_src.shape}->{v_src2.shape} vs dst {v_dst.shape}"
+                    )
+                k_dst.copy_(k_src2.to(k_dst.device), non_blocking=True)
+                v_dst.copy_(v_src2.to(v_dst.device), non_blocking=True)
+                return
+
+            # Case B: mem is [..., 2, ...]
+            if mem_tensor.shape[1] == 2:
+                k_dst = mem_tensor[:, 0, ...]
+                v_dst = mem_tensor[:, 1, ...]
+                k_src2 = _flatten_last2_if_needed(k_src, k_dst)
+                v_src2 = _flatten_last2_if_needed(v_src, v_dst)
+                if k_src2.shape != k_dst.shape or v_src2.shape != v_dst.shape:
+                    raise ValueError(
+                        f"KV shape mismatch after reshape: "
+                        f"k src {k_src.shape}->{k_src2.shape} vs dst {k_dst.shape}; "
+                        f"v src {v_src.shape}->{v_src2.shape} vs dst {v_dst.shape}"
+                    )
+                k_dst.copy_(k_src2.to(k_dst.device), non_blocking=True)
+                v_dst.copy_(v_src2.to(v_dst.device), non_blocking=True)
+                return
+
+            raise ValueError(f"Unexpected output token2d layout: {mem_tensor.shape}")
+
+        slot_mapping_on_device = slot_mapping.to(self.device)
+
+        # Precompute “full” mapping for batched gather 
+        # NOTE: this assumes starts/ends partition slot_mapping contiguously.
+        # If not contiguous, concatenation is still correct.
+        slot_mapping_full = torch.cat(
+            [slot_mapping_on_device[s:e] for s, e in zip(starts, ends, strict=False)],
+            dim=0,
+        )
+        total_tokens = int(slot_mapping_full.numel())
+
+        # Optional staging buffer (will be USED when self.use_gpu=True)
         tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
             from lmcache.v1.memory_management import MemoryFormat
 
-            slot_mapping_full = torch.cat([slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)], dim=0)
-            slot_mapping_full = slot_mapping_full.to(self.device)
-            num_tokens = int(slot_mapping_full.numel())
-            buffer_shape = self.get_shape(num_tokens)
+            # buffer shape uses existing helper; must match how allocator expects KV_T2D
+            buffer_shape = self.get_shape(total_tokens)
             assert self.gpu_buffer_allocator is not None
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
                 buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
             assert tmp_gpu_buffer_obj is not None and tmp_gpu_buffer_obj.tensor is not None
+            tmp = tmp_gpu_buffer_obj.tensor  # staging tensor on device
 
         for layer_id in range(self.num_layers):
             mem_layer = memory_objs[layer_id]
@@ -532,34 +650,68 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
 
                 src_layer = self.kvcaches[layer_id]
 
-                # For each chunk, gather out by its mapping
-                for s, e, mem in zip(starts, ends, mem_layer, strict=False):
-                    assert mem.tensor is not None
-                    sl = slot_mapping[s:e].to(self.device)
+                if self.use_mla:
+                    # (leave MLA behavior as-is; most reports are non-MLA)
+                    src_flat = _get_paged_kv_views(src_layer, use_mla=True)
 
-                    if self.use_mla:
-                        src_flat = _get_paged_kv_views(src_layer, use_mla=True)
-                        gathered = src_flat.index_select(0, sl)
-                        # write into mem.tensor on CPU
-                        mem.tensor.copy_(gathered.to(mem.tensor.device), non_blocking=True)
-                        mem.metadata.fmt = MemoryFormat.KV_MLA_FMT
-                    else:
-                        src_k_flat, src_v_flat = _get_paged_kv_views(src_layer, use_mla=False)
-                        k = src_k_flat.index_select(0, sl)
-                        v = src_v_flat.index_select(0, sl)
-
-                        # mem.tensor may be [2, T, D] or [T, 2, D]
-                        if mem.tensor.dim() == 3 and mem.tensor.shape[0] == 2:
-                            mem.tensor[0].copy_(k.to(mem.tensor.device), non_blocking=True)
-                            mem.tensor[1].copy_(v.to(mem.tensor.device), non_blocking=True)
-                        elif mem.tensor.dim() == 3 and mem.tensor.shape[1] == 2:
-                            mem.tensor[:, 0, :].copy_(k.to(mem.tensor.device), non_blocking=True)
-                            mem.tensor[:, 1, :].copy_(v.to(mem.tensor.device), non_blocking=True)
+                    if self.use_gpu:
+                        gathered_full = src_flat.index_select(0, slot_mapping_full)
+                        # Write into tmp if possible, else fallback to per-chunk
+                        tmp_src = _flatten_last2_if_needed(gathered_full, tmp) if "tmp" in locals() else gathered_full
+                        if "tmp" in locals() and tmp_src.shape == tmp.shape:
+                            tmp.copy_(tmp_src, non_blocking=True)
+                            off = 0
+                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
+                                assert mem.tensor is not None
+                                n = e - s
+                                chunk = tmp[off:off + n]
+                                off += n
+                                mem.tensor.copy_(chunk.to(mem.tensor.device), non_blocking=True)
                         else:
-                            raise ValueError(f"Unexpected output token2d layout: {mem.tensor.shape}")
+                            for s, e, mem in zip(starts, ends, mem_layer, strict=False):
+                                assert mem.tensor is not None
+                                sl = slot_mapping_on_device[s:e]
+                                gathered = src_flat.index_select(0, sl)
+                                mem.tensor.copy_(gathered.to(mem.tensor.device), non_blocking=True)
+                    else:
+                        for s, e, mem in zip(starts, ends, mem_layer, strict=False):
+                            assert mem.tensor is not None
+                            sl = slot_mapping_on_device[s:e]
+                            gathered = src_flat.index_select(0, sl)
+                            mem.tensor.copy_(gathered.to(mem.tensor.device), non_blocking=True)
 
-                        # keep consistent with CUDA layerwise connector behavior
-                        mem.metadata.fmt = MemoryFormat.KV_MLA_FMT if self.use_mla else mem.metadata.fmt
+                    # keep fmt update
+                    mem.metadata.fmt = MemoryFormat.KV_MLA_FMT
+
+                else:
+                    src_k_flat, src_v_flat = _get_paged_kv_views(src_layer, use_mla=False)
+
+                    if self.use_gpu:
+                        k_full = src_k_flat.index_select(0, slot_mapping_full)
+                        v_full = src_v_flat.index_select(0, slot_mapping_full)
+
+                        # Slice from staging. If tmp exists and can hold the layout, use it.
+                        # If tmp layout isn't compatible, we still avoid per-chunk gathers;
+                        # we just slice k_full/v_full directly.
+                        off = 0
+                        for s, e, mem in zip(starts, ends, mem_layer, strict=False):
+                            assert mem.tensor is not None
+                            n = e - s
+
+                            k_chunk = k_full[off:off + n]
+                            v_chunk = v_full[off:off + n]
+                            off += n
+
+                            _copy_kv_into_mem(mem.tensor, k_chunk, v_chunk)
+
+                    else:
+                        # per-chunk gather (original behavior) but without per-iter H2D transfer
+                        for s, e, mem in zip(starts, ends, mem_layer, strict=False):
+                            assert mem.tensor is not None
+                            sl = slot_mapping_on_device[s:e]
+                            k = src_k_flat.index_select(0, sl)
+                            v = src_v_flat.index_select(0, sl)
+                            _copy_kv_into_mem(mem.tensor, k, v)
 
             yield
             if sync:
@@ -577,8 +729,26 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
         ends: Optional[List[int]] = None,
         **kwargs,
     ):
-        assert starts is not None and ends is not None
-        return self._batched_to_gpu_gen(starts, ends, **kwargs)
+        slot_mapping = kwargs.get("slot_mapping", None)
+
+        if starts is None or ends is None:
+            # Most reliable: infer from slot_mapping length
+            if slot_mapping is not None:
+                n = int(slot_mapping.numel())
+            else:
+                # fallback if some callers pass explicit count
+                n = int(kwargs.get("num_tokens", 0))
+
+            if n <= 0:
+                raise ValueError(
+                    "Layerwise batched_to_gpu called with starts/ends=None and "
+                    "cannot infer token count (missing slot_mapping/num_tokens)."
+                )
+
+            # Single contiguous segment [0, n)
+            starts, ends = [0], [n]
+
+        return self._batched_to_gpu_gen(memory_objs=memory_objs, starts=starts, ends=ends, **kwargs)
 
 
     def get_shape(self, num_tokens: int) -> torch.Size:
