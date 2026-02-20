@@ -91,7 +91,9 @@ class S3Connector(RemoteConnector):
 
         self.s3_part_size = self.full_chunk_size_bytes
 
-        self.s3_endpoint = s3_endpoint.removeprefix("s3://")
+        endpoint, _, path = s3_endpoint.removeprefix("s3://").partition("/")
+        self.s3_endpoint = endpoint
+        self.s3_base_path = f"/{path.strip('/')}/" if path != "" else "/"
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
@@ -173,7 +175,7 @@ class S3Connector(RemoteConnector):
         any special characters.
         """
         flat_key_str = key_str.replace("/", "_")
-        return "/" + url_quote(flat_key_str)
+        return self.s3_base_path + url_quote(flat_key_str)
 
     # TODO(Jiayi): optimize this with async
     def _get_object_size(self, key_str: str) -> int:
