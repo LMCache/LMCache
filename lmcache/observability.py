@@ -176,7 +176,7 @@ class RetrieveRequestStats:
 @dataclass
 class StoreRequestStats:
     request_id: int
-    num_requested_tokens: int
+    num_tokens_to_store: int
     start_time: float
     end_time: float
     process_tokens_time: float = 0
@@ -191,7 +191,7 @@ class StoreRequestStats:
     def store_speed(self):
         if self.time_to_store() == 0:
             return 0
-        return self.num_requested_tokens / self.time_to_store()
+        return self.num_tokens_to_store / self.time_to_store()
 
     @contextmanager
     def profile_process_tokens(self):
@@ -461,7 +461,7 @@ class LMCStatsMonitor:
         curr_time = time.perf_counter()
         store_stats = StoreRequestStats(
             request_id=self.store_request_id,
-            num_requested_tokens=num_tokens,
+            num_tokens_to_store=num_tokens,
             start_time=curr_time,
             end_time=0,
         )
@@ -473,16 +473,13 @@ class LMCStatsMonitor:
     def on_store_finished(
         self,
         store_stats: StoreRequestStats,
-        num_stored_tokens: int = -1,
     ):
         curr_time = time.perf_counter()
         assert store_stats.request_id in self.store_requests
         if store_stats.end_time == 0:
             store_stats.end_time = curr_time
-        if num_stored_tokens >= 0:
-            store_stats.num_requested_tokens = num_stored_tokens
         self.interval_num_store_requests += 1
-        self.interval_num_stored_tokens += store_stats.num_requested_tokens
+        self.interval_num_stored_tokens += store_stats.num_tokens_to_store
 
     @thread_safe
     def on_p2p_transfer_request(self, num_tokens: int) -> int:

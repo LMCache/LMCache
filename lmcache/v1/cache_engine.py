@@ -516,7 +516,6 @@ class LMCacheEngine:
 
         self.stats_monitor.on_store_finished(
             store_stats,
-            tot_token_num,
         )
         tot_time = store_stats.time_to_store()
 
@@ -713,7 +712,7 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
 
-        self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
+        self.stats_monitor.on_store_finished(monitor_req_id)
         yield
 
     @_lmcache_nvtx_annotate
