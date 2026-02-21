@@ -106,7 +106,7 @@ async def recreate_lookup(request: Request):
     Example:
         # Step 1: Update config
         curl -X PUT http://localhost:6999/conf \\
-            -H "Content-Type: application/json" \\
+        curl -X POST http://localhost:6999/conf \\
             -d '{"enable_scheduler_bypass_lookup": true}'
 
         # Step 2: Recreate
