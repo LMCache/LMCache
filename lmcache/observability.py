@@ -2,7 +2,16 @@
 # Standard
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Union,
+)
 import os
 import threading
 import time
@@ -16,6 +25,10 @@ from lmcache.logging import init_logger
 from lmcache.usage_context import ContinuousUsageContext
 from lmcache.utils import thread_safe
 from lmcache.v1.metadata import LMCacheMetadata
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
@@ -890,7 +903,7 @@ class PrometheusLogger:
     def __init__(
         self,
         metadata: LMCacheMetadata,
-        config: Optional[Any] = None,
+        config: Optional["LMCacheEngineConfig"] = None,
     ):
         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
@@ -1813,7 +1826,7 @@ class PrometheusLogger:
     @staticmethod
     def GetOrCreate(
         metadata: LMCacheMetadata,
-        config: Optional[Any] = None,
+        config: Optional["LMCacheEngineConfig"] = None,
     ) -> "PrometheusLogger":
         if PrometheusLogger._instance is None:
             PrometheusLogger._instance = PrometheusLogger(metadata, config=config)
@@ -1881,7 +1894,7 @@ class LMCacheStatsLogger:
         self,
         metadata: LMCacheMetadata,
         log_interval: int,
-        config: Optional[Any] = None,
+        config: Optional["LMCacheEngineConfig"] = None,
     ):
         self.metadata = metadata
         self.log_interval = log_interval
