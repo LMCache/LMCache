@@ -5,7 +5,7 @@ Health check for RemoteBackend.
 
 # Standard
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 import asyncio
 import time
 
@@ -81,6 +81,27 @@ class RemoteBackendHealthCheck(HealthCheck):
         self._backend_name: Optional[str] = None
         self._last_get_blocking_failed_count = 0
 
+    def set_trigger_callback(
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        """
+        Set a callback to trigger immediate health check.
+
+        This registers the callback with the backend so that
+        failures can trigger immediate health checks instead
+        of waiting for the next check interval.
+
+        Args:
+            callback: A callable that triggers an immediate
+                health check.
+        """
+        self.backend.set_on_failure_callback(callback)
+        logger.info(
+            "Registered failure callback for %s",
+            self.backend.remote_url,
+        )
+
     @classmethod
     def create(cls, manager: "LMCacheManager") -> List[HealthCheck]:
         """
@@ -136,6 +157,64 @@ class RemoteBackendHealthCheck(HealthCheck):
         """Get the ping timeout from the backend config."""
         return self.backend.config.get_extra_config_value(
             PING_TIMEOUT_CONFIG_KEY, DEFAULT_PING_TIMEOUT
+        )
+
+    def _check_get_blocking_failed_threshold(
+        self,
+        clear_count: bool = False,
+    ) -> bool:
+        """
+        Check if get_blocking failed count exceeds threshold.
+
+        Args:
+            clear_count: If True, update the last count after
+                reading. If False, just peek without updating.
+
+        Returns:
+            bool: True if within threshold, False if exceeded
+        """
+
+        # Check read failed
+        current = self.backend.get_blocking_failed_count
+        count = (
+            current - self._last_get_blocking_failed_count
+        )
+        if clear_count:
+            self._last_get_blocking_failed_count = current
+
+        threshold = self.backend.config.get_extra_config_value(
+            GET_BLOCKING_FAILED_THRESHOLD_CONFIG_KEY,
+            DEFAULT_GET_BLOCKING_FAILED_THRESHOLD,
+        )
+        if count >= threshold:
+            logger.warning(
+                "Detected %s get blocking failed in interval, threshold: %s",
+                count,
+                threshold,
+            )
+            self.failure_time = time.time()
+            return False
+        return True
+
+    def quick_check(self) -> bool:
+        """
+        Perform a lightweight quick health check.
+
+        This checks the get_blocking_failed_count against the
+        threshold. It's designed to be called frequently (on
+        every failure) and completes very quickly without any
+        network I/O.
+
+        Returns:
+            bool: True if check passes, False if failures
+                exceed threshold
+        """
+        # Skip if already in failure recovery mode
+        if self.failure_time is not None:
+            return False
+
+        return self._check_get_blocking_failed_threshold(
+            clear_count=False,
         )
 
     def _try_reinitialize_connection(self) -> bool:
@@ -201,24 +280,11 @@ class RemoteBackendHealthCheck(HealthCheck):
                 )
                 return False
 
-        # Check read failed
-        current_get_blocking_failed_count = self.backend.get_blocking_failed_count
-        get_blocking_failed_count = (
-            current_get_blocking_failed_count - self._last_get_blocking_failed_count
-        )
-        self._last_get_blocking_failed_count = current_get_blocking_failed_count
-        threshold = self.backend.config.get_extra_config_value(
-            GET_BLOCKING_FAILED_THRESHOLD_CONFIG_KEY,
-            DEFAULT_GET_BLOCKING_FAILED_THRESHOLD,
-        )
-        if get_blocking_failed_count >= threshold:
-            logger.warning(
-                "Detected %s get blocking failed in interval, threshold: %s",
-                get_blocking_failed_count,
-                threshold,
-            )
-            self.failure_time = time.time()
-            return False
+
+        # Check read failed count and clear it
+        if not self._check_get_blocking_failed_threshold(
+            clear_count=True,
+        ):
 
         # If connector doesn't support ping, assume it's healthy
         if not connector.support_ping():

@@ -88,6 +88,11 @@ class RemoteBackend(StorageBackendInterface):
         self._get_blocking_failed_count = 0
         self._put_failed_count = 0
 
+        # Callback to notify external components (e.g., HealthMonitor)
+        # when a remote failure occurs. This allows immediate health
+        # check without waiting for the next check interval.
+        self._on_failure_callback: Optional[Callable[[], None]] = None
+
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is not None:
@@ -351,7 +356,7 @@ class RemoteBackend(StorageBackendInterface):
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
         if memory_obj is None:
-            self._get_blocking_failed_count += 1
+            self._record_failure()
             return None
         decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
         t3 = time.perf_counter()
@@ -369,6 +374,35 @@ class RemoteBackend(StorageBackendInterface):
     @property
     def put_failed_count(self):
         return self._put_failed_count
+
+    def set_on_failure_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """
+        Set a callback to be invoked when a remote failure occurs.
+
+        This allows external components (e.g., HealthMonitor) to be
+        notified immediately when failures happen, enabling faster
+        health status updates.
+
+        Args:
+            callback: A callable that takes no arguments and
+                returns None. Pass None to remove the callback.
+        """
+        self._on_failure_callback = callback
+
+    def _record_failure(self) -> None:
+        """
+        Record a remote failure by incrementing the failure count
+        and notifying external components.
+        """
+        self._get_blocking_failed_count += 1
+        if self._on_failure_callback is not None:
+            try:
+                self._on_failure_callback()
+            except Exception as e:
+                logger.warning("Error in on_failure_callback: %s", e)
 
     def batched_get_blocking(
         self,
@@ -472,7 +506,7 @@ class RemoteBackend(StorageBackendInterface):
                     self.deserializer.deserialize(memory_obj)
                 )
         if error_happened:
-            self._get_blocking_failed_count += 1
+            self._record_failure()
 
         assert len(decompressed_memory_objs) == len(keys), (
             f"keys length: {len(keys)}, "

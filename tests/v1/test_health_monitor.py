@@ -31,12 +31,17 @@ class SimpleHealthCheck(HealthCheck):
     ):
         self._name, self._healthy, self._skip = name, healthy, skip
         self.check_count = 0
+        self.quick_check_count = 0
 
     def name(self) -> str:
         return self._name
 
     def check(self) -> bool:
         self.check_count += 1
+        return self._healthy
+
+    def quick_check(self) -> bool:
+        self.quick_check_count += 1
         return self._healthy
 
     def should_skip(self) -> bool:
@@ -230,6 +235,36 @@ class TestHealthMonitor:
         reader_thread.join()
         assert len(results) > 0
 
+    def test_run_quick_checks(self, monitor):
+        """Test that run_quick_checks runs quick_check."""
+        toggle = SimpleHealthCheck(healthy=True)
+        monitor._health_checks = [toggle]
+
+        # run_quick_checks runs quick_check synchronously
+        initial_quick_count = toggle.quick_check_count
+        monitor.run_quick_checks()
+
+        # Verify that quick_check was called (not full check)
+        assert toggle.quick_check_count > initial_quick_count
+        assert toggle.check_count == 0  # full check not called
+
+    def test_run_quick_checks_updates_health_status(self, monitor):
+        """Test that run_quick_checks updates health status."""
+        toggle = SimpleHealthCheck(healthy=True)
+        monitor._health_checks = [toggle]
+
+        # Initial state should be healthy
+        assert monitor.is_healthy() is True
+
+        # Set check to unhealthy
+        toggle.set_healthy(False)
+
+        # Run quick checks synchronously
+        monitor.run_quick_checks()
+
+        # Status should be updated to unhealthy immediately
+        assert monitor.is_healthy() is False
+
 
 # ============================================================================
 # Tests for RemoteBackendHealthCheck
@@ -270,6 +305,43 @@ class TestRemoteBackendHealthCheck:
         mock_manager.lmcache_engine.storage_manager = MagicMock()
         mock_manager.lmcache_engine.storage_manager.storage_backends = {}
         assert len(RemoteBackendHealthCheck.create(mock_manager)) == 0
+
+    def test_set_trigger_callback(self, mock_backend):
+        """Test set_trigger_callback registers callback with backend."""
+        check = RemoteBackendHealthCheck(mock_backend)
+
+        callback_called = False
+
+        def callback():
+            nonlocal callback_called
+            callback_called = True
+
+        check.set_trigger_callback(callback)
+        mock_backend.set_on_failure_callback.assert_called_once_with(callback)
+
+    def test_quick_check_passes_when_below_threshold(self, mock_backend):
+        """Test quick_check returns True when below threshold."""
+        mock_backend.get_blocking_failed_count = 0
+        mock_backend.config.get_extra_config_value.return_value = 5
+
+        check = RemoteBackendHealthCheck(mock_backend)
+        assert check.quick_check() is True
+
+    def test_quick_check_fails_when_exceeds_threshold(self, mock_backend):
+        """Test quick_check returns False when above threshold."""
+        mock_backend.get_blocking_failed_count = 10
+        mock_backend.config.get_extra_config_value.return_value = 5
+
+        check = RemoteBackendHealthCheck(mock_backend)
+        assert check.quick_check() is False
+        assert check.failure_time is not None
+
+    def test_quick_check_returns_false_in_failure_recovery(self, mock_backend):
+        """Test quick_check returns False when failure_time is set."""
+        check = RemoteBackendHealthCheck(mock_backend)
+        check.failure_time = 12345.0  # Simulate previous failure
+
+        assert check.quick_check() is False
 
 
 # ============================================================================

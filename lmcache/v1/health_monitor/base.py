@@ -5,7 +5,7 @@ Base classes for health monitoring.
 
 # Standard
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 import threading
 
 # First Party
@@ -111,6 +111,22 @@ class HealthCheck(ABC):
         """
         return False
 
+    def quick_check(self) -> bool:  # noqa: B027
+        """
+        Perform a lightweight quick health check.
+
+        This method is called on every failure callback and should be
+        very fast (no network calls, no I/O operations). It's designed
+        for checking counters, thresholds, and other in-memory state.
+
+        Default implementation returns True (healthy). Override this
+        method to implement custom quick check logic.
+
+        Returns:
+            bool: True if quick check passes, False otherwise
+        """
+        return True
+
     def get_bypass_backend_name(self) -> Optional[str]:
         """
         Return the backend name to bypass when this health check fails
@@ -122,6 +138,26 @@ class HealthCheck(ABC):
             Optional[str]: The backend name to bypass, or None if not applicable
         """
         return None
+
+    def set_trigger_callback(  # noqa: B027
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        """
+        Set a callback to trigger immediate health check.
+
+        This method is called by HealthMonitor after discovery to allow
+        health checks to register callbacks with their monitored
+        components.
+
+        Override this method to implement custom callback registration
+        logic.
+
+        Args:
+            callback: A callable that triggers an immediate
+                health check.
+        """
+        pass
 
     @classmethod
     @abstractmethod
@@ -262,6 +298,8 @@ class HealthMonitor(PeriodicThread):
                                 self._health_checks.append(instance)
                                 # Initialize previous status as healthy
                                 self._previous_check_status[instance.name()] = True
+                                # Set trigger callback for immediate check
+                                instance.set_trigger_callback(self.run_quick_checks)
                                 logger.info(
                                     f"Registered health check: {instance.name()} "
                                     f"with fallback_policy: {instance.fallback_policy}"
@@ -547,6 +585,56 @@ class HealthMonitor(PeriodicThread):
         PeriodicThreadRegistry.get_instance().unregister(self.name)
         # Use base class stop method
         super().stop(timeout)
+
+    def run_quick_checks(self) -> None:
+        """
+        Run quick_check() on all health checks.
+
+        This method is called from external components
+        (e.g., RemoteBackend) when a failure occurs. It runs
+        lightweight quick_check() on all health checks. If any
+        quick check fails, the system is immediately marked as
+        unhealthy.
+
+        Quick checks are designed to be fast (no network I/O)
+        and can be called frequently. Full checks (ping, etc.)
+        only run on the regular interval to avoid excessive
+        overhead.
+
+        This is thread-safe and non-blocking.
+        """
+        # Skip if already unhealthy
+        if not self._healthy:
+            return
+
+        for check in self._health_checks:
+            if check.should_skip():
+                continue
+
+            check_name = check.name()
+
+            try:
+                is_healthy = check.quick_check()
+            except Exception as e:
+                logger.error(
+                    "Quick check %s raised exception: %s",
+                    check_name,
+                    e,
+                )
+                is_healthy = False
+
+            if not is_healthy:
+                # Quick check failed
+                logger.warning(
+                    "Quick health check failed: %s",
+                    check_name,
+                )
+                self._previous_check_status[check_name] = False
+
+                if check.fallback_policy == FallbackPolicy.RECOMPUTE:
+                    self._set_healthy(False)
+                elif check.fallback_policy == FallbackPolicy.LOCAL_CPU:
+                    self._apply_local_cpu_fallback(check)
 
     def _execute(self) -> ThreadRunSummary:
         """
