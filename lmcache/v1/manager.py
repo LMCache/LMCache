@@ -781,20 +781,12 @@ class LMCacheManager:
             return "None"
 
         # First Party
-        from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
-            ChunkStatisticsLookupClient,
-        )
-        from lmcache.v1.lookup_client.hit_limit_lookup_client import (
-            HitLimitLookupClient,
-        )
-
         parts = []
         current = obj
         while True:
             parts.append(type(current).__name__)
-            if isinstance(current, ChunkStatisticsLookupClient):
-                current = current.actual_lookup_client
-            elif isinstance(current, HitLimitLookupClient):
+            # Check for wrapper by looking for 'actual_lookup_client' attribute
+            if hasattr(current, "actual_lookup_client"):
                 current = current.actual_lookup_client
             else:
                 break
