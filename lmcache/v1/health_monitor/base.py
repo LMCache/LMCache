@@ -604,7 +604,7 @@ class HealthMonitor(PeriodicThread):
         This is thread-safe and non-blocking.
         """
         # Skip if already unhealthy
-        if not self._healthy:
+        if not self.is_healthy():
             return
 
         for check in self._health_checks:
