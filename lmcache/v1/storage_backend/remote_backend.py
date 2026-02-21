@@ -397,7 +397,8 @@ class RemoteBackend(StorageBackendInterface):
         Record a remote failure by incrementing the failure count
         and notifying external components.
         """
-        self._get_blocking_failed_count += 1
+        with self.lock:
+            self._get_blocking_failed_count += 1
         if self._on_failure_callback is not None:
             try:
                 self._on_failure_callback()
