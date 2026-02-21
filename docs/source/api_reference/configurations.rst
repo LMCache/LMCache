@@ -340,6 +340,68 @@ Settings for different storage backends and paths.
      - LMCACHE_CUFILE_BUFFER_SIZE
      - Buffer size for cuFile operations
 
+Custom Prometheus Histogram Buckets
+------------------------------------
+
+You can override the default bucket boundaries for any Prometheus histogram metric
+by adding a key ``histogram_bucket_<name>`` to ``extra_config``, where ``<name>``
+is the metric name **without** the ``lmcache:`` prefix.
+
+The value must be a list of numeric boundaries (floats or ints).
+
+.. code-block:: yaml
+
+    extra_config:
+      histogram_bucket_time_to_retrieve: [0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+      histogram_bucket_retrieve_speed: [100, 500, 1000, 5000, 10000]
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Available Histogram Names
+     - Description
+   * - ``time_to_retrieve``
+     - Time to retrieve from cache (seconds)
+   * - ``time_to_store``
+     - Time to store to cache (seconds)
+   * - ``time_to_lookup``
+     - Time to lookup in cache (seconds)
+   * - ``retrieve_process_tokens_time``
+     - Time to process tokens in retrieve (seconds)
+   * - ``retrieve_broadcast_time``
+     - Time to broadcast memory objects in retrieve (seconds)
+   * - ``retrieve_to_gpu_time``
+     - Time to move data to GPU in retrieve (seconds)
+   * - ``remote_backend_batched_get_blocking_time``
+     - Time to get data from remote backend (seconds)
+   * - ``instrumented_connector_batched_get_time``
+     - Time used by the connector (seconds)
+   * - ``store_process_tokens_time``
+     - Time to process tokens in store (seconds)
+   * - ``store_from_gpu_time``
+     - Time to move data from GPU in store (seconds)
+   * - ``store_put_time``
+     - Time to put data to storage in store (seconds)
+   * - ``retrieve_speed``
+     - Retrieve speed (tokens per second)
+   * - ``store_speed``
+     - Store speed (tokens per second)
+   * - ``p2p_time_to_transfer``
+     - Time to transfer via P2P (seconds)
+   * - ``p2p_transfer_speed``
+     - P2P transfer speed (tokens per second)
+   * - ``remote_time_to_get``
+     - Time to get from remote backends (ms)
+   * - ``remote_time_to_put``
+     - Time to put to remote backends (ms)
+   * - ``remote_time_to_get_sync``
+     - Time to get from remote backends synchronously (ms)
+   * - ``request_cache_hit_rate``
+     - Request cache hit rate (0.0 to 1.0)
+   * - ``request_cache_lifespan``
+     - Request cache lifespan (minutes)
+
 Internal API Server Configurations
 ----------------------------------
 
