@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import asyncio
 import hashlib
@@ -590,6 +591,12 @@ class CacheStoreEvent:
 
     medium: str | None
     lora_name: str | None
+
+
+class EngineType(Enum):
+    VLLM = "vllm"
+    SGLANG = "sglang"
+    MOCK = "mock"
 
 
 ##### NVTX annotation #####
