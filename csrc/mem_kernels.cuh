@@ -101,6 +101,12 @@ void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
                                   const TransferDirection direction,
                                   const bool token_major = false);
 
+void single_layer_kv_transfer_sgl_mla(torch::Tensor& lmc_key_value_cache,
+                                  torch::Tensor& sgl_key_value_cache,
+                                  torch::Tensor& slot_mapping,
+                                  const TransferDirection direction,
+                                  const bool token_major = false);
+
 void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,
                           size_t host_buffer_offset,

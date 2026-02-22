@@ -235,7 +235,7 @@ key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
          token_idx * scalars_per_token + scalar_offset;
 }
 
-template <typename scalar_t>
+template <typename scalar_t, bool USE_MLA = false>
 __global__ void single_layer_kv_transfer_sgl_kernel(
     // scalar_t* __restrict__ lmc_key_cache,    // [num_tokens,
     // num_heads*head_size] scalar_t* __restrict__ lmc_value_cache,  //
@@ -267,7 +267,6 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
 
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
     const int64_t lmc_key_idx = token_idx * lmc_stride + i;
-    const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
 
     const int head_idx = i / head_size_in_64bit;
     const int head_offset = i % head_size_in_64bit;
@@ -278,10 +277,16 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
 
     if (direction == TransferDirection::D2H) {
       lmc_key_value_cache[lmc_key_idx] = sgl_key_cache[sgl_key_value_idx];
-      lmc_key_value_cache[lmc_value_idx] = sgl_value_cache[sgl_key_value_idx];
+      if constexpr (!USE_MLA) {
+        const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
+        lmc_key_value_cache[lmc_value_idx] = sgl_value_cache[sgl_key_value_idx];
+      }
     } else {  // direction == TransferDirection::H2D
       sgl_key_cache[sgl_key_value_idx] = lmc_key_value_cache[lmc_key_idx];
-      sgl_value_cache[sgl_key_value_idx] = lmc_key_value_cache[lmc_value_idx];
+      if constexpr (!USE_MLA) {
+        const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
+        sgl_value_cache[sgl_key_value_idx] = lmc_key_value_cache[lmc_value_idx];
+      }
     }
   }
 }
@@ -909,6 +914,64 @@ void single_layer_kv_transfer_sgl(
 
   lmc::single_layer_kv_transfer_sgl_kernel<int64_t><<<grid, block, 0, stream>>>(
       lmc_key_value_cache_ptr, sgl_key_cache_ptr, sgl_value_cache_ptr,
+      slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
+      num_heads, head_size_in_64bit, block_size, direction);
+}
+
+void single_layer_kv_transfer_sgl_mla(
+    // torch::Tensor& lmc_key_cache,  // [num_tokens, num_heads*head_size]
+    //  key/value must be on gpu/pinned cpu
+    // torch::Tensor& lmc_value_cache,  // [num_tokens, num_heads*head_size]
+
+    torch::Tensor& lmc_key_value_cache, // [num_tokens, aligned_head_size]
+
+    torch::Tensor&
+        sgl_key_value_cache,  // [num_blocks, block_size, 1, head_size]
+                          // key_value_cache must be on gpu
+    torch::Tensor& slot_mapping,  // [num_tokens]
+    const TransferDirection direction,
+    const bool token_major  // true: lmc_key_value_cache is
+                            // [num_tokens, 2, num_heads*head_size]
+                            // false: lmc_key_value_cache is
+                            // [2, num_tokens, num_heads*head_size]
+) {
+  // int64_t* lmc_key_cache_ptr = get_kernel_ptr<int64_t,
+  // torch::Tensor>(lmc_key_cache); int64_t* lmc_value_cache_ptr =
+  // get_kernel_ptr<int64_t, torch::Tensor>(lmc_value_cache);
+  int64_t* lmc_key_value_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(lmc_key_value_cache);
+
+  int64_t* sgl_key_value_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(sgl_key_value_cache);
+
+  const int64_t* slot_mapping_ptr =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
+
+  int elements_per_entry = 8 / sgl_key_value_cache.element_size();
+
+  int num_tokens = slot_mapping.size(0);
+  int num_heads = 1;
+  int head_size_in_64bit = sgl_key_value_cache.size(3) / elements_per_entry;
+  int block_size = sgl_key_value_cache.size(1);
+
+  const bool use_mla = true;
+
+  int lmc_stride;
+  int lmc_value_offset;
+  // MLA format: [num_tokens, aligned_head_size]
+  lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
+  lmc_value_offset = 0;  // No separate K/V for MLA
+  
+  // MLA format: [num_blocks, block_size, 1, head_size]
+  int block_stride_in_64bit = sgl_key_value_cache.stride(0) / elements_per_entry;
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(num_heads * head_size_in_64bit, 128));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(sgl_key_value_cache));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  lmc::single_layer_kv_transfer_sgl_kernel<int64_t, true><<<grid, block, 0, stream>>>(
+      lmc_key_value_cache_ptr, sgl_key_value_cache_ptr, NULL,
       slot_mapping_ptr, block_stride_in_64bit, lmc_stride, lmc_value_offset,
       num_heads, head_size_in_64bit, block_size, direction);
 }

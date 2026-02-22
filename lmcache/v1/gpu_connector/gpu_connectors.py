@@ -1658,32 +1658,73 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             for start, end, memory_obj in zip(
                 starts, ends, memory_objs_layer, strict=False
             ):
-                assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
+                # Validate memory format
+                if self.use_mla:
+                    assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT, (
+                        f"Expected memory format {MemoryFormat.KV_MLA_FMT}, "
+                        f"got {memory_obj.metadata.fmt}"
+                    )
+                else:
+                    assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D, (
+                        f"Expected memory format {MemoryFormat.KV_T2D}, "
+                        f"got {memory_obj.metadata.fmt}"
+                    )
                 if self.use_gpu:
                     tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
                         memory_obj.tensor, non_blocking=True
                     )
                 else:
-                    lmc_ops.single_layer_kv_transfer_sgl(
-                        memory_obj.tensor,
-                        self.kvcaches[0][layer_id],
-                        self.kvcaches[1][layer_id],
-                        slot_mapping[start:end],
+                    if self.use_mla:
+                        if len(self.kvcaches[layer_id].shape)==3:
+                            t,h,d = self.kvcaches[layer_id].shape
+                            kv_cache = self.kvcaches[layer_id].view(t,1,h,d)
+                        else:
+                            kv_cache = self.kvcaches[layer_id]
+                        lmc_ops.single_layer_kv_transfer_sgl_mla(
+                            memory_obj.tensor,
+                            kv_cache,
+                            slot_mapping[start:end],
+                            lmc_ops.TransferDirection.H2D,
+                            token_major=True,
+                        )
+                    else:
+                        if len(self.kvcaches[0][layer_id].shape)==3:
+                            t,h,d = self.kvcaches[0][layer_id].shape
+                            k_cache = self.kvcaches[0][layer_id].view(t,1,h,d)
+                            v_cache = self.kvcaches[1][layer_id].view(t,1,h,d)
+                        else:
+                            k_cache = self.kvcaches[0][layer_id]
+                            v_cache = self.kvcaches[1][layer_id]
+                        lmc_ops.single_layer_kv_transfer_sgl(
+                            memory_obj.tensor,
+                            k_cache,
+                            v_cache,
+                            slot_mapping[start:end],
+                            lmc_ops.TransferDirection.H2D,
+                            token_major=True,
+                        )
+
+            if self.use_gpu:
+                if self.use_mla:
+                    t, h, d = self.kvcaches[layer_id].shape
+                    lmc_ops.single_layer_kv_transfer_sgl_mla(
+                        tmp_gpu_buffer_obj.tensor,
+                        self.kvcaches[layer_id].view(t, 1, h, d),
+                        slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
                         token_major=True,
                     )
-
-            if self.use_gpu:
-                t, h, d = self.kvcaches[0][layer_id].shape
-
-                lmc_ops.single_layer_kv_transfer_sgl(
-                    tmp_gpu_buffer_obj.tensor,
-                    self.kvcaches[0][layer_id].view(t, 1, h, d),
-                    self.kvcaches[1][layer_id].view(t, 1, h, d),
-                    slot_mapping_full,
-                    lmc_ops.TransferDirection.H2D,
-                    token_major=True,
-                )
+                else:
+                    t, h, d = self.kvcaches[0][layer_id].shape
+                    lmc_ops.single_layer_kv_transfer_sgl(
+                        tmp_gpu_buffer_obj.tensor,
+                        self.kvcaches[0][layer_id].view(t, 1, h, d),
+                        self.kvcaches[1][layer_id].view(t, 1, h, d),
+                        slot_mapping_full,
+                        lmc_ops.TransferDirection.H2D,
+                        token_major=True,
+                    )
+        yield
 
         # free the buffer memory
         if self.use_gpu:
@@ -1749,7 +1790,6 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
-
             assert self.gpu_buffer_allocator is not None, (
                 "GPU buffer allocator should be initialized"
             )
@@ -1765,15 +1805,25 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             memory_objs_layer = memory_objs[layer_id]
             # kvcaches -> gpu_buffer -> memobj
             if self.use_gpu:
-                t, h, d = self.kvcaches[0][layer_id].shape
-                lmc_ops.single_layer_kv_transfer_sgl(
-                    tmp_gpu_buffer_obj.tensor,
-                    self.kvcaches[0][layer_id].view(t, 1, h, d),
-                    self.kvcaches[1][layer_id].view(t, 1, h, d),
-                    slot_mapping_full,
-                    lmc_ops.TransferDirection.D2H,
-                    token_major=True,
-                )
+                if self.use_mla:
+                    t, h, d = self.kvcaches[layer_id].shape
+                    lmc_ops.single_layer_kv_transfer_sgl_mla(
+                        tmp_gpu_buffer_obj.tensor,
+                        self.kvcaches[layer_id].view(t, 1, h, d),
+                        slot_mapping_full,
+                        lmc_ops.TransferDirection.D2H,
+                        token_major=True,
+                    )
+                else:
+                    t, h, d = self.kvcaches[0][layer_id].shape
+                    lmc_ops.single_layer_kv_transfer_sgl(
+                        tmp_gpu_buffer_obj.tensor,
+                        self.kvcaches[0][layer_id].view(t, 1, h, d),
+                        self.kvcaches[1][layer_id].view(t, 1, h, d),
+                        slot_mapping_full,
+                        lmc_ops.TransferDirection.D2H,
+                        token_major=True,
+                    )
 
             start_idx = 0
 
@@ -1789,15 +1839,38 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     )
                     start_idx += chunk_len
                 else:
-                    lmc_ops.single_layer_kv_transfer_sgl(
-                        memory_obj.tensor,
-                        self.kvcaches[0][layer_id],
-                        self.kvcaches[1][layer_id],
-                        slot_mapping[start:end],
-                        lmc_ops.TransferDirection.D2H,
-                        token_major=True,
-                    )
-
+                    if self.use_mla:
+                        if len(self.kvcaches[layer_id].shape)==3:
+                            t,h,d = self.kvcaches[layer_id].shape
+                            kv_cache = self.kvcaches[layer_id].view(t,1,h,d)
+                        else:
+                            kv_cache = self.kvcaches[layer_id]
+                        lmc_ops.single_layer_kv_transfer_sgl_mla(
+                            memory_obj.tensor,
+                            kv_cache,
+                            slot_mapping[start:end],
+                            lmc_ops.TransferDirection.D2H,
+                            token_major=True,
+                        )
+                    else:
+                        if len(self.kvcaches[0][layer_id].shape)==3:
+                            t,h,d = self.kvcaches[0][layer_id].shape
+                            k_cache = self.kvcaches[0][layer_id].view(t,1,h,d)
+                            v_cache = self.kvcaches[1][layer_id].view(t,1,h,d)
+                        else:
+                            k_cache = self.kvcaches[0][layer_id]
+                            v_cache = self.kvcaches[1][layer_id]
+                        lmc_ops.single_layer_kv_transfer_sgl(
+                            memory_obj.tensor,
+                            k_cache,
+                            v_cache,
+                            slot_mapping[start:end],
+                            lmc_ops.TransferDirection.D2H,
+                            token_major=True,
+                        )
+                # Set metadata format
+                if self.use_mla:
+                    memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
             yield
             logger.debug(f"Finished offloading layer {layer_id}")
 
@@ -1807,5 +1880,9 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         yield
 
     def get_shape(self, num_tokens: int) -> torch.Size:
-        # TODO: support MLA
-        return torch.Size([num_tokens, 2, self.hidden_dim_size])
+        if self.use_mla:
+            # MLA format: [num_tokens, hidden_dim_size]
+            return torch.Size([num_tokens, self.hidden_dim_size])
+        else:
+            # Standard format: [num_tokens, 2, hidden_dim_size]
+            return torch.Size([num_tokens, 2, self.hidden_dim_size])

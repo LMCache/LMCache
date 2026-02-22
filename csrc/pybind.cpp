@@ -35,6 +35,10 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
         py::arg("sgl_value_cache"), py::arg("slot_mapping"),
         py::arg("direction"), py::arg("token_major") = false);
+  m.def("single_layer_kv_transfer_sgl_mla", &single_layer_kv_transfer_sgl_mla,
+        py::arg("lmc_key_value_cache"), py::arg("sgl_key_value_cache"),
+        py::arg("slot_mapping"), py::arg("direction"), 
+        py::arg("token_major") = false);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async);

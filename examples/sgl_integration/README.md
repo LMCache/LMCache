@@ -3,13 +3,9 @@
 This example shows how to use SGLang & LMCache Integration.
 
 ## Install
-This project depends on a pending pull request in the SGLang repository. Until PR is merged, please use the code from that specific branch instead of the SGLang main branch.
+Install sglang through `pip`.
 ```bash
-git clone https://github.com/Oasis-Git/sglang/tree/lmcache
-cd sglang
-
-pip install --upgrade pip
-pip install -e "python[all]"
+pip install sglang
 ```
 
 ## Server script
