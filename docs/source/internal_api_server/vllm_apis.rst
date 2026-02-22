@@ -793,3 +793,126 @@ Get current chunk statistics and auto-exit configuration.
       "auto_exit_timeout_hours": 24.0,
       "auto_exit_target_unique_chunks": 1000
     }
+
+
+.. _bypass_mode:
+
+Bypass Mode
+------------
+
+Bypass mode allows dynamically skipping specific storage backends at runtime.
+Bypassed backends are excluded from ``contains``/``put``/``get`` operations.
+This is useful for fault injection testing, isolating a problematic backend,
+or debugging without restarting the engine.
+
+
+``GET /bypass/list`` — List Bypassed Backends
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+List all currently bypassed backends and all available backend names.
+
+- **Method**: ``GET``
+- **Path**: ``/bypass/list``
+- **Parameters**: None
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl http://localhost:7000/bypass/list
+
+**Example Response**:
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "bypassed_backends": ["RemoteBackend"],
+      "all_backends": ["LocalCPUBackend", "RemoteBackend"]
+    }
+
+
+``PUT /bypass/add`` — Add a Backend to Bypass List
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Add a backend to the bypass list. The bypassed backend will be excluded
+from ``contains``/``put``/``get`` operations.
+
+- **Method**: ``PUT``
+- **Path**: ``/bypass/add``
+- **Parameters**:
+
+  ================ ======= =============================================
+  Name             Type    Description
+  ================ ======= =============================================
+  ``backend_name`` str     Name of the backend to bypass (required)
+  ================ ======= =============================================
+
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl -X PUT "http://localhost:7000/bypass/add?backend_name=RemoteBackend"
+
+**Example Response**:
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "backend_name": "RemoteBackend",
+      "bypassed": true,
+      "was_already_bypassed": false,
+      "bypassed_backends": ["RemoteBackend"]
+    }
+
+**Error Response** (unknown backend, HTTP 400):
+
+.. code-block:: json
+
+    {
+      "error": "Unknown backend",
+      "message": "Backend 'FooBackend' not found. Available: ['LocalCPUBackend', 'RemoteBackend']"
+    }
+
+
+``PUT /bypass/remove`` — Remove a Backend from Bypass List
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Remove a backend from the bypass list, restoring it to normal operation.
+
+- **Method**: ``PUT``
+- **Path**: ``/bypass/remove``
+- **Parameters**:
+
+  ================ ======= =============================================
+  Name             Type    Description
+  ================ ======= =============================================
+  ``backend_name`` str     Name of the backend to restore (required)
+  ================ ======= =============================================
+
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl -X PUT "http://localhost:7000/bypass/remove?backend_name=RemoteBackend"
+
+**Example Response**:
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "backend_name": "RemoteBackend",
+      "bypassed": false,
+      "was_bypassed": true,
+      "bypassed_backends": []
+    }
+
+**Error Response** (unknown backend, HTTP 400):
+
+.. code-block:: json
+
+    {
+      "error": "Unknown backend",
+      "message": "Backend 'FooBackend' not found. Available: ['LocalCPUBackend', 'RemoteBackend']"
+    }

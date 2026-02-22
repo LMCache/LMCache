@@ -865,6 +865,25 @@ class StorageManager:
         with self._bypass_lock:
             return backend_name in self._bypassed_backends
 
+    def get_bypassed_backends(self) -> List[str]:
+        """
+        Get the list of currently bypassed backend names.
+
+        Returns:
+            List[str]: List of bypassed backend names
+        """
+        with self._bypass_lock:
+            return list(self._bypassed_backends)
+
+    def get_all_backend_names(self) -> List[str]:
+        """
+        Get the list of all registered backend names.
+
+        Returns:
+            List[str]: List of all backend names
+        """
+        return list(self.storage_backends.keys())
+
     def contains(
         self,
         key: CacheEngineKey,
