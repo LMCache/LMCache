@@ -84,6 +84,32 @@ The health monitor runs in a background thread:
 3. When unhealthy, store/retrieve operations are blocked with a warning log
 4. Once all checks pass again, the system is marked as healthy and operations resume
 
+Quick Health Check (Fast-Fail)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In addition to periodic health checks, the Health Monitor supports **quick health checks** for fast failure detection:
+
+**How it works:**
+
+1. When a remote operation fails (e.g., ``get_blocking`` returns None), the backend calls a failure callback
+2. The callback triggers ``run_quick_checks()`` on the Health Monitor
+3. Each health check's ``quick_check()`` method is executed (lightweight, no network I/O)
+4. If quick check fails (e.g., failure count exceeds threshold), the system is immediately marked as unhealthy
+
+**Benefits:**
+
+- **Faster detection**: Failures are detected immediately, not waiting for the next ping interval
+- **Lower overhead**: Quick checks are lightweight (counter checks only, no ping operations)
+- **Automatic integration**: RemoteBackend automatically registers failure callbacks with the Health Monitor
+
+**Failure threshold mechanism:**
+
+The ``get_blocking_failed_threshold`` configuration controls how many consecutive failures trigger an unhealthy state:
+
+- Each ``get_blocking`` or ``batched_get_blocking`` failure increments a counter
+- When counter reaches the threshold within a check interval, quick check fails
+- System enters degraded mode and waits ``waiting_time_for_recovery`` seconds before retrying
+
 Initialization Failure Handling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -121,11 +147,25 @@ This check monitors the connectivity to remote storage backends (e.g., Redis, Va
 - Pings the remote connector to verify it's reachable
 - Measures ping latency
 - Reports error codes for failures
+- Tracks ``get_blocking`` failure counts (via quick check)
 
 **When it's active:**
 
 - Only when a remote backend is configured (``remote_url`` is set)
 - Only if the connector supports the ``ping()`` operation
+
+**Quick check behavior:**
+
+- Monitors ``get_blocking_failed_count`` from the RemoteBackend
+- If failures exceed ``get_blocking_failed_threshold``, quick check fails immediately
+- After failure, waits ``waiting_time_for_recovery`` seconds before attempting recovery
+- Recovery is validated by a put-and-get test before resuming normal operations
+
+**Failure callback integration:**
+
+- Registers a failure callback with RemoteBackend during initialization
+- RemoteBackend calls the callback when ``get_blocking`` or ``batched_get_blocking`` fails
+- This triggers immediate ``quick_check()`` instead of waiting for the next ping interval
 
 **Metrics reported:**
 
