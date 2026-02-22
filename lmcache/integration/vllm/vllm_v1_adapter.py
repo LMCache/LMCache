@@ -957,6 +957,9 @@ class LMCacheConnectorV1Impl:
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.info(f"Retrieved {num_retrieved_tokens} tokens")
 
+        if self.layerwise_retrievers:
+            self.current_layer += 1
+
         return
 
     @_lmcache_nvtx_annotate
