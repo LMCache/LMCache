@@ -86,7 +86,8 @@ class RemoteBackend(StorageBackendInterface):
 
         self._setup_metrics()
 
-        self._interval_get_blocking_failed_count = 0
+        self._get_blocking_failed_count = 0
+        self._put_failed_count = 0
 
     def _setup_metrics(self):
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
@@ -94,8 +95,11 @@ class RemoteBackend(StorageBackendInterface):
             prometheus_logger.remote_put_task_num.set_function(
                 lambda: len(self.put_tasks)
             )
-            prometheus_logger.interval_get_blocking_failed_count.set_function(
-                lambda: self._interval_get_blocking_failed_count
+            prometheus_logger.get_blocking_failed_count.set_function(
+                lambda: self._get_blocking_failed_count
+            )
+            prometheus_logger.put_failed_count.set_function(
+                lambda: self._put_failed_count
             )
 
     def __str__(self):
@@ -184,11 +188,13 @@ class RemoteBackend(StorageBackendInterface):
             return key in self.put_tasks
 
     def put_callback(self, future: Future, key: CacheEngineKey):
-        """
-        Callback function for put tasks.
-        """
         with self.lock:
             self.put_tasks.discard(key)
+        try:
+            future.result()
+        except Exception as e:
+            self._put_failed_count += 1
+            logger.error(f"Put task failed for key {key}: {e}")
 
     def submit_put_task(
         self,
@@ -346,7 +352,7 @@ class RemoteBackend(StorageBackendInterface):
         t2 = time.perf_counter()
         self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
         if memory_obj is None:
-            self._interval_get_blocking_failed_count += 1
+            self._get_blocking_failed_count += 1
             return None
         decompressed_memory_obj = self.deserializer.deserialize(memory_obj)
         t3 = time.perf_counter()
@@ -357,10 +363,13 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_obj
 
-    def get_and_clear_interval_get_blocking_failed_count(self):
-        count = self._interval_get_blocking_failed_count
-        self._interval_get_blocking_failed_count = 0
-        return count
+    @property
+    def get_blocking_failed_count(self):
+        return self._get_blocking_failed_count
+
+    @property
+    def put_failed_count(self):
+        return self._put_failed_count
 
     def batched_get_blocking(
         self,
@@ -464,7 +473,7 @@ class RemoteBackend(StorageBackendInterface):
                     self.deserializer.deserialize(memory_obj)
                 )
         if error_happened:
-            self._interval_get_blocking_failed_count += 1
+            self._get_blocking_failed_count += 1
 
         assert len(decompressed_memory_objs) == len(keys), (
             f"keys length: {len(keys)}, "

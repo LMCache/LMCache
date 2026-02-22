@@ -7,6 +7,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
@@ -130,7 +131,7 @@ def _list_depth_tensor_dim(kv_caches: Any) -> Tuple[int, int]:
 
 
 def discover_gpu_kv_format(
-    kv_caches: Any, serving_engine: str
+    kv_caches: Any, serving_engine: EngineType
 ) -> "lmc_ops.GPUKVFormat":
     """
     Discover the GPU KV Cache Format from the kv_caches.
@@ -158,7 +159,7 @@ def discover_gpu_kv_format(
 
     detected_format = None
 
-    if serving_engine == "vllm":
+    if serving_engine == EngineType.VLLM:
         if list_depth == 0:
             # vllm cross layer
             detected_format = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
@@ -173,7 +174,7 @@ def discover_gpu_kv_format(
             elif tensor_dim == 3:
                 # vllm MLA
                 detected_format = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
-    elif serving_engine == "sglang":
+    elif serving_engine == EngineType.SGLANG:
         if list_depth == 1:
             if kv_caches[0].shape[1] == 1:
                 # sglang MLA

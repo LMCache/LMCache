@@ -5,6 +5,9 @@ from prometheus_client import REGISTRY, generate_latest
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
+# First Party
+from lmcache.observability import reset_observability_metrics
+
 router = APIRouter()
 
 
@@ -15,3 +18,12 @@ async def get_metrics(request: Request):
     """
     metrics_data = generate_latest(REGISTRY)
     return PlainTextResponse(content=metrics_data, media_type="text/plain")
+
+
+@router.post("/metrics/reset")
+async def reset_metrics():
+    """
+    Reset Prometheus metrics to their initial state.
+    """
+    reset_observability_metrics()
+    return PlainTextResponse(content="ok", media_type="text/plain")
