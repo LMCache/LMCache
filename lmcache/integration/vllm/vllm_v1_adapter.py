@@ -1600,6 +1600,12 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        # Layerwise save uses request-scoped generators. If request finishes
+        # without entering wait_for_save (abort/error/evict path), make sure
+        # we release the generator entry to avoid leaking state.
+        if self.use_layerwise:
+            self._layerwise_save_storers.pop(request.request_id, None)
+
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
             # Cancel any ongoing async lookup and prefetch tasks on workers
