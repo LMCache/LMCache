@@ -236,20 +236,13 @@ class StorageManager:
         )
         self.thread.start()
 
-        # For scheduler role, always use CPU device
-        if is_cuda_worker(metadata):
-            dst_device = "cuda"
-        else:
-            dst_device = "cpu"
-        self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
-            CreateStorageBackends(
-                config,
-                metadata,
-                self.loop,
-                dst_device,
-                lmcache_worker,
-            )
-        )
+        self.storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
+        self.manager_lock = threading.Lock()
+        self.lmcache_worker = lmcache_worker
+
+        # Use the unified create path so that init and
+        # dynamic creation share the same logic.
+        self.create_backends()
 
         # the backend used for actual storage
         self.non_allocator_backends = self.get_non_allocator_backends()
@@ -262,9 +255,6 @@ class StorageManager:
 
         self.local_cpu_backend = self.storage_backends.get("LocalCPUBackend", None)
 
-        self.manager_lock = threading.Lock()
-
-        self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
 
