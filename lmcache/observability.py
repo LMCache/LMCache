@@ -370,7 +370,7 @@ class LMCStatsMonitor:
             self.interval_lookup_0_hit_requests += 1
 
     @thread_safe
-    def on_retrieve_request(self, num_requested_tokens: int) -> RetrieveRequestStats:
+    def on_retrieve_request(self, num_tokens: int) -> RetrieveRequestStats:
         """
         Returns the internal "request id" that will be used in
         on_retrieve_finished
@@ -378,7 +378,7 @@ class LMCStatsMonitor:
         curr_time = time.perf_counter()
         retrieve_stats = RetrieveRequestStats(
             request_id=self.retrieve_request_id,
-            num_requested_tokens=num_requested_tokens,
+            num_requested_tokens=num_tokens,
             local_hit_tokens=0,
             remote_hit_tokens=0,
             start_time=curr_time,
