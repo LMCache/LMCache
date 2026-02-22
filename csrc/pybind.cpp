@@ -16,11 +16,25 @@ PYBIND11_MODULE(c_ops, m) {
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H)
       .export_values();
+  py::enum_<GPUKVFormat>(m, "GPUKVFormat")
+      .value("NB_NL_TWO_BS_NH_HS", GPUKVFormat::NB_NL_TWO_BS_NH_HS)
+      .value("NL_X_TWO_NB_BS_NH_HS", GPUKVFormat::NL_X_TWO_NB_BS_NH_HS)
+      .value("NL_X_NB_TWO_BS_NH_HS", GPUKVFormat::NL_X_NB_TWO_BS_NH_HS)
+      .value("NL_X_NB_BS_HS", GPUKVFormat::NL_X_NB_BS_HS)
+      .value("TWO_X_NL_X_NBBS_NH_HS", GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS)
+      .value("NL_X_NBBS_ONE_HS", GPUKVFormat::NL_X_NBBS_ONE_HS)
+      .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
-  m.def("single_layer_kv_transfer", &single_layer_kv_transfer);
-  m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl);
+  m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
+        py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
+        py::arg("slot_mapping"), py::arg("direction"), py::arg("gpu_kv_format"),
+        py::arg("token_major") = false);
+  m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl,
+        py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
+        py::arg("sgl_value_cache"), py::arg("slot_mapping"),
+        py::arg("direction"), py::arg("token_major") = false);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async);

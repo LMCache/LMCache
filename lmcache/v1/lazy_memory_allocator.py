@@ -213,6 +213,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         """
         return self._buffer
 
+    def get_address_manager(self) -> AddressManager:
+        """
+        Get the address manager used by this allocator.
+        """
+        return self._address_manager
+
     # Helper functions
     def _pin_memory_chunk(self, offset: int, size: int):
         """

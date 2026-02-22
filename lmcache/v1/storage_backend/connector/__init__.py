@@ -178,10 +178,11 @@ class ConnectorManager:
             metadata=metadata,
         )
         self.adapters: List[ConnectorAdapter] = []
-        self._discover_adapters()
+        self._remote_adapters_builtin_launcher()
+        self._remote_adapters_plugin_launcher(config)
 
-    def _discover_adapters(self) -> None:
-        """Automatically discover and register all ConnectorAdapter subclasses."""
+    def _remote_adapters_builtin_launcher(self) -> None:
+        """Automatically load all builtin remote connector adapters."""
         # Import current package to ensure all modules are loaded
         # First Party
         import lmcache.v1.storage_backend.connector as connector_pkg
@@ -215,6 +216,71 @@ class ConnectorManager:
                             )
             except ImportError as e:
                 logger.warning(f"Failed to import module {module_name}: {e}")
+
+    def _remote_adapters_plugin_launcher(self, config: LMCacheEngineConfig) -> None:
+        """Automatically load all plug and play remote connector adapters."""
+
+        if config is None:
+            logger.warning(
+                "Configuration not available to parse remote connector adapters."
+            )
+            return
+
+        # Get the list of allowed remote connector adapters if configured
+        remote_storage_plugins = (
+            set(config.remote_storage_plugins)
+            if config.remote_storage_plugins
+            else set()
+        )
+
+        for remote_storage_plugin in remote_storage_plugins:
+            try:
+                extra_config = config.extra_config
+                if extra_config is None:
+                    logger.warning(
+                        f"Remote connector {remote_storage_plugin} configuration is "
+                        f"missing 'extra_config'."
+                    )
+                    continue
+
+                module_path = extra_config.get(
+                    f"remote_storage_plugin.{remote_storage_plugin}.module_path"
+                )
+                class_name = extra_config.get(
+                    f"remote_storage_plugin.{remote_storage_plugin}.class_name"
+                )
+
+                if not module_path or not class_name:
+                    logger.warning(
+                        f"Remote connector {remote_storage_plugin} missing adapter "
+                        f"module_path or class_name"
+                    )
+                    continue
+
+                # Dynamically import the module
+                module = importlib.import_module(module_path)
+                # Get the class from the module
+                adapter_class = getattr(module, class_name)
+                adapter_instance = adapter_class()
+                if not isinstance(adapter_instance, ConnectorAdapter):
+                    logger.warning(
+                        f"Remote connector {remote_storage_plugin} adapter does not "
+                        f"implement the 'ConnectorAdapter' interface"
+                    )
+                    adapter_instance = None
+                    continue
+                self.adapters.append(adapter_instance)
+                logger.info(f"Discovered adapter: {adapter_class.__name__}")
+            except (ImportError, AttributeError) as e:
+                logger.error(
+                    f"Failed to load remote connector {remote_storage_plugin} due to "
+                    f"import/attribute error: {e}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to create remote connector {remote_storage_plugin} "
+                    f"adapter: {str(e)}"
+                )
 
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
