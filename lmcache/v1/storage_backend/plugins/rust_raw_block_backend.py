@@ -168,6 +168,11 @@ class RustRawBlockBackend(StoragePluginInterface):
             raise ValueError(
                 "rust_raw_block.meta_total_bytes must align to block_align"
             )
+        if self.meta_total_bytes <= self.block_align:
+            raise ValueError(
+                "rust_raw_block.meta_total_bytes must be > block_align "
+                "(room for metadata header + payload)"
+            )
 
         self._lock = threading.Lock()
         self._index: dict[CacheEngineKey, _Entry] = {}
@@ -309,6 +314,13 @@ class RustRawBlockBackend(StoragePluginInterface):
         self._lru.pop(key, None)
         self._lru[key] = None
 
+    def _append_free_slot_locked(self, slot: int) -> None:
+        if slot < 0 or slot >= self._max_slots:
+            return
+        if slot in self._free_slots:
+            return
+        self._free_slots.append(slot)
+
     def _evict_one(self) -> bool:
         for victim in list(self._lru.keys()):
             if victim in self._pinned or victim in self._inflight:
@@ -319,7 +331,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 continue
             self._lru.pop(victim, None)
             self._pinned.discard(victim)
-            self._free_slots.append(self._offset_to_slot(int(entry.offset)))
+            self._append_free_slot_locked(self._offset_to_slot(int(entry.offset)))
             self._meta_dirty_total += 1
             return True
         return False
@@ -357,7 +369,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             self._pinned.discard(key)
             self._lru.pop(key, None)
             if entry is not None:
-                self._free_slots.append(self._offset_to_slot(int(entry.offset)))
+                self._append_free_slot_locked(self._offset_to_slot(int(entry.offset)))
                 self._meta_dirty_total += 1
             if inflight is not None:
                 inflight.canceled = True
@@ -483,7 +495,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 inflight = self._inflight.pop(key, None)
                 if inflight is not None:
                     if inflight.canceled:
-                        self._free_slots.append(
+                        self._append_free_slot_locked(
                             self._offset_to_slot(int(inflight.offset))
                         )
                         self._meta_dirty_total += 1
@@ -847,9 +859,47 @@ class RustRawBlockBackend(StoragePluginInterface):
             logger.warning("Device metadata meta_version mismatch; ignoring metadata")
             return False
 
+        try:
+            next_slot = int(data.get("next_slot", 0))
+        except Exception:
+            logger.warning("Device metadata next_slot is invalid; ignoring metadata")
+            return False
+        if next_slot < 0 or next_slot > self._max_slots:
+            logger.warning(
+                "Device metadata next_slot out of range (%d); ignoring metadata",
+                next_slot,
+            )
+            return False
+
+        raw_free_slots = data.get("free_slots", [])
+        if not isinstance(raw_free_slots, list):
+            logger.warning("Device metadata free_slots is invalid; ignoring metadata")
+            return False
+        free_slots: list[int] = []
+        seen_slots: set[int] = set()
+        for raw_slot in raw_free_slots:
+            try:
+                slot = int(raw_slot)
+            except Exception:
+                logger.warning(
+                    "Device metadata free_slots contains non-integer; ignoring metadata"
+                )
+                return False
+            if slot < 0 or slot >= self._max_slots:
+                logger.warning(
+                    "Device metadata free_slots contains out-of-range slot %d; "
+                    "ignoring metadata",
+                    slot,
+                )
+                return False
+            if slot in seen_slots:
+                continue
+            seen_slots.add(slot)
+            free_slots.append(slot)
+
         with self._lock:
-            self._next_slot = int(data.get("next_slot", 0))
-            self._free_slots = [int(x) for x in data.get("free_slots", [])]
+            self._next_slot = next_slot
+            self._free_slots = free_slots
             self._index.clear()
             self._lru.clear()
 
@@ -894,6 +944,15 @@ class RustRawBlockBackend(StoragePluginInterface):
                         pin_count=0,
                     )
                     self._index[key] = _Entry(offset=offset, size=size, meta=meta)
+
+            # Remove free-slot entries that overlap with loaded index slots.
+            used_slots = {
+                self._offset_to_slot(int(entry.offset))
+                for entry in self._index.values()
+            }
+            self._free_slots = [
+                slot for slot in self._free_slots if slot not in used_slots
+            ]
 
             lru_keys = data.get("lru_keys", [])
             if isinstance(lru_keys, list) and lru_keys:
@@ -944,7 +1003,7 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._lru.pop(key, None)
                 self._pinned.discard(key)
                 if removed_entry is not None:
-                    self._free_slots.append(
+                    self._append_free_slot_locked(
                         self._offset_to_slot(int(removed_entry.offset))
                     )
             self._meta_dirty_total += 1
