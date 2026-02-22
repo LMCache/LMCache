@@ -6,6 +6,7 @@ Tests cover:
 - GET /backends  — list active backends
 - DELETE /backends/{name} — close and remove a backend
 - POST /backends — create new backends from current config
+- POST /backends/{name}/recreate — atomic close + create
 - End-to-end flow: close → conf update → create → verify
 """
 
@@ -165,6 +166,46 @@ class TestCreateBackends:
         assert resp.status_code == 500
         data = resp.json()
         assert "create error" in data["message"]
+
+
+# ------------------------------------------------------------------ #
+#  POST /backends/{name}/recreate
+# ------------------------------------------------------------------ #
+
+
+class TestRecreateBackend:
+    def test_recreate_success(self, client_with_engine, mock_storage_manager):
+        mock_storage_manager.recreate_backend.return_value = {
+            "RemoteBackend": "RemoteBackend"
+        }
+        resp = client_with_engine.post("/backends/RemoteBackend/recreate")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert "RemoteBackend" in data["recreated"]
+        mock_storage_manager.recreate_backend.assert_called_once_with("RemoteBackend")
+
+    def test_recreate_not_found(self, client_with_engine, mock_storage_manager):
+        mock_storage_manager.recreate_backend.side_effect = KeyError(
+            "Backend NonExistent not found"
+        )
+        resp = client_with_engine.post("/backends/NonExistent/recreate")
+        assert resp.status_code == 404
+        data = resp.json()
+        assert data["status"] == "not_found"
+
+    def test_recreate_no_engine(self, client_without_engine):
+        resp = client_without_engine.post("/backends/RemoteBackend/recreate")
+        assert resp.status_code == 503
+
+    def test_recreate_exception(self, client_with_engine, mock_storage_manager):
+        mock_storage_manager.recreate_backend.side_effect = RuntimeError(
+            "recreate error"
+        )
+        resp = client_with_engine.post("/backends/RemoteBackend/recreate")
+        assert resp.status_code == 500
+        data = resp.json()
+        assert "recreate error" in data["message"]
 
 
 # ------------------------------------------------------------------ #

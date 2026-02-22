@@ -165,3 +165,57 @@ async def create_backends(request: Request):
             },
             status_code=500,
         )
+
+
+@router.post("/backends/{backend_name}/recreate")
+async def recreate_backend(request: Request, backend_name: str):
+    """Recreate a specific storage backend atomically.
+
+    The backend will be closed and recreated from the current
+    config in a single step.
+
+    Args:
+        backend_name: Name of the backend to recreate
+            (e.g. ``RemoteBackend``).
+
+    Returns:
+        JSONResponse: Dict of recreated backends and the
+        full list of active backends.
+
+    Example:
+        .. code-block:: bash
+
+            curl -X POST \\
+                http://localhost:7000/backends/RemoteBackend/recreate
+    """
+    sm = _get_storage_manager(request)
+    if sm is None:
+        return _unavailable_response("/backends")
+
+    try:
+        created = sm.recreate_backend(backend_name)
+        return JSONResponse(
+            content={
+                "status": "success",
+                "recreated": created,
+                "backends": sm.list_backends(),
+            },
+        )
+    except KeyError:
+        return JSONResponse(
+            content={
+                "status": "not_found",
+                "message": ("Backend %s not found" % backend_name),
+                "backends": sm.list_backends(),
+            },
+            status_code=404,
+        )
+    except Exception as e:
+        logger.exception("Failed to recreate backend: %s", backend_name)
+        return JSONResponse(
+            content={
+                "error": "Failed to recreate backend",
+                "message": str(e),
+            },
+            status_code=500,
+        )
