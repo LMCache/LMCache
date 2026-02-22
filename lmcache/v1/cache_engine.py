@@ -40,12 +40,8 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.gpu_connector import (
-    GPUConnectorInterface,
-    SGLangLayerwiseGPUConnector,
-    VLLMBufferLayerwiseGPUConnector,
-    VLLMPagedMemLayerwiseGPUConnector,
-)
+from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -226,6 +222,9 @@ class LMCacheEngine:
         # Health monitor reference (injected by LMCacheManager)
         self._health_monitor: Optional["HealthMonitor"] = None
 
+        # Flag to indicate if initialization failed (irrecoverable error)
+        self._init_failed = False
+
     def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
         """
         Set the health monitor reference.
@@ -242,15 +241,42 @@ class LMCacheEngine:
         """
         Check if the LMCache system is healthy.
 
-        This method delegates to the HealthMonitor if one is set.
-        If no health monitor is set, it returns True (assume healthy).
+        This method returns False if:
+        - Initialization failed (irrecoverable error)
+        - HealthMonitor reports unhealthy
+
+        If no health monitor is set and initialization succeeded,
+        it returns True (assume healthy).
 
         Returns:
             bool: True if healthy, False otherwise
         """
+        if self._init_failed:
+            return False
         if self._health_monitor is not None:
             return self._health_monitor.is_healthy()
         return True
+
+    def _get_req_id(self, kwargs: dict) -> str:
+        """Extracts request ID from kwargs for logging."""
+        return kwargs.get("req_id", "unspecified")
+
+    def mark_init_failed(self, reason: str = "") -> None:
+        """
+        Mark the engine as having failed initialization.
+
+        This is called by LMCacheManager when an irrecoverable error occurs
+        during initialization or post_init. Once marked, is_healthy() will
+        always return False, causing the system to fall back to recomputation.
+
+        Args:
+            reason: Optional reason string for logging
+        """
+        self._init_failed = True
+        if reason:
+            logger.error("LMCacheEngine marked as init failed: %s", reason)
+        else:
+            logger.error("LMCacheEngine marked as init failed")
 
     def post_init(self, **kwargs) -> None:
         if not self.post_inited:
@@ -308,6 +334,30 @@ class LMCacheEngine:
             return self.storage_manager.is_frozen()
         return False
 
+    def set_hot_cache(self, enabled: bool) -> None:
+        """
+        Dynamically enable or disable the LocalCPUBackend hot cache.
+
+        When disabled, the existing hot cache entries will be cleared
+        and no new data will be written to the hot cache.
+
+        Args:
+            enabled (bool): Whether to enable hot cache
+        """
+        if self.storage_manager is not None:
+            self.storage_manager.set_hot_cache(enabled)
+
+    def is_hot_cache_enabled(self) -> bool:
+        """
+        Get the current hot cache status of LocalCPUBackend.
+
+        Returns:
+            bool: True if hot cache is enabled, False otherwise
+        """
+        if self.storage_manager is not None:
+            return self.storage_manager.is_hot_cache_enabled()
+        return False
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(
@@ -351,6 +401,9 @@ class LMCacheEngine:
             return
 
         assert self.storage_manager is not None
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         # Initialize num_to_store_tokens to avoid reference before assignment
         num_to_store_tokens = 0
@@ -485,11 +538,17 @@ class LMCacheEngine:
                 keys, memory_objs, transfer_spec=transfer_spec
             )
 
+        self.stats_monitor.on_store_finished(
+            store_stats,
+            tot_token_num,
+        )
         tot_time = store_stats.time_to_store()
 
         logger.info(
-            "Stored %d out of total %d tokens. size: %.4f GB, cost %.4f ms, "
-            "throughput: %.4f GB/s; offload_time: %.4f ms, put_time: %.4f ms",
+            "[req_id=%s] Stored %d out of total %d tokens. "
+            "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
+            "offload_time: %.4f ms, put_time: %.4f ms",
+            req_id,
             tot_token_num,
             num_to_store_tokens,
             tot_kv_size / 1024**3,
@@ -497,11 +556,6 @@ class LMCacheEngine:
             tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
             (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
             store_stats.put_time * 1000,
-        )
-
-        self.stats_monitor.on_store_finished(
-            store_stats,
-            tot_token_num,
         )
 
     @_lmcache_nvtx_annotate
@@ -541,6 +595,9 @@ class LMCacheEngine:
         assert self.gpu_connector is not None, (
             "gpu_connector is required for store_layer operation"
         )
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         if mask is not None:
             num_to_store_tokens = torch.sum(mask).item()
@@ -649,14 +706,7 @@ class LMCacheEngine:
                 mo.get_size() for layer_objs in memory_objs for mo in layer_objs
             )
 
-            assert isinstance(
-                self.gpu_connector,
-                (
-                    VLLMPagedMemLayerwiseGPUConnector,
-                    VLLMBufferLayerwiseGPUConnector,
-                    SGLangLayerwiseGPUConnector,
-                ),
-            )
+            assert_layerwise_gpu_connector(self.gpu_connector)
 
             t_start = time.perf_counter()
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
@@ -672,8 +722,9 @@ class LMCacheEngine:
 
             tot_time = time.perf_counter() - t_start
             logger.info(
-                "Stored %d out of total %d tokens. "
+                "[req_id=%s] Stored %d out of total %d tokens. "
                 "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s",
+                req_id,
                 tot_token_num,
                 len(tokens),
                 tot_kv_size / 1024**3,
@@ -726,6 +777,9 @@ class LMCacheEngine:
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve operation"
         )
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         tot_kv_size = 0
 
@@ -800,13 +854,12 @@ class LMCacheEngine:
                 self.storage_manager.remove(key)
             memory_obj.ref_count_down()
 
-        onload_time = retrieve_stats.time_to_retrieve()
-
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
             retrieve_stats,
             retrieved_tokens,
         )
+        onload_time = retrieve_stats.time_to_retrieve()
         # The retrieved may be larger than the need_to_load
         # Example (page_size=16, chunk_size=256):
         #
@@ -821,9 +874,10 @@ class LMCacheEngine:
         # retrieved: 256 tokens
         if not self._is_passive():
             logger.info(
-                "Retrieved %d out of %d required tokens (from %d total tokens)."
-                " size: %.4f gb,"
-                " cost %.4f ms, throughput: %.4f GB/s;",
+                "[req_id=%s] Retrieved %d out of %d required tokens "
+                "(from %d total tokens). size: %.4f gb, "
+                "cost %.4f ms, throughput: %.4f GB/s;",
+                req_id,
                 retrieved_tokens,
                 num_required_tokens,
                 len(tokens),
@@ -873,6 +927,9 @@ class LMCacheEngine:
         assert self.gpu_connector is not None, (
             "gpu_connector is required for retrieve_layer operation"
         )
+
+        # Get req_id for logging
+        req_id = self._get_req_id(kwargs)
 
         if mask is not None:
             num_required_tokens = torch.sum(mask).item()
@@ -929,14 +986,8 @@ class LMCacheEngine:
                 location=location,
             )
 
-            assert isinstance(
-                self.gpu_connector,
-                (
-                    VLLMPagedMemLayerwiseGPUConnector,
-                    VLLMBufferLayerwiseGPUConnector,
-                    SGLangLayerwiseGPUConnector,
-                ),
-            )
+            assert_layerwise_gpu_connector(self.gpu_connector)
+
             mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
             next(mem_obj_consumer)
 
@@ -974,9 +1025,11 @@ class LMCacheEngine:
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         if not self._is_passive():
             logger.info(
-                f"Retrieved {retrieved_tokens} "
-                f"out of {num_required_tokens} "
-                f"out of total {len(tokens)} tokens"
+                "[req_id=%s] Retrieved %d out of %d out of total %d tokens",
+                req_id,
+                retrieved_tokens,
+                num_required_tokens,
+                len(tokens),
             )
 
         yield ret_mask

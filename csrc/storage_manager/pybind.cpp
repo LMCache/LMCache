@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include "ttl_lock.h"
+#include "utils.h"
 
 namespace py = pybind11;
 
 using lmcache::storage_manager::TTLLock;
+using lmcache::utils::ParallelPatternMatcher;
 
 PYBIND11_MODULE(native_storage_ops, m) {
   m.doc() = "Native storage operations for LMCache";
@@ -23,4 +26,11 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Check if the lock is held (counter > 0 and TTL not expired).")
       .def("reset", &TTLLock::reset,
            "Reset the lock to initial state (counter = 0, TTL expired).");
+
+  py::class_<ParallelPatternMatcher>(m, "ParallelPatternMatcher")
+      .def(py::init<const std::vector<int>&>(), py::arg("pattern"),
+           "Construct a ParallelPatternMatcher with the specified pattern.")
+      .def("match", &ParallelPatternMatcher::match, py::arg("data"),
+           "Match the pattern in the given data and return a sorted list "
+           "of positions where the pattern starts.");
 }

@@ -322,11 +322,27 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_str_list,
     },
+    "remote_storage_plugins": {
+        "type": Optional[list[str]],
+        "default": None,
+        "env_converter": _to_str_list,
+    },
     # Lookup client configurations
     "lookup_timeout_ms": {
         "type": int,
         "default": 3000,
         "env_converter": int,
+    },
+    "min_retrieve_tokens": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": (
+            "Minimum number of hit tokens required to perform retrieve. "
+            "If hit tokens < min_retrieve_tokens, skip retrieve but the "
+            "actual hit count is still used for skip_leading_tokens to avoid "
+            "re-storing existing chunks. Default is 0 (disabled)."
+        ),
     },
     "hit_miss_ratio": {
         "type": Optional[float],
@@ -497,6 +513,11 @@ def _validate_config(self):
     #         "CPU memory fragmentation"
     #     )
     #     self.save_unfull_chunk = False
+
+    if self.min_retrieve_tokens < 0:
+        raise ValueError(
+            "min_retrieve_tokens must be >= 0, got %d" % self.min_retrieve_tokens
+        )
 
     if self.enable_blending:
         if not self.save_unfull_chunk:

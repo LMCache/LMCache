@@ -11,9 +11,6 @@ will be interconnected to form a distributed KV cache service.
 .. note::
    This is an experimental feature and is under active development. Please expect breaking changes in the future.
 
-.. note::
-    Currently, the multi-process mode only supports CPU offloading without eviction. It is not recommended for production use.
-
 
 Prerequisites
 -------------
@@ -26,11 +23,11 @@ Quick Start
 
 **Step 1: Start the LMCache server**
 
-Run the following command to start the LMCache server with a 100 GB CPU buffer:
+Run the following command to start the LMCache server with 100 GB L1 cache and LRU eviction policy:
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.multiprocess.server --cpu-buffer-size 100
+    python3 -m lmcache.v1.multiprocess.server --l1-size-gb 100 --eviction-policy LRU
 
 You should see the following log output:
 
@@ -105,7 +102,7 @@ Run the LMCache server in a Docker container:
         --ipc host \
         lmcache/standalone:nightly \
         /opt/venv/bin/python3 -m lmcache.v1.multiprocess.server \
-        --cpu-buffer-size 60 --max-workers 4 --port 6555
+        --l1-size-gb 60 --eviction-policy LRU --max-workers 4 --port 6555
 
 .. note::
     We use ``--network host`` to allow the vLLM container to connect to the LMCache server on localhost. The ``--ipc host`` flag is needed for shared memory access.
@@ -322,11 +319,30 @@ Server Configuration
 
 The LMCache multi-process server supports the following command-line arguments:
 
+**Basic Server Options:**
+
 - ``--host``: Host address to bind the server (default: ``localhost``)
 - ``--port``: Port number to bind the server (default: ``5555``)
 - ``--chunk-size``: Chunk size for KV cache operations in tokens (default: ``256``)
-- ``--cpu-buffer-size``: CPU buffer size in GB for caching (default: ``5.0``)
 - ``--max-workers``: Maximum number of worker threads for handling requests (default: ``1``)
+
+**L1 Memory Manager Options:**
+
+- ``--l1-size-gb``: The size of L1 memory in GB (**required**)
+- ``--l1-use-lazy``: Whether to use lazy loading for L1 memory (default: ``True``)
+- ``--l1-init-size-gb``: The initial size in GB when using lazy allocation (default: ``20``)
+- ``--l1-align-bytes``: The alignment size in bytes (default: ``4096``)
+
+**L1 Manager TTL Options:**
+
+- ``--l1-write-ttl-seconds``: Time to live for each object's write lock in seconds (default: ``600``)
+- ``--l1-read-ttl-seconds``: Time to live for each object's read lock in seconds (default: ``300``)
+
+**Eviction Policy Options:**
+
+- ``--eviction-policy``: The eviction policy to use. Currently only ``LRU`` is supported (**required**)
+- ``--eviction-trigger-watermark``: The memory usage watermark (0.0 to 1.0) to trigger eviction (default: ``0.8``)
+- ``--eviction-ratio``: The fraction of allocated memory to evict when triggered (0.0 to 1.0) (default: ``0.2``)
 
 Example with custom configuration:
 
@@ -336,7 +352,12 @@ Example with custom configuration:
         --host 0.0.0.0 \
         --port 6000 \
         --chunk-size 512 \
-        --cpu-buffer-size 50.0 \
+        --l1-size-gb 50.0 \
+        --l1-use-lazy \
+        --l1-init-size-gb 10 \
+        --eviction-policy LRU \
+        --eviction-trigger-watermark 0.9 \
+        --eviction-ratio 0.1 \
         --max-workers 4
 
 vLLM Client Configuration
@@ -354,7 +375,6 @@ Future Work
 -----------
 
 - Thread-safe memory allocator and storage manager.
-- Eviction policy.
 - Plugin the current storage backends.
 - Potential performance improvements (double buffering, new kernels, etc.).
 - Lock and unlock semantics in new storage manager.
