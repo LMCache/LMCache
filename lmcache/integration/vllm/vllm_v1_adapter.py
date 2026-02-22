@@ -1603,7 +1603,9 @@ class LMCacheConnectorV1Impl:
         # Layerwise save uses request-scoped generators. If request finishes
         # without entering wait_for_save (abort/error/evict path), make sure
         # we release the generator entry to avoid leaking state.
-        if self.use_layerwise:
+        if getattr(self, "use_layerwise", False) and hasattr(
+            self, "_layerwise_save_storers"
+        ):
             self._layerwise_save_storers.pop(request.request_id, None)
 
         # Cleanup if request was aborted
