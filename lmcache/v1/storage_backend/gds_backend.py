@@ -2,6 +2,7 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
@@ -21,7 +22,11 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     CuFileMemoryAllocator,
@@ -30,6 +35,87 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+
+
+class OperationTimeoutError(Exception):
+    """Exception raised when operations timeout."""
+
+    pass
+
+
+class OperationHangThresholdReached(Exception):
+    """Exception raised when operations hang threshold is reached."""
+
+    pass
+
+
+class OperationManager:
+    def __init__(
+        self,
+        num_threads: int = 4,
+        hang_threshold: int = 10,
+        reset_file: str = "/tmp/lmcache_operation_manager_reset",
+    ):
+        self.timeout_pool = ThreadPoolExecutor(
+            max_workers=num_threads, thread_name_prefix="fs-timeout"
+        )
+        self._failure_count = 0
+        self._failure_lock = threading.Lock()
+        self._hang_threshold = hang_threshold
+        self._reset_file = reset_file
+
+    def run_with_timeout(
+        self,
+        func: Callable[[], Any],
+        timeout_seconds: float,
+        label: str = "default_label",
+        metadata: Any = None,
+    ) -> Any:
+        if self._failure_count >= self._hang_threshold:
+            if os.path.exists(self._reset_file):
+                os.remove(self._reset_file)
+                self.reset_failure_count()
+                logger.info(
+                    f"Resetting operation manager failure count due to reset file "
+                    f"{self._reset_file}"
+                )
+            else:
+                raise OperationHangThresholdReached(
+                    f"Operation hang threshold reached. Will not run operation "
+                    f"'{label}'",
+                    metadata,
+                )
+        future = self.timeout_pool.submit(func)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except ConcurrentTimeoutError as err:
+            count = self.increment_failure_count()
+            raise OperationTimeoutError(
+                f"Operation '{label}' timed out after {timeout_seconds} seconds",
+                metadata,
+                count,
+            ) from err
+
+    def shutdown(self):
+        self.timeout_pool.shutdown(wait=True)
+
+    def increment_failure_count(self) -> int:
+        with self._failure_lock:
+            self._failure_count += 1
+            return self._failure_count
+
+    def get_failure_count(self) -> int:
+        """Get the current count of timed-out operations."""
+        with self._failure_lock:
+            return self._failure_count
+
+    def reset_failure_count(self) -> int:
+        """Reset the timeout counter and return the previous count."""
+        with self._failure_lock:
+            old_count = self._failure_count
+            self._failure_count = 0
+            return old_count
+
 
 logger = init_logger(__name__)
 
@@ -170,11 +256,6 @@ class GdsBackend(AllocatorBackendInterface):
     GDS-supported remote filesystem.  In order to use it, users need to specify
     `gds_path` and `cufile_buffer_size` in their LMCache config.
 
-    Cache Directory Structure created by this Backend:
-    /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
-    is semi-arbitrary. We create two levels in the directory hierarchy to
-    parallelize loading the data during initialization in the Python code.
-
     NOTE: If GPUDirect is not supported on that other filesystem, then CuFile will
     fall back to POSIX I/O.
     """
@@ -190,6 +271,7 @@ class GdsBackend(AllocatorBackendInterface):
         super().__init__(dst_device=dst_device)
 
         self.config = config
+        self.layerwise = config.use_layerwise
         self.loop = loop
         self.memory_allocator = self.initialize_allocator(config, metadata)
         self.dst_device = dst_device
@@ -242,6 +324,16 @@ class GdsBackend(AllocatorBackendInterface):
                 max_workers=thread_count, thread_name_prefix="weka-gds-io"
             )
 
+        self.op_manager = OperationManager(
+            config.extra_config.get("operation_manager_threads", 4),
+            config.extra_config.get("operation_hang_threshold", 10),
+        )
+        self.timeout_contains = config.extra_config.get("timeout_contains", 1.0)
+        self.timeout_get_blocking = config.extra_config.get("timeout_get_blocking", 5.0)
+        self.timeout_batched_get_blocking = config.extra_config.get(
+            "timeout_batched_get_blocking", 5.0
+        )
+
         if self.use_cufile:
             logger.info("Using cufile")
             # HACK(Jiayi): cufile import is buggy on some hardware
@@ -259,13 +351,36 @@ class GdsBackend(AllocatorBackendInterface):
 
         self.use_direct_io = False
 
+        self.max_alloc_attempts = config.extra_config.get("max_alloc_attempts", 10)
+        self.alloc_attempt_delay_secs = config.extra_config.get(
+            "allocation_attempt_delay_secs", 0.1
+        )
+        self.enable_blending = config.extra_config.get("enable_blending", False)
+
         if config.extra_config is not None:
             use_direct_io = get_extra_config_bool("use_direct_io", config)
             if use_direct_io is not None:
                 self.use_direct_io = use_direct_io
 
-        if not os.path.exists(self.gds_path):
-            os.makedirs(self.gds_path, exist_ok=True)
+        if self.fstype == "wekafs":
+            # Construct a descriptive directory name based on metadata
+            # Format:
+            # {model_name}-{world_size}-{kv_dtype}-{kv_shape}-{worker_id}[-layerwise]
+            dtype_str = str(metadata.kv_dtype).replace("torch.", "")
+            shape_str = "x".join(map(str, metadata.kv_shape))
+            dir_components = [
+                # Replace / in model names like "meta/Llama-2-7b"
+                metadata.model_name.replace("/", "_"),
+                str(metadata.world_size),
+                dtype_str,
+                shape_str,
+                str(metadata.worker_id),
+            ]
+            if self.layerwise:
+                dir_components.append("layerwise")
+            metadata_dir = "-".join(dir_components)
+            self.gds_path = os.path.join(config.gds_path, metadata_dir)
+        os.makedirs(self.gds_path, exist_ok=True)
 
         self.stats = None  # TODO: plug into LMCache Statistics
 
@@ -284,75 +399,32 @@ class GdsBackend(AllocatorBackendInterface):
         else:
             logger.info("No base pointer found, cufile will use bounce buffers")
             self.cufile_base_pointer = None
-        asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
-    async def _scan_metadata(self):
-        # TODO: even though we only run it once on startup, this is still
-        # not super scalable - test whether Rust code will be faster here, or
-        # whether we can serialize meta-data in groups for faster loading.
-        tasks = []
-        start = time.perf_counter()
-        with os.scandir(self.gds_path) as it:
-            for entry in it:
-                if not entry.is_dir():
-                    continue
-                l1_dir = os.path.basename(entry.name)
-                if len(l1_dir) != 2:
-                    continue
-                tasks.append(
-                    asyncio.to_thread(
-                        self._scan_metadata_subdir,
-                        os.path.join(self.gds_path, l1_dir),
-                        l1_dir,
-                    )
-                )
-        # TODO: If Python 3.11+, can we use TaskGroup instead?
-        await asyncio.gather(*tasks)
-        end = time.perf_counter()
-        logger.info(
-            f"Read {len(self.hot_cache)} cache entries from persistent "
-            f"storage in {end - start:.2f} seconds"
-        )
+    def _read_metadata_info(self, filename: str):
+        # Use O_NOATIME to prevent updating access time and improve performance
+        # Instead of using Python's open() and read(), we use the OS's open() and
+        # read() because it is faster - the metadata file is small and we don't
+        # need any buffering.
+        #
+        # Additionally, we use O_NOATIME for two reasons:
+        # 1. Improve performance
+        # 2. To prevent updating the access time and preserve our LRU ordering
+        #    when we get rid of the metadata file separation.
+        fd = os.open(filename, os.O_RDONLY | os.O_NOATIME)
+        try:
+            buf = os.read(fd, _METADATA_MAX_SIZE)
+        finally:
+            os.close(fd)
+        return unpack_metadata(buf)
 
-    def _scan_metadata_subdir(self, path, l1_dir):
-        target_suffix = self.data_suffix + _METADATA_FILE_SUFFIX
-        with os.scandir(path) as it:
-            for entry in it:
-                if not entry.is_dir():
-                    continue
-                l2_dir = os.path.basename(entry.name)
-                if len(l2_dir) != 2:
-                    continue
-                with os.scandir(os.path.join(path, l2_dir)) as it2:
-                    for fentry in it2:
-                        if not fentry.is_file():
-                            continue
-                        if not fentry.name.endswith(target_suffix):
-                            continue
-                        filename = os.path.basename(fentry.name)
-                        key_str = filename[: -len(target_suffix)].replace("_", "/")
-                        try:
-                            key = CacheEngineKey.from_string(key_str)
-                        except ValueError as e:
-                            logger.error(
-                                f"Filename {filename} can't be converted "
-                                f"back into cache key: {e}"
-                            )
-                            continue
-                        try:
-                            self._read_metadata(key, fentry.path, l1_dir + l2_dir)
-                        except UnsupportedMetadataVersion:
-                            logger.error(
-                                "Unsupported metadata version for "
-                                f"{fentry.path}, ignoring"
-                            )
-
-    def _read_metadata(self, key, filename, subdir_key):
-        with open(filename, "rb") as f:
-            buf = f.read(_METADATA_MAX_SIZE)
-
-        shape, dtype, size, fmt, extra_metadata = unpack_metadata(buf)
+    def _import_key_with_metadata(
+        self,
+        key: CacheEngineKey,
+        filename: str,
+        subdir_key: str,
+    ):
+        shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
             raise RuntimeError("unhandled lmcache metadata")
         logger.debug(
@@ -363,6 +435,11 @@ class GdsBackend(AllocatorBackendInterface):
         # TODO(extra_metadata)
         # TODO(Jiayi): need to support `cached_positions`.
         # Currently we just fill it as None.
+
+        # Set the appropriate memory format for layerwise operations
+        if self.layerwise:
+            fmt = MemoryFormat.KV_T2D
+
         metadata = DiskCacheMetadata(
             filename.removesuffix(_METADATA_FILE_SUFFIX),
             size,
@@ -385,35 +462,68 @@ class GdsBackend(AllocatorBackendInterface):
             res = key in self.hot_cache
         if res:
             return True
-        if self._try_to_read_metadata(key):
-            return True
-        return False
+        return self._contains_slow_path(key)
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
         path, subdir_key, _, _ = self._key_to_path(key)
-        path += _METADATA_FILE_SUFFIX
-        if os.path.exists(path):
-            try:
-                return self._read_metadata(key, path, subdir_key)
-            except UnsupportedMetadataVersion:
-                logger.error(f"Unsupported metadata version for {path}, ignoring")
+        path = (path + _METADATA_FILE_SUFFIX).strip()
+
+        try:
+            flags = os.O_RDONLY | os.O_NONBLOCK
+            fd = os.open(path, flags)
+            with os.fdopen(fd, "rb"):
+                return self._import_key_with_metadata(key, path, subdir_key)
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            print(f"DEBUG [GDS]: Permission Denied for PID {os.getpid()} on {path}")
+            return None
+        except UnsupportedMetadataVersion:
+            logger.error(f"Unsupported metadata version for {path}, ignoring")
+        except (OSError, IOError) as e:
+            logger.error(
+                f"Failed to read metadata file {path}: {type(e).__name__}: {e}. "
+                f"File may be corrupted or inaccessible. "
+                f"Ignoring cache entry for key {key}."
+            )
+        except Exception as e:
+            logger.error(
+                f"Unexpected error reading metadata file {path}: "
+                f"{type(e).__name__}: {e}. Ignoring cache entry for key {key}."
+            )
         return None
 
     def _key_to_path(
         self,
         key: CacheEngineKey,
     ) -> Tuple[str, str, str, str]:
-        hash = str(key.chunk_hash)
-        l1_dir = hash[:2]
-        l2_dir = hash[2:4]
+        # FIX: Handle bytes correctly to get actual hex characters
+        if isinstance(key.chunk_hash, bytes):
+            hash_str = key.chunk_hash.hex()
+        else:
+            hash_str = str(key.chunk_hash)
+
+        l1_dir = hash_str[:2]
+        l2_dir = hash_str[2:4]
+
+        # Ensure key_str is also a clean string
         key_str = key.to_string()
-        assert "_" not in key_str, "key string should not contain `_`"
+        if key_str.startswith("b'") or key_str.startswith('b"'):
+            # This is a fallback in case CacheEngineKey.to_string()
+            # also has the byte-stringification bug
+            # Standard
+            import re
+
+            key_str = re.sub(r"^b['\"]|['\"]$", "", key_str)
+
+        assert "_" not in key_str, f"key string '{key_str}' should not contain `_`"
+
         return (
             os.path.join(
                 self.gds_path,
                 l1_dir,
                 l2_dir,
-                key_str.replace("/", "_") + self.data_suffix,
+                key_str.replace("/", "_") + _DATA_FILE_SUFFIX,
             ),
             l1_dir + l2_dir,
             l1_dir,
@@ -455,19 +565,42 @@ class GdsBackend(AllocatorBackendInterface):
         transfer_spec: Any = None,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> Union[List[Future], None]:
-        """
-        Submit batched put tasks to store KV caches to GDS asynchronously.
+        if not keys or not memory_objs:
+            return None
 
-        :param on_complete_callback: Optional callback invoked once per key
-            after that key's write completes (not once per batch).
+        # Batch setup (Synchronous & Thread-safe)
+        for memory_obj in memory_objs:
+            memory_obj.ref_count_up()
+
+        with self.put_lock:
+            self.put_tasks.update(keys)
+
+        # Offload the entire batch as one operation
+        # This returns a single Future for the background coroutine
+        master_future = asyncio.run_coroutine_threadsafe(
+            self._async_batched_submit(keys, memory_objs), self.loop
+        )
+
+        # Return a list of the same future repeated N times.
+        return [master_future] * len(keys)
+
+    async def _async_batched_submit(
+        self,
+        keys: Sequence[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> None:
         """
-        futures = []
+        Asynchronously submit multiple put tasks in batch.
+        The loop happens in the async context so it doesn't block the caller.
+        """
+        # Create all async tasks
+        tasks = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
-            future = self.submit_put_task(
-                key, memory_obj, on_complete_callback=on_complete_callback
-            )
-            futures.append(future)
-        return futures
+            task = self._async_save_bytes_to_disk(key, memory_obj)
+            tasks.append(task)
+
+        # Execute all tasks concurrently
+        await asyncio.gather(*tasks)
 
     async def _async_save_bytes_to_disk(
         self,
@@ -475,47 +608,68 @@ class GdsBackend(AllocatorBackendInterface):
         memory_obj: MemoryObj,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
-        """
-        Convert KV to bytes and async store bytes to disk.
+        try:
+            """
+            Convert KV to bytes and async store bytes to disk.
 
-        :param on_complete_callback: Optional callback invoked after the GDS
-            write completes for this key. Callback exceptions are caught.
-        """
-        kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
-        path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
-        # TODO: maybe remove `metadata_dirs` and insert mkdir calls
-        # only for the case where creating the CuFile fails on ENOENT. It
-        # also makes the code more resilient to out-of-band deletions
-        if subdir_key not in self.metadata_dirs:
-            os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
-            self.metadata_dirs.add(subdir_key)
-        tmp = ".tmp" + rand_suffix(self.rand, 8)
-        fmt = memory_obj.metadata.fmt
-        metadata = await asyncio.to_thread(
-            self._save_gds,
-            path,
-            tmp,
-            kv_chunk,
-            fmt,
-            self.cufile_base_pointer,
-            memory_obj.metadata.address,
-        )
+            :param on_complete_callback: Optional callback invoked after the GDS
+                write completes for this key. Callback exceptions are caught.
+            """
+            kv_chunk = memory_obj.tensor
+            assert kv_chunk is not None
+            path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
+            # TODO: maybe remove `metadata_dirs` and insert mkdir calls
+            # only for the case where creating the CuFile fails on ENOENT. It
+            # also makes the code more resilient to out-of-band deletions
+            if subdir_key not in self.metadata_dirs:
+                os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
+                self.metadata_dirs.add(subdir_key)
+            tmp = ".tmp" + rand_suffix(self.rand, 8)
+            fmt = memory_obj.metadata.fmt
+            try:
+                metadata = await asyncio.to_thread(
+                    self._save_gds,
+                    path,
+                    tmp,
+                    kv_chunk,
+                    fmt,
+                    self.cufile_base_pointer,
+                    memory_obj.metadata.address,
+                )
+            except Exception as e:
+                logger.error(
+                    f"GDS/cuFile write operation failed for key {key} at path {path}: "
+                    f"tensor_shape={kv_chunk.shape}, tensor_dtype={kv_chunk.dtype}, "
+                    f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
+                    exc_info=True,
+                )
+                with self.put_lock:
+                    self.put_tasks.discard(key)
+                return
 
-        logger.debug(
-            f"Saved {kv_chunk.numel()} elements of {kv_chunk.dtype} "
-            f"to {path} with metadata {metadata}"
-        )
-        self.insert_key(key, memory_obj)
-        memory_obj.ref_count_down()
+            # Register key in cache
+            self.insert_key(key, memory_obj)
 
-        task = asyncio.create_task(
-            save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
-        )
-        self.save_metadata_tasks.add(task)
-        task.add_done_callback(self.save_metadata_tasks.discard)
-        with self.put_lock:
-            self.put_tasks.discard(key)
+            try:
+                task = asyncio.create_task(
+                    save_metadata(path + _METADATA_FILE_SUFFIX, tmp, metadata)
+                )
+                self.save_metadata_tasks.add(task)
+                task.add_done_callback(self.save_metadata_tasks.discard)
+            except Exception as e:
+                logger.error(
+                    f"POSIX metadata write operation failed for key {key} at path "
+                    f"{path + _METADATA_FILE_SUFFIX}: "
+                    f"metadata_size_bytes={len(metadata)}, "
+                    f"tmp_suffix={tmp}, error={e}",
+                    exc_info=True,
+                )
+                with self.hot_lock:
+                    self.hot_cache.pop(key, None)
+        finally:
+            memory_obj.ref_count_down()
+            with self.put_lock:
+                self.put_tasks.discard(key)
 
         # Call the completion callback if provided
         if on_complete_callback is not None:
@@ -526,7 +680,8 @@ class GdsBackend(AllocatorBackendInterface):
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         path, _, _, _ = self._key_to_path(key)
-        size = memory_obj.get_physical_size()
+        # size = memory_obj.get_physical_size()
+        size = memory_obj.get_size()  # Use logical size to match what's stored in file
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
@@ -565,11 +720,8 @@ class GdsBackend(AllocatorBackendInterface):
         path: str,
         dtype: torch.dtype,
         shape: torch.Size,
-        fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
-        return self._load_bytes_from_disk_with_allocation(
-            key, path, dtype, shape, fmt=fmt
-        )
+        return self._load_bytes_from_disk_with_allocation(key, path, dtype, shape)
 
     def get_blocking(
         self,
@@ -588,9 +740,28 @@ class GdsBackend(AllocatorBackendInterface):
         assert dtype is not None
         assert shape is not None
         assert fmt is not None
-        return self._load_bytes_from_disk_with_allocation(
-            key, path, dtype=dtype, shape=shape, fmt=fmt
-        )
+
+        try:
+            return self.op_manager.run_with_timeout(
+                lambda: self._load_bytes_from_disk_with_allocation(
+                    key, path, dtype=dtype, shape=shape
+                ),
+                self.timeout_get_blocking,
+                "get_blocking",
+                key,
+            )
+        except OperationHangThresholdReached:
+            logger.error(
+                "Get blocking hang threshold reached. Will not run operation",
+                exc_info=True,
+            )
+            return None
+        except OperationTimeoutError:
+            logger.error(
+                f"Get blocking timed out after {self.timeout_get_blocking} seconds",
+                exc_info=True,
+            )
+            return None
 
     def _load_bytes_from_disk_with_allocation(
         self,
@@ -598,7 +769,6 @@ class GdsBackend(AllocatorBackendInterface):
         path: str,
         dtype: torch.dtype,
         shape: torch.Size,
-        fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
         """
         Load byte array from disk by first allocating memory, then loading.
@@ -613,13 +783,14 @@ class GdsBackend(AllocatorBackendInterface):
             A new memory object with loaded data, or None if allocation or
             loading failed
         """
+        if self.layerwise:
+            fmt = MemoryFormat.KV_T2D
+        else:
+            fmt = MemoryFormat.KV_2LTD
         memory_obj = self.memory_allocator.allocate(shape, dtype, fmt=fmt)
         if memory_obj is None:
-            logger.debug("Memory allocation failed during sync disk load.")
+            logger.error("Memory allocation failed during sync disk load.")
             return None
-        assert memory_obj.tensor is not None
-        assert memory_obj.tensor.is_cuda
-        assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
 
         return self._load_bytes_from_disk_with_memory(key, path, memory_obj)
 
@@ -642,8 +813,6 @@ class GdsBackend(AllocatorBackendInterface):
         """
         if memory_obj is None or memory_obj.tensor is None:
             return None
-        assert memory_obj.tensor.is_cuda
-        assert torch.device(self.dst_device) == torch.device(memory_obj.tensor.device)
 
         offset = _METADATA_MAX_SIZE
         if self.cufile_base_pointer is None:
@@ -687,7 +856,26 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> List[Optional[MemoryObj]]:
         if self.use_thread_pool:
             logger.info("Using batched_get_blocking with thread pool implementation")
-            return self._batched_get_blocking_by_thread_pool_impl(keys)
+            try:
+                return self.op_manager.run_with_timeout(
+                    lambda: self._batched_get_blocking_by_thread_pool_impl(keys),
+                    self.timeout_batched_get_blocking,
+                    "batched_get_blocking",
+                    len(keys),
+                )
+            except OperationHangThresholdReached:
+                logger.error(
+                    "Batched get blocking hang threshold reached. Halting operation",
+                    exc_info=True,
+                )
+                return [None] * len(keys)
+            except OperationTimeoutError:
+                logger.error(
+                    f"Batched get blocking timed out after "
+                    f"{self.timeout_batched_get_blocking} seconds",
+                    exc_info=True,
+                )
+                return [None] * len(keys)
         else:
             return super().batched_get_blocking(keys)
 
@@ -710,6 +898,11 @@ class GdsBackend(AllocatorBackendInterface):
                 paths.append(entry.path)
                 dtypes.append(entry.dtype)
                 shapes.append(entry.shape)
+        fmt = None
+        if self.layerwise:
+            fmt = MemoryFormat.KV_T2D
+        else:
+            fmt = MemoryFormat.KV_2LTD
 
         memory_objs: list[MemoryObj | None] = []
         gds_reads, gds_read_bytes = 0, 0
@@ -717,7 +910,7 @@ class GdsBackend(AllocatorBackendInterface):
             if path is None:
                 memory_objs.append(None)
                 continue
-            memory_obj = self.memory_allocator.allocate(shape, dtype)
+            memory_obj = self.memory_allocator.allocate(shape, dtype, fmt)
             if memory_obj is None:
                 logger.error(f"Memory allocation failed during get_blocking for {path}")
             else:
@@ -739,6 +932,16 @@ class GdsBackend(AllocatorBackendInterface):
         )
         return results
 
+    async def _async_batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> list[MemoryObj | None]:
+        """
+        Asynchronously run the batched get operation in a thread pool.
+        This allows the event loop to handle other operations while I/O is happening.
+        """
+        return await asyncio.to_thread(self.batched_get_blocking, keys)
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def _save_gds(
@@ -757,6 +960,7 @@ class GdsBackend(AllocatorBackendInterface):
             addr = ctypes.c_void_p(base_pointer)
             dev_offset = device_offset
         tmp_path = path + tmp
+
         offset = _METADATA_MAX_SIZE
         # TODO: We can add the chunk's metadata here, e.g. Tensor parallelism shard
         # and pipeline parallelism index.
@@ -814,47 +1018,51 @@ class GdsBackend(AllocatorBackendInterface):
         dev_offset: int,
     ) -> int:
         # Read data from disk into a GPU buffer
-        if self.cufile:
-            with self.cufile.CuFile(
-                gds_path, "r", use_direct_io=self.use_direct_io
-            ) as f:
-                return f.read(
-                    gpu_pointer,
-                    size_in_bytes,
-                    file_offset=file_offset,
-                    dev_offset=dev_offset,
+        try:
+            if self.cufile:
+                with self.cufile.CuFile(
+                    gds_path, "r", use_direct_io=self.use_direct_io
+                ) as f:
+                    return f.read(
+                        gpu_pointer,
+                        size_in_bytes,
+                        file_offset=file_offset,
+                        dev_offset=dev_offset,
+                    )
+            elif self.cudart:
+                fd = os.open(gds_path, os.O_RDONLY)
+                file_size = os.fstat(fd).st_size
+                mm = mmap.mmap(
+                    fd,
+                    file_size,
+                    prot=mmap.PROT_READ,
+                    flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
                 )
-        elif self.cudart:
-            fd = os.open(gds_path, os.O_RDONLY)
-            file_size = os.fstat(fd).st_size
-            mm = mmap.mmap(
-                fd,
-                file_size,
-                prot=mmap.PROT_READ,
-                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
-            )
-            os.close(fd)
+                os.close(fd)
 
-            arr = np.frombuffer(mm, dtype=np.uint8)
-            addr = arr.__array_interface__["data"][0]
+                arr = np.frombuffer(mm, dtype=np.uint8)
+                addr = arr.__array_interface__["data"][0]
 
-            assert gpu_pointer.value is not None
-            res = self.cudart.cudaMemcpy(
-                ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
-                ctypes.c_void_p(addr + file_offset),
-                ctypes.c_size_t(size_in_bytes),
-                ctypes.c_int(1),
-            )
+                assert gpu_pointer.value is not None
+                res = self.cudart.cudaMemcpy(
+                    ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
+                    ctypes.c_void_p(addr + file_offset),
+                    ctypes.c_size_t(size_in_bytes),
+                    ctypes.c_int(1),
+                )
 
-            if res != 0:
-                raise RuntimeError(f"cudaMemcpy failed with code {res}")
-            del arr
-            mm.close()
-            return size_in_bytes
-        else:
-            raise RuntimeError(
-                "Both cufile and cudart are None, this should not happen"
-            )
+                if res != 0:
+                    raise RuntimeError(f"cudaMemcpy failed with code {res}")
+                del arr
+                mm.close()
+                return size_in_bytes
+            else:
+                raise RuntimeError(
+                    "Both cufile and cudart are None, this should not happen"
+                )
+        except Exception as e:
+            logger.error(f"CuFile read failed for {gds_path}: {e}", exc_info=True)
+            return -1
 
     def pin(self, key: CacheEngineKey) -> bool:
         # NOTE (ApostaC): Since gds doesn't have eviction now, we don't need
@@ -883,12 +1091,50 @@ class GdsBackend(AllocatorBackendInterface):
         eviction: bool = True,
         busy_loop: bool = True,
     ) -> Optional[MemoryObj]:
-        if busy_loop:
-            logger.warning("GDS Backend does not support allocation with busy loop")
-        if eviction:
-            logger.warning("GDS Backend does not support eviction")
+        """
+        Allocate a memory object of shape and dtype
+        evict if necessary.
+        """
+        logger.debug(
+            f"Allocating memory with busy loop: {busy_loop} with eviction: {eviction}"
+        )
+        memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
+        if memory_obj is not None:
+            return memory_obj
+        if not busy_loop:
+            logger.error(
+                "GDS allocation failed and busy loop is disabled. Returning None."
+            )
+            return None
 
-        return self.memory_allocator.allocate(shapes, dtypes, fmt)
+        num_attempts = 0
+        logger.warning(
+            "GDS allocation failed and busy loop is enabled. "
+            f"Waiting for {self.alloc_attempt_delay_secs} seconds before retrying."
+        )
+        while True:
+            time.sleep(self.alloc_attempt_delay_secs)
+
+            memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
+            if memory_obj is not None:
+                break
+            num_attempts += 1
+            logger.warning(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of GDS backend allocate()"
+            )
+            if num_attempts >= self.max_alloc_attempts:
+                logger.error(
+                    "GDS allocation failed after "
+                    f"{self.max_alloc_attempts} attempts. Returning None."
+                )
+                if not self.memory_allocator.memcheck():
+                    logger.error(
+                        "GDS allocation failed and memory allocator "
+                        "is inconsistent. This is a bug in the memory allocator."
+                    )
+                return None
+        return memory_obj
 
     def batched_allocate(
         self,
@@ -901,10 +1147,60 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> Optional[list[MemoryObj]]:
         if busy_loop:
             logger.warning("GDS Backend does not support allocation with busy loop")
-        if eviction:
-            logger.warning("GDS Backend does not support eviction")
 
-        return self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
+        """
+        Batched allocate `batch_size` memory objects of shape and dtype
+        evict if necessary.
+        """
+        logger.debug(
+            f"Batched allocating memory in GDS backend"
+            f" with busy loop: {busy_loop} with eviction: {eviction}"
+        )
+
+        memory_objs = self.memory_allocator.batched_allocate(
+            shapes, dtypes, batch_size, fmt
+        )
+
+        if memory_objs is not None:
+            return memory_objs
+        if not busy_loop:
+            logger.error(
+                "GDS batched allocation failed and "
+                "busy loop is disabled. Returning None."
+            )
+            return None
+
+        num_attempts = 0
+        logger.warning(
+            "GDS batched allocation failed and busy loop is enabled. "
+            f"Waiting for {self.alloc_attempt_delay_secs} seconds before retrying."
+        )
+        while True:
+            time.sleep(self.alloc_attempt_delay_secs)
+
+            memory_objs = self.memory_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt
+            )
+            if memory_objs:
+                break
+
+            num_attempts += 1
+            logger.debug(
+                f"Unable to allocate memory object after {num_attempts}"
+                " attempts of GDS backend batched_allocate()"
+            )
+            if num_attempts >= self.max_alloc_attempts:
+                logger.error(
+                    "GDS batched allocation failed after "
+                    f"{self.max_alloc_attempts} attempts. Returning None."
+                )
+                if not self.memory_allocator.memcheck():
+                    logger.error(
+                        "GDS batched allocation failed and memory allocator "
+                        "is inconsistent. This is a bug in the memory allocator."
+                    )
+                return None
+        return memory_objs
 
     def get_allocator_backend(self):
         return self
@@ -912,8 +1208,132 @@ class GdsBackend(AllocatorBackendInterface):
     def get_memory_allocator(self):
         return self.memory_allocator
 
+    async def _wait_for_metadata_tasks(self) -> None:
+        """Wait for all pending metadata save tasks to complete."""
+        if self.save_metadata_tasks:
+            await asyncio.gather(*self.save_metadata_tasks, return_exceptions=True)
+
+    def wait_for_metadata_tasks(self) -> None:
+        """Synchronously wait for all pending metadata save tasks to complete."""
+        if self.save_metadata_tasks:
+            future = asyncio.run_coroutine_threadsafe(
+                self._wait_for_metadata_tasks(), self.loop
+            )
+            future.result()
+
+    def _contains_slow_path(self, key: CacheEngineKey) -> bool:
+        try:
+            read_from_disk = self.op_manager.run_with_timeout(
+                lambda: self._try_to_read_metadata(key),
+                self.timeout_contains,
+                "contains",
+                key,
+            )
+            if read_from_disk:
+                return True
+        except OperationHangThresholdReached:
+            logger.error(
+                "Contains hang threshold reached. Will not run operation",
+                exc_info=True,
+            )
+            return False
+        except OperationTimeoutError:
+            logger.error(
+                f"Contains timed out after {self.timeout_contains} seconds",
+                exc_info=True,
+            )
+        return False
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """
+        Check whether keys are in the storage backend.
+
+        :param lookup_id: Identifier for the lookup operation
+        :param keys: The keys to check
+        :param pin: Whether to pin the keys if they exist
+        :return: Number of keys that exist in the storage backend
+        """
+        num_hit_chunks = 0
+        while num_hit_chunks < len(keys):
+            # Keep the lock as long as we keep getting hits
+            # in the hot cache.
+            with self.hot_lock:
+                while (
+                    num_hit_chunks < len(keys)
+                    and keys[num_hit_chunks] in self.hot_cache
+                ):
+                    if pin:
+                        # TODO(Serapheim): implement pin() semantics
+                        pass
+                    num_hit_chunks += 1
+
+            # If we've processed all keys, return the count
+            if num_hit_chunks == len(keys):
+                return num_hit_chunks
+
+            # Check the current key that's not in hot cache using slow path
+            current_key = keys[num_hit_chunks]
+            if self._contains_slow_path(current_key):
+                num_hit_chunks += 1
+            else:
+                return num_hit_chunks
+
+        return num_hit_chunks
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
+    ) -> list[MemoryObj]:
+        """
+        Non-blocking function to get memory objects from storage.
+
+        :param lookup_id: Identifier for the lookup operation
+        :param keys: The keys to retrieve
+        :return: List of MemoryObj instances
+        """
+        mem_objs: list[MemoryObj] = []
+        entries: list[DiskCacheMetadata] = []
+
+        # TODO(Serapheim): Do this properly
+
+        # First, collect metadata for all keys
+        with self.hot_lock:
+            for key in keys:
+                entry = self.hot_cache.get(key)
+                assert entry is not None, f"Key {key} not found in hot cache"
+                entries.append(entry)
+
+        # Load memory objects for each key
+        for key, entry in zip(keys, entries, strict=True):
+            assert entry is not None, f"Key {key} not found in hot cache"
+            try:
+                memory_obj = await self._async_load_bytes_from_disk(
+                    key,
+                    entry.path,
+                    entry.dtype,
+                    entry.shape,
+                )
+                if memory_obj is not None:
+                    memory_obj.ref_count_up()
+                    mem_objs.append(memory_obj)
+            except Exception as e:
+                logger.error(
+                    f"Failed to load memory object for key {key}: {e}",
+                    exc_info=True,
+                )
+
+        return mem_objs
+
     def close(self) -> None:
         self.memory_allocator.close()
+        self.op_manager.shutdown()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)
         logger.info("GDS backend closed.")

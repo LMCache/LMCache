@@ -2,6 +2,17 @@
 # Standard
 from typing import Dict, Optional
 
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
+
 # Third Party
 import msgspec
 
@@ -17,7 +28,7 @@ class LookupRequestMsg(AsyncLookupMsg):
     """Async lookup request message from scheduler to worker"""
 
     lookup_id: str
-    hashes: list[int]
+    hashes: list[Any]
     offsets: list[int]
     request_configs: Optional[Dict[str, str]] = None
 

@@ -334,6 +334,30 @@ class LMCacheEngine:
             return self.storage_manager.is_frozen()
         return False
 
+    def set_hot_cache(self, enabled: bool) -> None:
+        """
+        Dynamically enable or disable the LocalCPUBackend hot cache.
+
+        When disabled, the existing hot cache entries will be cleared
+        and no new data will be written to the hot cache.
+
+        Args:
+            enabled (bool): Whether to enable hot cache
+        """
+        if self.storage_manager is not None:
+            self.storage_manager.set_hot_cache(enabled)
+
+    def is_hot_cache_enabled(self) -> bool:
+        """
+        Get the current hot cache status of LocalCPUBackend.
+
+        Returns:
+            bool: True if hot cache is enabled, False otherwise
+        """
+        if self.storage_manager is not None:
+            return self.storage_manager.is_hot_cache_enabled()
+        return False
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store(
@@ -455,7 +479,7 @@ class LMCacheEngine:
                 )
                 if memory_obj is None:
                     logger.warning(
-                        "Local cpu memory under pressure so"
+                        "Memory allocator under pressure so"
                         " choosing to store only "
                         f" {len(memory_objs)}"
                         " total chunks of KV cache."
@@ -636,7 +660,7 @@ class LMCacheEngine:
 
             if memory_objs_multi_layer is None:
                 logger.warning(
-                    "Local cpu memory under pressure so"
+                    "Memory allocator under pressure so"
                     " choosing to not store the KV cache."
                 )
                 break
@@ -1202,7 +1226,7 @@ class LMCacheEngine:
         self,
         lookup_id: str,
         tokens: Optional[Union[torch.Tensor, List[int]]] = None,
-        hashes: Optional[List[int]] = None,
+        hashes: Optional[List[Any]] = None,
         offsets: Optional[List[int]] = None,
         search_range: Optional[List[str]] = None,
         pin: bool = False,
