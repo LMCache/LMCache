@@ -1147,8 +1147,6 @@ class GdsBackend(AllocatorBackendInterface):
     ) -> Optional[list[MemoryObj]]:
         if busy_loop:
             logger.warning("GDS Backend does not support allocation with busy loop")
-        if eviction:
-            logger.warning("GDS Backend does not support eviction")
 
         """
         Batched allocate `batch_size` memory objects of shape and dtype
