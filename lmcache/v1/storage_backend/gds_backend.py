@@ -290,7 +290,9 @@ class GdsBackend(AllocatorBackendInterface):
         else:
             logger.info("No base pointer found, cufile will use bounce buffers")
             self.cufile_base_pointer = None
-        asyncio.run_coroutine_threadsafe(self._scan_metadata(), self.loop)
+        self._scan_metadata_future = asyncio.run_coroutine_threadsafe(
+            self._scan_metadata(), self.loop
+        )
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
     async def _scan_metadata(self):
@@ -1051,6 +1053,14 @@ class GdsBackend(AllocatorBackendInterface):
         return self.memory_allocator
 
     def close(self) -> None:
+        # Wait for initial metadata scan to complete
+        try:
+            self._scan_metadata_future.result(timeout=30)
+        except Exception as e:
+            logger.warning(
+                f"Exception while waiting for metadata scan: {e}",
+                exc_info=True,
+            )
         self.memory_allocator.close()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)
