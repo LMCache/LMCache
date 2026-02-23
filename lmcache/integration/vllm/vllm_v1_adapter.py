@@ -504,7 +504,9 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
-        self.layerwise_storers: list[Generator[Optional[torch.Tensor], None, None]] = []
+        self._layerwise_save_storers: dict[
+            str, Generator[Optional[torch.Tensor], None, None]
+        ] = {}
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         # Role-specific initialization
@@ -959,6 +961,9 @@ class LMCacheConnectorV1Impl:
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.info(f"Retrieved {num_retrieved_tokens} tokens")
 
+        if self.layerwise_retrievers:
+            self.current_layer += 1
+
         return
 
     @_lmcache_nvtx_annotate
@@ -998,16 +1003,17 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) > 0
 
         kvcaches = list(self.kv_caches.values())
-        if self.current_layer == 0:
-            self.layerwise_storers = []
+        is_first = True
 
-            is_first = True
+        for request in connector_metadata.requests:
+            save_spec = request.save_spec
+            if (
+                save_spec is None or not save_spec.can_save
+            ) and self.kv_role != "kv_producer":
+                continue
 
-            for idx, request in enumerate(connector_metadata.requests):
-                save_spec = request.save_spec
-                if save_spec is None or not save_spec.can_save:
-                    continue
-
+            layerwise_storer = self._layerwise_save_storers.get(request.req_id)
+            if layerwise_storer is None:
                 token_ids = request.token_ids
                 assert isinstance(token_ids, list)
 
@@ -1021,6 +1027,7 @@ class LMCacheConnectorV1Impl:
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
                 else:
+                    assert save_spec is not None
                     skip_leading_tokens = save_spec.skip_leading_tokens
 
                     if skip_leading_tokens == len(token_ids):
@@ -1055,14 +1062,11 @@ class LMCacheConnectorV1Impl:
                     sync=is_first,
                     req_id=request.req_id,
                 )
-                self.layerwise_storers.append(layerwise_storer)
+                self._layerwise_save_storers[request.req_id] = layerwise_storer
                 if is_first:
                     is_first = False
 
-        for layerwise_storer in self.layerwise_storers:
             next(layerwise_storer)
-
-        self.current_layer += 1
 
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
@@ -1076,11 +1080,13 @@ class LMCacheConnectorV1Impl:
             return
 
         if self.use_layerwise:
-            for layerwise_storer in self.layerwise_storers:
-                next(layerwise_storer)
-
-            # unpin the kv caches according to req_id
             for request in connector_metadata.requests:
+                layerwise_storer = self._layerwise_save_storers.pop(
+                    request.req_id, None
+                )
+                if layerwise_storer is not None:
+                    next(layerwise_storer)
+                # unpin the kv caches according to req_id
                 self.lmcache_engine.lookup_unpin(request.req_id)
             return
 
@@ -1599,6 +1605,14 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        # Layerwise save uses request-scoped generators. If request finishes
+        # without entering wait_for_save (abort/error/evict path), make sure
+        # we release the generator entry to avoid leaking state.
+        if getattr(self, "use_layerwise", False) and hasattr(
+            self, "_layerwise_save_storers"
+        ):
+            self._layerwise_save_storers.pop(request.request_id, None)
+
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
             # Cancel any ongoing async lookup and prefetch tasks on workers
