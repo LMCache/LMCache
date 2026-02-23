@@ -14,6 +14,7 @@ from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheStoreEvent,
+    EngineType,
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
@@ -85,7 +86,7 @@ def init_lmcache_engine(
         kv_shape=kv_shape,
     )
 
-    gpu_connector = CreateGPUConnector(config, metadata, "sglang")
+    gpu_connector = CreateGPUConnector(config, metadata, EngineType.SGLANG)
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         config,
