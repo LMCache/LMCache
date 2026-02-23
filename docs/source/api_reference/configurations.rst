@@ -70,6 +70,12 @@ Basic cache settings that control the core functionality of LMCache.
    * - numa_mode
      - LMCACHE_NUMA_MODE
      - NUMA-aware memory allocation mode. Values: "auto" (detect from system), "manual" (use extra_config mapping), null (disabled). When enabled, allocates pinned memory on specific NUMA nodes for better GPU-CPU memory bandwidth. Default: null
+   * - lookup_poll_key_timeout_ms
+     - LMCACHE_LOOKUP_POLL_KEY_TIMEOUT_MS
+     - The maximum time in milliseconds to poll for a cache key to be fully available across all layers during lookup. Set to 0 to disable polling (default).
+   * - lookup_poll_key_intervals_ms
+     - LMCACHE_LOOKUP_POLL_KEY_INTERVALS_MS
+     - The interval in milliseconds between consecutive polls when waiting for a cache key to be fully available across all layers during lookup. Only effective when `lookup_poll_key_timeout_ms` > 0.
    * - external_lookup_client
      - LMCACHE_EXTERNAL_LOOKUP_CLIENT
      - External KV lookup service URI (e.g., "mooncakestore://address"). If null, defaults to LMCache's internal lookup client. Default: null
