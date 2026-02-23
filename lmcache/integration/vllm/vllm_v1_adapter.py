@@ -392,7 +392,7 @@ class ReqMeta:
         slot_mapping = slot_mapping.flatten()[: len(token_ids)]
         assert slot_mapping.dtype == torch.long  # TODO: this could be removed
 
-        # For load operation: check whether the request is scheduled to load
+        # For load operation: log if the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
             logger.debug(
                 "Scheduled to load %d tokens (%d cached in vLLM) for request %s",
@@ -400,10 +400,8 @@ class ReqMeta:
                 load_spec.vllm_cached_tokens,
                 tracker.req_id,
             )
-        else:
-            # Do not load if not in `can_load` state
-            load_spec = None
 
+        # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
             req_id=tracker.req_id,
             token_ids=token_ids,
@@ -770,12 +768,21 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers = []
 
         for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
+            if request.load_spec is None or not request.load_spec.can_load:
                 continue
             last_idx = idx
 
         for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
+            # Update metrics for all requests that have a load_spec
+            if request.load_spec is not None:
+                self._stats_monitor.update_interval_vllm_hit_tokens(
+                    request.load_spec.vllm_cached_tokens
+                )
+                self._stats_monitor.update_interval_prompt_tokens(
+                    len(request.token_ids)
+                )
+
+            if request.load_spec is None or not request.load_spec.can_load:
                 continue
 
             tokens = request.token_ids
@@ -855,11 +862,6 @@ class LMCacheConnectorV1Impl:
                         slot_mapping[:lmcache_cached_tokens],
                     )
                     self._invalid_block_ids.update(missing_blocks)
-
-            self._stats_monitor.update_interval_vllm_hit_tokens(
-                request.load_spec.vllm_cached_tokens
-            )
-            self._stats_monitor.update_interval_prompt_tokens(len(tokens))
 
     def record_failed_blocks(
         self,
