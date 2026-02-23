@@ -64,7 +64,6 @@ torch_dtypes = {
     torch.float8_e5m2: "F8E5M2",
 }
 
-
 torch_dtypes_inverse = dict([(v, k) for k, v in torch_dtypes.items()])
 
 
