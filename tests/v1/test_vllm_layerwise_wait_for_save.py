@@ -113,9 +113,38 @@ def test_wait_for_save_repeated_call_does_not_readvance_finalized_storer() -> No
     assert engine.store_steps["req-1"] == 2
 
 
+def test_multi_layer_save_and_finalize() -> None:
+    connector, _, engine = _make_connector([_make_req("req-1"), _make_req("req-2")])
+    num_layers = 4
+
+    for _ in range(num_layers):
+        connector.save_kv_layer("layer_x", torch.zeros(1), None)
+
+    assert engine.store_steps["req-1"] == num_layers
+    assert engine.store_steps["req-2"] == num_layers
+
+    connector.wait_for_save()
+    assert engine.store_steps["req-1"] == num_layers + 1
+    assert engine.store_steps["req-2"] == num_layers + 1
+    assert connector._layerwise_save_storers == {}
+
+
 def test_layerwise_save_skips_requests_that_cannot_save() -> None:
     connector, _, engine = _make_connector([_make_req("req-1", can_save=False)])
     connector.kv_role = "kv_both"
     connector.save_kv_layer("layer0", torch.zeros(1), None)
     assert engine.store_calls == []
+    assert connector._layerwise_save_storers == {}
+
+
+def test_layerwise_save_kv_producer_ignores_can_save_flag() -> None:
+    connector, _, engine = _make_connector([_make_req("req-1", can_save=False)])
+
+    connector.save_kv_layer("layer0", torch.zeros(1), None)
+    assert engine.store_calls == ["req-1"]
+    assert engine.store_steps["req-1"] == 1
+    assert set(connector._layerwise_save_storers.keys()) == {"req-1"}
+
+    connector.wait_for_save()
+    assert engine.store_steps["req-1"] == 2
     assert connector._layerwise_save_storers == {}
