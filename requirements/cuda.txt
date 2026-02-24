@@ -1,10 +1,12 @@
 # Common project dependencies
 -r common.txt
 
+# Right now we are using cuda 12.x to align with serving engines
+cupy-cuda12x
+
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
 nvidia-ml-py # for pynvml package
-
 
 # do not pin version because the dockerfile requires cuda.txt
 torch
