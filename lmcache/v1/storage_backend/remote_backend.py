@@ -39,7 +39,6 @@ class RemoteBackend(StorageBackendInterface):
         assert config.remote_url is not None
 
         self.remote_url = config.remote_url
-        self.blocking_timeout_secs = config.blocking_timeout_secs
 
         self.local_cpu_backend = local_cpu_backend
 
@@ -341,7 +340,7 @@ class RemoteBackend(StorageBackendInterface):
         future = asyncio.run_coroutine_threadsafe(self.connection.get(key), self.loop)
 
         try:
-            memory_obj = future.result(self.blocking_timeout_secs)
+            memory_obj = future.result(self.config.blocking_timeout_secs)
         except Exception as e:
             if isinstance(e, TimeoutError):
                 logger.warning("get blocking timeout, trigger cancel the future task")
@@ -398,7 +397,7 @@ class RemoteBackend(StorageBackendInterface):
                 self.connection.batched_get(keys), self.loop
             )
             try:
-                memory_objs = future.result(self.blocking_timeout_secs)
+                memory_objs = future.result(self.config.blocking_timeout_secs)
             except Exception as e:
                 if isinstance(e, TimeoutError):
                     logger.warning(
@@ -430,7 +429,7 @@ class RemoteBackend(StorageBackendInterface):
             for fut in futures:
                 if not failed:
                     try:
-                        memory_obj = fut.result(self.blocking_timeout_secs)
+                        memory_obj = fut.result(self.config.blocking_timeout_secs)
                     except Exception as e:
                         failed = True
                         if isinstance(e, TimeoutError):
@@ -507,7 +506,7 @@ class RemoteBackend(StorageBackendInterface):
             # scheduler from waiting for the result
             return await asyncio.wait_for(
                 self.connection.batched_async_contains(lookup_id, keys, pin),
-                self.blocking_timeout_secs,
+                self.config.blocking_timeout_secs,
             )
         except asyncio.TimeoutError:
             logger.warning("batched_async_contains timed out")
@@ -546,7 +545,7 @@ class RemoteBackend(StorageBackendInterface):
             # scheduler from waiting for the result
             return await asyncio.wait_for(
                 self.connection.batched_get_non_blocking(lookup_id, keys),
-                self.blocking_timeout_secs,
+                self.config.blocking_timeout_secs,
             )
         except asyncio.TimeoutError:
             logger.warning("batched_get_non_blocking timed out")

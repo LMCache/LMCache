@@ -236,20 +236,13 @@ class StorageManager:
         )
         self.thread.start()
 
-        # For scheduler role, always use CPU device
-        if is_cuda_worker(metadata):
-            dst_device = "cuda"
-        else:
-            dst_device = "cpu"
-        self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
-            CreateStorageBackends(
-                config,
-                metadata,
-                self.loop,
-                dst_device,
-                lmcache_worker,
-            )
-        )
+        self.storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
+        self.manager_lock = threading.Lock()
+        self.lmcache_worker = lmcache_worker
+
+        # Use the unified create path so that init and
+        # dynamic creation share the same logic.
+        self.create_backends()
 
         # the backend used for actual storage
         self.non_allocator_backends = self.get_non_allocator_backends()
@@ -262,9 +255,6 @@ class StorageManager:
 
         self.local_cpu_backend = self.storage_backends.get("LocalCPUBackend", None)
 
-        self.manager_lock = threading.Lock()
-
-        self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.worker_id = metadata.worker_id
 
@@ -1156,6 +1146,166 @@ class StorageManager:
                 continue
             storage_names.append(backend_name)
         return storage_names
+
+    def list_backends(self) -> Dict[str, str]:
+        """
+        List all active storage backends.
+
+        Returns:
+            Dict mapping backend name to its class name.
+        """
+        with self.manager_lock:
+            return {
+                name: type(backend).__name__
+                for name, backend in self.storage_backends.items()
+            }
+
+    def close_backend(self, backend_name: str) -> bool:
+        """
+        Close and remove a specific storage backend by name.
+
+        The backend will be closed and removed from the internal
+        dict so that no stale references remain.
+
+        Args:
+            backend_name: The name of the backend to close.
+
+        Returns:
+            True if the backend was found and closed, False
+            otherwise.
+        """
+        with self.manager_lock:
+            backend = self.storage_backends.get(backend_name)
+            if backend is None:
+                logger.warning(
+                    "Backend %s not found, cannot close",
+                    backend_name,
+                )
+                return False
+
+            try:
+                logger.info("Closing backend: %s", backend_name)
+                backend.close()
+            except Exception:
+                logger.exception("Error closing backend %s", backend_name)
+
+            del self.storage_backends[backend_name]
+
+            # Update derived references
+            self.non_allocator_backends = self.get_non_allocator_backends()
+            if backend_name == "LocalCPUBackend":
+                self.local_cpu_backend = None
+            logger.info("Backend %s closed and removed", backend_name)
+            return True
+
+    def create_backends(self) -> Dict[str, str]:
+        """
+        Create new storage backends based on current config.
+
+        Backends that are already present will be skipped
+        **before** instantiation so that no unnecessary
+        resources are allocated.  This allows callers to close
+        a subset of backends, update config via ``/conf``,
+        and then call this method to bring up only the missing
+        backends.
+
+        Returns:
+            Dict mapping newly created backend name to its
+            class name.
+        """
+        with self.manager_lock:
+            existing_names = set(self.storage_backends)
+            new_backends = CreateStorageBackends(
+                self.config,
+                self.metadata,
+                self.loop,
+                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                lmcache_worker=self.lmcache_worker,
+                skip_backends=existing_names,
+                existing_backends=self.storage_backends,
+            )
+
+            created: Dict[str, str] = {}
+            for name, backend in new_backends.items():
+                self.storage_backends[name] = backend
+                created[name] = type(backend).__name__
+                logger.info(
+                    "Created backend: %s (%s)",
+                    name,
+                    created[name],
+                )
+
+            # Refresh derived references
+            self.non_allocator_backends = self.get_non_allocator_backends()
+            cpu = self.storage_backends.get("LocalCPUBackend")
+            if cpu is not None:
+                self.local_cpu_backend = cpu
+
+            return created
+
+    def recreate_backend(self, backend_name: str) -> Dict[str, str]:
+        """
+        Close a backend and recreate it from current config.
+
+        This is an atomic close-then-create operation that
+        combines :meth:`close_backend` and :meth:`create_backends`
+        into a single step.
+
+        Args:
+            backend_name: Name of the backend to recreate
+                (e.g. ``RemoteBackend``).
+
+        Returns:
+            Dict mapping newly created backend name to its
+            class name.
+
+        Raises:
+            KeyError: If *backend_name* does not exist.
+        """
+        with self.manager_lock:
+            backend = self.storage_backends.get(backend_name)
+            if backend is None:
+                raise KeyError("Backend %s not found" % backend_name)
+
+            # --- close ---
+            try:
+                logger.info("Closing backend: %s", backend_name)
+                backend.close()
+            except Exception:
+                logger.exception("Error closing backend %s", backend_name)
+            del self.storage_backends[backend_name]
+
+            # --- create ---
+            existing_names = set(self.storage_backends)
+            new_backends = CreateStorageBackends(
+                self.config,
+                self.metadata,
+                self.loop,
+                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                lmcache_worker=self.lmcache_worker,
+                skip_backends=existing_names,
+                existing_backends=self.storage_backends,
+            )
+
+            created: Dict[str, str] = {}
+            for name, be in new_backends.items():
+                self.storage_backends[name] = be
+                created[name] = type(be).__name__
+                logger.info(
+                    "Recreated backend: %s (%s)",
+                    name,
+                    created[name],
+                )
+
+            # Refresh derived references
+            self.non_allocator_backends = self.get_non_allocator_backends()
+            cpu = self.storage_backends.get("LocalCPUBackend")
+            if cpu is not None:
+                self.local_cpu_backend = cpu
+            elif backend_name == "LocalCPUBackend":
+                self.local_cpu_backend = None
+
+            return created
 
     def close(self):
         logger.info("Closing StorageManager...")

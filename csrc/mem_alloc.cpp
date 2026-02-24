@@ -5,6 +5,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <cstring>            // for strerror
 #include <linux/mempolicy.h>  // for MPOL_BIND, MPOL_MF_MOVE, MPOL_MF_STRICT
 #include "mem_alloc.h"
@@ -93,4 +94,54 @@ void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
   if (munmap(p, size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
+}
+
+uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name) {
+  int fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0600);
+  if (fd < 0)
+    throw std::runtime_error(std::string("shm_open failed: ") +
+                             strerror(errno));
+
+  if (ftruncate(fd, size) != 0) {
+    int err = errno;
+    close(fd);
+    shm_unlink(shm_name.c_str());
+    throw std::runtime_error(std::string("ftruncate failed: ") + strerror(err));
+  }
+
+  void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (ptr == MAP_FAILED) {
+    shm_unlink(shm_name.c_str());
+    throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+  }
+
+  first_touch(ptr, size);
+
+  cudaError_t st = cudaHostRegister(ptr, size, 0);
+  if (st != cudaSuccess) {
+    munmap(ptr, size);
+    shm_unlink(shm_name.c_str());
+    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
+                             cudaGetErrorString(st));
+  }
+
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void free_shm_pinned_ptr(uintptr_t ptr, size_t size,
+                         const std::string& shm_name) {
+  void* p = reinterpret_cast<void*>(ptr);
+  cudaError_t st = cudaHostUnregister(p);
+  if (st != cudaSuccess) {
+    munmap(p, size);
+    shm_unlink(shm_name.c_str());
+    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
+                             cudaGetErrorString(st));
+  }
+  if (munmap(p, size) != 0) {
+    shm_unlink(shm_name.c_str());
+    throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
+  }
+  shm_unlink(shm_name.c_str());
 }
