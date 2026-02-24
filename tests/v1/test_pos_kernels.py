@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+pytest.importorskip("vllm", reason="vllm package is required for positional_encoding")
+
 # First Party
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 

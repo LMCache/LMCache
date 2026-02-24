@@ -32,8 +32,14 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+
+if torch.cuda.is_available():
+    from lmcache.v1.distributed.storage_manager import StorageManager
+
+# First Party
 from lmcache.v1.memory_management import MemoryFormat
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 # ==============================================================================
 # Test Fixtures

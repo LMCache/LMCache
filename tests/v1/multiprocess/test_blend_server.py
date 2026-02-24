@@ -34,8 +34,13 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
-from lmcache.v1.multiprocess.blend_server import get_sep_tokens
+
+if torch.cuda.is_available():
+    from lmcache.v1.multiprocess.blend_server import get_sep_tokens
+
 from lmcache.v1.multiprocess.config import MPServerConfig
+
+# First Party
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -46,6 +51,8 @@ from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_response_class,
 )
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 # Configuration constants
 SERVER_HOST = "localhost"
