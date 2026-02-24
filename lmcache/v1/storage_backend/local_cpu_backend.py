@@ -370,6 +370,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         # Calculate effective CPU memory size
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
+        cpu_size_bytes = int(cpu_size * 1024**3)
+
+        allocator_align_bytes = self._resolve_local_cpu_allocator_alignment(config)
+        if allocator_align_bytes is not None:
+            logger.info(
+                "LocalCPUBackend: using pinned allocation alignment=%d bytes",
+                allocator_align_bytes,
+            )
 
         if config.enable_p2p:
             # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
@@ -380,7 +388,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             paged_mem_allocator = PagedCpuGpuMemoryAllocator()
             chunk_size_bytes = get_size_bytes(shapes, dtypes)
-            origin_cpu_size_bytes = int(cpu_size * 1024**3)
+            origin_cpu_size_bytes = cpu_size_bytes
             align_cpu_size_bytes = (
                 origin_cpu_size_bytes // chunk_size_bytes * chunk_size_bytes
             )
@@ -402,7 +410,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 config.enable_lazy_memory_allocator
                 and cpu_size > config.lazy_memory_safe_size
             )
-
             if use_lazy:
                 logger.warning(
                     "LazyMixedMemoryAllocator is temporarily unavailable; "
@@ -418,11 +425,65 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     f"({config.lazy_memory_safe_size:.2f} GB). "
                     f"Using MixedMemoryAllocator instead."
                 )
+            if allocator_align_bytes is not None:
+                return MixedMemoryAllocator(
+                    cpu_size_bytes,
+                    numa_mapping=numa_mapping,
+                    align_bytes=allocator_align_bytes,
+                )
             return MixedMemoryAllocator(
-                int(cpu_size * 1024**3),
+                cpu_size_bytes,
                 numa_mapping=numa_mapping,
                 config=config,
             )
+
+    @staticmethod
+    def _is_power_of_two(value: int) -> bool:
+        return value > 0 and (value & (value - 1)) == 0
+
+    def _resolve_local_cpu_allocator_alignment(
+        self, config: LMCacheEngineConfig
+    ) -> Optional[int]:
+        """
+        Determine pinned-memory alignment for LocalCPUBackend allocator.
+
+        Precedence:
+        1) explicit override: extra_config["local_cpu.pinned_align_bytes"]
+        2) rust raw block auto mode:
+           - rust_raw_block.device_path is set
+           - rust_raw_block.use_odirect is true
+           - rust_raw_block.align_local_cpu_allocator is true (default)
+           -> use rust_raw_block.block_align
+        3) None (use allocator default)
+        """
+        extra = config.extra_config or {}
+
+        explicit_align = extra.get("local_cpu.pinned_align_bytes")
+        if explicit_align is not None:
+            align = int(explicit_align)
+            if not self._is_power_of_two(align):
+                raise ValueError(
+                    "extra_config['local_cpu.pinned_align_bytes'] must be "
+                    "a positive power of two"
+                )
+            return align
+
+        rust_device_path = extra.get("rust_raw_block.device_path")
+        rust_use_odirect = bool(extra.get("rust_raw_block.use_odirect", False))
+        rust_auto_align = bool(
+            extra.get("rust_raw_block.align_local_cpu_allocator", True)
+        )
+
+        if not rust_device_path or not rust_use_odirect or not rust_auto_align:
+            return None
+
+        rust_block_align = int(extra.get("rust_raw_block.block_align", 4096))
+        if not self._is_power_of_two(rust_block_align):
+            raise ValueError(
+                "extra_config['rust_raw_block.block_align'] must be a positive "
+                "power of two when O_DIRECT alignment is enabled"
+            )
+        return rust_block_align
 
     @_lmcache_nvtx_annotate
     def allocate(
