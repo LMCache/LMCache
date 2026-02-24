@@ -545,7 +545,6 @@ class LMCacheConnectorV1Impl:
         )
 
         self._lmcache_chunk_size = config.chunk_size
-        self._save_decode_cache = config.save_decode_cache
 
         self.skip_last_n_tokens = vllm_config.kv_transfer_config.get_from_extra_config(
             "skip_last_n_tokens", 0
@@ -1467,7 +1466,7 @@ class LMCacheConnectorV1Impl:
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
-                save_decode_cache=self._save_decode_cache,
+                save_decode_cache=self.config.save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -1513,7 +1512,7 @@ class LMCacheConnectorV1Impl:
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
-                    save_decode_cache=self._save_decode_cache,
+                    save_decode_cache=self.config.save_decode_cache,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -1592,7 +1591,7 @@ class LMCacheConnectorV1Impl:
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
-                save_decode_cache=self._save_decode_cache,
+                save_decode_cache=self.config.save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)

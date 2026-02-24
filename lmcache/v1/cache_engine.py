@@ -210,11 +210,6 @@ class LMCacheEngine:
 
         self.post_inited = False
 
-        # Whether to force store to wait if no CPU buffer is available
-        self.force_store_wait = config.extra_config and config.extra_config.get(
-            "force_store_wait", False
-        )
-
         # Flag to control KVCache Check logging (can be toggled via API)
         self.kvcache_check_log_enabled = False
 
@@ -477,7 +472,9 @@ class LMCacheEngine:
                 memory_obj = self.storage_manager.allocate(
                     kv_shapes,
                     kv_dtypes,
-                    busy_loop=self.force_store_wait,
+                    busy_loop=self.config.get_extra_config_value(
+                        "force_store_wait", False
+                    ),
                     fmt=self.fmt,
                 )
                 if memory_obj is None:
@@ -658,7 +655,7 @@ class LMCacheEngine:
                 kv_dtype,
                 batch_size=self.num_layers,
                 fmt=self.fmt,
-                busy_loop=self.force_store_wait,
+                busy_loop=self.config.get_extra_config_value("force_store_wait", False),
             )
 
             if memory_objs_multi_layer is None:
@@ -1967,7 +1964,11 @@ class LMCacheEngineBuilder:
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
             token_database = cls._Create_token_database(config, metadata)
-            stat_logger = LMCacheStatsLogger(metadata, log_interval=10)
+            stat_logger = LMCacheStatsLogger(
+                metadata,
+                log_interval=10,
+                config=config,
+            )
 
             engine = LMCacheEngine(
                 config,
