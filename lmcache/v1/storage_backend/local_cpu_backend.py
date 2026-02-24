@@ -652,7 +652,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_objs
 
-    def get_full_chunk_size(self) -> int:
+    def get_full_chunk_size_bytes(self) -> int:
         logger.info("Calculating the size of a single LMCache chunk")
         assert self.metadata is not None, (
             "metadata required for chunk budget calculation"
@@ -695,7 +695,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             int: The estimated chunk budget for concurrent allocations
         """
         total_memory = int(self.config.max_local_cpu_size * 1024**3)
-        chunk_bytes = self.get_full_chunk_size()
+        chunk_bytes = self.get_full_chunk_size_bytes()
         # add alignment overhead
         # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
         assert hasattr(self.memory_allocator, "align_bytes")

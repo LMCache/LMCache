@@ -89,7 +89,7 @@ class S3Connector(RemoteConnector):
         if not s3_endpoint.startswith("s3://"):
             raise ValueError("S3 url must start with 's3://'")
 
-        self.s3_part_size = self.full_chunk_size
+        self.s3_part_size = self.full_chunk_size_bytes
 
         self.s3_endpoint = s3_endpoint.removeprefix("s3://")
         self.loop = loop
