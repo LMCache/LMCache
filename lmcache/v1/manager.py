@@ -632,6 +632,186 @@ class LMCacheManager:
         """Get the lookup server instance."""
         return self._lookup_server
 
+    def close_lookup_client(self) -> dict:
+        """
+        Close the current lookup client.
+
+        Returns:
+            dict: Result with old client type info.
+        """
+        old_type = self._get_lookup_type_str(self._lookup_client)
+        if self._lookup_client is not None:
+            try:
+                self._lookup_client.close()
+                self._lookup_client = None
+                logger.info("Closed lookup client: %s", old_type)
+            except Exception as e:
+                logger.warning("Error closing lookup client: %s", e)
+        return {"old": old_type}
+
+    def create_lookup_client(self, dryrun: bool = False) -> dict:
+        """
+        Create a new lookup client using the current configuration.
+
+        Args:
+            dryrun: If True, only return what would be created without
+                actually creating it.
+
+        Returns:
+            dict: Result with new client type info.
+        """
+        # First Party
+        from lmcache.v1.lookup_client.factory import LookupClientFactory
+
+        if self._lmcache_engine_metadata is None:
+            return {"error": "metadata not available"}
+
+        if dryrun:
+            # Create temporarily to get type info, then discard
+            client = LookupClientFactory.create_lookup_client(
+                self._config,
+                self._lmcache_engine_metadata,
+                self._lmcache_engine,
+            )
+            new_type = self._get_lookup_type_str(client)
+            client.close()
+            return {"new": new_type, "dryrun": True}
+
+        self._lookup_client = LookupClientFactory.create_lookup_client(
+            self._config,
+            self._lmcache_engine_metadata,
+            self._lmcache_engine,
+        )
+        new_type = self._get_lookup_type_str(self._lookup_client)
+        logger.info("Created lookup client: %s", new_type)
+        return {"new": new_type}
+
+    def recreate_lookup_client(self) -> dict:
+        """
+        Recreate the lookup client (close + create).
+
+        Returns:
+            dict: Result with old and new client type info.
+        """
+        if self._role != "scheduler":
+            return {"error": "only supported for scheduler role"}
+
+        result = self.close_lookup_client()
+        create_result = self.create_lookup_client()
+        result.update(create_result)
+        return result
+
+    def close_lookup_server(self) -> dict:
+        """
+        Close the current lookup server.
+
+        Returns:
+            dict: Result with old server type info.
+        """
+        old_type = self._get_lookup_type_str(self._lookup_server)
+        if self._lookup_server is not None:
+            try:
+                self._lookup_server.close()
+                self._lookup_server = None
+                logger.info("Closed lookup server: %s", old_type)
+            except Exception as e:
+                logger.warning("Error closing lookup server: %s", e)
+        return {"old": old_type}
+
+    def create_lookup_server(self, dryrun: bool = False) -> dict:
+        """
+        Create a new lookup server using the current configuration.
+
+        Args:
+            dryrun: If True, only return what would be created without
+                actually creating it.
+
+        Returns:
+            dict: Result with new server type info.
+        """
+        # First Party
+        from lmcache.v1.lookup_client.factory import LookupClientFactory
+
+        if self._lmcache_engine is None:
+            return {"error": "engine not available"}
+        if self._lmcache_engine_metadata is None:
+            return {"error": "metadata not available"}
+
+        if dryrun:
+            # Create temporarily to get type info, then discard
+            server = LookupClientFactory.create_lookup_server(
+                self._lmcache_engine,
+                self._lmcache_engine_metadata,
+            )
+            new_type = self._get_lookup_type_str(server)
+            if server is not None:
+                server.close()
+            return {"new": new_type, "dryrun": True}
+
+        self._lookup_server = LookupClientFactory.create_lookup_server(
+            self._lmcache_engine,
+            self._lmcache_engine_metadata,
+        )
+        new_type = self._get_lookup_type_str(self._lookup_server)
+        logger.info("Created lookup server: %s", new_type)
+        return {"new": new_type}
+
+    def recreate_lookup_server(self) -> dict:
+        """
+        Recreate the lookup server (close + create).
+
+        Returns:
+            dict: Result with old and new server type info.
+        """
+        if self._role != "worker":
+            return {"error": "only supported for worker role"}
+
+        result = self.close_lookup_server()
+        create_result = self.create_lookup_server()
+        result.update(create_result)
+        return result
+
+    def _get_lookup_type_str(self, obj) -> str:
+        """
+        Get type string for lookup client/server, including wrapper info.
+
+        Returns format: "OuterWrapper(InnerWrapper(CoreType))" or "None"
+        """
+        if obj is None:
+            return "None"
+
+        # First Party
+        parts = []
+        current = obj
+        while True:
+            parts.append(type(current).__name__)
+            # Check for wrapper by looking for 'actual_lookup_client' attribute
+            if hasattr(current, "actual_lookup_client"):
+                current = current.actual_lookup_client
+            else:
+                break
+
+        if len(parts) == 1:
+            return parts[0]
+        # Format: Outer(Inner(Core))
+        result = parts[-1]
+        for wrapper in reversed(parts[:-1]):
+            result = "%s(%s)" % (wrapper, result)
+        return result
+
+    def get_lookup_info(self) -> dict:
+        """
+        Get information about the current lookup client and server.
+
+        Returns:
+            dict: Information about lookup client/server types and role.
+        """
+        return {
+            "client": self._get_lookup_type_str(self._lookup_client),
+            "server": self._get_lookup_type_str(self._lookup_server),
+            "role": self._role,
+        }
+
     @property
     def offload_server(self) -> Optional[ZMQOffloadServer]:
         """Get the offload server instance."""
