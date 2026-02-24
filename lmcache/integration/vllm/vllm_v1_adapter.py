@@ -392,7 +392,7 @@ class ReqMeta:
         slot_mapping = slot_mapping.flatten()[: len(token_ids)]
         assert slot_mapping.dtype == torch.long  # TODO: this could be removed
 
-        # For load operation: check whether the request is scheduled to load
+        # For load operation: log if the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
             logger.debug(
                 "Scheduled to load %d tokens (%d cached in vLLM) for request %s",
@@ -400,10 +400,8 @@ class ReqMeta:
                 load_spec.vllm_cached_tokens,
                 tracker.req_id,
             )
-        else:
-            # Do not load if not in `can_load` state
-            load_spec = None
 
+        # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
             req_id=tracker.req_id,
             token_ids=token_ids,
@@ -491,9 +489,8 @@ class LMCacheConnectorV1Impl:
                     config_key = key[8:]  # Remove "lmcache." prefix
                     if validate_and_set_config_value(config, config_key, value):
                         logger.info(
-                            "Updated config %s from vLLM extra config: %s",
+                            "Updated config %s from vLLM extra config",
                             config_key,
-                            value,
                         )
 
     def _init_connector_state(
@@ -507,7 +504,9 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
-        self.layerwise_storers: list[Generator[Optional[torch.Tensor], None, None]] = []
+        self._layerwise_save_storers: dict[
+            str, Generator[Optional[torch.Tensor], None, None]
+        ] = {}
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         # Role-specific initialization
@@ -546,7 +545,6 @@ class LMCacheConnectorV1Impl:
         )
 
         self._lmcache_chunk_size = config.chunk_size
-        self._save_decode_cache = config.save_decode_cache
 
         self.skip_last_n_tokens = vllm_config.kv_transfer_config.get_from_extra_config(
             "skip_last_n_tokens", 0
@@ -771,12 +769,21 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers = []
 
         for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
+            if request.load_spec is None or not request.load_spec.can_load:
                 continue
             last_idx = idx
 
         for idx, request in enumerate(metadata.requests):
-            if request.load_spec is None:
+            # Update metrics for all requests that have a load_spec
+            if request.load_spec is not None:
+                self._stats_monitor.update_interval_vllm_hit_tokens(
+                    request.load_spec.vllm_cached_tokens
+                )
+                self._stats_monitor.update_interval_prompt_tokens(
+                    len(request.token_ids)
+                )
+
+            if request.load_spec is None or not request.load_spec.can_load:
                 continue
 
             tokens = request.token_ids
@@ -856,11 +863,6 @@ class LMCacheConnectorV1Impl:
                         slot_mapping[:lmcache_cached_tokens],
                     )
                     self._invalid_block_ids.update(missing_blocks)
-
-            self._stats_monitor.update_interval_vllm_hit_tokens(
-                request.load_spec.vllm_cached_tokens
-            )
-            self._stats_monitor.update_interval_prompt_tokens(len(tokens))
 
     def record_failed_blocks(
         self,
@@ -958,6 +960,9 @@ class LMCacheConnectorV1Impl:
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.info(f"Retrieved {num_retrieved_tokens} tokens")
 
+        if self.layerwise_retrievers:
+            self.current_layer += 1
+
         return
 
     @_lmcache_nvtx_annotate
@@ -997,16 +1002,17 @@ class LMCacheConnectorV1Impl:
         assert len(self.kv_caches) > 0
 
         kvcaches = list(self.kv_caches.values())
-        if self.current_layer == 0:
-            self.layerwise_storers = []
+        is_first = True
 
-            is_first = True
+        for request in connector_metadata.requests:
+            save_spec = request.save_spec
+            if (
+                save_spec is None or not save_spec.can_save
+            ) and self.kv_role != "kv_producer":
+                continue
 
-            for idx, request in enumerate(connector_metadata.requests):
-                save_spec = request.save_spec
-                if save_spec is None or not save_spec.can_save:
-                    continue
-
+            layerwise_storer = self._layerwise_save_storers.get(request.req_id)
+            if layerwise_storer is None:
                 token_ids = request.token_ids
                 assert isinstance(token_ids, list)
 
@@ -1020,6 +1026,7 @@ class LMCacheConnectorV1Impl:
                 if self.kv_role == "kv_producer":
                     skip_leading_tokens = 0
                 else:
+                    assert save_spec is not None
                     skip_leading_tokens = save_spec.skip_leading_tokens
 
                     if skip_leading_tokens == len(token_ids):
@@ -1054,14 +1061,11 @@ class LMCacheConnectorV1Impl:
                     sync=is_first,
                     req_id=request.req_id,
                 )
-                self.layerwise_storers.append(layerwise_storer)
+                self._layerwise_save_storers[request.req_id] = layerwise_storer
                 if is_first:
                     is_first = False
 
-        for layerwise_storer in self.layerwise_storers:
             next(layerwise_storer)
-
-        self.current_layer += 1
 
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
@@ -1075,11 +1079,13 @@ class LMCacheConnectorV1Impl:
             return
 
         if self.use_layerwise:
-            for layerwise_storer in self.layerwise_storers:
-                next(layerwise_storer)
-
-            # unpin the kv caches according to req_id
             for request in connector_metadata.requests:
+                layerwise_storer = self._layerwise_save_storers.pop(
+                    request.req_id, None
+                )
+                if layerwise_storer is not None:
+                    next(layerwise_storer)
+                # unpin the kv caches according to req_id
                 self.lmcache_engine.lookup_unpin(request.req_id)
             return
 
@@ -1264,9 +1270,11 @@ class LMCacheConnectorV1Impl:
 
         if num_external_hit_tokens is None:
             logger.debug(
-                "Reqid: %s, Total tokens %d, LMCache hit tokens: None.",
+                "Reqid: %s, Total tokens %d, Inference Engine computed tokens: %d, "
+                "LMCache hit tokens: None.",
                 req_id,
                 request.num_tokens,
+                num_computed_tokens,
             )
             return None
 
@@ -1280,13 +1288,34 @@ class LMCacheConnectorV1Impl:
         if num_external_hit_tokens == request.num_tokens:
             need_to_allocate -= 1
 
-        logger.info(
-            "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
-            req_id,
-            request.num_tokens,
-            num_external_hit_tokens,
-            need_to_allocate,
-        )
+        # Check if hit tokens meet the minimum for retrieve
+        # If below minimum, skip retrieve but still record hit tokens
+        # for skip_leading_tokens to avoid re-storing existing chunks
+        min_retrieve = self.config.min_retrieve_tokens
+        below_min_retrieve = min_retrieve > 0 and need_to_allocate < min_retrieve
+
+        if below_min_retrieve:
+            logger.info(
+                "Reqid: %s, Total tokens %d, Inference Engine computed tokens: %d, "
+                "LMCache hit tokens: %d, but need to load: %d < min_retrieve %d, "
+                "skip retrieve but record for save skip",
+                req_id,
+                request.num_tokens,
+                num_computed_tokens,
+                num_external_hit_tokens,
+                max(need_to_allocate, 0),
+                min_retrieve,
+            )
+        else:
+            logger.info(
+                "Reqid: %s, Total tokens %d, Inference Engine computed tokens: %d, "
+                "LMCache hit tokens: %d, need to load: %d",
+                req_id,
+                request.num_tokens,
+                num_computed_tokens,
+                num_external_hit_tokens,
+                max(need_to_allocate, 0),
+            )
 
         self.load_specs[req_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
@@ -1294,7 +1323,7 @@ class LMCacheConnectorV1Impl:
             can_load=False,
         )
 
-        if need_to_allocate <= 0:
+        if below_min_retrieve or need_to_allocate <= 0:
             return 0
 
         # TODO: Align to vLLM block size. Should test whether it can be removed
@@ -1437,7 +1466,7 @@ class LMCacheConnectorV1Impl:
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
-                save_decode_cache=self._save_decode_cache,
+                save_decode_cache=self.config.save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -1483,7 +1512,7 @@ class LMCacheConnectorV1Impl:
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
-                    save_decode_cache=self._save_decode_cache,
+                    save_decode_cache=self.config.save_decode_cache,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -1562,7 +1591,7 @@ class LMCacheConnectorV1Impl:
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
-                save_decode_cache=self._save_decode_cache,
+                save_decode_cache=self.config.save_decode_cache,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -1575,6 +1604,14 @@ class LMCacheConnectorV1Impl:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        # Layerwise save uses request-scoped generators. If request finishes
+        # without entering wait_for_save (abort/error/evict path), make sure
+        # we release the generator entry to avoid leaking state.
+        if getattr(self, "use_layerwise", False) and hasattr(
+            self, "_layerwise_save_storers"
+        ):
+            self._layerwise_save_storers.pop(request.request_id, None)
+
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
             # Cancel any ongoing async lookup and prefetch tasks on workers

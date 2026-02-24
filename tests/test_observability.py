@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from unittest.mock import MagicMock
+
 # Third Party
 import pytest
 
 # First Party
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import (
+    LMCStatsMonitor,
+    PrometheusLogger,
+)
 
 
 @pytest.fixture(scope="function")
@@ -268,3 +274,111 @@ def test_zero_division_protection(stats_monitor):
     stats = stats_monitor.get_stats_and_clear()
     assert stats.retrieve_hit_rate == 1.0
     assert stats.lookup_hit_rate == 0
+
+
+# ---- PrometheusLogger custom histogram bucket tests ----
+
+
+@pytest.fixture(scope="function")
+def _cleanup_prometheus_logger():
+    """Reset PrometheusLogger singleton and metrics between tests."""
+    LMCStatsMonitor.unregister_all_metrics()
+    PrometheusLogger._instance = None
+    yield
+    LMCStatsMonitor.unregister_all_metrics()
+    PrometheusLogger._instance = None
+
+
+def _make_metadata():
+    """Create a minimal mock LMCacheMetadata for testing."""
+    meta = MagicMock()
+    meta.model_name = "test_model"
+    meta.worker_id = 0
+    meta.role = "worker"
+    meta.served_model_name = None
+    return meta
+
+
+def _make_config(extra_config=None):
+    """Create a minimal mock config for testing."""
+    cfg = MagicMock()
+    cfg.extra_config = extra_config
+    cfg.get_extra_config_value = lambda key, default=None: (
+        extra_config.get(key, default) if extra_config is not None else default
+    )
+    return cfg
+
+
+def test_prometheus_logger_default_buckets(_cleanup_prometheus_logger):
+    """Histogram should use default buckets when no config."""
+    meta = _make_metadata()
+    prom = PrometheusLogger(meta)
+    # Verify histogram was created (basic sanity check)
+    assert prom.histogram_time_to_retrieve is not None
+
+
+def test_prometheus_logger_custom_buckets(_cleanup_prometheus_logger):
+    """Histogram should use custom buckets from config."""
+    meta = _make_metadata()
+    custom_buckets = [0.1, 0.5, 1.0, 5.0]
+    cfg = _make_config(
+        {
+            "histogram_bucket_time_to_retrieve": custom_buckets,
+        }
+    )
+    prom = PrometheusLogger(meta, config=cfg)
+    labels = prom.labels
+
+    # Verify the histogram's upper_bounds match custom buckets + Inf
+    hist = prom.histogram_time_to_retrieve.labels(**labels)
+    # prometheus_client Histogram stores buckets as _upper_bounds
+    upper_bounds = list(hist._upper_bounds)
+    for bucket_val in custom_buckets:
+        assert bucket_val in upper_bounds
+
+
+def test_prometheus_logger_partial_custom_buckets(
+    _cleanup_prometheus_logger,
+):
+    """Only specified histograms should get custom buckets."""
+    meta = _make_metadata()
+    custom_buckets = [1, 10, 100]
+    cfg = _make_config(
+        {
+            "histogram_bucket_store_speed": custom_buckets,
+        }
+    )
+    prom = PrometheusLogger(meta, config=cfg)
+    labels = prom.labels
+
+    # store_speed should have custom buckets
+    hist = prom.histogram_store_speed.labels(**labels)
+    upper_bounds = list(hist._upper_bounds)
+    for bucket_val in custom_buckets:
+        assert bucket_val in upper_bounds
+
+    # time_to_retrieve should still have default buckets
+    hist_default = prom.histogram_time_to_retrieve.labels(**labels)
+    default_upper = list(hist_default._upper_bounds)
+    # default first bucket is 0.001
+    assert 0.001 in default_upper
+
+
+def test_prometheus_logger_get_or_create_with_config(
+    _cleanup_prometheus_logger,
+):
+    """GetOrCreate should pass config to the constructor."""
+    meta = _make_metadata()
+    custom_buckets = [0.01, 0.1, 1.0]
+    cfg = _make_config(
+        {
+            "histogram_bucket_time_to_store": custom_buckets,
+        }
+    )
+    prom = PrometheusLogger.GetOrCreate(meta, config=cfg)
+    labels = prom.labels
+
+    hist = prom.histogram_time_to_store.labels(**labels)
+    upper_bounds = list(hist._upper_bounds)
+    for bucket_val in custom_buckets:
+        assert bucket_val in upper_bounds

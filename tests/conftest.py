@@ -2,6 +2,7 @@
 # Standard
 from dataclasses import dataclass
 from unittest.mock import patch
+import asyncio
 import importlib.util
 import random
 import shlex
@@ -10,6 +11,7 @@ import subprocess
 import time
 
 # Third Party
+import numpy as np
 import pytest
 import torch
 
@@ -228,6 +230,86 @@ class MockRedisSentinel:
         self, service_name, socket_timeout=None, username=None, password=None, **kwargs
     ):
         return self.slave_redis
+
+
+class MockRESPClient:
+    """In-memory mock of RESPClient so RESP connector tests never hit real Redis."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        num_workers: int,
+        loop=None,
+        username: str = "",
+        password: str = "",
+    ):
+        self._store: dict[str, bytes] = {}  # key -> bytes
+        self._loop = loop
+        self._closed = False
+        self._username = username
+        self._password = password
+
+    async def exists(self, key: str) -> bool:
+        return key in self._store
+
+    def exists_sync(self, key: str) -> bool:
+        if self._loop is None:
+            return key in self._store
+        fut = asyncio.run_coroutine_threadsafe(self.exists(key), self._loop)
+        return fut.result(timeout=10.0)
+
+    def _copy_into_buf(self, buf: memoryview, data: bytes) -> None:
+        """
+        Copy bytes into buffer; buf may be non-byte or multi-dimensional
+        (e.g. from bfloat16 tensor).
+        """
+        view = buf.cast("B")
+        n = len(data)
+        try:
+            view[:n] = data
+        except (NotImplementedError, TypeError, ValueError):
+            # Multi-dimensional or non-contiguous:
+            # write via flat numpy view (same memory)
+            arr = np.asarray(view, dtype=np.uint8, copy=False)
+            arr.flat[:n] = np.frombuffer(data, dtype=np.uint8, count=n)
+
+    async def get(self, key: str, buf: memoryview) -> None:
+        data = self._store.get(key)
+        if data is None:
+            raise RuntimeError("key not found")
+        self._copy_into_buf(buf, data)
+
+    async def set(self, key: str, buf: memoryview) -> None:
+        self._store[key] = bytes(buf.cast("B"))
+
+    async def batch_get(self, keys: list, bufs: list) -> None:
+        if len(keys) != len(bufs):
+            raise ValueError("keys and bufs length mismatch")
+        for k, b in zip(keys, bufs, strict=False):
+            data = self._store.get(k)
+            if data is None:
+                raise RuntimeError("key not found")
+            self._copy_into_buf(b, data)
+
+    async def batch_set(self, keys: list, bufs: list) -> None:
+        if len(keys) != len(bufs):
+            raise ValueError("keys and bufs length mismatch")
+        for k, b in zip(keys, bufs, strict=False):
+            self._store[k] = bytes(b.cast("B"))
+
+    async def batch_exists(self, keys: list) -> list:
+        return [k in self._store for k in keys]
+
+    def batch_exists_sync(self, keys: list) -> list:
+        if self._loop is None:
+            return [k in self._store for k in keys]
+        fut = asyncio.run_coroutine_threadsafe(self.batch_exists(keys), self._loop)
+        return fut.result(timeout=10.0)
+
+    def close(self) -> None:
+        self._closed = True
+        self._store.clear()
 
 
 class MockRedisCluster:
