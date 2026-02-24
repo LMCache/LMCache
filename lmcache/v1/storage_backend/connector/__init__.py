@@ -127,13 +127,13 @@ class ConnectorContext:
         self.config = config
         self.metadata = metadata
 
-    def get_full_chunk_size(self) -> int:
+    def get_full_chunk_size_bytes(self) -> int:
         """
         return the number of bytes in a full chunk
         useful for S3Connector where we need to preallocate filesystem buffers
         in ramfs for zero-copy transfers
         """
-        return self.local_cpu_backend.get_full_chunk_size()
+        return self.local_cpu_backend.get_full_chunk_size_bytes()
 
 
 class ConnectorAdapter(ABC):

@@ -122,7 +122,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         self.header_bytes: int = int(extra.get("rust_raw_block.header_bytes", 4096))
         self.use_odirect: bool = bool(extra.get("rust_raw_block.use_odirect", False))
 
-        full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size())
+        full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size_bytes())
         default_slot_bytes = _round_up(
             self.header_bytes + full_chunk_bytes, self.block_align
         )
