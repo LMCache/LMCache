@@ -10,11 +10,17 @@ GPU_LIMIT=8                   # reserves GPU 0-7 for CI/Build
 TIMEOUT_SECONDS=3600
 INTERVAL=10
 
+echo "[pick-free-gpu] Starting GPU selection: MIN_FREE_MEM=${MIN_FREE_MEM}MiB, REQUESTED_GPU_COUNT=${REQUESTED_GPU_COUNT}, MAX_UTIL=${MAX_UTIL}%, GPU_LIMIT=${GPU_LIMIT}" >&2
+
 start_time=$(date +%s)
 
 while true; do
   now=$(date +%s)
   elapsed=$((now - start_time))
+
+  echo "[pick-free-gpu $(date '+%H:%M:%S')] Elapsed: ${elapsed}s / ${TIMEOUT_SECONDS}s - Checking for available GPUs..." >&2
+  echo "[pick-free-gpu] nvidia-smi output:" >&2
+  nvidia-smi --query-gpu=memory.free,utilization.gpu,index --format=csv,noheader,nounits >&2 || echo "[pick-free-gpu] nvidia-smi failed!" >&2
 
   if (( elapsed >= TIMEOUT_SECONDS )); then
     echo "❌ Timeout: No suitable GPU found within ${TIMEOUT_SECONDS}s"
@@ -36,6 +42,7 @@ while true; do
   )
 
   if [ "${#candidates[@]}" -gt 0 ]; then
+    echo "[pick-free-gpu] Found ${#candidates[@]} candidate GPU(s): ${candidates[*]}" >&2
     # select the top N GPUs with the maximum free memory
     mapfile -t top_gpus < <(
       printf "%s\n" "${candidates[@]}" \
@@ -65,5 +72,6 @@ while true; do
     break
   fi
 
+  echo "[pick-free-gpu] No suitable GPUs found yet, sleeping ${INTERVAL}s..." >&2
   sleep $INTERVAL
 done
