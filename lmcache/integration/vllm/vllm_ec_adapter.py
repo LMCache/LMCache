@@ -118,7 +118,7 @@ class LMCacheECConnectorImpl:
             key = ECKey(
                 model_name=self._ec_engine.metadata.model_name,
                 mm_hash=mm_data.mm_hash,
-                dtype=torch.float16,  # v1: assume fp16 (we can make this configurable later)
+                dtype=torch.float16,
             )
             t = self._ec_engine.get(key, device=current_platform.device_type)
             if t is None:
@@ -132,6 +132,9 @@ class LMCacheECConnectorImpl:
         mm_hash: str,
         **kwargs: Any,
     ) -> None:
+
+        if not getattr(self._parent, "is_producer", False):
+            return
 
         if mm_hash not in encoder_cache:
             return

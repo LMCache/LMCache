@@ -20,9 +20,7 @@ paged KV GPU gather/scatter.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -31,11 +29,8 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryFormat, MemoryObjMetadata, TensorMemoryObj
-from lmcache.v1.memory_management import allocate_aligned_cpu_tensor
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
 logger = init_logger(__name__)
 
@@ -76,140 +71,87 @@ class ECLocalDiskEngine:
             raise ValueError(
                 "EC LocalDiskEngine requires config.local_disk and max_local_disk_size > 0"
             )
-
-        self.config = config
-        self.metadata = metadata
-
-        # LocalDiskBackend needs an event loop; StorageManager normally owns this.
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
-            target=self._loop.run_forever, name="lmcache-ec-disk-loop", daemon=True
-        )
-        self._loop_thread.start()
-
-        # LocalDiskBackend requires a LocalCPUBackend for allocation/loading.
-        # We keep this minimal: always allocate from CPU backend.
-        # Note: LocalCPUBackend expects config.local_cpu True and max_local_cpu_size > 0.
-        # For EC v1, we force-enable it if needed by cloning config values.
         if not config.local_cpu or config.max_local_cpu_size <= 0:
             raise ValueError(
                 "EC LocalDiskEngine currently requires local_cpu enabled with max_local_cpu_size > 0 "
                 "(LocalDiskBackend uses LocalCPUBackend for allocations)."
             )
 
-        # LocalCPUBackend also needs loop + metadata.
-        self.local_cpu_backend = LocalCPUBackend(config, metadata, self._loop, dst_device="cpu")
+        self.config = config
+        self.metadata = metadata
 
-        self.local_disk_backend = LocalDiskBackend(
-            config,
-            loop=self._loop,
-            local_cpu_backend=self.local_cpu_backend,
-            dst_device="cpu",
-            lmcache_worker=None,
+        # Mirror KV engine layering: StorageManager owns backends + allocator.
+        from lmcache.v1.event_manager import EventManager
+        from lmcache.v1.storage_backend.storage_manager import StorageManager
+
+        self._event_manager = EventManager()
+        self._storage_manager = StorageManager(
+            config=config,
             metadata=metadata,
+            event_manager=self._event_manager,
+            lmcache_worker=None,
+            async_lookup_server=None,
         )
+
+        # EC transfer is simple contiguous tensor copy.
+        # v1: we normalize storage dtype to fp16 for key stability.
+        self._storage_dtype = torch.float16
 
     def close(self) -> None:
-        try:
-            self.local_disk_backend.close()
-        finally:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        # StorageManager owns its own loop/thread; best-effort shutdown.
+        if hasattr(self, "_storage_manager") and self._storage_manager is not None:
+            # Close backends if they expose close().
+            for _name, backend in self._storage_manager.storage_backends.items():
+                close_fn = getattr(backend, "close", None)
+                if callable(close_fn):
+                    close_fn()
 
     def contains(self, key: ECKey) -> bool:
-        cek = key.to_cache_engine_key(world_size=1, worker_id=0)
-        # storage manager contains
-        return self.local_disk_backend.contains(cek)
+        cek = ECKey(key.model_name, key.mm_hash, self._storage_dtype).to_cache_engine_key(
+            world_size=1, worker_id=0
+        )
+        # Directly query disk tier.
+        return self._storage_manager.storage_backends["LocalDiskBackend"].contains(cek)
 
     def put(self, key: ECKey, tensor: torch.Tensor) -> None:
+        # v1: normalize storage dtype for stable keying.
+        t = tensor.detach().to(device="cpu", dtype=self._storage_dtype)
 
-        """
-        add:
-        - introduce gpu connector
-        - storage manager
-        """
-        # this actually allocates the buffer
-        #  memory_obj = self.storage_manager.allocate(
-        #             kv_shapes,
-        #             kv_dtypes,
-        #             busy_loop=self.force_store_wait,
-        #             fmt=self.fmt,
-        #         )
-
-        # somthing like data self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
-
-        # finally the submit put task self.storage_manager.batched_put(
-        #           keys, memory_objs, transfer_spec=transfer_spec
-        #     )
-
-
-
-
-        
-        # Store CPU tensor (portable).
-        cpu_tensor = tensor.detach().to(device="cpu")
-
-        # LocalDiskBackend expects a MemoryObj with a `byte_array` backing buffer.
-        # Allocate an aligned flat uint8 buffer and view it as the desired dtype/shape.
-        raw_base, raw_u8 = allocate_aligned_cpu_tensor(cpu_tensor.numel() * cpu_tensor.element_size())
-        raw_typed = raw_u8.view(cpu_tensor.dtype).view(cpu_tensor.shape)
-        raw_typed.copy_(cpu_tensor)
-
-        # ^^^^ we can just use gpu connector i believe
-
-        meta = MemoryObjMetadata(
-            shape=cpu_tensor.shape,
-            dtype=cpu_tensor.dtype,
-            address=raw_u8.data_ptr(),
-            phy_size=raw_u8.numel(),
-            ref_count=0,
+        # Allocate via LMCache allocator (LocalCPUBackend) through StorageManager.
+        mem_obj = self._storage_manager.allocate(
+            shapes=t.shape,
+            dtypes=t.dtype,
             fmt=MemoryFormat.UNDEFINED,
-            cached_positions=None,
+            eviction=True,
+            busy_loop=True,
         )
+        if mem_obj is None or mem_obj.tensor is None:
+            logger.warning("EC allocate failed; skipping put for %s", key.mm_hash)
+            return
 
-        # we want memory from the memory allocator 
-        mem_obj = TensorMemoryObj(raw_u8, meta, parent_allocator=None)
+        # Copy data into allocator-managed buffer.
+        mem_obj.tensor.copy_(t)
 
-        # Prevent GC of the base buffer.
-        mem_obj._ec_base_buffer = raw_base  # type: ignore[attr-defined]
-        cek = key.to_cache_engine_key(world_size=1, worker_id=0)
-
-        # ^^^^ investigate how some of this code can be dont different using storage manager
-
-        self.local_disk_backend.submit_put_task(cek, mem_obj)
-        
+        cek = ECKey(key.model_name, key.mm_hash, self._storage_dtype).to_cache_engine_key(
+            world_size=1, worker_id=0
+        )
+        self._storage_manager.batched_put([cek], [mem_obj], location="LocalDiskBackend")
 
     def get(self, key: ECKey, device: Optional[str] = None) -> Optional[torch.Tensor]:
-        """
-        What you should take away
-        - LocalDiskBackend.get_blocking() gives you a MemoryObj backed by an allocator-managed CPU buffer.
-        - ref_count_down() returns that buffer to the pool.
-        - Returning t after refcount-down is only safe if you’ve already copied it elsewhere (GPU or a cloned CPU tensor).
-        Follow-up question
-        Do you ever intend to call get(..., device=None) and use the returned CPU tensor directly?
-        - If “no” (worker always loads to GPU), we can leave this, but it’s a footgun.
-        - If “yes”, we should adjust the design so get(..., device=None) returns t.clone() (or delays ref_count_down() until the caller is done).
-        """
-
-
-        # memory_objs = self.storage_manager.batched_get(
-         #       keys=keys,
-        #        location=location,
-         #   )
-
-
-        # somthing like data self.gpu_connector.batched_to_gpu(memory_objs, starts, ends, **kwargs)
-        # memory_obj.ref_count_down()
-
-        # return tensor
-
         logger.debug("Getting encoder cache for key %s", key)
-        cek = key.to_cache_engine_key(world_size=1, worker_id=0)
-        mem_obj = self.local_disk_backend.get_blocking(cek)
+
+        cek = ECKey(key.model_name, key.mm_hash, self._storage_dtype).to_cache_engine_key(
+            world_size=1, worker_id=0
+        )
+        mem_objs = self._storage_manager.batched_get([cek], location="LocalDiskBackend")
+        mem_obj = mem_objs[0]
         if mem_obj is None or mem_obj.tensor is None:
             return None
-        t = mem_obj.tensor
-        # release allocator object
+
+        # Always clone before releasing allocator-owned buffer.
+        cpu_t = mem_obj.tensor.detach().clone()
         mem_obj.ref_count_down()
+
         if device is None:
-            return t
-        return t.to(device=device)
+            return cpu_t
+        return cpu_t.to(device=device)
