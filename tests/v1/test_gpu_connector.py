@@ -933,6 +933,7 @@ def test_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
 
     allocator.close()
 
+
 @pytest.mark.parametrize("use_gpu", [True, False])
 @pytest.mark.parametrize("use_mla", [True, False])
 @pytest.mark.skipif(
@@ -1035,7 +1036,7 @@ def test_batched_layerwise_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         ends,
         kvcaches=gpu_kv_src,
         slot_mapping=slot_mapping,
-        sync=True, # sync unused
+        sync=True,  # sync unused
     )
     for layer_id in range(num_layers + 1):
         next(mem_obj_generator)
@@ -1070,6 +1071,7 @@ def test_batched_layerwise_sglang_connector_with_gpu_and_mla(use_gpu, use_mla):
         )
 
     allocator.close()
+
 
 def _create_metadata(use_mla, kv_caches):
     num_heads = 1 if use_mla else 8
