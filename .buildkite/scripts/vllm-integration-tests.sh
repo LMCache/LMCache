@@ -38,10 +38,6 @@ PORT2=
 # UTILITIES #
 #############
 
-debug_log() {
-    echo "[DEBUG $(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
-}
-
 cleanup() {
     local code="${1:-0}"
 
@@ -111,21 +107,10 @@ wait_for_openai_api_server() {
     local model="$2"
     local cid="$3"
 
-    debug_log "wait_for_openai_api_server: port=$port, model=$model, cid=$cid, timeout=$SERVER_WAIT_TIMEOUT"
-    debug_log "Container status before waiting:"
-    docker ps -a --filter "id=$cid" --format "ID={{.ID}} Status={{.Status}} Names={{.Names}}" >&2 || true
-    debug_log "Container logs (last 20 lines):"
-    docker logs --tail 20 "$cid" >&2 2>&1 || true
-
     if ! timeout "$SERVER_WAIT_TIMEOUT" bash -c "
         echo \"Curl /v1/models endpoint\"
-        attempt=0
         until curl -s 127.0.0.1:${port}/v1/models \
                 | grep -Fq \"\\\"id\\\":\\\"${model}\\\"\"; do
-            attempt=\$((attempt + 1))
-            echo \"[\$(date '+%H:%M:%S')] Attempt \$attempt: Server not ready yet, sleeping 30s...\"
-            echo \"[\$(date '+%H:%M:%S')] curl response: \$(curl -s 127.0.0.1:${port}/v1/models 2>&1 | head -c 500)\"
-            echo \"[\$(date '+%H:%M:%S')] Container status: \$(docker ps -a --filter id=$cid --format 'Status={{.Status}}' 2>&1)\"
             sleep 30
         done
         echo \"Model ${model} is available on ${port}\"
@@ -142,28 +127,17 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
-    debug_log "Entering run_lmcache_vllmopenai_container for $cfg_name"
-    debug_log "Docker args: $docker"
-    debug_log "VLLM args: $vllm"
-
     # Ensure host directory exists for socket mapping
-    debug_log "Creating socket directory: /tmp/lmcache_internal_api_server/${PORT}"
     mkdir -p "/tmp/lmcache_internal_api_server/${PORT}"
 
     # Pick the GPUs based on config
-    debug_log "Reading gpu_count from config file: $cfg_file"
     gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
-    debug_log "GPU count requested: $gpu_count"
-    debug_log "Sourcing pick-free-gpu.sh with memory threshold 40000 and gpu_count $gpu_count"
-    debug_log "pick-free-gpu.sh path: $ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh"
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 "$gpu_count"
-    debug_log "pick-free-gpu.sh completed, CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
     if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
         echo "❌ Failed to select $gpu_count GPU(s)"
         exit 1
     fi
     best_gpu="${CUDA_VISIBLE_DEVICES}"
-    debug_log "Selected GPU(s): $best_gpu"
 
     # docker args
     docker_args=(
@@ -200,16 +174,12 @@ run_lmcache_vllmopenai_container() {
     cmd_args+=("--port" "$PORT")
 
     # Start docker
-    debug_log "Starting docker container with command:"
-    debug_log "docker run -d ${docker_args[*]} ${cmd_args[*]}"
     CID=$(
         docker run -d \
             "${docker_args[@]}" \
             "${cmd_args[@]}"
     )
-    debug_log "Docker container started with CID: $CID"
 
-    debug_log "Waiting for OpenAI API server on port $PORT for model $vllm_model"
     wait_for_openai_api_server "$PORT" "$vllm_model" "$CID"
 
     # Logging
@@ -810,11 +780,7 @@ echo "Using port $PORT to send or receive requests."
 cd docker/
 
 # Create the container image
-debug_log "Building lmcache/vllm-openai image..."
 build_lmcache_vllmopenai_image
-debug_log "Image build completed"
-debug_log "Checking built image:"
-docker images lmcache/vllm-openai:build-latest >&2 || echo "Image not found" >&2
 
 ########
 # MAIN #
@@ -824,19 +790,9 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     echo -e "\033[1;33m===== Testing LMCache with ${cfg_name} =====\033[0m"
     cfg_file="${CONFIG_DIR}/${cfg_name}"
 
-    debug_log "Processing config: $cfg_file"
-    debug_log "Config file exists: $(test -f "$cfg_file" && echo 'yes' || echo 'no')"
-    debug_log "Config file contents:"
-    cat "$cfg_file" >&2 || echo "Failed to read config file" >&2
-    debug_log "---"
-
     # Start engine
-    debug_log "Extracting feature_type from config"
     feature_type=$(yq -r '.feature.type // ""' "$cfg_file")
-    debug_log "feature_type='$feature_type'"
-    debug_log "Entering feature_type conditional: feature_type='$feature_type'"
     if [[ "$feature_type" == "pd" ]]; then
-        debug_log "Branch: pd (disaggregated prefill-decode)"
         PORT1=$(find_available_port 8100)
         prefiller_docker_args="$(yq '.["docker-prefiller"]' "$cfg_file")"
         prefiller_vllm_args="$(yq '.["vllm-prefiller"]' "$cfg_file")"
@@ -846,7 +802,6 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         run_pd_lmcache "$prefiller_docker_args" "$prefiller_vllm_args" "$decoder_docker_args" "$decoder_vllm_args" "$cfg_name" 
         model="$(yq -r '.["vllm-prefiller"].model' "$cfg_file")"
     elif [[ "$feature_type" == "p2p" ]]; then
-        debug_log "Branch: p2p"
         PORT1=$(find_available_port 8177)
         docker1_args="$(yq '.["docker1"]' "$cfg_file")"
         vllm1_args="$(yq '.["vllm1"]' "$cfg_file")"
@@ -856,18 +811,10 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
         run_p2p_lmcache "$docker1_args" "$vllm1_args" "$docker2_args" "$vllm2_args" "$cfg_name" 
         model="$(yq -r '.["vllm1"].model' "$cfg_file")"
     elif [[ -z "$feature_type" ]]; then
-        debug_log "Branch: empty feature_type (standard single-instance)"
-        debug_log "Extracting docker args from config"
         docker_args="$(yq '.docker' "$cfg_file")"
-        debug_log "docker_args: $docker_args"
-        debug_log "Extracting vllm args from config"
         vllm_args="$(yq '.vllm' "$cfg_file")"
-        debug_log "vllm_args: $vllm_args"
-        debug_log "Calling run_lmcache_vllmopenai_container"
         run_lmcache_vllmopenai_container "$docker_args" "$vllm_args" "$cfg_name"
-        debug_log "run_lmcache_vllmopenai_container completed"
         model="$(yq -r '.vllm.model' "$cfg_file")"
-        debug_log "model=$model"
     fi
     
     # Send request
