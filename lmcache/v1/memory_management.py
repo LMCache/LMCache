@@ -1934,6 +1934,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         """
 
         self.numa_mapping = kwargs.get("numa_mapping", None)
+        self.align_bytes = kwargs.get("align_bytes", AddressManager.ALIGN_BYTES)
+        if self.align_bytes <= 0 or self.align_bytes & (self.align_bytes - 1) != 0:
+            raise ValueError("align_bytes must be a positive power of two")
 
         # Extract shm_name from config.extra_config if available
         config = kwargs.get("config", None)
@@ -1966,7 +1969,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 fmt=kwargs["fmt"],
             )
         else:
-            self.pin_allocator = TensorMemoryAllocator(self.buffer)
+            self.pin_allocator = TensorMemoryAllocator(
+                self.buffer, align_bytes=self.align_bytes
+            )
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
