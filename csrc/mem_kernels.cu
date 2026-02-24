@@ -885,7 +885,7 @@ void single_layer_kv_transfer_sgl(
       get_kernel_ptr<int64_t, torch::Tensor>(sgl_key_cache);
   int64_t* sgl_value_cache_ptr = NULL;
   if (!use_mla) {
-    int64_t* sgl_value_cache_ptr =
+    sgl_value_cache_ptr =
         get_kernel_ptr<int64_t, torch::Tensor>(sgl_key_value_cache[1]);
   }
 

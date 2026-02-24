@@ -16,6 +16,7 @@ from lmcache.v1.gpu_connector.utils import (
     discover_gpu_kv_format,
     get_block_size,
     get_elements_per_layer,
+    get_head_size,
     get_num_blocks,
     get_num_heads,
     get_page_buffer_size,
@@ -1570,6 +1571,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
         self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
         self.num_heads = get_num_heads(kv_caches, self.gpu_kv_format)
+        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
         if self.use_gpu and self.gpu_buffer_allocator is None:
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
@@ -1685,7 +1687,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                     self.page_buffer_size,
                                     1,
                                     self.num_heads,
-                                    self.hidden_dim_size,
+                                    self.head_size,
                                 )
                             ],
                             slot_mapping[start:end],
@@ -1700,13 +1702,13 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                     self.page_buffer_size,
                                     1,
                                     self.num_heads,
-                                    self.hidden_dim_size,
+                                    self.head_size,
                                 ),
                                 self.kvcaches[1][layer_id].view(
                                     self.page_buffer_size,
                                     1,
                                     self.num_heads,
-                                    self.hidden_dim_size,
+                                    self.head_size,
                                 ),
                             ],
                             slot_mapping[start:end],
@@ -1723,7 +1725,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                 self.page_buffer_size,
                                 1,
                                 self.num_heads,
-                                self.hidden_dim_size,
+                                self.head_size,
                             )
                         ],
                         slot_mapping_full,
@@ -1738,13 +1740,13 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                 self.page_buffer_size,
                                 1,
                                 self.num_heads,
-                                self.hidden_dim_size,
+                                self.head_size,
                             ),
                             self.kvcaches[1][layer_id].view(
                                 self.page_buffer_size,
                                 1,
                                 self.num_heads,
-                                self.hidden_dim_size,
+                                self.head_size,
                             ),
                         ],
                         slot_mapping_full,
@@ -1840,7 +1842,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                 self.page_buffer_size,
                                 1,
                                 self.num_heads,
-                                self.hidden_dim_size,
+                                self.head_size,
                             )
                         ],
                         slot_mapping_full,
@@ -1855,13 +1857,13 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                 self.page_buffer_size,
                                 1,
                                 self.num_heads,
-                                self.hidden_dim_size,
+                                self.head_size,
                             ),
                             self.kvcaches[1][layer_id].view(
                                 self.page_buffer_size,
                                 1,
                                 self.num_heads,
-                                self.hidden_dim_size,
+                                self.head_size,
                             ),
                         ],
                         slot_mapping_full,
@@ -1891,7 +1893,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                     self.page_buffer_size,
                                     1,
                                     self.num_heads,
-                                    self.hidden_dim_size,
+                                    self.head_size,
                                 )
                             ],
                             slot_mapping[start:end],
@@ -1906,13 +1908,13 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                                     self.page_buffer_size,
                                     1,
                                     self.num_heads,
-                                    self.hidden_dim_size,
+                                    self.head_size,
                                 ),
                                 self.kvcaches[1][layer_id].view(
                                     self.page_buffer_size,
                                     1,
                                     self.num_heads,
-                                    self.hidden_dim_size,
+                                    self.head_size,
                                 ),
                             ],
                             slot_mapping[start:end],
