@@ -1567,10 +1567,10 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         the gpu buffer size in gpu connector.
         Also, the first request might be a bit slower due to buffer creation.
         """
+        self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
+        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
+        self.num_heads = get_num_heads(kv_caches, self.gpu_kv_format)
         if self.use_gpu and self.gpu_buffer_allocator is None:
-            self.gpu_kv_format = discover_gpu_kv_format(kv_caches, EngineType.SGLANG)
-            self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
-            self.num_heads = get_num_heads(kv_caches, self.gpu_kv_format)
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
                 kv_caches, self.gpu_kv_format
