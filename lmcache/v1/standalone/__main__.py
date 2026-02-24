@@ -556,7 +556,6 @@ def main():
             local_world_size=args.world_size,
             worker_id=args.worker_id,
             local_worker_id=args.worker_id,
-            fmt=args.fmt,
             kv_dtype=kv_dtype,
             kv_shape=kv_shape,
             use_mla=args.use_mla,

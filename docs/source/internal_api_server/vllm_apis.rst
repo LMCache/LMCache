@@ -685,6 +685,195 @@ These endpoints manage chunk-level statistics collection via
 ``ChunkStatisticsLookupClient``. They are only available when the
 lookup client supports statistics.
 
+
+Lookup Client/Server Management
+-----------------------------------
+
+These endpoints allow runtime management of the lookup client and server.
+They are useful for dynamically reconfiguring the lookup mechanism without
+restarting the service.
+
+.. important::
+
+    **Configuration Update Required First**
+
+    Before calling ``/lookup/create`` or ``/lookup/recreate``, you **MUST**
+    update the configuration via the ``/conf`` API first. The new lookup
+    client/server will be created using ``LookupClientFactory``.
+
+    For some configurations (e.g., switching ``enable_scheduler_bypass_lookup``),
+    you only need to update the **scheduler's** configuration and recreate its
+    lookup client. The workers don't need changes in this case.
+
+
+``GET /lookup/info`` — Lookup Client/Server Information
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Get information about the current lookup client and server status.
+Shows wrapper chain if applicable (e.g., ``HitLimitLookupClient(LMCacheLookupClient)``).
+
+- **Method**: ``GET``
+- **Path**: ``/lookup/info``
+- **Parameters**: None
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl http://localhost:6999/lookup/info
+
+**Example Response** (scheduler):
+
+.. code-block:: json
+
+    {
+      "client": "HitLimitLookupClient(LMCacheBypassLookupClient)",
+      "server": "None",
+      "role": "scheduler"
+    }
+
+**Example Response** (worker):
+
+.. code-block:: json
+
+    {
+      "client": "None",
+      "server": "LMCacheLookupServer",
+      "role": "worker"
+    }
+
+
+``POST /lookup/close`` — Close Lookup Client/Server
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Close the current lookup client (scheduler) or server (worker).
+
+- **Method**: ``POST``
+- **Path**: ``/lookup/close``
+- **Parameters**: None
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:6999/lookup/close
+
+**Example Response**:
+
+.. code-block:: json
+
+    {
+      "old": "HitLimitLookupClient(LMCacheBypassLookupClient)",
+      "role": "scheduler"
+    }
+
+
+``POST /lookup/create`` — Create Lookup Client/Server
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Create a new lookup client (scheduler) or server (worker) using current config.
+
+- **Method**: ``POST``
+- **Path**: ``/lookup/create``
+- **Parameters**:
+
+  =========== ======= =============================================
+  Name        Type    Description
+  =========== ======= =============================================
+  ``dryrun``  bool    If ``true``, only show what would be created
+  =========== ======= =============================================
+
+- **Response**: ``application/json``
+
+.. code-block:: bash
+
+    # Dryrun - preview what would be created
+    curl -X POST "http://localhost:6999/lookup/create?dryrun=true"
+
+    # Actually create
+    curl -X POST http://localhost:6999/lookup/create
+
+**Example Response** (dryrun):
+
+.. code-block:: json
+
+    {
+      "new": "LMCacheLookupClient",
+      "dryrun": true,
+      "role": "scheduler"
+    }
+
+**Example Response** (actual create):
+
+.. code-block:: json
+
+    {
+      "new": "LMCacheLookupClient",
+      "role": "scheduler"
+    }
+
+
+``POST /lookup/recreate`` — Recreate Lookup Client/Server
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Recreate the lookup client or server (equivalent to close + create).
+The endpoint automatically determines which component based on role:
+
+- **scheduler** role: recreates lookup client
+- **worker** role: recreates lookup server
+
+- **Method**: ``POST``
+- **Path**: ``/lookup/recreate``
+- **Parameters**: None
+- **Response**: ``application/json``
+
+**Usage Flow**:
+
+.. code-block:: bash
+
+    # Step 1: Update worker configuration (if needed)
+    curl -X POST "http://localhost:7000/conf" \
+      -H "Content-Type: application/json" \
+      -d '{"enable_async_loading": true}'
+
+    # Step 2: Recreate lookup server on worker
+    curl -X POST "http://localhost:7000/lookup/recreate"
+
+    # Step 3: Update scheduler configuration
+    curl -X POST "http://localhost:6999/conf" \
+      -H "Content-Type: application/json" \
+      -d '{"enable_scheduler_bypass_lookup": true}'
+
+    # Step 4: Recreate lookup client on scheduler
+    curl -X POST "http://localhost:6999/lookup/recreate"
+
+**Example Response** (scheduler):
+
+.. code-block:: json
+
+    {
+      "old": "HitLimitLookupClient(LMCacheBypassLookupClient)",
+      "new": "LMCacheLookupClient",
+      "role": "scheduler"
+    }
+
+**Example Response** (worker):
+
+.. code-block:: json
+
+    {
+      "old": "LMCacheLookupServer",
+      "new": "LMCacheAsyncLookupServer",
+      "role": "worker"
+    }
+
+.. note::
+
+    **Client-only Changes**
+
+    For some configuration changes (e.g., switching ``enable_scheduler_bypass_lookup``),
+    you only need to update the scheduler's configuration and recreate its lookup
+    client. Worker-side lookup servers don't need to be recreated in this case.
+
+
 ``POST /chunk_statistics/start`` — Start Statistics
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

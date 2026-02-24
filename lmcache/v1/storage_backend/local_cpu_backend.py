@@ -434,6 +434,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return MixedMemoryAllocator(
                 cpu_size_bytes,
                 numa_mapping=numa_mapping,
+                config=config,
             )
 
     @staticmethod
