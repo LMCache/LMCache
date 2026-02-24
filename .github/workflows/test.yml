@@ -74,16 +74,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install vllm
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
 
       - name: "Run non-CUDA unit tests"
+        # Avoid adding ignore statements here. You should aim to make your tests to run on non-CUDA
+        # by default. Follow pattern in other test files where they check for CUDA and act accordingly.
+        # This is so that users can run unit test from CLI in CUDA and non-CUDA environment with just
+        # pytest command.
         run: |
-          pytest --ignore=tests/disagg --ignore=tests/v1/test_nixl_storage.py \
-            --ignore=tests/v1/multiprocess/ \
-            --ignore=tests/v1/distributed/ \
-            --ignore=tests/v1/mp_observability/ \
-            --ignore=tests/skipped \
-            --ignore=tests/v1/storage_backend/test_eic.py
-
+          pytest
