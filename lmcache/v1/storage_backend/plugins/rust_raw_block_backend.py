@@ -128,7 +128,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             extra.get("rust_raw_block.enable_zero_copy", True)
         )
 
-        full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size())
+        full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size_bytes())
         default_slot_bytes = _round_up(
             self.header_bytes + full_chunk_bytes, self.block_align
         )
