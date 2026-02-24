@@ -371,13 +371,27 @@ class MemoryObj(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
-def _allocate_cpu_memory(
-    size: int,
+def _resolve_pinned_alloc_free(
     numa_mapping: Optional[NUMAMapping] = None,
-) -> torch.Tensor:
-    if size == 0:
-        return torch.empty(0, dtype=torch.uint8)
-    if numa_mapping:
+    shm_name: Optional[str] = None,
+    size: Optional[int] = None,
+) -> Tuple[
+    tuple,  # (alloc_fn, *alloc_args)
+    tuple,  # (free_fn, *free_args_after_ptr)
+]:
+    """Resolve the alloc/free function pair based on memory type.
+
+    Returns:
+        A tuple of (alloc_info, free_info) where:
+        - alloc_info: (alloc_fn, *args) to call as alloc_fn(size, *args)
+        - free_info: (free_fn, *args) to call as free_fn(ptr, *args)
+    """
+    if shm_name:
+        return (
+            (lmc_ops.alloc_shm_pinned_ptr, shm_name),
+            (lmc_ops.free_shm_pinned_ptr, size, shm_name),
+        )
+    elif numa_mapping:
         if torch.cuda.is_available():
             current_device_id = torch.cuda.current_device()
         else:
@@ -387,9 +401,31 @@ def _allocate_cpu_memory(
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
-        ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+        return (
+            (lmc_ops.alloc_pinned_numa_ptr, numa_id),
+            (lmc_ops.free_pinned_numa_ptr, size),
+        )
     else:
-        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+        return (
+            (lmc_ops.alloc_pinned_ptr, 0),
+            (lmc_ops.free_pinned_ptr,),
+        )
+
+
+def _allocate_cpu_memory(
+    size: int,
+    numa_mapping: Optional[NUMAMapping] = None,
+    shm_name: Optional[str] = None,
+) -> torch.Tensor:
+    if size == 0:
+        return torch.empty(0, dtype=torch.uint8)
+
+    alloc_info, _ = _resolve_pinned_alloc_free(
+        numa_mapping,
+        shm_name,
+    )
+    alloc_fn, *alloc_args = alloc_info
+    ptr = alloc_fn(size, *alloc_args)
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
@@ -402,13 +438,18 @@ def _free_cpu_memory(
     buffer: torch.Tensor,
     size: int | None = None,
     numa_mapping: Optional[NUMAMapping] = None,
-) -> torch.Tensor:
+    shm_name: Optional[str] = None,
+) -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-    if numa_mapping:
-        lmc_ops.free_pinned_numa_ptr(buffer.data_ptr(), size)
-    else:
-        lmc_ops.free_pinned_ptr(buffer.data_ptr())
+
+    _, free_info = _resolve_pinned_alloc_free(
+        numa_mapping,
+        shm_name,
+        size=size,
+    )
+    free_fn, *free_args = free_info
+    free_fn(buffer.data_ptr(), *free_args)
 
 
 def _allocate_gpu_memory(
@@ -1802,14 +1843,8 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         """
         :param int size: The size of the pinned memory in bytes.
         """
-
-        if size == 0:
-            self.buffer = torch.empty(0, dtype=torch.uint8)
-        else:
-            ptr = lmc_ops.alloc_pinned_ptr(size, 0)
-            array_type = ctypes.c_uint8 * size
-            buf = array_type.from_address(ptr)
-            self.buffer = torch.frombuffer(buf, dtype=torch.uint8)
+        self.size = size
+        self.buffer = _allocate_cpu_memory(size)
         self._unregistered = False
 
         self.allocator: MemoryAllocatorInterface
@@ -1878,11 +1913,9 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
             if self.buffer.numel() == 0:
                 return
-            lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
+            _free_cpu_memory(self.buffer, self.size)
             self._unregistered = True
 
     def __str__(self):
@@ -1902,9 +1935,18 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.numa_mapping = kwargs.get("numa_mapping", None)
 
+        # Extract shm_name from config.extra_config if available
+        config = kwargs.get("config", None)
+        if config is not None:
+            self.shm_name: Optional[str] = config.get_extra_config_value(
+                "shm_name", None
+            )
+        else:
+            self.shm_name = kwargs.get("shm_name", None)
+
         self.size = size
 
-        self.buffer = _allocate_cpu_memory(size, self.numa_mapping)
+        self.buffer = _allocate_cpu_memory(size, self.numa_mapping, self.shm_name)
 
         self._unregistered = False
 
@@ -2025,10 +2067,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 torch.cuda.synchronize()
             if self.buffer.numel() == 0:
                 return
-            if self.numa_mapping:
-                lmc_ops.free_pinned_numa_ptr(self.buffer.data_ptr(), self.size)
-            else:
-                lmc_ops.free_pinned_ptr(self.buffer.data_ptr())
+            _free_cpu_memory(
+                self.buffer,
+                self.size,
+                self.numa_mapping,
+                self.shm_name,
+            )
             self._unregistered = True
 
     def __str__(self):
