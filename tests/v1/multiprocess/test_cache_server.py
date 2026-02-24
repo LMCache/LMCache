@@ -34,8 +34,6 @@ if torch.cuda.is_available():
     # First Party
     from lmcache.v1.multiprocess.server import run_cache_server
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-
 # Configuration constants
 SERVER_HOST = "localhost"
 SERVER_PORT = 5599
