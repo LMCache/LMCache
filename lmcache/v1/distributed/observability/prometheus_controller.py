@@ -1,39 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from typing import TYPE_CHECKING, List
 import threading
-import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.observability.storage_stats_listener import (
+from lmcache.v1.distributed.observability.logger.prometheus_logger import (
+    PrometheusLogger,
+)
+from lmcache.v1.distributed.observability.logger.storage_stats_logger import (
     StorageStatsListener,
 )
 from lmcache.v1.distributed.storage_controller import (
     StorageControllerInterface,
 )
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.storage_manager import StorageManager
+
 logger = init_logger(__name__)
 
 
 class PrometheusController(StorageControllerInterface):
-    def __init__(self, l1_manager: L1Manager, eviction_config: EvictionConfig):
-        super().__init__(l1_manager)
+    def __init__(
+        self,
+        storage_manager: "StorageManager",
+        l1_manager: L1Manager,
+        log_interval: float,
+    ):
+        super().__init__(storage_manager, l1_manager)
 
-        self.stats_listener: StorageStatsListener = StorageStatsListener()
-        self.get_l1_manager().register_listener(self.stats_listener)
+        self._log_interval = log_interval
+        self.all_loggers: List[PrometheusLogger] = []
+
+        self.sm_stats_logger: StorageStatsListener = StorageStatsListener()
+        self.get_l1_manager().register_listener(self.sm_stats_logger)
+        self.get_storage_manager().register_listener(self.sm_stats_logger)
+        self.all_loggers.append(self.sm_stats_logger)
+
+        # TODO: adding more stats loggers, e.g., integrator logger or mp server logger
 
         self._stop_flag = threading.Event()
 
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
+            name="PrometheusController",
         )
 
     def start(self):
-        logger.info("Starting ProemtheusController...")
+        logger.info(
+            "Starting PrometheusController (interval=%.1fs)...", self._log_interval
+        )
         self._thread.start()
 
     def stop(self):
@@ -41,6 +62,12 @@ class PrometheusController(StorageControllerInterface):
         self._thread.join()
 
     def _run(self):
-
-        while not self._stop_flag.is_set():
-            time.sleep(1)  # Trigger every second
+        while not self._stop_flag.wait(timeout=self._log_interval):
+            for prometheus_logger in self.all_loggers:
+                try:
+                    prometheus_logger.log_prometheus()
+                except Exception:
+                    logger.exception(
+                        "PrometheusController: error logging %s",
+                        type(prometheus_logger).__name__,
+                    )

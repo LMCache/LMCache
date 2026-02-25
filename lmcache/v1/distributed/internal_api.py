@@ -12,7 +12,11 @@ import enum
 from lmcache.v1.distributed.api import ObjectKey
 
 
-class StorageManagerListener(ABC):
+class EventListener(ABC):  # noqa: B024
+    pass
+
+
+class StorageManagerListener(EventListener):
     @abstractmethod
     def on_sm_read_prefetched(
         self,
@@ -80,7 +84,7 @@ class StorageManagerListener(ABC):
 
 
 # For L1 manager event notifications
-class L1ManagerListener(StorageManagerListener):
+class L1ManagerListener(EventListener):
     """
     Listener for L1 manager events
     """
@@ -136,9 +140,11 @@ class L1ManagerListener(StorageManagerListener):
         pass
 
 
-class L2ManagerListener(StorageManagerListener):
-    # Waiting for L2 manager to be finalized
-    pass
+class L2ManagerListener(EventListener):
+    # Just a placeholder here. Waiting for L2 manager to be finalized.
+    @abstractmethod
+    def on_l2_lookup_and_lock(self):
+        pass
 
 
 # For Eviction

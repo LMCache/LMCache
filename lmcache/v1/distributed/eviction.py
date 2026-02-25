@@ -109,20 +109,3 @@ class EvictionPolicy(L1ManagerListener):
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         # No-op
         self.on_keys_removed(keys)
-
-    # StorageManagerListner implementations, not used by eviction policy
-    def on_sm_read_prefetched(self, keys: list[ObjectKey]):
-        # No-op
-        pass
-
-    def on_sm_read_prefetched_finished(self, keys: list[ObjectKey]):
-        # No-op
-        pass
-
-    def on_sm_reserved_write(self, keys: list[ObjectKey]):
-        # No-op
-        pass
-
-    def on_sm_write_finished(self, keys: list[ObjectKey]):
-        # No-op
-        pass

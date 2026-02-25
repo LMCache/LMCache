@@ -18,6 +18,9 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import StorageManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.observability.prometheus_controller import (
+    PrometheusController,
+)
 from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
 )
@@ -35,15 +38,27 @@ class PrefetchHandle:
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
+        self._registered_listeners: list[StorageManagerListener] = []
 
         # Eviction controller
         self._eviction_controller = EvictionController(
+            storage_manager=self,
             l1_manager=self._l1_manager,
             eviction_config=config.eviction_config,
         )
         self._eviction_controller.start()
 
-        self._registered_listeners: list[StorageManagerListener] = []
+        if config.prometheus_config.enabled:
+            self._prometheus_controller: PrometheusController | None = (
+                PrometheusController(
+                    storage_manager=self,
+                    l1_manager=self._l1_manager,
+                    log_interval=config.prometheus_config.log_interval,
+                )
+            )
+            self._prometheus_controller.start()
+        else:
+            self._prometheus_controller = None
 
     def register_listener(self, listener: StorageManagerListener) -> None:
         """Register a listener for StorageManager events.
@@ -261,6 +276,8 @@ class StorageManager:
         Close the storage manager and release all resources.
         """
         self._eviction_controller.stop()
+        if self._prometheus_controller is not None:
+            self._prometheus_controller.stop()
         self._l1_manager.close()
 
     # Functions for debugging and testing
