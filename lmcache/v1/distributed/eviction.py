@@ -107,5 +107,4 @@ class EvictionPolicy(L1ManagerListener):
         self.on_keys_created(keys)
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
-        # No-op
         self.on_keys_removed(keys)
