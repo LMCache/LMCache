@@ -60,6 +60,8 @@ class PrometheusController(StorageControllerInterface):
     def stop(self):
         self._stop_flag.set()
         self._thread.join()
+        for prometheus_logger in self.all_loggers:
+            prometheus_logger.unregister()
 
     def _run(self):
         while not self._stop_flag.wait(timeout=self._log_interval):

@@ -129,3 +129,15 @@ class PrometheusLogger(ABC):
         for histogram in self._histograms:
             histogram.clear()
             histogram.labels(**self.labels)
+
+    def unregister(self) -> None:
+        """Unregister all tracked metrics from the Prometheus registry.
+
+        Called on shutdown so that re-instantiation (e.g. in tests) does not
+        raise ``ValueError: Duplicated timeseries in CollectorRegistry``.
+        """
+        for metric in (*self._counters, *self._histograms):
+            try:
+                prometheus_client.REGISTRY.unregister(metric)
+            except Exception:
+                pass
