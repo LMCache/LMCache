@@ -363,7 +363,12 @@ class GdsBackend(AllocatorBackendInterface):
             try:
                 fd = os.open(filename, os.O_RDONLY | os.O_NOATIME)
             except (
-                PermissionError
+                # PermissionError: User doesn't own the file
+                # AttributeError: O_NOATIME not available on this platform
+                # OSError: Filesystem doesn't support O_NOATIME (EINVAL)
+                PermissionError,
+                AttributeError,
+                OSError,
             ):  # fallback to normal open if O_NOATIME is not supported
                 self._use_noatime = False
                 logger.info(
@@ -678,7 +683,6 @@ class GdsBackend(AllocatorBackendInterface):
         """
         if memory_obj is None or not memory_obj.is_valid():
             return None
-            assert memory_obj.tensor is not None
 
         offset = _METADATA_MAX_SIZE
         if self.cufile_base_pointer is None:
