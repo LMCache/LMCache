@@ -179,7 +179,7 @@ class L1Manager:
             successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_keys_reserved_read(successful_keys)
+            listener.on_l1_keys_reserved_read(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -284,8 +284,8 @@ class L1Manager:
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
-            listener.on_keys_read_finished(successful_keys)
-            listener.on_keys_deleted_by_manager(need_to_free_keys)
+            listener.on_l1_keys_read_finished(successful_keys)
+            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
 
         return ret
 
@@ -377,7 +377,7 @@ class L1Manager:
                 successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_keys_reserved_write(successful_keys)
+            listener.on_l1_keys_reserved_write(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -430,7 +430,7 @@ class L1Manager:
             successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_keys_write_finished(successful_keys)
+            listener.on_l1_keys_write_finished(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -470,7 +470,7 @@ class L1Manager:
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
-            listener.on_keys_deleted_by_manager(successful_keys)
+            listener.on_l1_keys_deleted_by_manager(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -481,7 +481,7 @@ class L1Manager:
         self._memory_manager.free(all_memory_objs)
         self._objects.clear()
         for listener in self._registered_listeners:
-            listener.on_keys_deleted_by_manager(all_keys)
+            listener.on_l1_keys_deleted_by_manager(all_keys)
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.

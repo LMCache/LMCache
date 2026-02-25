@@ -16,6 +16,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
+from lmcache.v1.distributed.internal_api import StorageManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
@@ -41,6 +42,16 @@ class StorageManager:
             eviction_config=config.eviction_config,
         )
         self._eviction_controller.start()
+
+        self._registered_listeners: list[StorageManagerListener] = []
+
+    def register_listener(self, listener: StorageManagerListener) -> None:
+        """Register a listener for StorageManager events.
+
+        Args:
+            listener: The listener to register.
+        """
+        self._registered_listeners.append(listener)
 
     # External APIs for serving engine integration code to call
     def reserve_write(
@@ -73,7 +84,12 @@ class StorageManager:
             mode=mode,
         )
 
-        return {k: m for k, (e, m) in reserve_result.items() if m is not None}
+        result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
+        successful_keys = list(result.keys())
+        failed_keys = [k for k, (e, m) in reserve_result.items() if m is None]
+        for listener in self._registered_listeners:
+            listener.on_sm_reserved_write(successful_keys, failed_keys)
+        return result
 
     def finish_write(
         self,
@@ -85,7 +101,11 @@ class StorageManager:
         Args:
             keys (list[ObjectKey]): List of object keys that have been written.
         """
-        self._l1_manager.finish_write(keys)
+        finish_result = self._l1_manager.finish_write(keys)
+        successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
+        failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
+        for listener in self._registered_listeners:
+            listener.on_sm_write_finished(successful_keys, failed_keys)
 
         # TODO: global key states update
         # TODO: trigger L2 controller
@@ -118,6 +138,7 @@ class StorageManager:
         read_results = self._l1_manager.unsafe_read(keys)
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
+        bad_keys: list[ObjectKey] = []
         all_good = True
         for k, (e, o) in read_results.items():
             if o is None:
@@ -126,6 +147,7 @@ class StorageManager:
                     k,
                     strerror(e),
                 )
+                bad_keys.append(k)
                 all_good = False
                 continue
 
@@ -147,6 +169,8 @@ class StorageManager:
             # if None is yielded or exception occurs during caller's processing
             if not all_good or not successfully_yielded:
                 self._l1_manager.finish_read(good_keys)
+                for listener in self._registered_listeners:
+                    listener.on_sm_read_prefetched_finished(good_keys, bad_keys)
 
     def finish_read_prefetched(
         self,
@@ -158,7 +182,11 @@ class StorageManager:
         Args:
             keys (list[ObjectKey]): List of object keys that have been read.
         """
-        self._l1_manager.finish_read(keys)
+        finish_result = self._l1_manager.finish_read(keys)
+        successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
+        failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
+        for listener in self._registered_listeners:
+            listener.on_sm_read_prefetched_finished(successful_keys, failed_keys)
 
     def submit_prefetch_task(
         self,
@@ -202,6 +230,8 @@ class StorageManager:
         if skipped_keys:
             self._l1_manager.finish_read(skipped_keys)
 
+        for listener in self._registered_listeners:
+            listener.on_sm_read_prefetched(keys[:hit_count], keys[hit_count:])
         return PrefetchHandle(prefix_hit_chunks=hit_count)
 
     def query_prefetch_status(
