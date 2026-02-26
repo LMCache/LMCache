@@ -29,7 +29,7 @@ def clone_tensor_memory_obj(obj: MemoryObj) -> TensorMemoryObj:
 
     new_obj = TensorMemoryObj(
         raw_data=raw_tensor.detach().clone(),
-        metadata=copy.copy(obj.metadata),
+        metadata=copy.deepcopy(obj.metadata),
         parent_allocator=None,
     )
 
