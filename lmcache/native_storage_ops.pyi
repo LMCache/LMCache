@@ -45,6 +45,62 @@ class TTLLock:
         """Reset the lock to initial state (counter = 0, TTL expired)."""
         ...
 
+class Bitmap:
+    """
+    A bitmap for tracking the state of L2 storage operation results.
+
+    Each bit represents the success or failure of a key.
+    """
+
+    def __init__(self, size: int) -> None:
+        """
+        Construct a Bitmap with the specified number of bits.
+
+        Args:
+            size: The number of bits in the bitmap.
+        """
+        ...
+
+    def set(self, index: int) -> None:
+        """Set the bit at the specified index to 1."""
+        ...
+
+    def clear(self, index: int) -> None:
+        """Clear the bit at the specified index to 0."""
+        ...
+
+    def test(self, index: int) -> bool:
+        """
+        Test the bit at the specified index.
+
+        Returns:
+            True if the bit is set to 1, False otherwise.
+        """
+        ...
+
+    def popcount(self) -> int:
+        """Return the number of bits set to 1."""
+        ...
+
+    def count_leading_zeros(self) -> int:
+        """Return the number of leading zeros."""
+        ...
+
+    def count_leading_ones(self) -> int:
+        """Return the number of leading ones."""
+        ...
+
+    def __and__(self, other: Bitmap) -> Bitmap:
+        """
+        Bitwise AND with another bitmap.
+        If sizes differ, the result is truncated to the smaller size.
+        """
+        ...
+
+    def __repr__(self) -> str:
+        """String representation: '1' for set bits, '0' for clear bits."""
+        ...
+
 class ParallelPatternMatcher:
     """
     Pattern matcher for integer vectors.
