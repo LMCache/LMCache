@@ -18,6 +18,7 @@ from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.resp_client import RESPClient
 
 logger = init_logger(__name__)
 
@@ -32,6 +33,206 @@ class Priorities(IntEnum):
     PREFETCH = auto()
     GET = auto()
     PUT = auto()
+
+
+class RESPConnector(RemoteConnector):
+    """
+    The remote url should start with "resp://" and only have one host-port pair
+    """
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+        num_threads: int = 8,
+        username: str = "",
+        password: str = "",
+    ):
+        # this gives us access to self.full_chunk_size_bytes
+        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+
+        self.host = host
+        self.port = port
+        self.num_threads = num_threads
+        self.loop = loop
+        self.local_cpu_backend = local_cpu_backend
+
+        self.client = RESPClient(host, port, num_threads, loop, username, password)
+        self.pq_executor = AsyncPQExecutor(loop)
+
+    async def _exists(self, key: CacheEngineKey) -> bool:
+        return await self.client.exists(key.to_string())
+
+    async def exists(self, key: CacheEngineKey) -> bool:
+        return await self.pq_executor.submit_job(
+            self._exists, key=key, priority=Priorities.PEEK
+        )
+
+    def exists_sync(self, key: CacheEngineKey) -> bool:
+        return self.client.exists_sync(key.to_string())
+
+    async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        key_str = key.to_string()
+        memory_obj = self.local_cpu_backend.allocate(
+            self.meta_shapes,
+            self.meta_dtypes,
+            self.meta_fmt,
+        )
+
+        # byte array view of tensor
+        recv_buf = memory_obj.byte_array
+        if not isinstance(recv_buf, memoryview):
+            recv_buf = memoryview(recv_buf)
+        await self.client.get(key_str, recv_buf)
+        return memory_obj
+
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        return await self.pq_executor.submit_job(
+            self._get, key=key, priority=Priorities.GET
+        )
+
+    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        key_str = key.to_string()
+        send_buf = memory_obj.byte_array
+        if not isinstance(send_buf, memoryview):
+            send_buf = memoryview(send_buf)
+        await self.client.set(key_str, send_buf)
+
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        await self.pq_executor.submit_job(
+            self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
+        )
+
+    def support_batched_put(self) -> bool:
+        return True
+
+    async def _batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        key_strs = [key.to_string() for key in keys]
+        send_bufs = [
+            memory_obj.byte_array
+            if isinstance(memory_obj.byte_array, memoryview)
+            else memoryview(memory_obj.byte_array)
+            for memory_obj in memory_objs
+        ]
+        await self.client.batch_set(key_strs, send_bufs)
+
+    async def batched_put(
+        self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
+    ):
+        await self.pq_executor.submit_job(
+            self._batched_put,
+            keys=keys,
+            memory_objs=memory_objs,
+            priority=Priorities.PUT,
+        )
+
+    def support_batched_get(self) -> bool:
+        return True
+
+    async def _batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        key_strs = [key.to_string() for key in keys]
+        memory_objs = [
+            self.local_cpu_backend.allocate(
+                self.meta_shapes,
+                self.meta_dtypes,
+                self.meta_fmt,
+            )
+            for _ in keys
+        ]
+        recv_bufs = [
+            memory_obj.byte_array
+            if isinstance(memory_obj.byte_array, memoryview)
+            else memoryview(memory_obj.byte_array)
+            for memory_obj in memory_objs
+        ]
+        await self.client.batch_get(key_strs, recv_bufs)
+        return memory_objs
+
+    async def batched_get(
+        self, keys: List[CacheEngineKey]
+    ) -> List[Optional[MemoryObj]]:
+        return await self.pq_executor.submit_job(
+            self._batched_get, keys=keys, priority=Priorities.GET
+        )
+
+    def support_batched_contains(self) -> bool:
+        return True
+
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        """Synchronous batched contains - checks consecutive prefix existence."""
+        key_strs = [key.to_string() for key in keys]
+        results = self.client.batch_exists_sync(key_strs)
+        count = 0
+        # we only want the prefixes
+        for result in results:
+            if not result:
+                return count
+            count += 1
+        return count
+
+    async def _batched_async_contains(self, keys: List[CacheEngineKey]) -> int:
+        key_strs = [key.to_string() for key in keys]
+        results = await self.client.batch_exists(key_strs)
+        count = 0
+        # we only want the prefixes
+        for result in results:
+            if not result:
+                return count
+            count += 1
+        return count
+
+    def support_batched_async_contains(self) -> bool:
+        return True
+
+    async def batched_async_contains(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """Check how many keys exist in file system in batch
+
+        Args:
+            lookup_id: Identifier for this lookup operation
+            keys: List of keys to check
+            pin: Whether to pin the keys (not used in FS connector)
+
+        Returns:
+            Number of consecutive keys that exist, starting from the first key
+        """
+        # prefetch priority
+        return await self.pq_executor.submit_job(
+            self._batched_async_contains, keys=keys, priority=Priorities.PREFETCH
+        )
+
+    def support_batched_get_non_blocking(self) -> bool:
+        return True
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        # prefetch priority
+        return await self.pq_executor.submit_job(
+            self._batched_get, keys=keys, priority=Priorities.PREFETCH
+        )
+
+    # TODO
+    @no_type_check
+    async def list(self) -> List[str]:
+        pass
+
+    async def close(self):
+        await self.pq_executor.shutdown(wait=True)
+        self.client.close()
+        logger.info("Closed the RESP connection")
 
 
 class RedisConnector(RemoteConnector):

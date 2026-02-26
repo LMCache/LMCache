@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, AbstractSet, Optional
 import asyncio
 import importlib  # Added for dynamic import
 
@@ -116,6 +116,8 @@ def CreateStorageBackends(
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,
+    skip_backends: Optional[AbstractSet[str]] = None,
+    existing_backends: Optional[OrderedDict[str, StorageBackendInterface]] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_cuda_worker(metadata):
         dst_device = f"cuda:{torch.cuda.current_device()}"
@@ -124,13 +126,14 @@ def CreateStorageBackends(
     else:
         dst_device = "cpu"
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
+    _skip = skip_backends or set()
 
     extra_config = config.extra_config
     enable_nixl_storage = extra_config is not None and extra_config.get(
         "enable_nixl_storage"
     )
 
-    if config.enable_pd:
+    if config.enable_pd and "PDBackend" not in _skip:
         # First Party
         from lmcache.v1.storage_backend.pd_backend import PDBackend
 
@@ -139,12 +142,21 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
+    # Reuse existing LocalCPUBackend when available so that
+    # dependent backends (disk, remote, p2p, …) keep working.
     local_cpu_backend: Optional[LocalCPUBackend] = None
+    if existing_backends and "LocalCPUBackend" in existing_backends:
+        _existing_cpu = existing_backends["LocalCPUBackend"]
+        if isinstance(_existing_cpu, LocalCPUBackend):
+            local_cpu_backend = _existing_cpu
+
     if metadata.role == "scheduler":
         # For scheduler role, local_cpu_backend is None
         pass
     elif not config.enable_pd or config.local_cpu:
-        if config.max_local_cpu_size > 0:
+        if "LocalCPUBackend" in _skip:
+            pass  # Skipped — already exists
+        elif config.max_local_cpu_size > 0:
             local_cpu_backend = LocalCPUBackend(
                 config,
                 metadata,
@@ -156,7 +168,7 @@ def CreateStorageBackends(
         else:
             logger.info("No cpu memory is allocated as max_local_cpu_size <= 0")
 
-    if config.enable_p2p:
+    if config.enable_p2p and "P2PBackend" not in _skip:
         assert local_cpu_backend is not None
         assert lmcache_worker is not None
         p2p_backend = P2PBackend(
@@ -169,7 +181,7 @@ def CreateStorageBackends(
         backend_name = str(p2p_backend)
         storage_backends[backend_name] = p2p_backend
 
-    if enable_nixl_storage:
+    if enable_nixl_storage and "NixlStorageBackend" not in _skip:
         # First Party
         from lmcache.v1.storage_backend.nixl_storage_backend import (
             NixlStorageBackend,
@@ -179,19 +191,33 @@ def CreateStorageBackends(
             NixlStorageBackend.CreateNixlStorageBackend(config, loop, metadata)
         )
 
-    if config.local_disk and config.max_local_disk_size > 0:
+    if (
+        config.local_disk
+        and config.max_local_disk_size > 0
+        and "LocalDiskBackend" not in _skip
+    ):
         assert local_cpu_backend is not None
         local_disk_backend = LocalDiskBackend(
-            config, loop, local_cpu_backend, dst_device, lmcache_worker, metadata
+            config,
+            loop,
+            local_cpu_backend,
+            dst_device,
+            lmcache_worker,
+            metadata,
         )
 
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 
-    if config.gds_path is not None:
-        gds_backend = GdsBackend(config, metadata, loop, dst_device)
+    if config.gds_path is not None and "GdsBackend" not in _skip:
+        gds_backend = GdsBackend(
+            config,
+            metadata,
+            loop,
+            dst_device,
+        )
         storage_backends[str(gds_backend)] = gds_backend
-    if config.remote_url is not None:
+    if config.remote_url is not None and "RemoteBackend" not in _skip:
         remote_backend = RemoteBackend(
             config,
             metadata,
