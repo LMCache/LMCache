@@ -171,7 +171,7 @@ class BlendEngine(MPCacheEngine):
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             ipc_keys = temp_ipc_key.to_hash_keys(
                 hasher=self.token_hasher,
-                full_chunk_only=False,
+                full_chunk_only=True,
                 prefix_hash=self.BLEND_HASH_PREFIX,
             )
 
@@ -202,14 +202,15 @@ class BlendEngine(MPCacheEngine):
             found_count = found_count // world_size
 
             # All found or not
-            if found_count == exp_count:
-                found_ranges.append((start, end))
-                logger.debug(
-                    "Found all pre-computed chunks for paragraph with range (%d, %d)",
-                    start,
-                    end,
-                )
-            elif found_count > 0:
+            # if found_count == exp_count:
+            #    found_ranges.append((start, end))
+            #    logger.debug(
+            #        "Found all pre-computed chunks for paragraph with range (%d, %d)",
+            #        start,
+            #        end,
+            #    )
+            # elif found_count > 0:
+            if found_count > 0:
                 found_ranges.append((start, start + found_count * self.chunk_size))
                 logger.debug(
                     "Partially found pre-computed chunks for paragraph with range "
@@ -335,7 +336,7 @@ class BlendEngine(MPCacheEngine):
         # Compute blend-only hash for the keys
         hashed_ipc_keys = key.to_hash_keys(
             hasher=self.token_hasher,
-            full_chunk_only=False,
+            full_chunk_only=True,
             prefix_hash=self.BLEND_HASH_PREFIX,
         )
         # convert to object key
@@ -401,7 +402,7 @@ class BlendEngine(MPCacheEngine):
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             hash_ipc_keys = temp_ipc_key.to_hash_keys(
                 hasher=self.token_hasher,
-                full_chunk_only=False,
+                full_chunk_only=True,
                 prefix_hash=self.BLEND_HASH_PREFIX,
             )
             obj_keys = ipc_keys_to_object_keys(hash_ipc_keys)
@@ -414,30 +415,23 @@ class BlendEngine(MPCacheEngine):
             obj_keys: list[ObjectKey],
             memory_objs: list[MemoryObj],
             gpu_offset: int,
-            last_chunk_num_tokens: int,
         ):
             for idx, (key, memory_obj) in enumerate(
                 zip(obj_keys, memory_objs, strict=False)
             ):
                 offset_start = gpu_offset + idx * self.chunk_size
                 offset_end = offset_start + self.chunk_size
-                target_buffer_end = (
-                    offset_start + last_chunk_num_tokens
-                    if idx == len(obj_keys) - 1
-                    else offset_end
-                )
-                target_buffer_len = target_buffer_end - offset_start
 
                 # Copy from CPU to GPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(offset_end - offset_start)
                 target_buffer = gpu_context.slice_kv_cache_on_tokens(
-                    offset_start, target_buffer_end
+                    offset_start, offset_end
                 )
 
                 with self.lock:
                     lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                     target_buffer.copy_(
-                        tmp_buffer[:, :, :target_buffer_len, :],  # NOTE: 2LTD
+                        tmp_buffer,
                         non_blocking=True,
                     )
 
@@ -467,10 +461,7 @@ class BlendEngine(MPCacheEngine):
                     strict=False,
                 ):
                     gpu_offset = start + offset
-                    last_chunk_num_tokens = (end - start - 1) % self.chunk_size + 1
-                    _retrieve_one_paragraph(
-                        obj_keys, memory_objs, gpu_offset, last_chunk_num_tokens
-                    )
+                    _retrieve_one_paragraph(obj_keys, memory_objs, gpu_offset)
 
             except Exception as e:
                 logger.error("Error during retrieving prefetched results: %s", e)
@@ -579,20 +570,23 @@ def get_sep_tokens() -> tuple[list[int], list[int]]:
         is "openai/gpt-oss-120b"
     """
     model_name = os.getenv("LMCACHE_BLEND_MODEL_NAME", "openai/gpt-oss-120b")
-    if not model_name.startswith("openai/gpt-oss"):
+    start_end_family = {
+        "openai/gpt-oss-20b": ([200006], [200007]),
+        "openai/gpt-oss-120b": ([200006], [200007]),
+        "nvidia/Llama-3_3-Nemotron-Super-49B-v1": ([128006], [128009]),
+    }
+    if model_name not in start_end_family:
         logger.error(
-            "Currently the blend token matching engine only supports "
-            "openai/gpt-oss series models"
+            "Model name %s not recognized for blend engine. Supported models: %s",
+            model_name,
+            list(start_end_family.keys()),
         )
         raise ValueError(
-            "Currently the blend token matching engine only supports "
-            "openai/gpt-oss series models"
+            f"Model name {model_name} not recognized for blend engine. "
+            f"Supported models: {list(start_end_family.keys())}"
         )
 
-    # For GPT-OSS models only
-    # TODO: in the future, we should do auto-detection on the special tokens
-    # based on model name
-    return [200006], [200007]
+    return start_end_family[model_name]
 
 
 def add_handler_helper(
