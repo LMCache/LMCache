@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include "ttl_lock.h"
 #include "bitmap.h"
+#include "utils.h"
 
 namespace py = pybind11;
 
 using lmcache::storage_manager::Bitmap;
 using lmcache::storage_manager::TTLLock;
+using lmcache::utils::ParallelPatternMatcher;
 
 PYBIND11_MODULE(native_storage_ops, m) {
   m.doc() = "Native storage operations for LMCache";
@@ -44,4 +47,11 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Bitwise AND operation between two bitmaps.")
       .def("__repr__", &Bitmap::to_string,
            "Convert the bitmap to a string representation.");
+  
+  py::class_<ParallelPatternMatcher>(m, "ParallelPatternMatcher")
+      .def(py::init<const std::vector<int>&>(), py::arg("pattern"),
+           "Construct a ParallelPatternMatcher with the specified pattern.")
+      .def("match", &ParallelPatternMatcher::match, py::arg("data"),
+           "Match the pattern in the given data and return a sorted list "
+           "of positions where the pattern starts.");
 }

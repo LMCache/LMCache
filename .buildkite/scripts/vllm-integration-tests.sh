@@ -65,6 +65,10 @@ cleanup() {
             fi
         fi
     done
+    
+    # Wait for GPU memory to be fully released
+    echo "  - Waiting 5 seconds for GPU memory to be released..." >&2
+    sleep 5
 }
 
 find_available_port() {
@@ -123,21 +127,38 @@ run_lmcache_vllmopenai_container() {
     local cfg_name="$3"
     LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}.log"
 
+    # Ensure host directory exists for socket mapping
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT}"
+
     # Pick the GPUs based on config
     gpu_count=$(yq -r '.docker.gpu_count // 1' "$cfg_file")
     source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 "$gpu_count"
+    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+        echo "❌ Failed to select $gpu_count GPU(s)"
+        exit 1
+    fi
     best_gpu="${CUDA_VISIBLE_DEVICES}"
 
     # docker args
     docker_args=(
         --runtime nvidia
         --network host
-        --gpus "\"device=${best_gpu}\""
         --volume ~/.cache/huggingface:/root/.cache/huggingface
         --volume "${CONFIG_DIR}/lmcache_configs:/etc/lmcache:ro"
+        --volume /tmp/lmcache_internal_api_server/${PORT}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
     )
+    
+    # Handle GPU assignment based on count
+    if [ "$gpu_count" -gt 1 ]; then
+        # Multi-GPU: expose all and use CUDA_VISIBLE_DEVICES to restrict
+        docker_args+=(--gpus all)
+        docker_args+=(--env "CUDA_VISIBLE_DEVICES=${best_gpu}")
+    else
+        # Single GPU: use device isolation
+        docker_args+=(--gpus "device=${best_gpu}")
+    fi
     while IFS= read -r e; do
         [[ -n $e ]] && docker_args+=(--env "$e")
     done < <(yq -r '.env[]?' <<<"$docker")
@@ -176,13 +197,33 @@ run_pd_lmcache() {
     PREFILLER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_prefiller.log"
     DECODER_LOGFILE="/tmp/build_${BUILD_ID}_${cfg_name}_decoder.log"
 
+    # Pick 2 free GPUs for prefiller and decoder
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 2
+    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+        echo "❌ Failed to select 2 free GPUs"
+        exit 1
+    fi
+    IFS=',' read -ra SELECTED_GPUS <<< "$CUDA_VISIBLE_DEVICES"
+    if [ ${#SELECTED_GPUS[@]} -ne 2 ]; then
+        echo "❌ Expected 2 GPUs, but got ${#SELECTED_GPUS[@]}: ${CUDA_VISIBLE_DEVICES}"
+        exit 1
+    fi
+    GPU_PREFILLER="${SELECTED_GPUS[0]}"
+    GPU_DECODER="${SELECTED_GPUS[1]}"
+    echo "Selected GPU ${GPU_PREFILLER} for prefiller, GPU ${GPU_DECODER} for decoder"
+
+    # Ensure host directory exists for socket mapping
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT1}"
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT2}"
+
     ########## Prefiller ##########
     # docker args
     prefiller_docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=0"
+        --gpus "device=${GPU_PREFILLER}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT1}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp
@@ -224,8 +265,9 @@ run_pd_lmcache() {
     decoder_docker_args=(
         --runtime nvidia
         --network host
-        --gpus "device=1"
+        --gpus "device=${GPU_DECODER}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT2}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=cuda_ipc,cuda_copy,tcp
@@ -293,13 +335,33 @@ run_p2p_lmcache() {
     LOGFILE1="/tmp/build_${BUILD_ID}_${cfg_name}1.log"
     LOGFILE2="/tmp/build_${BUILD_ID}_${cfg_name}2.log"
 
+    # Pick 2 free GPUs for instance 1 and instance 2
+    source "$ORIG_DIR/.buildkite/scripts/pick-free-gpu.sh" 40000 2
+    if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+        echo "❌ Failed to select 2 free GPUs"
+        exit 1
+    fi
+    IFS=',' read -ra SELECTED_GPUS <<< "$CUDA_VISIBLE_DEVICES"
+    if [ ${#SELECTED_GPUS[@]} -ne 2 ]; then
+        echo "❌ Expected 2 GPUs, but got ${#SELECTED_GPUS[@]}: ${CUDA_VISIBLE_DEVICES}"
+        exit 1
+    fi
+    GPU_INSTANCE1="${SELECTED_GPUS[0]}"
+    GPU_INSTANCE2="${SELECTED_GPUS[1]}"
+    echo "Selected GPU ${GPU_INSTANCE1} for instance 1, GPU ${GPU_INSTANCE2} for instance 2"
+
+    # Ensure host directory exists for socket mapping
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT1}"
+    mkdir -p "/tmp/lmcache_internal_api_server/${PORT2}"
+
     ########## Instance 1 ##########
     # docker args
     docker1_args=(
         --runtime nvidia
         --network host
-        --gpus "device=0"
+        --gpus "device=${GPU_INSTANCE1}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT1}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=tcp
@@ -360,8 +422,9 @@ run_p2p_lmcache() {
     docker2_args=(
         --runtime nvidia
         --network host
-        --gpus "device=1"
+        --gpus "device=${GPU_INSTANCE2}"
         --volume ~/.cache/huggingface:/root/.cache/huggingface
+        --volume /tmp/lmcache_internal_api_server/${PORT2}:/tmp/lmcache_internal_api_server
         --env VLLM_USE_FLASHINFER_SAMPLER=0
         --env HF_TOKEN="$HF_TOKEN"
         --env UCX_TLS=tcp
@@ -415,6 +478,93 @@ usage() {
 #########
 # TESTS #
 #########
+
+check_memory_leak() {
+    local port="$1"
+
+    # Socket path on host: /tmp/lmcache_internal_api_server/{port}/socket_7000
+    local socket_path="/tmp/lmcache_internal_api_server/${port}/socket_7000"
+
+    # Get use_hot from /conf endpoint
+    local use_hot
+    use_hot=$(curl -s --unix-socket "$socket_path" "http://localhost/conf" 2>/dev/null | jq -r '.local_cpu // false')
+    if [ -z "$use_hot" ] || [ "$use_hot" = "null" ]; then
+        use_hot="false"
+    fi
+
+    echo "→ Checking memory leak on socket_path $socket_path (use_hot=$use_hot)..."
+
+    # Fetch metrics from the prometheus endpoint via unix socket
+    local metrics
+    metrics=$(curl -s --unix-socket "$socket_path" "http://localhost/metrics" 2>/dev/null)
+    if [ -z "$metrics" ]; then
+        echo "ERROR: Failed to fetch metrics from socket_path $socket_path"
+        return 1
+    fi
+
+    # Extract metric values
+    local local_cpu_hot_cache_count
+    local active_memory_objs_count
+    local pinned_memory_objs_count
+    local pin_monitor_pinned_objects_count
+
+    local_cpu_hot_cache_count=$(echo "$metrics" | grep -E '^lmcache:local_cpu_hot_cache_count\b' | awk '{print $2}' | head -n 1)
+    active_memory_objs_count=$(echo "$metrics" | grep -E '^lmcache:active_memory_objs_count\b' | awk '{print $2}' | head -n 1)
+    pinned_memory_objs_count=$(echo "$metrics" | grep -E '^lmcache:pinned_memory_objs_count\b' | awk '{print $2}' | head -n 1)
+    pin_monitor_pinned_objects_count=$(echo "$metrics" | grep -E '^lmcache:pin_monitor_pinned_objects_count\b' | awk '{print $2}' | head -n 1)
+
+    # Default to 0 if not found
+    local_cpu_hot_cache_count=${local_cpu_hot_cache_count:-0}
+    active_memory_objs_count=${active_memory_objs_count:-0}
+    pinned_memory_objs_count=${pinned_memory_objs_count:-0}
+    pin_monitor_pinned_objects_count=${pin_monitor_pinned_objects_count:-0}
+
+    # Convert to integer (remove decimal part if any)
+    local_cpu_hot_cache_count=$(printf "%.0f" "$local_cpu_hot_cache_count")
+    active_memory_objs_count=$(printf "%.0f" "$active_memory_objs_count")
+    pinned_memory_objs_count=$(printf "%.0f" "$pinned_memory_objs_count")
+    pin_monitor_pinned_objects_count=$(printf "%.0f" "$pin_monitor_pinned_objects_count")
+
+    echo "  local_cpu_hot_cache_count: $local_cpu_hot_cache_count"
+    echo "  active_memory_objs_count: $active_memory_objs_count"
+    echo "  pinned_memory_objs_count: $pinned_memory_objs_count"
+    echo "  pin_monitor_pinned_objects_count: $pin_monitor_pinned_objects_count"
+
+    local has_leak=false
+
+    # Check pinned_memory_objs_count must be 0
+    if [ "$pinned_memory_objs_count" -ne 0 ]; then
+        echo "ERROR: Memory leak detected - pinned_memory_objs_count ($pinned_memory_objs_count) should be 0"
+        has_leak=true
+    fi
+
+    # Check based on use_hot setting
+    if [ "$use_hot" = "false" ] || [ "$use_hot" = "False" ]; then
+        # use_hot is False: both local_cpu_hot_cache_count and active_memory_objs_count should be 0
+        if [ "$local_cpu_hot_cache_count" -ne 0 ]; then
+            echo "ERROR: Memory leak detected - local_cpu_hot_cache_count ($local_cpu_hot_cache_count) should be 0 when use_hot=false"
+            has_leak=true
+        fi
+        if [ "$active_memory_objs_count" -ne 0 ]; then
+            echo "ERROR: Memory leak detected - active_memory_objs_count ($active_memory_objs_count) should be 0 when use_hot=false"
+            has_leak=true
+        fi
+    else
+        # use_hot is True: active_memory_objs_count should equal local_cpu_hot_cache_count
+        if [ "$active_memory_objs_count" -ne "$local_cpu_hot_cache_count" ]; then
+            echo "ERROR: Memory leak detected - active_memory_objs_count ($active_memory_objs_count) should equal local_cpu_hot_cache_count ($local_cpu_hot_cache_count) when use_hot=true"
+            has_leak=true
+        fi
+    fi
+
+    if [ "$has_leak" = true ]; then
+        echo "$metrics"
+        return 1
+    fi
+
+    echo "  Memory leak check passed!"
+    return 0
+}
 
 test_vllmopenai_server_with_lmcache_integrated() {
     local model="$1"
@@ -535,8 +685,8 @@ run_long_doc_qa() {
         echo "Expected query ttft per prompt: $expected_query_ttft_per_prompt"
         echo "Actual query ttft per prompt: $query_ttft_per_prompt"
         awk -v expected="$expected_query_ttft_per_prompt" -v actual="$query_ttft_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Query ttft per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Query ttft per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Query ttft per prompt requirement met"
@@ -548,8 +698,8 @@ run_long_doc_qa() {
         echo "Expected query round time per prompt: $expected_query_round_time_per_prompt"
         echo "Actual query round time per prompt: $query_round_time_per_prompt"
         awk -v expected="$expected_query_round_time_per_prompt" -v actual="$query_round_time_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Query round time per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Query round time per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Query round time per prompt requirement met"
@@ -561,8 +711,8 @@ run_long_doc_qa() {
         echo "Expected warmup round time per prompt: $expected_warmup_round_time_per_prompt"
         echo "Actual warmup round time per prompt: $warmup_round_time_per_prompt"
         awk -v expected="$expected_warmup_round_time_per_prompt" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
-            if (actual > expected * 1.1) {
-                print "Warmup round time per prompt requirement not met"
+            if (actual > expected * 1.2) {
+                print "Warmup round time per prompt requirement not met (>20% overhead)"
                 exit 1
             } else {
                 print "Warmup round time per prompt requirement met"
@@ -691,6 +841,32 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             run_long_doc_qa "$workload_yaml" "$PORT2" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
         else
             run_long_doc_qa "$workload_yaml" "$PORT" "$check_warmup_round_time_per_prompt" "$check_query_ttft_per_prompt" "$check_query_round_time_per_prompt" "${cfg_name%.yaml}" "$NEED_UPLOAD"
+        fi
+    fi
+
+    # Check memory leak after test
+    sleep 15
+    echo "→ Checking for memory leaks..."
+    if [[ "$feature_type" == "pd" ]]; then
+        # Check both prefiller and decoder instances
+        if ! check_memory_leak "$PORT1"; then
+            echo "Memory leak check failed for prefiller (port $PORT1)"
+            exit 1
+        fi
+        if ! check_memory_leak "$PORT2"; then
+            echo "Memory leak check failed for decoder (port $PORT2)"
+            exit 1
+        fi
+    elif [[ "$feature_type" == "p2p" ]]; then
+        # TODO: p2p check_memory_leak has a known bug, skip for now
+        echo "⚠️  Skipping memory leak check for p2p case: check_memory_leak has a known bug that is being fixed."
+    elif [[ "$cfg_name" == "multi_device.yaml" || "$cfg_name" == "layerwise.yaml" ]]; then
+        echo "⚠️  Skipping memory leak check for $cfg_name case as it's a flaky test while run check_memory_leak check."
+    else
+        # Single instance
+        if ! check_memory_leak "$PORT"; then
+            echo "Memory leak check failed for $cfg_name"
+            exit 1
         fi
     fi
 

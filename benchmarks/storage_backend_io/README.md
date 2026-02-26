@@ -26,42 +26,73 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 
 - If `--raw-device` is not provided, the benchmark creates `raw_block.bin` in the same `--local-disk-dir` so both backends use the same filesystem.
 - This is safe but **not** representative of true raw block performance.
+- If `--raw-device` points to a real block device (`/dev/...`), the benchmark does not call `truncate()` on that path.
 - `--raw-odirect` should only be used with a real block device that supports O_DIRECT.
+- When `--local-disk-odirect` is enabled, the benchmark allocates **page-aligned** buffers to avoid EINVAL from O_DIRECT.
 - Local disk backend uses its internal worker pool; completion is tracked via callbacks.
+- Rust raw block benchmark uses a unique manifest path per run to avoid stale-index reuse between runs.
 
-## Sample Results (2026-02-02)
+## How To Compare On Real NVMe
 
-Run parameters:
-- num_ops: 512
-- concurrency: 32
-- local disk dir: `/tmp/lmcache_local_disk_bench`
-- raw device: temp file (no `--raw-device` provided)
-- O_DIRECT: disabled
+Use the same physical device for both tests:
+- local_disk on an ext4 mount
+- rust_raw_block on the raw block device (unmounted)
 
-| Backend         | Elapsed (s) | Ops/sec |
-|-----------------|-------------|---------|
-| local_disk      | 0.258       | 1985.24 |
-| rust_raw_block  | 0.123       | 4167.19 |
+Example parameters:
+- `num_ops=65536`
+- `concurrency=4`
+- `--local-disk-odirect`
+- `--raw-odirect`
 
-Sanity run (output directory path):
-- num_ops: 128
-- concurrency: 16
+### 1) Run local_disk on ext4
 
-| Backend         | Elapsed (s) | Ops/sec |
-|-----------------|-------------|---------|
-| local_disk      | 0.065       | 1979.01 |
-| rust_raw_block  | 0.041       | 3106.64 |
+```bash
+# WARNING: mkfs will erase the target device.
+sudo mkfs.ext4 -F /dev/nvme1n1
+sudo mkdir -p /mnt/local_disk_mount
+sudo mount -t ext4 /dev/nvme1n1 /mnt/local_disk_mount
+sudo chown "$USER":"$USER" /mnt/local_disk_mount
 
-Same-filesystem run (raw_block.bin inside local disk dir):
-- num_ops: 512
-- concurrency: 32
+python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+  --num-ops 65536 \
+  --concurrency 4 \
+  --backend local_disk \
+  --local-disk-dir /mnt/local_disk_mount/lmcache_local_disk_bench \
+  --max-local-disk-gb 120 \
+  --local-disk-odirect \
+  --output-json /tmp/local_disk_ext4.json
+```
 
-| Backend         | Elapsed (s) | Ops/sec |
-|-----------------|-------------|---------|
-| local_disk      | 0.316       | 1622.73 |
-| rust_raw_block  | 0.096       | 5327.97 |
+### 2) Run rust_raw_block on raw device
 
-> Results are machine- and device-dependent. Use real block devices and O_DIRECT for production-grade comparison.
+```bash
+sudo umount /mnt/local_disk_mount
+
+python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+  --num-ops 65536 \
+  --concurrency 4 \
+  --backend rust_raw_block \
+  --raw-device /dev/nvme1n1 \
+  --raw-odirect \
+  --output-json /tmp/rust_raw_block_raw.json
+```
+
+### 3) Compute comparison
+
+```bash
+python - <<'PY'
+import json
+
+with open("/tmp/local_disk_ext4.json") as f:
+    local = json.load(f)[0]["ops_per_sec"]
+with open("/tmp/rust_raw_block_raw.json") as f:
+    rust = json.load(f)[0]["ops_per_sec"]
+
+print(f"local_disk ops/sec: {local:.2f}")
+print(f"rust_raw_block ops/sec: {rust:.2f}")
+print(f"rust vs local: {(rust / local - 1.0) * 100.0:+.2f}%")
+PY
+```
 
 ## Output
 
