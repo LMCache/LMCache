@@ -3,7 +3,8 @@
 Unit tests for PrometheusController.
 
 Tests cover:
-- StorageStatsListener is registered with both L1Manager and StorageManager
+- SMStatsLogger is registered with StorageManager
+- L1StatsLogger is registered with L1Manager
 - start() / stop() lifecycle (no deadlock, thread terminates)
 - _run() calls log_prometheus() on every logger each interval
 - Exceptions raised by a logger do not crash the run loop
@@ -71,13 +72,6 @@ def controller(mock_storage_manager, mock_l1_manager):
 
 
 class TestListenerRegistration:
-    def test_sm_stats_logger_registered_with_l1_manager(
-        self, controller, mock_l1_manager
-    ):
-        mock_l1_manager.register_listener.assert_called_once_with(
-            controller.sm_stats_logger
-        )
-
     def test_sm_stats_logger_registered_with_storage_manager(
         self, controller, mock_storage_manager
     ):
@@ -85,8 +79,21 @@ class TestListenerRegistration:
             controller.sm_stats_logger
         )
 
+    def test_l1_stats_logger_registered_with_l1_manager(
+        self, controller, mock_l1_manager
+    ):
+        mock_l1_manager.register_listener.assert_called_once_with(
+            controller.l1_stats_logger
+        )
+
     def test_sm_stats_logger_in_all_loggers(self, controller):
         assert controller.sm_stats_logger in controller.all_loggers
+
+    def test_l1_stats_logger_in_all_loggers(self, controller):
+        assert controller.l1_stats_logger in controller.all_loggers
+
+    def test_all_loggers_has_two_entries(self, controller):
+        assert len(controller.all_loggers) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +118,6 @@ class TestLifecycle:
         because the thread was never started (join on a non-started thread raises, so
         we verify the flag is set and the thread is not alive)."""
         controller._stop_flag.set()
-        # Thread was never started, so it is not alive
         assert not controller._thread.is_alive()
 
     def test_thread_is_daemon(self, controller):
@@ -124,7 +130,6 @@ class TestLifecycle:
         """Calling stop() twice must not raise."""
         controller.start()
         controller.stop()
-        # Second stop: flag already set, join on dead thread returns immediately
         controller.stop()
 
 
@@ -165,7 +170,6 @@ class TestPeriodicFlushing:
 
         controller.sm_stats_logger.log_prometheus = recording_log
         controller.start()
-        # Wait well under one interval (20 ms), then stop
         time.sleep(0.005)
         controller.stop()
 
@@ -191,7 +195,6 @@ class TestExceptionIsolation:
             log_interval=0.02,
         )
 
-        # Replace the real logger with one that always raises
         bad_logger = MagicMock()
         bad_logger.log_prometheus.side_effect = RuntimeError("boom")
         good_logger = MagicMock()
@@ -201,7 +204,6 @@ class TestExceptionIsolation:
         time.sleep(0.12)
         controller.stop()
 
-        # The good logger must still have been called despite the bad one raising
         assert good_logger.log_prometheus.call_count >= 3
 
     def test_bad_logger_does_not_prevent_repeated_calls(
@@ -222,7 +224,6 @@ class TestExceptionIsolation:
         time.sleep(0.12)
         controller.stop()
 
-        # The bad logger is retried each interval — it should have been called ≥ 3×
         assert bad_logger.log_prometheus.call_count >= 3
 
 
@@ -241,5 +242,4 @@ class TestStopFlag:
         controller.stop()
         elapsed = time.perf_counter() - t0
 
-        # The thread should join well within one log_interval + small margin
         assert elapsed < 0.5, f"stop() took too long: {elapsed:.3f}s"

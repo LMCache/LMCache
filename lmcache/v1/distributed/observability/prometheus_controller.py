@@ -7,11 +7,14 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.observability.logger.l1_stats_logger import (
+    L1ManagerStatsLogger,
+)
 from lmcache.v1.distributed.observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
-from lmcache.v1.distributed.observability.logger.storage_stats_logger import (
-    StorageStatsListener,
+from lmcache.v1.distributed.observability.logger.storage_manager_stats_logger import (
+    StorageManagerStatsLogger,
 )
 from lmcache.v1.distributed.storage_controller import (
     StorageControllerInterface,
@@ -36,10 +39,13 @@ class PrometheusController(StorageControllerInterface):
         self._log_interval = log_interval
         self.all_loggers: List[PrometheusLogger] = []
 
-        self.sm_stats_logger: StorageStatsListener = StorageStatsListener()
-        self.get_l1_manager().register_listener(self.sm_stats_logger)
+        self.sm_stats_logger: StorageManagerStatsLogger = StorageManagerStatsLogger()
         self.get_storage_manager().register_listener(self.sm_stats_logger)
         self.all_loggers.append(self.sm_stats_logger)
+
+        self.l1_stats_logger: L1ManagerStatsLogger = L1ManagerStatsLogger()
+        self.get_l1_manager().register_listener(self.l1_stats_logger)
+        self.all_loggers.append(self.l1_stats_logger)
 
         # TODO: adding more stats loggers, e.g., integrator logger or mp server logger
 
@@ -55,6 +61,10 @@ class PrometheusController(StorageControllerInterface):
         logger.info(
             "Starting PrometheusController (interval=%.1fs)...", self._log_interval
         )
+        all_logger_names = [
+            type(prometheus_logger).__name__ for prometheus_logger in self.all_loggers
+        ]
+        logger.info(f"Registered PrometheusLogger: {all_logger_names}.")
         self._thread.start()
 
     def stop(self):

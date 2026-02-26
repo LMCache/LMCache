@@ -7,17 +7,11 @@ import time
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.internal_api import (
-    L1ManagerListener,
-    L2ManagerListener,
-    StorageManagerListener,
-)
+from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
-from lmcache.v1.distributed.observability.stats.storage_manager_stats import (
-    StorageManagerStats,
-)
+from lmcache.v1.distributed.observability.stats.l1_stats import L1Stats
 
 _stats_lock = threading.Lock()
 
@@ -51,9 +45,7 @@ _LATENCY_BUCKETS = [
 ]
 
 
-class StorageStatsListener(
-    StorageManagerListener, L1ManagerListener, L2ManagerListener, PrometheusLogger
-):
+class L1ManagerStatsLogger(L1ManagerListener, PrometheusLogger):
     def __init__(
         self,
         labels: Optional[Dict[str, str]] = None,
@@ -63,40 +55,8 @@ class StorageStatsListener(
             labels = {}
         PrometheusLogger.__init__(self, labels=labels, config=config)
 
-        self.stats: StorageManagerStats = StorageManagerStats()
+        self.stats: L1Stats = L1Stats()
         labelnames: List[str] = list(labels.keys())
-
-        # Prometheus StorageManager-level counters
-        self._sm_read_requests_counter = self._create_counter(
-            "lmcache_mp:sm_read_requests",
-            "Total number of StorageManager read (prefetch) requests",
-            labelnames,
-        )
-        self._sm_read_hit_keys_counter = self._create_counter(
-            "lmcache_mp:sm_read_hit_keys",
-            "Total number of keys that were cache hits in SM read",
-            labelnames,
-        )
-        self._sm_read_miss_keys_counter = self._create_counter(
-            "lmcache_mp:sm_read_miss_keys",
-            "Total number of keys that were cache misses in SM read",
-            labelnames,
-        )
-        self._sm_write_requests_counter = self._create_counter(
-            "lmcache_mp:sm_write_requests",
-            "Total number of StorageManager write (reserve) requests",
-            labelnames,
-        )
-        self._sm_write_success_keys_counter = self._create_counter(
-            "lmcache_mp:sm_write_success_keys",
-            "Total number of keys successfully allocated for write in SM",
-            labelnames,
-        )
-        self._sm_write_failed_keys_counter = self._create_counter(
-            "lmcache_mp:sm_write_failed_keys",
-            "Total number of keys that failed allocation for write in SM",
-            labelnames,
-        )
 
         # Prometheus L1-level counters
         self._l1_read_keys_counter = self._create_counter(
@@ -135,42 +95,6 @@ class StorageStatsListener(
         self._l1_write_start_times: Deque[float] = deque()
 
     @stats_safe
-    def on_sm_read_prefetched(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        self.stats.interval_sm_read_requests += 1
-        self.stats.interval_sm_read_hit_keys += len(succeeded_keys)
-        self.stats.interval_sm_read_miss_keys += len(failed_keys)
-
-    @stats_safe
-    def on_sm_read_prefetched_finished(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        pass
-
-    @stats_safe
-    def on_sm_reserved_write(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        self.stats.interval_sm_write_requests += 1
-        self.stats.interval_sm_write_success_keys += len(succeeded_keys)
-        self.stats.interval_sm_write_failed_keys += len(failed_keys)
-
-    @stats_safe
-    def on_sm_write_finished(
-        self,
-        succeeded_keys: list[ObjectKey],
-        failed_keys: list[ObjectKey],
-    ):
-        pass
-
-    @stats_safe
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]):
         self._l1_read_start_times.append(time.perf_counter())
         self.stats.interval_l1_read_keys += len(keys)
@@ -198,36 +122,11 @@ class StorageStatsListener(
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         self.stats.interval_l1_evicted_keys += len(keys)
 
-    # L2ManagerListener callbacks
-    def on_l2_lookup_and_lock(self):
-        # No-op: L2 metrics will be added when L2 is finalized
-        pass
-
     def log_prometheus(self) -> None:
         """Log accumulated stats to Prometheus and reset internal counters."""
         with _stats_lock:
             stats = self.stats
-            self.stats = StorageManagerStats()
-
-        # StorageManager counters
-        self._log_counter(
-            self._sm_read_requests_counter, stats.interval_sm_read_requests
-        )
-        self._log_counter(
-            self._sm_read_hit_keys_counter, stats.interval_sm_read_hit_keys
-        )
-        self._log_counter(
-            self._sm_read_miss_keys_counter, stats.interval_sm_read_miss_keys
-        )
-        self._log_counter(
-            self._sm_write_requests_counter, stats.interval_sm_write_requests
-        )
-        self._log_counter(
-            self._sm_write_success_keys_counter, stats.interval_sm_write_success_keys
-        )
-        self._log_counter(
-            self._sm_write_failed_keys_counter, stats.interval_sm_write_failed_keys
-        )
+            self.stats = L1Stats()
 
         # L1 counters
         self._log_counter(self._l1_read_keys_counter, stats.interval_l1_read_keys)
