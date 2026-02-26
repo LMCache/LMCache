@@ -845,7 +845,7 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
     fi
 
     # Check memory leak after test
-    sleep 15
+    sleep 30
     echo "→ Checking for memory leaks..."
     if [[ "$feature_type" == "pd" ]]; then
         # Check both prefiller and decoder instances
@@ -858,8 +858,15 @@ for cfg_name in "${CONFIG_NAMES[@]}"; do
             exit 1
         fi
     elif [[ "$feature_type" == "p2p" ]]; then
-        # TODO: p2p check_memory_leak has a known bug, skip for now
-        echo "⚠️  Skipping memory leak check for p2p case: check_memory_leak has a known bug that is being fixed."
+        # Check both p2p instances
+        if ! check_memory_leak "$PORT1"; then
+            echo "Memory leak check failed for p2p instance 1 (port $PORT1)"
+            exit 1
+        fi
+        if ! check_memory_leak "$PORT2"; then
+            echo "Memory leak check failed for p2p instance 2 (port $PORT2)"
+            exit 1
+        fi
     elif [[ "$cfg_name" == "multi_device.yaml" || "$cfg_name" == "layerwise.yaml" ]]; then
         echo "⚠️  Skipping memory leak check for $cfg_name case as it's a flaky test while run check_memory_leak check."
     else
