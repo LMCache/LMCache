@@ -44,7 +44,6 @@ class TTLLock:
     def reset(self) -> None:
         """Reset the lock to initial state (counter = 0, TTL expired)."""
         ...
-        
 
 class Bitmap:
     """
@@ -101,8 +100,7 @@ class Bitmap:
     def __repr__(self) -> str:
         """String representation: '1' for set bits, '0' for clear bits."""
         ...
-        
-        
+
 class ParallelPatternMatcher:
     """
     Pattern matcher for integer vectors.

@@ -47,7 +47,7 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Bitwise AND operation between two bitmaps.")
       .def("__repr__", &Bitmap::to_string,
            "Convert the bitmap to a string representation.");
-  
+
   py::class_<ParallelPatternMatcher>(m, "ParallelPatternMatcher")
       .def(py::init<const std::vector<int>&>(), py::arg("pattern"),
            "Construct a ParallelPatternMatcher with the specified pattern.")
