@@ -90,6 +90,7 @@ class NixlStorageConfig:
     enable_async_put: bool
     use_direct_io: bool
 <<<<<<< HEAD
+<<<<<<< HEAD
     path: str
     use_hugepages: bool
     enable_prog_thread: bool
@@ -97,6 +98,9 @@ class NixlStorageConfig:
 =======
     path: Union[str, List[str]] 
 >>>>>>> 3f608db3 (Address feedback: add validate_nixl_path helper function and update NixlFilePool path handling)
+=======
+    path: Union[str, List[str]]
+>>>>>>> d90e8f32 (Addresses PR feedback for documentation, unit tests, and formatting)
     path_sharding: str
 
     @staticmethod
@@ -112,14 +116,15 @@ class NixlStorageConfig:
     @staticmethod
     def validate_nixl_path(path: Union[str, List[str]], path_sharding: str) -> str:
         assert path is not None, "nixl_path cannot be None"
-        assert path_sharding == "by_gpu", "Unsupported path_sharding. Only 'by_gpu' is supported currently."
-    
+        assert path_sharding == "by_gpu", (
+            "Unsupported path_sharding. Only 'by_gpu' is supported currently."
+        )
+
         paths = [path] if isinstance(path, str) else path
         assert len(paths) > 0, "nixl_path cannot be an empty list."
-        
+
         device_id = torch.cuda.current_device()
         return paths[device_id % len(paths)]
-        
 
     @staticmethod
     def from_cache_engine_config(
@@ -275,7 +280,13 @@ class NixlDescPool(ABC):
 
 
 class NixlFilePool(NixlDescPool):
-    def __init__(self, size: int, path: Union[str, List[str]], use_direct_io: bool, path_sharding: str):
+    def __init__(
+        self,
+        size: int,
+        path: Union[str, List[str]],
+        use_direct_io: bool,
+        path_sharding: str,
+    ):
         super().__init__(size)
         self.fds: List[int] = []
 
@@ -292,7 +303,7 @@ class NixlFilePool(NixlDescPool):
                     "this system. Falling back to buffered I/O."
                 )
         base_path = NixlStorageConfig.validate_nixl_path(path, path_sharding)
-        
+
         for i in reversed(range(size)):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
             tmp_path = os.path.join(base_path, filename)
@@ -916,7 +927,13 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         )
 
     @staticmethod
-    def createPool(backend: str, size: int, path: str, use_direct_io: bool, path_sharding: str):
+    def createPool(
+        backend: str,
+        size: int,
+        path: Union[str, List[str]],
+        use_direct_io: bool,
+        path_sharding: str,
+    ):
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
             return NixlFilePool(size, path, use_direct_io, path_sharding)
         elif backend in ("OBJ", "AZURE_BLOB"):
