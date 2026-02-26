@@ -3,10 +3,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "ttl_lock.h"
+#include "bitmap.h"
 #include "utils.h"
 
 namespace py = pybind11;
 
+using lmcache::storage_manager::Bitmap;
 using lmcache::storage_manager::TTLLock;
 using lmcache::utils::ParallelPatternMatcher;
 
@@ -26,6 +28,25 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Check if the lock is held (counter > 0 and TTL not expired).")
       .def("reset", &TTLLock::reset,
            "Reset the lock to initial state (counter = 0, TTL expired).");
+
+  py::class_<Bitmap>(m, "Bitmap")
+      .def(py::init<size_t>(), py::arg("size"),
+           "Construct a Bitmap with the specified size.")
+      .def("set", &Bitmap::set, py::arg("index"),
+           "Set the bit at the specified index to 1.")
+      .def("clear", &Bitmap::clear, py::arg("index"),
+           "Clear the bit at the specified index to 0.")
+      .def("test", &Bitmap::test, py::arg("index"),
+           "Test the bit at the specified index.")
+      .def("popcount", &Bitmap::popcount, "Count the number of bits set to 1.")
+      .def("count_leading_zeros", &Bitmap::clz,
+           "Count the number of leading zeros.")
+      .def("count_leading_ones", &Bitmap::clo,
+           "Count the number of leading ones.")
+      .def("__and__", &Bitmap::operator&, py::arg("other"),
+           "Bitwise AND operation between two bitmaps.")
+      .def("__repr__", &Bitmap::to_string,
+           "Convert the bitmap to a string representation.");
 
   py::class_<ParallelPatternMatcher>(m, "ParallelPatternMatcher")
       .def(py::init<const std::vector<int>&>(), py::arg("pattern"),
