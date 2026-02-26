@@ -52,7 +52,7 @@ SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
 DEFAULT_TIMEOUT = 10.0
-
+SUPPORT_PARTIAL_CHUNK = False
 
 # =============================================================================
 # Helper Functions and Classes
@@ -229,6 +229,13 @@ def create_token_ids_with_sep_tokens(token_ids: list[int]) -> tuple[int, ...]:
     len_ed = len(ed_pattern)
     result = st_pattern + token_ids[len_st : len(token_ids) - len_ed] + ed_pattern
     return tuple(result)
+
+
+def calculate_expected_hit_count(document_length: int, chunk_size: int = 256):
+    if SUPPORT_PARTIAL_CHUNK:
+        return document_length
+    else:
+        return (document_length // chunk_size) * chunk_size
 
 
 # =============================================================================
@@ -700,7 +707,9 @@ def test_cb_lookup_after_store_single_paragraph(
     Expected: Returns ranges matching the stored data.
     """
     paragraph_size = 1000
-    expected_hit_count_per_paragraph = paragraph_size
+    expected_hit_count_per_paragraph = calculate_expected_hit_count(
+        paragraph_size, chunk_size=CHUNK_SIZE
+    )
 
     # Store one paragraph
     token_ids = create_token_ids_with_sep_tokens(list(range(100, 100 + paragraph_size)))
@@ -754,7 +763,9 @@ def test_cb_lookup_after_store_multiple_paragraphs(
     """
     num_paragraphs = 3
     paragraph_size = 800
-    expected_hit_count_per_paragraph = paragraph_size
+    expected_hit_count_per_paragraph = calculate_expected_hit_count(
+        paragraph_size, chunk_size=CHUNK_SIZE
+    )
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
@@ -835,7 +846,9 @@ def test_cb_lookup_partial_match(
     """
     # Store tokens [A, B, C]
     paragraph_size = 300
-    expected_hit_count_per_paragraph = paragraph_size
+    expected_hit_count_per_paragraph = calculate_expected_hit_count(
+        paragraph_size, chunk_size=CHUNK_SIZE
+    )
     num_paragraphs = 3
     event = torch.cuda.Event(interprocess=True)
     event.record()
@@ -992,7 +1005,9 @@ def test_cb_retrieve_after_store_and_lookup(
     Expected: Returns (event_handle, True) and data is copied to CB buffer.
     """
     paragraph_size = 600
-    expected_hit_count_per_paragraph = paragraph_size
+    expected_hit_count_per_paragraph = calculate_expected_hit_count(
+        paragraph_size, chunk_size=CHUNK_SIZE
+    )
     # Store pre-computed chunks
     token_ids = create_token_ids_with_sep_tokens(list(range(200, 200 + paragraph_size)))
     key = create_cb_cache_key(token_ids, request_id="retrieve-test")
@@ -1055,7 +1070,9 @@ def test_cb_retrieve_verify_data_correctness(
     Test: Store known data, retrieve to different offset, verify correctness.
     """
     paragraph_size = 600
-    expected_hit_count_per_paragraph = paragraph_size
+    expected_hit_count_per_paragraph = calculate_expected_hit_count(
+        paragraph_size, chunk_size=CHUNK_SIZE
+    )
 
     # Set known values in the source region
     source_offset = 0
@@ -1265,7 +1282,9 @@ def test_cb_store_final_then_normal_lookup_retrieve(
     source_value = 0.125
     cb_client_context.set_tensor_slice(0, paragraph_size, source_value)
 
-    expected_hit_count_per_paragraph = paragraph_size // CHUNK_SIZE * CHUNK_SIZE
+    expected_hit_count_per_paragraph = calculate_expected_hit_count(
+        paragraph_size, chunk_size=CHUNK_SIZE
+    )
     expected_hit_chunks = expected_hit_count_per_paragraph // CHUNK_SIZE
     token_ids = create_token_ids_with_sep_tokens(list(range(500, 500 + paragraph_size)))
     cb_key = create_cb_cache_key(token_ids, request_id="final-lookup-test")
