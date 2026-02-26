@@ -2,7 +2,6 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
@@ -35,87 +34,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-
-
-class OperationTimeoutError(Exception):
-    """Exception raised when operations timeout."""
-
-    pass
-
-
-class OperationHangThresholdReached(Exception):
-    """Exception raised when operations hang threshold is reached."""
-
-    pass
-
-
-class OperationManager:
-    def __init__(
-        self,
-        num_threads: int = 4,
-        hang_threshold: int = 10,
-        reset_file: str = "/tmp/lmcache_operation_manager_reset",
-    ):
-        self.timeout_pool = ThreadPoolExecutor(
-            max_workers=num_threads, thread_name_prefix="fs-timeout"
-        )
-        self._failure_count = 0
-        self._failure_lock = threading.Lock()
-        self._hang_threshold = hang_threshold
-        self._reset_file = reset_file
-
-    def run_with_timeout(
-        self,
-        func: Callable[[], Any],
-        timeout_seconds: float,
-        label: str = "default_label",
-        metadata: Any = None,
-    ) -> Any:
-        if self._failure_count >= self._hang_threshold:
-            if os.path.exists(self._reset_file):
-                os.remove(self._reset_file)
-                self.reset_failure_count()
-                logger.info(
-                    f"Resetting operation manager failure count due to reset file "
-                    f"{self._reset_file}"
-                )
-            else:
-                raise OperationHangThresholdReached(
-                    f"Operation hang threshold reached. Will not run operation "
-                    f"'{label}'",
-                    metadata,
-                )
-        future = self.timeout_pool.submit(func)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except ConcurrentTimeoutError as err:
-            count = self.increment_failure_count()
-            raise OperationTimeoutError(
-                f"Operation '{label}' timed out after {timeout_seconds} seconds",
-                metadata,
-                count,
-            ) from err
-
-    def shutdown(self):
-        self.timeout_pool.shutdown(wait=True)
-
-    def increment_failure_count(self) -> int:
-        with self._failure_lock:
-            self._failure_count += 1
-            return self._failure_count
-
-    def get_failure_count(self) -> int:
-        """Get the current count of timed-out operations."""
-        with self._failure_lock:
-            return self._failure_count
-
-    def reset_failure_count(self) -> int:
-        """Reset the timeout counter and return the previous count."""
-        with self._failure_lock:
-            old_count = self._failure_count
-            self._failure_count = 0
-            return old_count
-
+from lmcache.v1.utils.run_with_timeout import OperationManager, OperationTimeoutError
 
 logger = init_logger(__name__)
 
@@ -249,6 +168,45 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     return bool_value
 
 
+def get_timeout_value(
+    key: str, config: LMCacheEngineConfig, default: float
+) -> float:
+    """
+    Get timeout value from environment variable or config, with environment
+    taking priority.
+    
+    Args:
+        key: The config key name (e.g., "timeout_contains")
+        config: The LMCache engine config
+        default: Default value if not found in env or config
+        
+    Returns:
+        The timeout value in seconds as a float
+    """
+    # Check environment variable first (priority)
+    env_name = f"LMCACHE_{key.upper()}"
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        try:
+            timeout = float(env_value)
+            logger.info(f"Using {key} = {timeout} from environment variable {env_name}")
+            return timeout
+        except ValueError:
+            logger.warning(
+                f"Invalid value '{env_value}' for {env_name}, falling back to config/default"
+            )
+    
+    # Fall back to config
+    if config.extra_config is not None:
+        timeout = config.extra_config.get(key, default)
+        if timeout != default:
+            logger.info(f"Using {key} = {timeout} from config")
+            return float(timeout)
+    
+    logger.info(f"Using {key} = {default} (default)")
+    return default
+
+
 class GdsBackend(AllocatorBackendInterface):
     """
     Originally based on the open sourced WekaGdsBackend, this is a backend that
@@ -324,14 +282,14 @@ class GdsBackend(AllocatorBackendInterface):
                 max_workers=thread_count, thread_name_prefix="weka-gds-io"
             )
 
+        # TODO allow control from env
         self.op_manager = OperationManager(
             config.extra_config.get("operation_manager_threads", 4),
-            config.extra_config.get("operation_hang_threshold", 10),
         )
-        self.timeout_contains = config.extra_config.get("timeout_contains", 1.0)
-        self.timeout_get_blocking = config.extra_config.get("timeout_get_blocking", 5.0)
-        self.timeout_batched_get_blocking = config.extra_config.get(
-            "timeout_batched_get_blocking", 5.0
+        self.timeout_contains = get_timeout_value("timeout_contains", config, 10.0)
+        self.timeout_get_blocking = get_timeout_value("timeout_get_blocking", config, 10.0)
+        self.timeout_batched_get_blocking = get_timeout_value(
+            "timeout_batched_get_blocking", config, 10.0
         )
 
         if self.use_cufile:
@@ -351,6 +309,7 @@ class GdsBackend(AllocatorBackendInterface):
 
         self.use_direct_io = False
 
+        # TODO allow control from env
         self.max_alloc_attempts = config.extra_config.get("max_alloc_attempts", 10)
         self.alloc_attempt_delay_secs = config.extra_config.get(
             "allocation_attempt_delay_secs", 0.1
@@ -750,12 +709,6 @@ class GdsBackend(AllocatorBackendInterface):
                 "get_blocking",
                 key,
             )
-        except OperationHangThresholdReached:
-            logger.error(
-                "Get blocking hang threshold reached. Will not run operation",
-                exc_info=True,
-            )
-            return None
         except OperationTimeoutError:
             logger.error(
                 f"Get blocking timed out after {self.timeout_get_blocking} seconds",
@@ -863,12 +816,6 @@ class GdsBackend(AllocatorBackendInterface):
                     "batched_get_blocking",
                     len(keys),
                 )
-            except OperationHangThresholdReached:
-                logger.error(
-                    "Batched get blocking hang threshold reached. Halting operation",
-                    exc_info=True,
-                )
-                return [None] * len(keys)
             except OperationTimeoutError:
                 logger.error(
                     f"Batched get blocking timed out after "
@@ -1231,12 +1178,6 @@ class GdsBackend(AllocatorBackendInterface):
             )
             if read_from_disk:
                 return True
-        except OperationHangThresholdReached:
-            logger.error(
-                "Contains hang threshold reached. Will not run operation",
-                exc_info=True,
-            )
-            return False
         except OperationTimeoutError:
             logger.error(
                 f"Contains timed out after {self.timeout_contains} seconds",
