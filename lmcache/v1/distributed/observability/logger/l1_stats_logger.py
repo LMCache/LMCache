@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import threading
-import time
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -59,64 +57,39 @@ class L1ManagerStatsLogger(L1ManagerListener, PrometheusLogger):
         labelnames: List[str] = list(labels.keys())
 
         # Prometheus L1-level counters
-        self._l1_read_keys_counter = self._create_counter(
+        self._l1_read_keys_counter = self.create_counter(
             "lmcache_mp:l1_read_keys",
             "Total number of keys reserved for read on L1",
             labelnames,
         )
-        self._l1_write_keys_counter = self._create_counter(
+        self._l1_write_keys_counter = self.create_counter(
             "lmcache_mp:l1_write_keys",
             "Total number of keys reserved for write on L1",
             labelnames,
         )
-        self._l1_evicted_keys_counter = self._create_counter(
+        self._l1_evicted_keys_counter = self.create_counter(
             "lmcache_mp:l1_evicted_keys",
             "Total number of keys evicted from L1 by the manager",
             labelnames,
         )
 
-        # Prometheus L1-level histograms
-        self._l1_read_latency_histogram = self._create_histogram(
-            "lmcache_mp:l1_read_latency",
-            "L1 cache read latency in seconds",
-            labelnames,
-            buckets=_LATENCY_BUCKETS,
-        )
-        self._l1_write_latency_histogram = self._create_histogram(
-            "lmcache_mp:l1_write_latency",
-            "L1 cache write latency in seconds",
-            labelnames,
-            buckets=_LATENCY_BUCKETS,
-        )
-
-        # Per-batch start timestamps for L1 latency tracking (FIFO, O(1) per call)
-        # This is safe only because L1Manager serializes all callbacks under its lock
-        self._l1_read_start_times: Deque[float] = deque()
-        self._l1_write_start_times: Deque[float] = deque()
-
     @stats_safe
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]):
-        self._l1_read_start_times.append(time.perf_counter())
-        self.stats.interval_l1_read_keys += len(keys)
+        # No ops. Record read count once it is actually finished.
+        pass
 
     @stats_safe
     def on_l1_keys_read_finished(self, keys: list[ObjectKey]):
-        if self._l1_read_start_times:
-            self.stats.l1_read_latency.append(
-                time.perf_counter() - self._l1_read_start_times.popleft()
-            )
+        self.stats.interval_l1_read_keys += len(keys)
 
     @stats_safe
     def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
-        self._l1_write_start_times.append(time.perf_counter())
-        self.stats.interval_l1_write_keys += len(keys)
+        # No ops. Record write counts once it is actually finished.
+        pass
 
     @stats_safe
     def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
-        if self._l1_write_start_times:
-            self.stats.l1_write_latency.append(
-                time.perf_counter() - self._l1_write_start_times.popleft()
-            )
+        self.stats.interval_l1_write_keys += len(keys)
 
     @stats_safe
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
@@ -129,10 +102,6 @@ class L1ManagerStatsLogger(L1ManagerListener, PrometheusLogger):
             self.stats = L1Stats()
 
         # L1 counters
-        self._log_counter(self._l1_read_keys_counter, stats.interval_l1_read_keys)
-        self._log_counter(self._l1_write_keys_counter, stats.interval_l1_write_keys)
-        self._log_counter(self._l1_evicted_keys_counter, stats.interval_l1_evicted_keys)
-
-        # L1 histograms
-        self._log_histogram(self._l1_read_latency_histogram, stats.l1_read_latency)
-        self._log_histogram(self._l1_write_latency_histogram, stats.l1_write_latency)
+        self.log_counter(self._l1_read_keys_counter, stats.interval_l1_read_keys)
+        self.log_counter(self._l1_write_keys_counter, stats.interval_l1_write_keys)
+        self.log_counter(self._l1_evicted_keys_counter, stats.interval_l1_evicted_keys)

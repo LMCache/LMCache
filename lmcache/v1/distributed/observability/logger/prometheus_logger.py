@@ -33,8 +33,24 @@ class PrometheusLogger(ABC):
         self.config = config
         self._counters: List[prometheus_client.Counter] = []
         self._histograms: List[prometheus_client.Histogram] = []
+        self._gauges: List[prometheus_client.Gauge] = []
 
-    def _create_counter(
+    def create_gauge(
+        self,
+        name: str,
+        documentation: str,
+        labelnames: List[str],
+    ) -> prometheus_client.Gauge:
+        """Create a Gauge and register it for unregister()."""
+        gauge = self._gauge_cls(
+            name=name,
+            documentation=documentation,
+            labelnames=labelnames,
+        )
+        self._gauges.append(gauge)
+        return gauge
+
+    def create_counter(
         self,
         name: str,
         documentation: str,
@@ -49,7 +65,7 @@ class PrometheusLogger(ABC):
         self._counters.append(counter)
         return counter
 
-    def _create_histogram(
+    def create_histogram(
         self,
         name: str,
         documentation: str,
@@ -86,14 +102,14 @@ class PrometheusLogger(ABC):
         self._histograms.append(histogram)
         return histogram
 
-    def _log_gauge(self, gauge: Any, data: Union[int, float]) -> None:
+    def log_gauge(self, gauge: Any, data: Union[int, float]) -> None:
         """Set a gauge metric using the instance labels."""
         if self.labels:
             gauge.labels(**self.labels).set(data)
         else:
             gauge.set(data)
 
-    def _log_counter(self, counter: Any, data: Union[int, float]) -> None:
+    def log_counter(self, counter: Any, data: Union[int, float]) -> None:
         """Increment a counter metric; negative values are silently ignored."""
         if data < 0:
             return
@@ -102,7 +118,7 @@ class PrometheusLogger(ABC):
         else:
             counter.inc(data)
 
-    def _log_histogram(
+    def log_histogram(
         self, histogram: Any, data: Union[List[int], List[float]]
     ) -> None:
         """Observe a list of values on a histogram metric."""
@@ -136,7 +152,7 @@ class PrometheusLogger(ABC):
         Called on shutdown so that re-instantiation (e.g. in tests) does not
         raise ``ValueError: Duplicated timeseries in CollectorRegistry``.
         """
-        for metric in (*self._counters, *self._histograms):
+        for metric in (*self._counters, *self._histograms, *self._gauges):
             try:
                 prometheus_client.REGISTRY.unregister(metric)
             except Exception:

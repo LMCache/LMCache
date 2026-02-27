@@ -38,32 +38,32 @@ class StorageManagerStatsLogger(StorageManagerListener, PrometheusLogger):
         labelnames: List[str] = list(labels.keys())
 
         # Prometheus StorageManager-level counters
-        self._sm_read_requests_counter = self._create_counter(
+        self._sm_read_requests_counter = self.create_counter(
             "lmcache_mp:sm_read_requests",
             "Total number of StorageManager read (prefetch) requests",
             labelnames,
         )
-        self._sm_read_hit_keys_counter = self._create_counter(
-            "lmcache_mp:sm_read_hit_keys",
+        self._sm_read_succeed_keys_counter = self.create_counter(
+            "lmcache_mp:sm_read_succeed_keys",
             "Total number of keys that were cache hits in SM read",
             labelnames,
         )
-        self._sm_read_miss_keys_counter = self._create_counter(
-            "lmcache_mp:sm_read_miss_keys",
+        self._sm_read_failed_keys_counter = self.create_counter(
+            "lmcache_mp:sm_read_failed_keys",
             "Total number of keys that were cache misses in SM read",
             labelnames,
         )
-        self._sm_write_requests_counter = self._create_counter(
+        self._sm_write_requests_counter = self.create_counter(
             "lmcache_mp:sm_write_requests",
             "Total number of StorageManager write (reserve) requests",
             labelnames,
         )
-        self._sm_write_success_keys_counter = self._create_counter(
-            "lmcache_mp:sm_write_success_keys",
+        self._sm_write_succeed_keys_counter = self.create_counter(
+            "lmcache_mp:sm_write_succeed_keys",
             "Total number of keys successfully allocated for write in SM",
             labelnames,
         )
-        self._sm_write_failed_keys_counter = self._create_counter(
+        self._sm_write_failed_keys_counter = self.create_counter(
             "lmcache_mp:sm_write_failed_keys",
             "Total number of keys that failed allocation for write in SM",
             labelnames,
@@ -76,8 +76,8 @@ class StorageManagerStatsLogger(StorageManagerListener, PrometheusLogger):
         failed_keys: list[ObjectKey],
     ):
         self.stats.interval_sm_read_requests += 1
-        self.stats.interval_sm_read_hit_keys += len(succeeded_keys)
-        self.stats.interval_sm_read_miss_keys += len(failed_keys)
+        self.stats.interval_sm_read_succeed_keys += len(succeeded_keys)
+        self.stats.interval_sm_read_failed_keys += len(failed_keys)
 
     @stats_safe
     def on_sm_read_prefetched_finished(
@@ -94,7 +94,7 @@ class StorageManagerStatsLogger(StorageManagerListener, PrometheusLogger):
         failed_keys: list[ObjectKey],
     ):
         self.stats.interval_sm_write_requests += 1
-        self.stats.interval_sm_write_success_keys += len(succeeded_keys)
+        self.stats.interval_sm_write_succeed_keys += len(succeeded_keys)
         self.stats.interval_sm_write_failed_keys += len(failed_keys)
 
     @stats_safe
@@ -111,21 +111,21 @@ class StorageManagerStatsLogger(StorageManagerListener, PrometheusLogger):
             stats = self.stats
             self.stats = StorageManagerStats()
 
-        self._log_counter(
+        self.log_counter(
             self._sm_read_requests_counter, stats.interval_sm_read_requests
         )
-        self._log_counter(
-            self._sm_read_hit_keys_counter, stats.interval_sm_read_hit_keys
+        self.log_counter(
+            self._sm_read_succeed_keys_counter, stats.interval_sm_read_succeed_keys
         )
-        self._log_counter(
-            self._sm_read_miss_keys_counter, stats.interval_sm_read_miss_keys
+        self.log_counter(
+            self._sm_read_failed_keys_counter, stats.interval_sm_read_failed_keys
         )
-        self._log_counter(
+        self.log_counter(
             self._sm_write_requests_counter, stats.interval_sm_write_requests
         )
-        self._log_counter(
-            self._sm_write_success_keys_counter, stats.interval_sm_write_success_keys
+        self.log_counter(
+            self._sm_write_succeed_keys_counter, stats.interval_sm_write_succeed_keys
         )
-        self._log_counter(
+        self.log_counter(
             self._sm_write_failed_keys_counter, stats.interval_sm_write_failed_keys
         )
