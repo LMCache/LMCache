@@ -69,41 +69,38 @@ def update_session_for_key(
     session.get_hashes(key.start, key.end)
 
 
-def resolve_keys(
-    keys: list[IPCCacheEngineKey],
+def resolve_key(
+    key: IPCCacheEngineKey,
     session_manager: SessionManager,
 ) -> list[IPCCacheEngineKey]:
-    """Convert token-mode keys to hash-mode keys.
+    """Convert a token-mode key to hash-mode keys.
 
     Uses session to retrieve pre-computed rolling hashes, then creates
     hash-mode IPCCacheEngineKey instances.
     update_session_for_key must be called before this function.
 
     Args:
-        keys: List of IPC keys.
+        key: An IPC cache engine key.
         session_manager: The session manager to use.
 
     Returns:
-        List of hash-mode IPCCacheEngineKey.
+        List of IPCCacheEngineKey with hash, one per chunk.
     """
-    resolved: list[IPCCacheEngineKey] = []
-    for key in keys:
-        session = session_manager.get_or_create(key.request_id)
-        hashes = session.get_hashes(key.start, key.end)
-        resolved.extend(
-            IPCCacheEngineKey(
-                model_name=key.model_name,
-                world_size=key.world_size,
-                worker_id=key.worker_id,
-                token_ids=key.token_ids,
-                start=key.start,
-                end=key.end,
-                request_id=key.request_id,
-                chunk_hash=TokenHasher.hash_to_bytes(h),
-            )
-            for h in hashes
+    session = session_manager.get_or_create(key.request_id)
+    hashes = session.get_hashes(key.start, key.end)
+    return [
+        IPCCacheEngineKey(
+            model_name=key.model_name,
+            world_size=key.world_size,
+            worker_id=key.worker_id,
+            token_ids=key.token_ids,
+            start=key.start,
+            end=key.end,
+            request_id=key.request_id,
+            chunk_hash=TokenHasher.hash_to_bytes(h),
         )
-    return resolved
+        for h in hashes
+    ]
 
 
 # Main class for the mp cache engine
@@ -165,7 +162,7 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def store(
         self,
-        keys: list[IPCCacheEngineKey],
+        key: IPCCacheEngineKey,
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
@@ -174,8 +171,8 @@ class MPCacheEngine:
         Stores the GPU KV cache blocks to CPU.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
-                All keys must have worker_id != None (worker store operation).
+            key (IPCCacheEngineKey): The IPC key for the KV cache blocks.
+                Must have worker_id != None (worker store operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to store.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -185,9 +182,8 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        for key in keys:
-            update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_keys(keys, self.session_manager)
+        update_session_for_key(key, self.session_manager)
+        ipc_keys = resolve_key(key, self.session_manager)
 
         st = time.perf_counter()
 
@@ -268,30 +264,28 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
-        keys: list[IPCCacheEngineKey],
+        key: IPCCacheEngineKey,
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
-    ) -> tuple[bytes, list[bool]]:
+    ) -> tuple[bytes, bool]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
-                All keys must have worker_id != None (worker retrieve operation).
+            key (IPCCacheEngineKey): The IPC key for the KV cache blocks.
+                Must have worker_id != None (worker retrieve operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
 
         Returns:
-            tuple[bytes, list[bool]]: The first element is the IPC handle of the event
+            tuple[bytes, bool]: The first element is the IPC handle of the event
                 that signals the completion of the retrieve operation. The second
-                element is a list indicating whether each IPC key was successfully
-                retrieved.
+                element indicates whether the key was successfully retrieved.
         """
-        for key in keys:
-            update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_keys(keys, self.session_manager)
+        update_session_for_key(key, self.session_manager)
+        ipc_keys = resolve_key(key, self.session_manager)
 
         st = time.perf_counter()
 
@@ -343,13 +337,13 @@ class MPCacheEngine:
                 ) as memory_objs:
                     if not memory_objs or len(memory_objs) != len(obj_keys):
                         logger.error("Some keys not found during retrieve!")
-                        return event.ipc_handle(), [False] * len(obj_keys)
+                        return event.ipc_handle(), False
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     _retrieve_loop(obj_keys, memory_objs)
             except Exception as e:
                 logger.warning("Cannot retrieve keys due to exception: %s", str(e))
-                return event.ipc_handle(), [False] * len(obj_keys)
+                return event.ipc_handle(), False
             finally:
                 event.record()
                 gpu_context.cupy_stream.launch_host_func(
@@ -365,7 +359,7 @@ class MPCacheEngine:
             ed - st,
         )
 
-        return event.ipc_handle(), [True] * len(obj_keys)
+        return event.ipc_handle(), True
 
     def lookup(
         self,
