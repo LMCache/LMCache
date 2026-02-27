@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest.mock import MagicMock, patch
 import threading
 import time
 
@@ -885,3 +886,128 @@ class TestLazyMemoryAllocator:
 
         assert allocator.memcheck()
         allocator.close()
+
+
+class TestMixedMemoryAllocatorReplaceBuffer:
+    """Test MixedMemoryAllocator.replace_buffer() method."""
+
+    def test_replace_buffer_frees_old_and_pins_new(self):
+        """replace_buffer should free original, pin new, and rebuild allocator."""
+        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
+            old_buf = torch.zeros(1024, dtype=torch.uint8)
+            mock_alloc.return_value = old_buf
+            allocator = MixedMemoryAllocator(1024)
+
+        old_pin_allocator = allocator.pin_allocator
+        external_ptr = 0x7F5500000000
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.replace_buffer(external_ptr, 2048)
+
+            mock_ops.free_pinned_ptr.assert_called_once_with(old_buf.data_ptr())
+            mock_ops.register_pinned_ptr.assert_called_once_with(external_ptr, 2048)
+
+        assert allocator.pin_allocator is not old_pin_allocator
+        assert allocator.size == 2048
+
+    def test_replace_buffer_updates_buffer_tensor(self):
+        """replace_buffer should update self.buffer to the new tensor."""
+        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
+            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
+            allocator = MixedMemoryAllocator(1024)
+
+        external_tensor = torch.zeros(2048, dtype=torch.uint8)
+        external_ptr = external_tensor.data_ptr()
+
+        with patch("lmcache.v1.memory_management.lmc_ops"):
+            allocator.replace_buffer(external_ptr, 2048)
+
+        assert allocator.buffer.numel() == 2048
+        assert allocator.buffer.data_ptr() == external_ptr
+
+    def test_close_calls_cleanup_fn_after_replace(self):
+        """close() should call cleanup_fn (unregister) instead of default free."""
+        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
+            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
+            allocator = MixedMemoryAllocator(1024)
+
+        external_tensor = torch.zeros(2048, dtype=torch.uint8)
+        external_ptr = external_tensor.data_ptr()
+
+        with patch("lmcache.v1.memory_management.lmc_ops"):
+            allocator.replace_buffer(external_ptr, 2048)
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.close()
+            mock_ops.unregister_pinned_ptr.assert_called_once_with(external_ptr, 2048)
+            mock_ops.free_pinned_ptr.assert_not_called()
+            mock_ops.free_pinned_numa_ptr.assert_not_called()
+
+    def test_close_without_replace_uses_default_free(self):
+        """close() without replace_buffer should use default free path."""
+        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
+            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
+            allocator = MixedMemoryAllocator(1024)
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.close()
+            mock_ops.free_pinned_ptr.assert_called_once()
+
+    def test_close_idempotent(self):
+        """Calling close() twice should be safe."""
+        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
+            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
+            allocator = MixedMemoryAllocator(1024)
+
+        external_tensor = torch.zeros(2048, dtype=torch.uint8)
+
+        with patch("lmcache.v1.memory_management.lmc_ops"):
+            allocator.replace_buffer(external_tensor.data_ptr(), 2048)
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.close()
+            allocator.close()  # Second call should be no-op
+            mock_ops.unregister_pinned_ptr.assert_called_once()
+
+    def test_replace_buffer_with_numa(self):
+        """replace_buffer on NUMA allocator should free with free_pinned_numa_ptr."""
+        mock_numa = MagicMock()
+        mock_numa.gpu_to_numa_mapping = {0: 0}
+
+        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
+            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
+            allocator = MixedMemoryAllocator(1024, numa_mapping=mock_numa)
+
+        external_tensor = torch.zeros(2048, dtype=torch.uint8)
+
+        old_buf_ptr = allocator.buffer.data_ptr()
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.replace_buffer(external_tensor.data_ptr(), 2048)
+            mock_ops.free_pinned_numa_ptr.assert_called_once_with(old_buf_ptr, 1024)
+
+    def test_replace_buffer_called_twice_unregisters_first(self):
+        """Calling replace_buffer twice should unregister the first external ptr."""
+        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
+            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
+            allocator = MixedMemoryAllocator(1024)
+
+        ext1 = torch.zeros(2048, dtype=torch.uint8)
+        ext2 = torch.zeros(4096, dtype=torch.uint8)
+        ext1_ptr = ext1.data_ptr()
+        ext2_ptr = ext2.data_ptr()
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.replace_buffer(ext1_ptr, 2048)
+            mock_ops.free_pinned_ptr.assert_called_once()
+            mock_ops.register_pinned_ptr.assert_called_once_with(ext1_ptr, 2048)
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.replace_buffer(ext2_ptr, 4096)
+            mock_ops.unregister_pinned_ptr.assert_called_once_with(ext1_ptr, 2048)
+            mock_ops.free_pinned_ptr.assert_not_called()
+            mock_ops.register_pinned_ptr.assert_called_once_with(ext2_ptr, 4096)
+
+        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
+            allocator.close()
+            mock_ops.unregister_pinned_ptr.assert_called_once_with(ext2_ptr, 4096)

@@ -8,7 +8,6 @@ import sys
 
 # Third Party
 import pytest
-import torch
 
 # First Party
 from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
@@ -197,40 +196,6 @@ def mock_local_cpu_backend():
 def mock_async_loop():
     """Create a simple event loop for testing."""
     return asyncio.new_event_loop()
-
-
-def _create_connector(
-    mock_mooncake_module,
-    mock_local_cpu_backend,
-    mock_async_loop,
-    mooncake_config,
-    lmcache_config=None,
-):
-    """Helper to create MooncakestoreConnector with all mocks in place."""
-    # We need to patch multiple things:
-    # 1. The mooncake import inside __init__
-    # 2. The RemoteConnector.__init__ (base class has complex deps)
-    # 3. The config loading
-
-    store_instance, store_class, replicate_config_cls = mock_mooncake_module
-
-    # Patch MOONCAKE_CONFIG_PATH to None to force lmcache_config path
-    with patch.dict(os.environ, {}, clear=False):
-        os.environ.pop("MOONCAKE_CONFIG_PATH", None)
-
-        # Patch the base class __init__ to avoid its complex dependencies
-        with patch(
-            "lmcache.v1.storage_backend.connector."
-            "mooncakestore_connector."
-            "MooncakestoreConnector.__init__"
-        ):
-            # We can't easily call the real __init__ with mocks,
-            # so let's test the setup path logic directly instead.
-            pass
-
-    # Instead of trying to instantiate the full class, test the setup logic
-    # by importing and calling with appropriate mocks on the config loading
-    return store_instance
 
 
 class TestMooncakestoreConnectorInit:
@@ -471,202 +436,55 @@ class TestMooncakestoreConnectorInit:
             # NUMADetector.get_numa_mapping should be called in real mode
             mock_numa.get_numa_mapping.assert_called_once()
 
+    @pytest.mark.parametrize(
+        "use_dummy, dummy_addr",
+        [(False, ""), (True, "127.0.0.1:50052")],
+        ids=["real_client", "dummy_client"],
+    )
     def test_register_buffer_called_in_both_modes(
-        self, mock_mooncake_module, mock_local_cpu_backend, mock_async_loop
+        self,
+        mock_mooncake_module,
+        mock_local_cpu_backend,
+        mock_async_loop,
+        use_dummy,
+        dummy_addr,
     ):
         """register_buffer should be called in both real and dummy modes."""
         store_instance, _, _ = mock_mooncake_module
+        config = _make_mooncake_store_config(
+            use_dummy_client=use_dummy,
+            dummy_server_address=dummy_addr,
+        )
 
-        for use_dummy in [False, True]:
-            store_instance.reset_mock()
-            config = _make_mooncake_store_config(
-                use_dummy_client=use_dummy,
-                dummy_server_address="127.0.0.1:50052" if use_dummy else "",
+        # First Party
+        from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
+            MooncakestoreConnector,
+        )
+
+        with (
+            patch(
+                "lmcache.v1.storage_backend.connector.mooncakestore_connector.MooncakeStoreConfig.load_from_lmcache_config",
+                return_value=config,
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector.mooncakestore_connector.RemoteConnector.__init__"
+            ),
+            patch(
+                "lmcache.v1.storage_backend.connector.mooncakestore_connector.NUMADetector"
+            ),
+        ):
+            MooncakestoreConnector(
+                host="127.0.0.1",
+                port=50051,
+                dev_name="",
+                loop=mock_async_loop,
+                local_cpu_backend=mock_local_cpu_backend,
+                lmcache_config=mock_local_cpu_backend.config,
             )
 
-            # First Party
-            from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
-                MooncakestoreConnector,
+            store_instance.register_buffer.assert_called_once_with(
+                0x7F000000, 1073741824
             )
-
-            with (
-                patch(
-                    "lmcache.v1.storage_backend.connector.mooncakestore_connector.MooncakeStoreConfig.load_from_lmcache_config",
-                    return_value=config,
-                ),
-                patch(
-                    "lmcache.v1.storage_backend.connector.mooncakestore_connector.RemoteConnector.__init__"
-                ),
-                patch(
-                    "lmcache.v1.storage_backend.connector.mooncakestore_connector.NUMADetector"
-                ),
-            ):
-                MooncakestoreConnector(
-                    host="127.0.0.1",
-                    port=50051,
-                    dev_name="",
-                    loop=mock_async_loop,
-                    local_cpu_backend=mock_local_cpu_backend,
-                    lmcache_config=mock_local_cpu_backend.config,
-                )
-
-                store_instance.register_buffer.assert_called_once_with(
-                    0x7F000000, 1073741824
-                )
-
-
-class TestMixedMemoryAllocatorReplaceBuffer:
-    """Test MixedMemoryAllocator.replace_buffer() method."""
-
-    def test_replace_buffer_frees_old_and_pins_new(self):
-        """replace_buffer should free original, pin new, and rebuild allocator."""
-        # First Party
-        from lmcache.v1.memory_management import MixedMemoryAllocator
-
-        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
-            old_buf = torch.zeros(1024, dtype=torch.uint8)
-            mock_alloc.return_value = old_buf
-            allocator = MixedMemoryAllocator(1024)
-
-        old_pin_allocator = allocator.pin_allocator
-        external_ptr = 0x7F5500000000
-
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            allocator.replace_buffer(external_ptr, 2048)
-
-            # Should free old buffer
-            mock_ops.free_pinned_ptr.assert_called_once_with(old_buf.data_ptr())
-            # Should pin new external memory
-            mock_ops.register_pinned_ptr.assert_called_once_with(external_ptr, 2048)
-
-        # pin_allocator should be rebuilt
-        assert allocator.pin_allocator is not old_pin_allocator
-        assert allocator.size == 2048
-
-    def test_replace_buffer_updates_buffer_tensor(self):
-        """replace_buffer should update self.buffer to the new tensor."""
-        # First Party
-        from lmcache.v1.memory_management import MixedMemoryAllocator
-
-        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
-            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
-            allocator = MixedMemoryAllocator(1024)
-
-        # Use a real tensor's data_ptr as the external ptr
-        external_tensor = torch.zeros(2048, dtype=torch.uint8)
-        external_ptr = external_tensor.data_ptr()
-
-        with patch("lmcache.v1.memory_management.lmc_ops"):
-            allocator.replace_buffer(external_ptr, 2048)
-
-        assert allocator.buffer.numel() == 2048
-        assert allocator.buffer.data_ptr() == external_ptr
-
-    def test_close_calls_cleanup_fn_after_replace(self):
-        """close() should call cleanup_fn (unregister) instead of default free."""
-        # First Party
-        from lmcache.v1.memory_management import MixedMemoryAllocator
-
-        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
-            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
-            allocator = MixedMemoryAllocator(1024)
-
-        external_tensor = torch.zeros(2048, dtype=torch.uint8)
-        external_ptr = external_tensor.data_ptr()
-
-        with patch("lmcache.v1.memory_management.lmc_ops"):
-            allocator.replace_buffer(external_ptr, 2048)
-
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            allocator.close()
-            # Should call unregister, not free
-            mock_ops.unregister_pinned_ptr.assert_called_once_with(external_ptr, 2048)
-            mock_ops.free_pinned_ptr.assert_not_called()
-            mock_ops.free_pinned_numa_ptr.assert_not_called()
-
-    def test_close_without_replace_uses_default_free(self):
-        """close() without replace_buffer should use default free path."""
-        # First Party
-        from lmcache.v1.memory_management import MixedMemoryAllocator
-
-        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
-            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
-            allocator = MixedMemoryAllocator(1024)
-
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            allocator.close()
-            mock_ops.free_pinned_ptr.assert_called_once()
-
-    def test_close_idempotent(self):
-        """Calling close() twice should be safe."""
-        # First Party
-        from lmcache.v1.memory_management import MixedMemoryAllocator
-
-        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
-            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
-            allocator = MixedMemoryAllocator(1024)
-
-        external_tensor = torch.zeros(2048, dtype=torch.uint8)
-
-        with patch("lmcache.v1.memory_management.lmc_ops"):
-            allocator.replace_buffer(external_tensor.data_ptr(), 2048)
-
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            allocator.close()
-            allocator.close()  # Second call should be no-op
-            mock_ops.unregister_pinned_ptr.assert_called_once()
-
-    def test_replace_buffer_with_numa(self):
-        """replace_buffer on NUMA allocator should free with free_pinned_numa_ptr."""
-        # First Party
-        from lmcache.v1.memory_management import MixedMemoryAllocator
-
-        mock_numa = MagicMock()
-        mock_numa.gpu_to_numa_mapping = {0: 0}
-
-        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
-            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
-            allocator = MixedMemoryAllocator(1024, numa_mapping=mock_numa)
-
-        external_tensor = torch.zeros(2048, dtype=torch.uint8)
-
-        old_buf_ptr = allocator.buffer.data_ptr()
-
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            allocator.replace_buffer(external_tensor.data_ptr(), 2048)
-            mock_ops.free_pinned_numa_ptr.assert_called_once_with(old_buf_ptr, 1024)
-
-    def test_replace_buffer_called_twice_unregisters_first(self):
-        """Calling replace_buffer twice should unregister the first external ptr."""
-        # First Party
-        from lmcache.v1.memory_management import MixedMemoryAllocator
-
-        with patch("lmcache.v1.memory_management._allocate_cpu_memory") as mock_alloc:
-            mock_alloc.return_value = torch.zeros(1024, dtype=torch.uint8)
-            allocator = MixedMemoryAllocator(1024)
-
-        ext1 = torch.zeros(2048, dtype=torch.uint8)
-        ext2 = torch.zeros(4096, dtype=torch.uint8)
-        ext1_ptr = ext1.data_ptr()
-        ext2_ptr = ext2.data_ptr()
-
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            # First replace: frees original pinned buffer
-            allocator.replace_buffer(ext1_ptr, 2048)
-            mock_ops.free_pinned_ptr.assert_called_once()
-            mock_ops.register_pinned_ptr.assert_called_once_with(ext1_ptr, 2048)
-
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            # Second replace: should unregister ext1 (not free_pinned_ptr)
-            allocator.replace_buffer(ext2_ptr, 4096)
-            mock_ops.unregister_pinned_ptr.assert_called_once_with(ext1_ptr, 2048)
-            mock_ops.free_pinned_ptr.assert_not_called()
-            mock_ops.register_pinned_ptr.assert_called_once_with(ext2_ptr, 4096)
-
-        # close should unregister ext2
-        with patch("lmcache.v1.memory_management.lmc_ops") as mock_ops:
-            allocator.close()
-            mock_ops.unregister_pinned_ptr.assert_called_once_with(ext2_ptr, 4096)
 
 
 class TestDummyClientShmBufferReplacement:
