@@ -7,7 +7,6 @@ import argparse
 # Third Party
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-import torch
 import uvicorn
 
 # First Party
