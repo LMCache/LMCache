@@ -38,6 +38,8 @@ class MooncakeStoreConfig:
     transfer_timeout: int
     storage_root_dir: str
     prefer_local_alloc: bool = False
+    use_dummy_client: bool = False
+    dummy_server_address: str = ""
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -48,16 +50,18 @@ class MooncakeStoreConfig:
         prefer_local_alloc = config.get("mooncake_prefer_local_alloc", False)
 
         return MooncakeStoreConfig(
-            local_hostname=config.get("local_hostname"),
-            metadata_server=config.get("metadata_server"),
+            local_hostname=config.get("local_hostname", ""),
+            metadata_server=config.get("metadata_server", ""),
             global_segment_size=config.get("global_segment_size", 3355443200),
             local_buffer_size=config.get("local_buffer_size", 1073741824),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
+            master_server_address=config.get("master_server_address", ""),
             transfer_timeout=config.get("transfer_timeout", 1),
             storage_root_dir=config.get("storage_root_dir", ""),
             prefer_local_alloc=prefer_local_alloc,
+            use_dummy_client=config.get("use_dummy_client", False),
+            dummy_server_address=config.get("dummy_server_address", ""),
         )
 
     @staticmethod
@@ -82,16 +86,18 @@ class MooncakeStoreConfig:
         prefer_local_alloc = extra_config.get("mooncake_prefer_local_alloc", False)
 
         return MooncakeStoreConfig(
-            local_hostname=extra_config["local_hostname"],
-            metadata_server=extra_config["metadata_server"],
+            local_hostname=extra_config.get("local_hostname", ""),
+            metadata_server=extra_config.get("metadata_server", ""),
             global_segment_size=extra_config.get("global_segment_size", 3355443200),
             local_buffer_size=extra_config.get("local_buffer_size", 1073741824),
             protocol=extra_config.get("protocol", "tcp"),
             device_name=extra_config.get("device_name", ""),
-            master_server_address=extra_config["master_server_address"],
+            master_server_address=extra_config.get("master_server_address", ""),
             transfer_timeout=extra_config.get("transfer_timeout", 1),
             storage_root_dir=extra_config.get("storage_root_dir", ""),
             prefer_local_alloc=prefer_local_alloc,
+            use_dummy_client=extra_config.get("use_dummy_client", False),
+            dummy_server_address=extra_config.get("dummy_server_address", ""),
         )
 
 
@@ -158,56 +164,89 @@ class MooncakestoreConnector(RemoteConnector):
             logger.info(f"  protocol: {self.config.protocol}")
             logger.info(f"  device_name: {self.config.device_name}")
             logger.info(f"  master_server_address: {self.config.master_server_address}")
-
-            try:
-                numa_mapping = getattr(
-                    local_cpu_backend.memory_allocator, "numa_mapping", None
+            logger.info(f"  use_dummy_client: {self.config.use_dummy_client}")
+            if self.config.use_dummy_client:
+                logger.info(
+                    f"  dummy_server_address: {self.config.dummy_server_address}"
                 )
-                if numa_mapping is None and lmcache_config is not None:
-                    numa_mapping = NUMADetector.get_numa_mapping(lmcache_config)
 
-                if numa_mapping:
-                    current_device_id = torch.cuda.current_device()
-                    gpu_to_numa = getattr(numa_mapping, "gpu_to_numa_mapping", {})
-                    numa_id = gpu_to_numa.get(current_device_id)
-                    logger.info(
-                        f"NUMA mapping detected (pre-Mooncake setup): {gpu_to_numa}"
+            if self.config.use_dummy_client:
+                # Dummy client mode: use setup_dummy with shared memory + IPC
+                if not hasattr(self.store, "setup_dummy"):
+                    raise RuntimeError(
+                        "The installed mooncake version does not support "
+                        "dummy client mode (setup_dummy). Please upgrade "
+                        "mooncake or set use_dummy_client to False."
                     )
-                    try:
-                        # Third Party
-                        from mooncake.store import bind_to_numa_node
-
-                        if numa_id is not None:
-                            bind_to_numa_node(numa_id)
-                            logger.info(
-                                f"GPU {current_device_id}, "
-                                f"NUMA node {numa_id} binding done"
-                            )
-                        else:
-                            logger.info(
-                                f"NUMA mapping not found for GPU {current_device_id}"
-                            )
-                    except ImportError:
-                        logger.warning(
-                            "unable to import bind_to_numa_node from mooncake.store"
-                        )
-                else:
-                    logger.info("NUMA mapping unavailable or disabled")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to determine NUMA mapping before Mooncake setup: {e}"
+                if not self.config.dummy_server_address:
+                    raise ValueError(
+                        "dummy_server_address must be provided when "
+                        "use_dummy_client is True."
+                    )
+                # Skip NUMA binding: RDMA runs in separate Real Client process
+                logger.info("Skipping NUMA binding in dummy client mode")
+                logger.info(
+                    "Using dummy client mode with server address: %s",
+                    self.config.dummy_server_address,
                 )
+                self.store.setup_dummy(
+                    self.config.global_segment_size,
+                    self.config.local_buffer_size,
+                    self.config.dummy_server_address,
+                )
+                logger.info("Mooncake dummy client setup completed successfully")
+            else:
+                # Real client mode: NUMA binding + standard setup
+                try:
+                    numa_mapping = getattr(
+                        local_cpu_backend.memory_allocator, "numa_mapping", None
+                    )
+                    if numa_mapping is None and lmcache_config is not None:
+                        numa_mapping = NUMADetector.get_numa_mapping(lmcache_config)
 
-            self.store.setup(
-                self.config.local_hostname,
-                self.config.metadata_server,
-                self.config.global_segment_size,
-                self.config.local_buffer_size,
-                self.config.protocol,
-                self.config.device_name,
-                self.config.master_server_address,
-            )
-            logger.info("Mooncake store setup completed successfully")
+                    if numa_mapping:
+                        current_device_id = torch.cuda.current_device()
+                        gpu_to_numa = getattr(numa_mapping, "gpu_to_numa_mapping", {})
+                        numa_id = gpu_to_numa.get(current_device_id)
+                        logger.info(
+                            f"NUMA mapping detected (pre-Mooncake setup): {gpu_to_numa}"
+                        )
+                        try:
+                            # Third Party
+                            from mooncake.store import bind_to_numa_node
+
+                            if numa_id is not None:
+                                bind_to_numa_node(numa_id)
+                                logger.info(
+                                    f"GPU {current_device_id}, "
+                                    f"NUMA node {numa_id} binding done"
+                                )
+                            else:
+                                logger.info(
+                                    "NUMA mapping not found "
+                                    f"for GPU {current_device_id}"
+                                )
+                        except ImportError:
+                            logger.warning(
+                                "unable to import bind_to_numa_node from mooncake.store"
+                            )
+                    else:
+                        logger.info("NUMA mapping unavailable or disabled")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to determine NUMA mapping before Mooncake setup: {e}"
+                    )
+
+                self.store.setup(
+                    self.config.local_hostname,
+                    self.config.metadata_server,
+                    self.config.global_segment_size,
+                    self.config.local_buffer_size,
+                    self.config.protocol,
+                    self.config.device_name,
+                    self.config.master_server_address,
+                )
+                logger.info("Mooncake store setup completed successfully")
 
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
