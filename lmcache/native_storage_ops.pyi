@@ -133,3 +133,53 @@ class ParallelPatternMatcher:
             Returns an empty list if no matches are found.
         """
         ...
+
+class RangePatternMatcher:
+    """
+    Range pattern matcher for integer vectors.
+
+    This class performs range pattern matching on a vector of integers.
+    It finds ranges that start with a start pattern and end with an end pattern.
+    When multiple end patterns exist after a start pattern, it matches the first
+    one (minimal range).
+    """
+
+    def __init__(self, start_pattern: list[int], end_pattern: list[int]) -> None:
+        """
+        Construct a RangePatternMatcher with start and end patterns.
+
+        Args:
+            start_pattern: The pattern marking the start of a range.
+            end_pattern: The pattern marking the end of a range.
+
+        Raises:
+            ValueError: If either pattern is empty or has more than 5 elements.
+        """
+        ...
+
+    def match(self, data: list[int]) -> list[tuple[int, int]]:
+        """
+        Match ranges in the given data.
+
+        Finds all ranges that start with the start pattern and end with the end
+        pattern. When multiple end patterns exist after a start pattern, matches
+        the first one (minimal range).
+
+        Args:
+            data: The data to search in.
+
+        Returns:
+            A list of (start_pos, end_pos) tuples where:
+            - start_pos is the beginning index of the start pattern
+            - end_pos is the exclusive index after the end pattern
+            Returns an empty list if no ranges are found.
+
+        Example:
+            >>> start = [1, 2]
+            >>> end = [3, 4]
+            >>> matcher = RangePatternMatcher(start, end)
+            >>> data = [1, 2, 0, 3, 4, 0, 3, 4, 1, 2, 0, 0, 3, 4]
+            >>> matcher.match(data)
+            [(0, 5), (8, 14)]
+        """
+        ...
