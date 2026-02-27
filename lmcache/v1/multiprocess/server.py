@@ -5,6 +5,7 @@ import threading
 import time
 
 # Third Party
+import prometheus_client
 import torch
 import zmq
 
@@ -476,6 +477,14 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
+    # Start Prometheus metrics HTTP server if enabled
+    if storage_manager_config.prometheus_config.enabled:
+        metrics_port = storage_manager_config.prometheus_config.port
+        prometheus_client.start_http_server(metrics_port)
+        logger.info(
+            "Prometheus metrics available at http://0.0.0.0:%d/metrics", metrics_port
+        )
+
     # Initialize the engine
     engine = MPCacheEngine(
         storage_manager_config=storage_manager_config,
