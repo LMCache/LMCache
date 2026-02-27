@@ -342,10 +342,9 @@ class MPCacheEngine:
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     _retrieve_loop(obj_keys, memory_objs)
-            except Exception as e:
+            except Exception:
                 logger.exception(
-                    "Cannot retrieve keys due to exception: %s",
-                    str(e),
+                    "Failed during KV cache retrieve from prefetched results"
                 )
                 return event.ipc_handle(), False
             finally:
