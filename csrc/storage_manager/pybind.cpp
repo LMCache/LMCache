@@ -11,6 +11,7 @@ namespace py = pybind11;
 using lmcache::storage_manager::Bitmap;
 using lmcache::storage_manager::TTLLock;
 using lmcache::utils::ParallelPatternMatcher;
+using lmcache::utils::RangePatternMatcher;
 
 PYBIND11_MODULE(native_storage_ops, m) {
   m.doc() = "Native storage operations for LMCache";
@@ -54,4 +55,15 @@ PYBIND11_MODULE(native_storage_ops, m) {
       .def("match", &ParallelPatternMatcher::match, py::arg("data"),
            "Match the pattern in the given data and return a sorted list "
            "of positions where the pattern starts.");
+
+  py::class_<RangePatternMatcher>(m, "RangePatternMatcher")
+      .def(py::init<const std::vector<int>&, const std::vector<int>&>(),
+           py::arg("start_pattern"), py::arg("end_pattern"),
+           "Construct a RangePatternMatcher with start and end patterns. ")
+      .def("match", &RangePatternMatcher::match, py::arg("data"),
+           "Match ranges in the given data. Returns a list of (start_pos, "
+           "end_pos) tuples where start_pos is the beginning of the start "
+           "pattern and end_pos is the exclusive index after the end pattern. "
+           "When multiple end patterns exist after a start pattern, matches "
+           "the first one (minimal range).");
 }
