@@ -946,8 +946,9 @@ def test_cb_lookup_cannot_find_normal_store(
     ISOLATION TEST: Store via normal STORE, then CB_LOOKUP_PRE_COMPUTED.
     Expected: CB lookup should NOT see normal-stored data (returns empty []).
     """
-    # Store via normal STORE operation
+    # Store via normal STORE operation (one key at a time)
     num_keys = 5
+    blocks_per_key = 16
     keys = [
         create_cache_key(
             tuple(range(CHUNK_SIZE * i, CHUNK_SIZE * (i + 1))),
@@ -955,17 +956,21 @@ def test_cb_lookup_cannot_find_normal_store(
         )
         for i in range(num_keys)
     ]
-    gpu_block_ids = list(range(0, 16 * num_keys))
+    gpu_block_ids = list(range(0, blocks_per_key * num_keys))
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
-    store_future = client.submit_request(
-        RequestType.STORE,
-        [keys, registered_instance, gpu_block_ids, event.ipc_handle()],
-        get_response_class(RequestType.STORE),
-    )
-    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-    assert store_result is True, "Normal store should succeed"
+    for i, key in enumerate(keys):
+        start = i * blocks_per_key
+        end = start + blocks_per_key
+        block_ids = gpu_block_ids[start:end]
+        store_future = client.submit_request(
+            RequestType.STORE,
+            [key, registered_instance, block_ids, event.ipc_handle()],
+            get_response_class(RequestType.STORE),
+        )
+        store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+        assert store_result is True, f"Normal store should succeed for key {i}"
 
     # Now try CB lookup with same token pattern
     # Use same hash value converted to token_ids pattern
