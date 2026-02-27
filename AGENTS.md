@@ -6,6 +6,10 @@ Guidelines for AI coding agents (Copilot, Cursor, Claude Code, etc.) working in 
 
 LMCache is a KV cache management engine for LLM serving that reduces Time To First Token (TTFT) and increases throughput. It stores KV caches across multiple tiers (GPU, CPU, disk, S3) and integrates with vLLM and SGLang.
 
+## Repository
+
+The default branch is `dev`. Base all new branches and pull requests against `dev`.
+
 ## Python Environment
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:
