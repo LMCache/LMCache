@@ -374,29 +374,35 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     return bool_value
 
 
-def get_timeout_value(
-    key: str, config: LMCacheEngineConfig, default: float
-) -> float:
+from typing import TypeVar
+
+T = TypeVar("T", int, float)
+
+
+def get_config_value(
+    key: str, config: LMCacheEngineConfig, default: T, value_type: type[T] = float
+) -> T:
     """
-    Get timeout value from environment variable or config, with environment
-    taking priority.
+    Get a configuration value from environment variable or config, with 
+    environment taking priority.
     
     Args:
-        key: The config key name (e.g., "timeout_contains")
+        key: The config key name (e.g., "timeout_contains", "operation_manager_threads")
         config: The LMCache engine config
         default: Default value if not found in env or config
+        value_type: The type to convert the value to (int or float)
         
     Returns:
-        The timeout value in seconds as a float
+        The configuration value converted to the specified type
     """
     # Check environment variable first (priority)
     env_name = f"LMCACHE_{key.upper()}"
     env_value = os.getenv(env_name)
     if env_value is not None:
         try:
-            timeout = float(env_value)
-            logger.info(f"Using {key} = {timeout} from environment variable {env_name}")
-            return timeout
+            value = value_type(env_value)
+            logger.info(f"Using {key} = {value} from environment variable {env_name}")
+            return value
         except ValueError:
             logger.warning(
                 f"Invalid value '{env_value}' for {env_name}, falling back to config/default"
@@ -404,10 +410,10 @@ def get_timeout_value(
     
     # Fall back to config
     if config.extra_config is not None:
-        timeout = config.extra_config.get(key, default)
-        if timeout != default:
-            logger.info(f"Using {key} = {timeout} from config")
-            return float(timeout)
+        value = config.extra_config.get(key, default)
+        if value != default:
+            logger.info(f"Using {key} = {value} from config")
+            return value_type(value)
     
     logger.info(f"Using {key} = {default} (default)")
     return default
@@ -488,13 +494,16 @@ class GdsBackend(AllocatorBackendInterface):
                 max_workers=thread_count, thread_name_prefix="weka-gds-io"
             )
 
-        # TODO allow control from env
-        self.op_manager = OperationManager(
-            config.extra_config.get("operation_manager_threads", 4),
+        num_op_manager_threads = get_config_value(
+            "operation_manager_threads", config, _DEFAULT_THREAD_COUNT, int
         )
-        self.timeout_contains = get_timeout_value("timeout_contains", config, 10.0)
-        self.timeout_get_blocking = get_timeout_value("timeout_get_blocking", config, 10.0)
-        self.timeout_batched_get_blocking = get_timeout_value(
+        self.op_manager = OperationManager(
+            num_threads=num_op_manager_threads,
+            logger=logger,
+        )
+        self.timeout_contains = get_config_value("timeout_contains", config, 10.0)
+        self.timeout_get_blocking = get_config_value("timeout_get_blocking", config, 10.0)
+        self.timeout_batched_get_blocking = get_config_value(
             "timeout_batched_get_blocking", config, 10.0
         )
 

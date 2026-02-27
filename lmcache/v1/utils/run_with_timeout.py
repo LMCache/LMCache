@@ -6,8 +6,6 @@ from typing import Any, Callable, Dict
 import logging
 import time
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass
 class OperationStats:
@@ -128,6 +126,7 @@ class OperationManager:
     def __init__(
         self,
         num_threads: int = 4,
+        logger: logging.Logger = logging.getLogger(__name__)
     ):
         self.num_threads = num_threads
         self.timeout_pool = ThreadPoolExecutor(
@@ -136,6 +135,7 @@ class OperationManager:
         # Lock-free: only updated from caller thread
         self._failure_count = 0
         self._stats = OperationManagerStats()
+        self.logger = logger
 
     def run_with_timeout(
         self,
@@ -177,7 +177,7 @@ class OperationManager:
             op_stats.record_timeout(latency_ms)
             
             # Log stats on timeout to help diagnose bottlenecks
-            logger.error(
+            self.logger.error(
                 f"TIMEOUT: Operation '{label}' after {timeout_seconds}s | "
                 f"latency={latency_ms:.1f}ms | "
                 f"total_failures={self._failure_count} | "
