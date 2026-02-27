@@ -48,6 +48,212 @@ _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
 _DEFAULT_THREAD_COUNT = 4
 
 
+from collections import deque
+
+
+class GdsBackendStats:
+    """Statistics tracking for GDS backend operations. Lock-free for real-time use.
+    
+    Tracks metrics to help diagnose performance bottlenecks:
+    - Thread pool utilization (queue depth, in-flight operations)
+    - Per-operation latency statistics
+    - Hot cache hit/miss rates
+    - I/O operation counts and throughput
+    
+    Uses simple counter increments (atomic under GIL) and thread-safe deques.
+    """
+    
+    def __init__(self, max_latency_samples: int = 1000):
+        # Hot cache stats (simple counters - GIL provides atomicity)
+        self.hot_cache_hits = 0
+        self.hot_cache_misses = 0
+        
+        # Slow path (disk) stats
+        self.disk_lookups = 0
+        self.disk_lookup_hits = 0
+        self.disk_lookup_misses = 0
+        
+        # Read/write stats
+        self.gds_reads = 0
+        self.gds_read_bytes = 0
+        self.gds_read_errors = 0
+        self.gds_writes = 0
+        self.gds_write_bytes = 0
+        self.gds_write_errors = 0
+        
+        # Batched operation stats
+        self.batched_contains_calls = 0
+        self.batched_contains_total_keys = 0
+        self.batched_get_calls = 0
+        self.batched_get_total_keys = 0
+        
+        # Latency tracking using thread-safe deques with maxlen
+        self._max_latency_samples = max_latency_samples
+        self.contains_latencies: deque[float] = deque(maxlen=max_latency_samples)
+        self.get_blocking_latencies: deque[float] = deque(maxlen=max_latency_samples)
+        self.batched_get_latencies: deque[float] = deque(maxlen=max_latency_samples)
+    
+    def record_hot_cache_hit(self) -> None:
+        self.hot_cache_hits += 1
+    
+    def record_hot_cache_miss(self) -> None:
+        self.hot_cache_misses += 1
+    
+    def record_disk_lookup(self, hit: bool) -> None:
+        self.disk_lookups += 1
+        if hit:
+            self.disk_lookup_hits += 1
+        else:
+            self.disk_lookup_misses += 1
+    
+    def record_gds_read(self, bytes_read: int, success: bool) -> None:
+        self.gds_reads += 1
+        if success:
+            self.gds_read_bytes += bytes_read
+        else:
+            self.gds_read_errors += 1
+    
+    def record_gds_write(self, bytes_written: int, success: bool) -> None:
+        self.gds_writes += 1
+        if success:
+            self.gds_write_bytes += bytes_written
+        else:
+            self.gds_write_errors += 1
+    
+    def record_batched_contains(self, num_keys: int) -> None:
+        self.batched_contains_calls += 1
+        self.batched_contains_total_keys += num_keys
+    
+    def record_batched_get(self, num_keys: int) -> None:
+        self.batched_get_calls += 1
+        self.batched_get_total_keys += num_keys
+    
+    def record_contains_latency(self, latency_ms: float) -> None:
+        self.contains_latencies.append(latency_ms)
+    
+    def record_get_blocking_latency(self, latency_ms: float) -> None:
+        self.get_blocking_latencies.append(latency_ms)
+    
+    def record_batched_get_latency(self, latency_ms: float) -> None:
+        self.batched_get_latencies.append(latency_ms)
+    
+    def _compute_latency_stats(self, latencies: deque[float]) -> dict:
+        """Compute min/max/avg/p50/p95/p99 from latency samples."""
+        if not latencies:
+            return {
+                "count": 0,
+                "min_ms": 0.0,
+                "max_ms": 0.0,
+                "avg_ms": 0.0,
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+            }
+        
+        # Take a snapshot to avoid iteration issues
+        snapshot = list(latencies)
+        sorted_latencies = sorted(snapshot)
+        count = len(sorted_latencies)
+        
+        def percentile(p: float) -> float:
+            idx = int(count * p / 100)
+            return sorted_latencies[min(idx, count - 1)]
+        
+        return {
+            "count": count,
+            "min_ms": round(sorted_latencies[0], 3),
+            "max_ms": round(sorted_latencies[-1], 3),
+            "avg_ms": round(sum(sorted_latencies) / count, 3),
+            "p50_ms": round(percentile(50), 3),
+            "p95_ms": round(percentile(95), 3),
+            "p99_ms": round(percentile(99), 3),
+        }
+    
+    def get_summary_line(self) -> str:
+        """Return a single-line summary for logging on timeout."""
+        total_cache = self.hot_cache_hits + self.hot_cache_misses
+        hit_rate = self.hot_cache_hits / total_cache if total_cache > 0 else 0.0
+        
+        contains_stats = self._compute_latency_stats(self.contains_latencies)
+        
+        return (
+            f"hot_cache_hit_rate={hit_rate:.2%} | "
+            f"disk_lookups={self.disk_lookups} (hits={self.disk_lookup_hits}) | "
+            f"gds_reads={self.gds_reads} (errors={self.gds_read_errors}) | "
+            f"contains_latency: avg={contains_stats['avg_ms']:.1f}ms "
+            f"p99={contains_stats['p99_ms']:.1f}ms"
+        )
+    
+    def to_dict(self) -> dict:
+        """Return all stats as a dictionary for logging/monitoring."""
+        total_cache_accesses = self.hot_cache_hits + self.hot_cache_misses
+        hot_cache_hit_rate = (
+            self.hot_cache_hits / total_cache_accesses 
+            if total_cache_accesses > 0 else 0.0
+        )
+        
+        disk_hit_rate = (
+            self.disk_lookup_hits / self.disk_lookups 
+            if self.disk_lookups > 0 else 0.0
+        )
+        
+        return {
+            "hot_cache": {
+                "hits": self.hot_cache_hits,
+                "misses": self.hot_cache_misses,
+                "hit_rate": round(hot_cache_hit_rate, 4),
+            },
+            "disk_lookups": {
+                "total": self.disk_lookups,
+                "hits": self.disk_lookup_hits,
+                "misses": self.disk_lookup_misses,
+                "hit_rate": round(disk_hit_rate, 4),
+            },
+            "gds_io": {
+                "reads": self.gds_reads,
+                "read_bytes": self.gds_read_bytes,
+                "read_errors": self.gds_read_errors,
+                "writes": self.gds_writes,
+                "write_bytes": self.gds_write_bytes,
+                "write_errors": self.gds_write_errors,
+            },
+            "batched_ops": {
+                "contains_calls": self.batched_contains_calls,
+                "contains_total_keys": self.batched_contains_total_keys,
+                "get_calls": self.batched_get_calls,
+                "get_total_keys": self.batched_get_total_keys,
+            },
+            "latency": {
+                "contains": self._compute_latency_stats(self.contains_latencies),
+                "get_blocking": self._compute_latency_stats(self.get_blocking_latencies),
+                "batched_get": self._compute_latency_stats(self.batched_get_latencies),
+            },
+        }
+    
+    def reset(self) -> dict:
+        """Reset all stats and return the old values."""
+        old_stats = self.to_dict()
+        self.hot_cache_hits = 0
+        self.hot_cache_misses = 0
+        self.disk_lookups = 0
+        self.disk_lookup_hits = 0
+        self.disk_lookup_misses = 0
+        self.gds_reads = 0
+        self.gds_read_bytes = 0
+        self.gds_read_errors = 0
+        self.gds_writes = 0
+        self.gds_write_bytes = 0
+        self.gds_write_errors = 0
+        self.batched_contains_calls = 0
+        self.batched_contains_total_keys = 0
+        self.batched_get_calls = 0
+        self.batched_get_total_keys = 0
+        self.contains_latencies.clear()
+        self.get_blocking_latencies.clear()
+        self.batched_get_latencies.clear()
+        return old_stats
+
+
 class UnsupportedMetadataVersion(Exception):
     pass
 
@@ -341,7 +547,7 @@ class GdsBackend(AllocatorBackendInterface):
             self.gds_path = os.path.join(config.gds_path, metadata_dir)
         os.makedirs(self.gds_path, exist_ok=True)
 
-        self.stats = None  # TODO: plug into LMCache Statistics
+        self.stats = GdsBackendStats()
 
         self.hot_lock = threading.Lock()
         self.hot_cache: OrderedDict[CacheEngineKey, DiskCacheMetadata] = OrderedDict()
@@ -420,7 +626,9 @@ class GdsBackend(AllocatorBackendInterface):
         with self.hot_lock:
             res = key in self.hot_cache
         if res:
+            self.stats.record_hot_cache_hit()
             return True
+        self.stats.record_hot_cache_miss()
         return self._contains_slow_path(key)
 
     def _try_to_read_metadata(self, key: CacheEngineKey) -> Optional[DiskCacheMetadata]:
@@ -700,8 +908,9 @@ class GdsBackend(AllocatorBackendInterface):
         assert shape is not None
         assert fmt is not None
 
+        start_time = time.perf_counter()
         try:
-            return self.op_manager.run_with_timeout(
+            result = self.op_manager.run_with_timeout(
                 lambda: self._load_bytes_from_disk_with_allocation(
                     key, path, dtype=dtype, shape=shape
                 ),
@@ -709,10 +918,16 @@ class GdsBackend(AllocatorBackendInterface):
                 "get_blocking",
                 key,
             )
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            self.stats.record_get_blocking_latency(latency_ms)
+            return result
         except OperationTimeoutError:
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            self.stats.record_get_blocking_latency(latency_ms)
             logger.error(
-                f"Get blocking timed out after {self.timeout_get_blocking} seconds",
-                exc_info=True,
+                f"Get blocking timed out after {self.timeout_get_blocking}s | "
+                f"GDS stats: {self.stats.get_summary_line()} | "
+                f"OpManager stats: {self.op_manager.get_stats()}"
             )
             return None
 
@@ -807,20 +1022,29 @@ class GdsBackend(AllocatorBackendInterface):
         self,
         keys: List[CacheEngineKey],
     ) -> List[Optional[MemoryObj]]:
+        self.stats.record_batched_get(len(keys))
+        
         if self.use_thread_pool:
             logger.info("Using batched_get_blocking with thread pool implementation")
+            start_time = time.perf_counter()
             try:
-                return self.op_manager.run_with_timeout(
+                result = self.op_manager.run_with_timeout(
                     lambda: self._batched_get_blocking_by_thread_pool_impl(keys),
                     self.timeout_batched_get_blocking,
                     "batched_get_blocking",
                     len(keys),
                 )
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                self.stats.record_batched_get_latency(latency_ms)
+                return result
             except OperationTimeoutError:
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                self.stats.record_batched_get_latency(latency_ms)
                 logger.error(
                     f"Batched get blocking timed out after "
-                    f"{self.timeout_batched_get_blocking} seconds",
-                    exc_info=True,
+                    f"{self.timeout_batched_get_blocking}s (keys={len(keys)}) | "
+                    f"GDS stats: {self.stats.get_summary_line()} | "
+                    f"OpManager stats: {self.op_manager.get_stats()}"
                 )
                 return [None] * len(keys)
         else:
@@ -970,12 +1194,14 @@ class GdsBackend(AllocatorBackendInterface):
                 with self.cufile.CuFile(
                     gds_path, "r", use_direct_io=self.use_direct_io
                 ) as f:
-                    return f.read(
+                    bytes_read = f.read(
                         gpu_pointer,
                         size_in_bytes,
                         file_offset=file_offset,
                         dev_offset=dev_offset,
                     )
+                    self.stats.record_gds_read(bytes_read, success=(bytes_read == size_in_bytes))
+                    return bytes_read
             elif self.cudart:
                 fd = os.open(gds_path, os.O_RDONLY)
                 file_size = os.fstat(fd).st_size
@@ -999,15 +1225,18 @@ class GdsBackend(AllocatorBackendInterface):
                 )
 
                 if res != 0:
+                    self.stats.record_gds_read(0, success=False)
                     raise RuntimeError(f"cudaMemcpy failed with code {res}")
                 del arr
                 mm.close()
+                self.stats.record_gds_read(size_in_bytes, success=True)
                 return size_in_bytes
             else:
                 raise RuntimeError(
                     "Both cufile and cudart are None, this should not happen"
                 )
         except Exception as e:
+            self.stats.record_gds_read(0, success=False)
             logger.error(f"CuFile read failed for {gds_path}: {e}", exc_info=True)
             return -1
 
@@ -1169,6 +1398,7 @@ class GdsBackend(AllocatorBackendInterface):
             future.result()
 
     def _contains_slow_path(self, key: CacheEngineKey) -> bool:
+        start_time = time.perf_counter()
         try:
             read_from_disk = self.op_manager.run_with_timeout(
                 lambda: self._try_to_read_metadata(key),
@@ -1176,14 +1406,25 @@ class GdsBackend(AllocatorBackendInterface):
                 "contains",
                 key,
             )
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            self.stats.record_contains_latency(latency_ms)
+            
             if read_from_disk:
+                self.stats.record_disk_lookup(hit=True)
                 return True
+            else:
+                self.stats.record_disk_lookup(hit=False)
+                return False
         except OperationTimeoutError:
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            self.stats.record_contains_latency(latency_ms)
+            self.stats.record_disk_lookup(hit=False)
             logger.error(
-                f"Contains timed out after {self.timeout_contains} seconds",
-                exc_info=True,
+                f"Contains timed out after {self.timeout_contains}s | "
+                f"GDS stats: {self.stats.get_summary_line()} | "
+                f"OpManager stats: {self.op_manager.get_stats()}"
             )
-        return False
+            return False
 
     async def batched_async_contains(
         self,
@@ -1199,6 +1440,8 @@ class GdsBackend(AllocatorBackendInterface):
         :param pin: Whether to pin the keys if they exist
         :return: Number of keys that exist in the storage backend
         """
+        self.stats.record_batched_contains(len(keys))
+        
         num_hit_chunks = 0
         while num_hit_chunks < len(keys):
             # Keep the lock as long as we keep getting hits
@@ -1211,6 +1454,7 @@ class GdsBackend(AllocatorBackendInterface):
                     if pin:
                         # TODO(Serapheim): implement pin() semantics
                         pass
+                    self.stats.record_hot_cache_hit()
                     num_hit_chunks += 1
 
             # If we've processed all keys, return the count
@@ -1218,6 +1462,7 @@ class GdsBackend(AllocatorBackendInterface):
                 return num_hit_chunks
 
             # Check the current key that's not in hot cache using slow path
+            self.stats.record_hot_cache_miss()
             current_key = keys[num_hit_chunks]
             if self._contains_slow_path(current_key):
                 num_hit_chunks += 1
