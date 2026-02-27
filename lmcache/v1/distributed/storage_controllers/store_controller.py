@@ -349,6 +349,12 @@ class StoreController(StorageControllerInterface):
             l1_mgr.finish_read(task.read_locked_keys)
 
             if success:
+                logger.debug(
+                    "L2 store task %d completed: adapter %d, %d keys.",
+                    task_id,
+                    adapter_index,
+                    len(task.keys),
+                )
                 delete_keys = self._policy.select_l1_deletions(task.keys)
                 if delete_keys:
                     l1_mgr.delete(delete_keys)
