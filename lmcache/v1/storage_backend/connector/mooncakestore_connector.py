@@ -217,7 +217,7 @@ class MooncakestoreConnector(RemoteConnector):
             buffer_size = allocator.pin_allocator.buffer.numel()
 
             shm_ptr = self.store.alloc_from_mem_pool(buffer_size)
-            if not shm_ptr:
+            if shm_ptr is None or shm_ptr == 0:
                 raise RuntimeError(
                     "Failed to allocate shared memory from mooncake mem pool"
                 )
