@@ -464,7 +464,10 @@ class BlendEngine(MPCacheEngine):
                     _retrieve_one_paragraph(obj_keys, memory_objs, gpu_offset)
 
             except Exception as e:
-                logger.error("Error during retrieving prefetched results: %s", e)
+                logger.exception(
+                    "Error during retrieving prefetched results: %s",
+                    e,
+                )
                 return event.ipc_handle(), False
 
             finally:
