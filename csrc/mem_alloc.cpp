@@ -145,3 +145,19 @@ void free_shm_pinned_ptr(uintptr_t ptr, size_t size,
   }
   shm_unlink(shm_name.c_str());
 }
+
+void register_pinned_ptr(uintptr_t ptr, size_t size) {
+  cudaError_t st = cudaHostRegister(reinterpret_cast<void*>(ptr), size, 0);
+  if (st != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
+                             cudaGetErrorString(st));
+  }
+}
+
+void unregister_pinned_ptr(uintptr_t ptr, size_t size) {
+  cudaError_t st = cudaHostUnregister(reinterpret_cast<void*>(ptr));
+  if (st != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
+                             cudaGetErrorString(st));
+  }
+}

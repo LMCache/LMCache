@@ -11,3 +11,6 @@ void free_numa_ptr(uintptr_t ptr, size_t size);
 void free_pinned_numa_ptr(uintptr_t ptr, size_t size);
 void free_shm_pinned_ptr(uintptr_t ptr, size_t size,
                          const std::string& shm_name);
+
+void register_pinned_ptr(uintptr_t ptr, size_t size);
+void unregister_pinned_ptr(uintptr_t ptr, size_t size);

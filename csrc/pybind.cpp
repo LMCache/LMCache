@@ -49,6 +49,10 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
+  m.def("register_pinned_ptr", &register_pinned_ptr,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("unregister_pinned_ptr", &unregister_pinned_ptr,
+        py::call_guard<py::gil_scoped_release>());
   m.def("alloc_numa_ptr", &alloc_numa_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_numa_ptr", &free_numa_ptr);

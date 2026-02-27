@@ -90,7 +90,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     shm = shared_memory.SharedMemory(name=name, create=True, size=size)
 
     array_type = ctypes.c_uint8 * size
-    buf = array_type.from_buffer(shm.buf)
+    buf = array_type.from_buffer(shm.buf)  # type: ignore[arg-type]
     ptr = ctypes.addressof(buf)
 
     # Store references to keep them alive
@@ -112,3 +112,15 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     if shm is not None:
         shm.close()
         shm.unlink()
+
+
+def register_pinned_ptr(ptr: int, size: int) -> None:
+    """Non-CUDA equivalent of registering an existing pointer as pinned.
+    Note: Pinned memory is not supported on non-CUDA, this is a no-op."""
+    pass
+
+
+def unregister_pinned_ptr(ptr: int, size: int) -> None:
+    """Non-CUDA equivalent of unregistering a pinned pointer.
+    Note: Pinned memory is not supported on non-CUDA, this is a no-op."""
+    pass

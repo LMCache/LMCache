@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import wraps
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import abc
 import ctypes
 import os
@@ -1952,6 +1952,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.buffer = _allocate_cpu_memory(size, self.numa_mapping, self.shm_name)
 
         self._unregistered = False
+        self._cleanup_fn: Optional[Callable[[], None]] = None
 
         self.pin_allocator: MemoryAllocatorInterface
         if use_paging:
@@ -2066,18 +2067,74 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
 
+    def replace_buffer(self, external_ptr: int, size: int):
+        """Replace the internal pinned buffer with externally allocated memory.
+
+        Handles all low-level details: frees the original pinned buffer,
+        pins the external memory via cudaHostRegister (or HIP equivalent),
+        wraps it as a torch.Tensor, and rebuilds the pin_allocator.
+
+        On close(), the external memory will be unpinned via
+        unregister_pinned_ptr instead of the default free path.
+
+        Can be called multiple times safely — each call properly cleans
+        up the previous buffer using the appropriate free/unregister path.
+
+        Args:
+            external_ptr: Raw pointer to externally allocated memory
+                (e.g. from mooncake alloc_from_mem_pool).
+            size: Size of the external memory in bytes.
+        """
+        # NOTE: Currently only called once during MooncakestoreConnector.__init__
+        # (dummy client mode). The _cleanup_fn check below is defensive in case
+        # this method is ever called multiple times in the future.
+
+        # 1. Free the previous buffer using the correct path
+        if self.buffer.numel() > 0:
+            if hasattr(self, "_cleanup_fn") and self._cleanup_fn:
+                # Previous buffer was from replace_buffer — unregister it
+                self._cleanup_fn()
+            else:
+                _free_cpu_memory(
+                    self.buffer,
+                    self.size,
+                    self.numa_mapping,
+                    self.shm_name,
+                )
+
+        # 2. Pin external memory for GPU DMA
+        lmc_ops.register_pinned_ptr(external_ptr, size)
+
+        # 3. Wrap external pointer as torch.Tensor
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_address(external_ptr)
+        new_buffer = torch.frombuffer(buf, dtype=torch.uint8)
+
+        # 4. Rebuild pin_allocator with new buffer
+        self.buffer = new_buffer
+        self.size = size
+        self.pin_allocator = TensorMemoryAllocator(self.buffer)
+
+        # 5. Set cleanup callback for close()
+        _ptr = external_ptr
+        _size = size
+        self._cleanup_fn = lambda: lmc_ops.unregister_pinned_ptr(_ptr, _size)
+
     def close(self):
         if not self._unregistered:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             if self.buffer.numel() == 0:
                 return
-            _free_cpu_memory(
-                self.buffer,
-                self.size,
-                self.numa_mapping,
-                self.shm_name,
-            )
+            if hasattr(self, "_cleanup_fn") and self._cleanup_fn:
+                self._cleanup_fn()
+            else:
+                _free_cpu_memory(
+                    self.buffer,
+                    self.size,
+                    self.numa_mapping,
+                    self.shm_name,
+                )
             self._unregistered = True
 
     def __str__(self):

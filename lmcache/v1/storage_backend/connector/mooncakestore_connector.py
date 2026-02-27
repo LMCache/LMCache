@@ -195,6 +195,29 @@ class MooncakestoreConnector(RemoteConnector):
                     self.config.dummy_server_address,
                 )
                 logger.info("Mooncake dummy client setup completed successfully")
+
+                # Replace pin_allocator with shm-backed memory
+                allocator = local_cpu_backend.memory_allocator
+                if hasattr(allocator, "pin_allocator") and hasattr(
+                    allocator.pin_allocator, "buffer"
+                ):
+                    buffer_size = allocator.pin_allocator.buffer.numel()
+
+                    # Allocate shm from mooncake's memory pool
+                    shm_ptr = self.store.alloc_from_mem_pool(buffer_size)
+                    if not shm_ptr:
+                        raise RuntimeError(
+                            "Failed to allocate shared memory from mooncake mem pool"
+                        )
+
+                    # Delegate all pin/wrap/rebuild to the allocator
+                    allocator.replace_buffer(shm_ptr, buffer_size)  # type: ignore[attr-defined]
+
+                    logger.info(
+                        "Replaced pin_allocator with shm buffer: ptr=%s, size=%d",
+                        hex(shm_ptr),
+                        buffer_size,
+                    )
             else:
                 # Real client mode: NUMA binding + standard setup
                 try:
