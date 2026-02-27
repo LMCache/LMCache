@@ -69,12 +69,12 @@ class TestSmReadCallbacks:
         logger.on_sm_read_prefetched(succeeded_keys=make_keys(2), failed_keys=[])
         assert logger.stats.interval_sm_read_requests == 1
 
-    def test_hit_and_miss_keys_counted_separately(self, logger):
+    def test_succeed_and_failed_keys_counted_separately(self, logger):
         logger.on_sm_read_prefetched(
             succeeded_keys=make_keys(3), failed_keys=make_keys(1, offset=100)
         )
-        assert logger.stats.interval_sm_read_hit_keys == 3
-        assert logger.stats.interval_sm_read_miss_keys == 1
+        assert logger.stats.interval_sm_read_succeed_keys == 3
+        assert logger.stats.interval_sm_read_failed_keys == 1
 
     def test_multiple_calls_accumulate(self, logger):
         for _ in range(5):
@@ -82,13 +82,13 @@ class TestSmReadCallbacks:
                 succeeded_keys=make_keys(2), failed_keys=make_keys(1, offset=50)
             )
         assert logger.stats.interval_sm_read_requests == 5
-        assert logger.stats.interval_sm_read_hit_keys == 10
-        assert logger.stats.interval_sm_read_miss_keys == 5
+        assert logger.stats.interval_sm_read_succeed_keys == 10
+        assert logger.stats.interval_sm_read_failed_keys == 5
 
     def test_all_misses(self, logger):
         logger.on_sm_read_prefetched(succeeded_keys=[], failed_keys=make_keys(4))
-        assert logger.stats.interval_sm_read_hit_keys == 0
-        assert logger.stats.interval_sm_read_miss_keys == 4
+        assert logger.stats.interval_sm_read_succeed_keys == 0
+        assert logger.stats.interval_sm_read_failed_keys == 4
 
     def test_finish_callback_is_noop(self, logger):
         logger.on_sm_read_prefetched(succeeded_keys=make_keys(2), failed_keys=[])
@@ -98,8 +98,8 @@ class TestSmReadCallbacks:
             succeeded_keys=make_keys(2), failed_keys=[]
         )
         assert logger.stats.interval_sm_read_requests == before
-        assert logger.stats.interval_sm_read_hit_keys == 2
-        assert logger.stats.interval_sm_read_miss_keys == 0
+        assert logger.stats.interval_sm_read_succeed_keys == 2
+        assert logger.stats.interval_sm_read_failed_keys == 0
 
 
 class TestSmWriteCallbacks:
@@ -111,7 +111,7 @@ class TestSmWriteCallbacks:
         logger.on_sm_reserved_write(
             succeeded_keys=make_keys(4), failed_keys=make_keys(2, offset=100)
         )
-        assert logger.stats.interval_sm_write_success_keys == 4
+        assert logger.stats.interval_sm_write_succeed_keys == 4
         assert logger.stats.interval_sm_write_failed_keys == 2
 
     def test_multiple_calls_accumulate(self, logger):
@@ -120,18 +120,18 @@ class TestSmWriteCallbacks:
                 succeeded_keys=make_keys(2), failed_keys=make_keys(1, offset=50)
             )
         assert logger.stats.interval_sm_write_requests == 3
-        assert logger.stats.interval_sm_write_success_keys == 6
+        assert logger.stats.interval_sm_write_succeed_keys == 6
         assert logger.stats.interval_sm_write_failed_keys == 3
 
     def test_finish_callback_is_noop(self, logger):
         logger.on_sm_reserved_write(succeeded_keys=make_keys(2), failed_keys=[])
         before_requests = logger.stats.interval_sm_write_requests
-        before_success = logger.stats.interval_sm_write_success_keys
+        before_succeed = logger.stats.interval_sm_write_succeed_keys
 
         logger.on_sm_write_finished(succeeded_keys=make_keys(2), failed_keys=[])
 
         assert logger.stats.interval_sm_write_requests == before_requests
-        assert logger.stats.interval_sm_write_success_keys == before_success
+        assert logger.stats.interval_sm_write_succeed_keys == before_succeed
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +148,10 @@ class TestLogPrometheus:
 
         s = logger.stats
         assert s.interval_sm_read_requests == 0
-        assert s.interval_sm_read_hit_keys == 0
-        assert s.interval_sm_read_miss_keys == 0
+        assert s.interval_sm_read_succeed_keys == 0
+        assert s.interval_sm_read_failed_keys == 0
         assert s.interval_sm_write_requests == 0
-        assert s.interval_sm_write_success_keys == 0
+        assert s.interval_sm_write_succeed_keys == 0
         assert s.interval_sm_write_failed_keys == 0
 
     def test_sm_counters_forwarded_to_prometheus(self, logger):
@@ -165,10 +165,10 @@ class TestLogPrometheus:
         logger.log_prometheus()
 
         logger._sm_read_requests_counter.inc.assert_called_once_with(1)
-        logger._sm_read_hit_keys_counter.inc.assert_called_once_with(3)
-        logger._sm_read_miss_keys_counter.inc.assert_called_once_with(1)
+        logger._sm_read_succeed_keys_counter.inc.assert_called_once_with(3)
+        logger._sm_read_failed_keys_counter.inc.assert_called_once_with(1)
         logger._sm_write_requests_counter.inc.assert_called_once_with(1)
-        logger._sm_write_success_keys_counter.inc.assert_called_once_with(2)
+        logger._sm_write_succeed_keys_counter.inc.assert_called_once_with(2)
         logger._sm_write_failed_keys_counter.inc.assert_called_once_with(1)
 
     def test_log_prometheus_with_zero_stats_still_calls_inc(self, logger):
@@ -213,7 +213,9 @@ class TestThreadSafety:
 
         assert not errors
         assert logger.stats.interval_sm_read_requests == n_threads * calls_per_thread
-        assert logger.stats.interval_sm_read_hit_keys == n_threads * calls_per_thread
+        assert (
+            logger.stats.interval_sm_read_succeed_keys == n_threads * calls_per_thread
+        )
 
     def test_concurrent_log_prometheus_and_callbacks(self, logger):
         n_callbacks = 200
