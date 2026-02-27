@@ -424,11 +424,11 @@ def test_mq_unregister_kv_cache_multiple_clients():
 def test_mq_store():
     """
     Test MessageQueue with STORE request type.
-    STORE takes (keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int])
-    and returns bool.
+    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    event_ipc_handle: bytes) and returns (bytes, bool).
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(3)]
+    # Create test key
+    key = create_cache_key(0)
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
     test_handle = b"\x00" * 64
@@ -440,7 +440,7 @@ def test_mq_store():
     # Run test with STORE request
     helper.run_test(
         request_type=RequestType.STORE,
-        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
+        payloads=[key, gpu_id, gpu_block_ids, test_handle],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
@@ -449,11 +449,11 @@ def test_mq_store():
 def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
-    RETRIEVE takes (keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int])
-    and returns bool.
+    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    event_ipc_handle: bytes) and returns (bytes, bool).
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(3)]
+    # Create test key
+    key = create_cache_key(0)
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
     test_handle = b"\x00" * 64
@@ -467,8 +467,8 @@ def test_mq_retrieve():
     # Run test with RETRIEVE request
     helper.run_test(
         request_type=RequestType.RETRIEVE,
-        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
-        expected_response=(b"\x01" * 64, [True, True, True]),
+        payloads=[key, gpu_id, gpu_block_ids, test_handle],
+        expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
 
