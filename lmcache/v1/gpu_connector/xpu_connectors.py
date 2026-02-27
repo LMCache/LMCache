@@ -21,6 +21,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2, GPUConnectorInterface
+from lmcache.v1.gpu_connector.utils import _split_token2d_kv, _get_head_size_view
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 
@@ -242,66 +243,6 @@ class VLLMPagedMemXPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.to_gpu(memory_obj, start, end, **kwargs)
 
-def _split_token2d_kv(token2d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Accepts either:
-      - [2, T, D]
-      - [T, 2, D]
-    Returns:
-      - k_tok: [T, D]
-      - v_tok: [T, D]
-    """
-    if token2d.dim() != 3:
-        raise ValueError(f"Expected token2d dim=3, got {token2d.shape}")
-    if token2d.shape[0] == 2:  # [2, T, D]
-        return token2d[0], token2d[1]
-    if token2d.shape[1] == 2:  # [T, 2, D]
-        return token2d[:, 0, :], token2d[:, 1, :]
-    raise ValueError(f"Unrecognized token2d layout: {token2d.shape}")
-
-
-def _get_paged_kv_views(
-    kv_cache_layer: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-    use_mla: bool,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    """
-    Returns flattened views for index_copy/index_select.
-
-    MLA:
-      kv_cache_layer: [num_pages, page_size, head_size]
-      returns: flat: [num_pages*page_size, head_size]
-
-    Non-MLA:
-      kv_cache_layer either:
-        - tensor [2, num_pages, page_size, num_heads, head_size]
-        - tuple (k, v) each [num_pages, page_size, num_heads, head_size]
-      returns:
-        (k_flat, v_flat) each [num_pages*page_size, num_heads*head_size]
-    """
-    if use_mla:
-        if not isinstance(kv_cache_layer, torch.Tensor):
-            raise ValueError("MLA expects kv_cache_layer as Tensor")
-        if kv_cache_layer.dim() != 3:
-            raise ValueError(f"MLA expects dim=3, got {kv_cache_layer.shape}")
-        num_pages, page_size, head_size = kv_cache_layer.shape
-        return kv_cache_layer.view(num_pages * page_size, head_size)
-
-    # non-MLA
-    if isinstance(kv_cache_layer, torch.Tensor):
-        # [2, num_pages, page_size, num_heads, head_size]
-        if kv_cache_layer.dim() != 5 or kv_cache_layer.shape[0] != 2:
-            raise ValueError(f"Expected [2, P, B, H, D], got {kv_cache_layer.shape}")
-        k = kv_cache_layer[0]
-        v = kv_cache_layer[1]
-    else:
-        k, v = kv_cache_layer
-        if k.dim() != 4 or v.dim() != 4:
-            raise ValueError(f"Expected (k,v) 4D, got {k.shape}, {v.shape}")
-
-    num_pages, page_size, num_heads, head_size = k.shape
-    total = num_pages * page_size
-    d = num_heads * head_size
-    return k.view(total, d), v.view(total, d)
 
 
 class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
@@ -443,9 +384,9 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             with torch.xpu.stream(self.load_stream):
                 dst_layer = self.kvcaches[layer_id]
                 if self.use_mla:
-                    dst_flat = _get_paged_kv_views(dst_layer, use_mla=True)
+                    dst_flat = _get_head_size_view(dst_layer, use_mla=True)
                 else:
-                    dst_k_flat, dst_v_flat = _get_paged_kv_views(dst_layer, use_mla=False)
+                    dst_k_flat, dst_v_flat = _get_head_size_view(dst_layer, use_mla=False)
 
                 cursor = 0
 
@@ -663,7 +604,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                 src_layer = self.kvcaches[layer_id]
 
                 if self.use_mla:
-                    src_flat = _get_paged_kv_views(src_layer, use_mla=True)
+                    src_flat = _get_head_size_view(src_layer, use_mla=True)
 
                     if self.use_gpu:
                         gathered_full = src_flat.index_select(0, slot_mapping_full)
@@ -695,7 +636,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                     mem.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
                 else:
-                    src_k_flat, src_v_flat = _get_paged_kv_views(src_layer, use_mla=False)
+                    src_k_flat, src_v_flat = _get_head_size_view(src_layer, use_mla=False)
 
                     if self.use_gpu:
                         k_full = src_k_flat.index_select(0, slot_mapping_full)
