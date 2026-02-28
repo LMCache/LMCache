@@ -414,9 +414,7 @@ class MessageQueueServer:
                 self.output_notifier.send(b"1")
 
             except Exception:
-                logger.exception(
-                    "Failed in blocking handler callback"
-                )
+                logger.exception("Failed in blocking handler callback")
 
         # TODO: HERE'S A BUG: WE CANNOT SEND RESPONSE IN THE FUTURE THREAD
         # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
