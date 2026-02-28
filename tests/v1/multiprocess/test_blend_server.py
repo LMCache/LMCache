@@ -1325,26 +1325,20 @@ def test_cb_store_final_then_normal_lookup_retrieve(
     )
 
     # Test retrieve
-    retrieve_keys = [
-        create_cb_cache_key(
-            token_ids[:expected_hit_count_per_paragraph],
-            request_id="final-retrieve-test",
-        )
-    ]
+    retrieve_key = create_cb_cache_key(
+        token_ids[:expected_hit_count_per_paragraph],
+        request_id="final-retrieve-test",
+    )
     gpu_block_ids = list(range(0, expected_hit_chunks * 16))  # Retrieve to first
     event2 = torch.cuda.Event(interprocess=True)
     event2.record()
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [retrieve_keys, registered_instance, gpu_block_ids, event2.ipc_handle()],
+        [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-    assert isinstance(retrieve_result, list), "Retrieve should return a list"
-    assert len(retrieve_result) == expected_hit_chunks, (
-        "Retrieve should return correct number of chunks"
-    )
-    assert all(retrieve_result), "All retrieved chunks should be successful"
+    assert retrieve_result is True, "Retrieve should succeed"
 
     # Verify the correctness
     torch.cuda.synchronize()
