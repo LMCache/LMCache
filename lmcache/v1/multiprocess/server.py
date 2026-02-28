@@ -531,10 +531,20 @@ def run_cache_server(
         engine.close()
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="LMCache ZMQ Cache Server (without HTTP)"
-    )
+def add_server_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    """Add server-specific CLI arguments to an existing argument parser.
+
+    This allows other modules (e.g. the unified ``lmcache`` CLI) to reuse
+    the same argument definitions without duplication.
+
+    Args:
+        parser: The argument parser to add arguments to.
+
+    Returns:
+        argparse.ArgumentParser: The same parser with server arguments added.
+    """
     parser.add_argument(
         "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
     )
@@ -553,7 +563,20 @@ def parse_args():
         default="blake3",
         help="Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)",
     )
-    parser = add_storage_manager_args(parser)
+    add_storage_manager_args(parser)
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the standalone ZMQ cache server.
+
+    Returns:
+        argparse.Namespace: The parsed arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description="LMCache ZMQ Cache Server (without HTTP)"
+    )
+    add_server_args(parser)
     return parser.parse_args()
 
 
