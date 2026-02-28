@@ -75,22 +75,21 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 
 
 def store_handler(
-    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
+    key: KeyType, gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for STORE requests.
 
     Args:
-        keys: List of cache keys to store
+        key: Cache key to store
         gpu_id: GPU device ID
         gpu_block_ids: List of GPU block IDs
+        ipc_handle: CUDA event IPC handle
 
     Returns:
-        bool: True if store succeeded
+        tuple[bytes, bool]: (event handle, success flag)
     """
-    # In a real implementation, this would store KV cache data
-    # For testing, we just validate the inputs are received correctly
-    assert isinstance(keys, list), f"Expected keys to be list, got {type(keys)}"
+    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
@@ -98,7 +97,6 @@ def store_handler(
     assert isinstance(ipc_handle, bytes), (
         f"Expected ipc_handle to be bytes, got {type(ipc_handle)}"
     )
-    # Return success
     return b"\x01" * 64, True
 
 
@@ -108,22 +106,21 @@ def store_handler(
 
 
 def retrieve_handler(
-    keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int], event_handler: bytes
-) -> tuple[bytes, list[bool]]:
+    key: KeyType, gpu_id: int, gpu_block_ids: list[int], event_handler: bytes
+) -> tuple[bytes, bool]:
     """
     Dummy handler for RETRIEVE requests.
 
     Args:
-        keys: List of cache keys to retrieve
+        key: Cache key to retrieve
         gpu_id: GPU device ID
         gpu_block_ids: List of GPU block IDs
+        event_handler: CUDA event IPC handle
 
     Returns:
-        bool: True if retrieve succeeded
+        tuple[bytes, bool]: (event handle, success flag)
     """
-    # In a real implementation, this would retrieve KV cache data
-    # For testing, we just validate the inputs are received correctly
-    assert isinstance(keys, list), f"Expected keys to be list, got {type(keys)}"
+    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
@@ -131,8 +128,7 @@ def retrieve_handler(
     assert isinstance(event_handler, bytes), (
         f"Expected event_handler to be bytes, got {type(event_handler)}"
     )
-    # Return success
-    return b"\x01" * 64, [True for _ in keys]
+    return b"\x01" * 64, True
 
 
 # ==============================================================================
