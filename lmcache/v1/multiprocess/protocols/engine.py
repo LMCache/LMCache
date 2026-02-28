@@ -58,26 +58,26 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         # Store KV cache blocks
         # Payload:
-        #   - keys: list[KeyType] - Cache keys to store
+        #   - key: KeyType - Cache key to store
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[int] - GPU block IDs containing the data
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "STORE": ProtocolDefinition(
-            payload_classes=[list[KeyType], int, list[int], bytes],
+            payload_classes=[KeyType, int, list[int], bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve KV cache blocks
         # Payload:
-        #   - keys: list[KeyType] - Cache keys to retrieve
+        #   - key: KeyType - Cache key to retrieve
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[int] - GPU block IDs to store retrieved data
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
-        # Returns: tuple[bytes, list[bool]] - (CUDA event handle, list of success flags)
+        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[list[KeyType], int, list[int], bytes],
-            response_class=tuple[bytes, list[bool]],
+            payload_classes=[KeyType, int, list[int], bytes],
+            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Lookup keys in cache
