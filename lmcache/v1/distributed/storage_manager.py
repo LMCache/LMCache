@@ -18,13 +18,13 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import StorageManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.observability.prometheus_controller import (
-    PrometheusController,
-)
 from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.prometheus_controller import (
+    PrometheusController,
+)
 
 logger = init_logger(__name__)
 
