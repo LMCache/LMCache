@@ -9,7 +9,7 @@ For the full list of existing metrics, see [METRICS.md](METRICS.md).
 
 ## Step 1 — Define a stats dataclass
 
-Create `lmcache/v1/distributed/observability/stats/my_stats.py`:
+Create `lmcache/v1/mp_observability/stats/my_stats.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
@@ -26,7 +26,7 @@ class MyStats:
 
 ## Step 2 — Implement the listener + PrometheusLogger
 
-Create `lmcache/v1/distributed/observability/logger/my_logger.py`:
+Create `lmcache/v1/mp_observability/logger/my_logger.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
@@ -35,8 +35,8 @@ import time
 from collections import deque
 from typing import Deque
 
-from lmcache.v1.distributed.observability.logger.prometheus_logger import PrometheusLogger
-from lmcache.v1.distributed.observability.stats.my_stats import MyStats
+from lmcache.v1.mp_observability.logger.prometheus_logger import PrometheusLogger
+from lmcache.v1.mp_observability.stats.my_stats import MyStats
 
 # Reuse the same latency bucket definition
 _LATENCY_BUCKETS = [0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1,
@@ -102,11 +102,11 @@ class MyListener(PrometheusLogger):
 
 ## Step 3 — Register with PrometheusController
 
-In `lmcache/v1/distributed/observability/prometheus_controller.py`, add your logger
+In `lmcache/v1/mp_observability/prometheus_controller.py`, add your logger
 in `__init__` alongside the existing loggers:
 
 ```python
-from lmcache.v1.distributed.observability.logger.my_logger import MyListener
+from lmcache.v1.mp_observability.logger.my_logger import MyListener
 
 class PrometheusController(StorageControllerInterface):
     def __init__(self, storage_manager, l1_manager, log_interval):
