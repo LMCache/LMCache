@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 
 # First Party
 from lmcache.v1.distributed.internal_api import L2ManagerListener
-from lmcache.v1.distributed.observability.logger.prometheus_logger import (
+from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
 

@@ -7,17 +7,17 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.observability.logger.l1_stats_logger import (
-    L1ManagerStatsLogger,
-)
-from lmcache.v1.distributed.observability.logger.prometheus_logger import (
-    PrometheusLogger,
-)
-from lmcache.v1.distributed.observability.logger.storage_manager_stats_logger import (
-    StorageManagerStatsLogger,
-)
 from lmcache.v1.distributed.storage_controller import (
     StorageControllerInterface,
+)
+from lmcache.v1.mp_observability.logger.l1_stats_logger import (
+    L1ManagerStatsLogger,
+)
+from lmcache.v1.mp_observability.logger.prometheus_logger import (
+    PrometheusLogger,
+)
+from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
+    StorageManagerStatsLogger,
 )
 
 if TYPE_CHECKING:

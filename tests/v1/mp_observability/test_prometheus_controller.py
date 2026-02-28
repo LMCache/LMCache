@@ -19,10 +19,10 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.distributed.observability.logger.prometheus_logger import (
+from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
-from lmcache.v1.distributed.observability.prometheus_controller import (
+from lmcache.v1.mp_observability.prometheus_controller import (
     PrometheusController,
 )
 

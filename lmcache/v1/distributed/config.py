@@ -15,6 +15,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     add_l2_adapters_args,
     parse_args_to_l2_adapters_config,
 )
+from lmcache.v1.mp_observability.config import PrometheusConfig
 
 
 @dataclass
@@ -69,22 +70,6 @@ class EvictionConfig:
 
     eviction_ratio: float = field(default=0.2)
     """ The fraction of *allocated* memory to evict when triggered (0.0 to 1.0). """
-
-
-@dataclass
-class PrometheusConfig:
-    """
-    The configuration for the Prometheus observability stack.
-    """
-
-    enabled: bool = True
-    """ Whether to enable Prometheus metrics collection and HTTP server. """
-
-    port: int = 9090
-    """ Port to expose the Prometheus /metrics endpoint on. """
-
-    log_interval: float = 10.0
-    """ How often (in seconds) to flush accumulated stats to Prometheus. """
 
 
 @dataclass
