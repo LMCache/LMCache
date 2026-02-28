@@ -45,6 +45,13 @@ def make_bitmap(size: int, set_bits: list[int]) -> Bitmap:
     return bitmap
 
 
+def plan_to_indices(plan: dict[int, Bitmap]) -> dict[int, list[int]]:
+    """Convert a Bitmap-based load plan to index lists for easy assertion."""
+    return {
+        adapter_idx: bitmap.get_indices_list() for adapter_idx, bitmap in plan.items()
+    }
+
+
 # =============================================================================
 # DefaultPrefetchPolicy Tests
 # =============================================================================
@@ -62,7 +69,7 @@ class TestDefaultPrefetchPolicy:
 
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
-        assert result == {0: [0, 1, 2]}
+        assert plan_to_indices(result) == {0: [0, 1, 2]}
 
     def test_single_adapter_partial_hits(self):
         """Only found keys are in the plan."""
@@ -74,7 +81,7 @@ class TestDefaultPrefetchPolicy:
 
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
-        assert result == {0: [0, 2]}
+        assert plan_to_indices(result) == {0: [0, 2]}
 
     def test_multi_adapter_overlap_first_wins(self):
         """When key is in multiple adapters, lowest-index adapter gets it."""
@@ -90,7 +97,7 @@ class TestDefaultPrefetchPolicy:
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
         # key 0 → adapter 0, key 1 → adapter 0 (first wins), key 2 → adapter 1
-        assert result == {0: [0, 1], 1: [2]}
+        assert plan_to_indices(result) == {0: [0, 1], 1: [2]}
 
     def test_multi_adapter_disjoint(self):
         """Each adapter gets its unique keys."""
@@ -104,7 +111,7 @@ class TestDefaultPrefetchPolicy:
 
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
-        assert result == {0: [0, 1], 1: [2, 3]}
+        assert plan_to_indices(result) == {0: [0, 1], 1: [2, 3]}
 
     def test_no_hits_returns_empty(self):
         """Empty bitmaps → empty plan."""
@@ -118,7 +125,7 @@ class TestDefaultPrefetchPolicy:
 
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
-        assert result == {}
+        assert plan_to_indices(result) == {}
 
     def test_empty_adapters_returns_empty(self):
         """No adapters means no plan."""
@@ -127,7 +134,7 @@ class TestDefaultPrefetchPolicy:
 
         result = policy.select_load_plan(keys, {}, [])
 
-        assert result == {}
+        assert plan_to_indices(result) == {}
 
     def test_empty_keys_returns_empty(self):
         """Empty keys list → empty plan."""
@@ -137,7 +144,7 @@ class TestDefaultPrefetchPolicy:
 
         result = policy.select_load_plan([], lookup_results, adapters)
 
-        assert result == {}
+        assert plan_to_indices(result) == {}
 
     def test_adapter_order_matters(self):
         """Adapter with lower index always has priority, regardless of order
@@ -154,7 +161,7 @@ class TestDefaultPrefetchPolicy:
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
         # Adapter 0 gets the key (lower index wins)
-        assert result == {0: [0]}
+        assert plan_to_indices(result) == {0: [0]}
 
     def test_three_adapters_with_overlap(self):
         """Three adapters with partial overlaps."""
@@ -174,7 +181,7 @@ class TestDefaultPrefetchPolicy:
         # key 2 → adapter 1 (lower than adapter 2)
         # key 3 → adapter 0 (lowest that has it)
         # key 4 → adapter 2
-        assert result == {0: [0, 3], 1: [1, 2], 2: [4]}
+        assert plan_to_indices(result) == {0: [0, 3], 1: [1, 2], 2: [4]}
 
     def test_missing_lookup_result_for_adapter(self):
         """Adapter with no lookup result is skipped."""
@@ -186,7 +193,7 @@ class TestDefaultPrefetchPolicy:
 
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
-        assert result == {1: [0, 1]}
+        assert plan_to_indices(result) == {1: [0, 1]}
 
     def test_each_key_appears_at_most_once(self):
         """No key should be assigned to multiple adapters."""
@@ -203,6 +210,6 @@ class TestDefaultPrefetchPolicy:
         result = policy.select_load_plan(keys, lookup_results, adapters)
 
         # All keys should go to adapter 0 only
-        assert result == {0: [0, 1, 2]}
+        assert plan_to_indices(result) == {0: [0, 1, 2]}
         assert 1 not in result
         assert 2 not in result

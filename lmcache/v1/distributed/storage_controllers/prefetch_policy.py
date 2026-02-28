@@ -33,7 +33,7 @@ class PrefetchPolicy(ABC):
         keys: list[ObjectKey],
         lookup_results: dict[int, Bitmap],
         adapters: list[AdapterDescriptor],
-    ) -> dict[int, list[int]]:
+    ) -> dict[int, Bitmap]:
         """
         Decide which adapter loads which keys.
 
@@ -44,9 +44,10 @@ class PrefetchPolicy(ABC):
             adapters: Descriptors of available L2 adapters.
 
         Returns:
-            Mapping from adapter index to list of key indices that
-            adapter should load. Each key index appears in at most
-            one adapter's list. Keys not in any list will NOT be loaded.
+            Mapping from adapter index to a bitmap telling which keys that
+            the adapter should load. The returned bitmaps should not
+            overlap, and the union of all returned bitmaps should be a subset
+            of the union of the input bitmaps.
         """
 
 
@@ -61,7 +62,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         keys: list[ObjectKey],
         lookup_results: dict[int, Bitmap],
         adapters: list[AdapterDescriptor],
-    ) -> dict[int, list[int]]:
+    ) -> dict[int, Bitmap]:
         """
         Assign each key to the first adapter (by index) that has it.
 
@@ -71,19 +72,24 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             adapters: Descriptors of available L2 adapters.
 
         Returns:
-            Mapping from adapter index to key indices. Each key goes
+            Mapping from adapter index to key bitmaps. Each key goes
             to the lowest-indexed adapter that reported having it.
         """
-        plan: dict[int, list[int]] = {}
-        assigned: set[int] = set()
+        plan: dict[int, Bitmap] = {}
+        global_bitmap = Bitmap(len(keys))
+        for bitmap in lookup_results.values():
+            global_bitmap |= bitmap
 
         for ad in sorted(adapters, key=lambda a: a.index):
-            bitmap = lookup_results.get(ad.index)
-            if bitmap is None:
+            curr_bitmap = lookup_results.get(ad.index)
+            if curr_bitmap is None:
                 continue
-            for i in range(len(keys)):
-                if i not in assigned and bitmap.test(i):
-                    plan.setdefault(ad.index, []).append(i)
-                    assigned.add(i)
+
+            local_bitmap = global_bitmap & curr_bitmap
+            global_bitmap &= ~local_bitmap
+            if local_bitmap.popcount() == 0:
+                continue
+
+            plan[ad.index] = local_bitmap
 
         return plan
