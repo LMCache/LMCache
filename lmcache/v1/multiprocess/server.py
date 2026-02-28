@@ -567,6 +567,27 @@ def add_server_args(
     return parser
 
 
+def run_server_from_args(args: argparse.Namespace) -> None:
+    """Convert parsed CLI arguments into config and start the cache server.
+
+    This is the shared entry point used by both the standalone
+    ``__main__`` runner and the unified ``lmcache server`` CLI.
+
+    Args:
+        args: Parsed CLI arguments containing server and storage-manager
+            options.
+    """
+    storage_manager_config = parse_args_to_config(args)
+    run_cache_server(
+        storage_manager_config=storage_manager_config,
+        host=args.host,
+        port=args.port,
+        chunk_size=args.chunk_size,
+        max_workers=args.max_workers,
+        hash_algorithm=args.hash_algorithm,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the standalone ZMQ cache server.
 
@@ -581,13 +602,4 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    storage_manager_config = parse_args_to_config(args)
-    run_cache_server(
-        storage_manager_config=storage_manager_config,
-        host=args.host,
-        port=args.port,
-        chunk_size=args.chunk_size,
-        max_workers=args.max_workers,
-        hash_algorithm=args.hash_algorithm,
-    )
+    run_server_from_args(parse_args())
