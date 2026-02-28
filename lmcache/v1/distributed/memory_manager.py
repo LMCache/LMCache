@@ -160,4 +160,4 @@ class L1MemoryManager:
 
     # Debugging APIs
     def memcheck(self):
-        self._allocator.memcheck()
+        return self._allocator.memcheck()
