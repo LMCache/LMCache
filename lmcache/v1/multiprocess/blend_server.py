@@ -463,10 +463,8 @@ class BlendEngine(MPCacheEngine):
                     gpu_offset = start + offset
                     _retrieve_one_paragraph(obj_keys, memory_objs, gpu_offset)
 
-            except Exception:
-                logger.exception(
-                    "Failed during blend retrieve from prefetched results"
-                )
+            except Exception as e:
+                logger.error("Error during retrieving prefetched results: %s", e)
                 return event.ipc_handle(), False
 
             finally:

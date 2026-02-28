@@ -413,10 +413,8 @@ class MessageQueueServer:
                 self.output_queue.put(frames_to_send)
                 self.output_notifier.send(b"1")
 
-            except Exception:
-                logger.exception(
-                    "Failed in blocking handler callback"
-                )
+            except Exception as e:
+                logger.error("Error in blocking handler: %s", e)
 
         # TODO: HERE'S A BUG: WE CANNOT SEND RESPONSE IN THE FUTURE THREAD
         # BECAUSE THE OUTPUT ZMQ SOCKET IS NOT THREAD-SAFE.
@@ -466,11 +464,8 @@ class MessageQueueServer:
                             payloads=payloads,
                             prefix_frames=[identity, b_request_uid, b_request_type],
                         )
-                    except Exception:
-                        logger.exception(
-                            "Failed in server main loop handling request %s",
-                            request_type,
-                        )
+                    except Exception as e:
+                        logger.error("Error handling request %s: %s", request_type, e)
                 else:
                     logger.error(
                         "No handler registered for request type %s", request_type
