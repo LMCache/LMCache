@@ -518,9 +518,9 @@ class L1Manager:
         return self._objects.get(key, None)
 
     @l1_mgr_synchronized
-    def memcheck(self) -> None:
+    def memcheck(self) -> bool:
         """Perform memory check for L1 cache."""
-        self._memory_manager.memcheck()
+        mem_check_result = self._memory_manager.memcheck()
 
         # Log the locked objects for debugging
         num_write_locked = 0
@@ -538,3 +538,4 @@ class L1Manager:
             num_write_locked,
             num_read_locked,
         )
+        return mem_check_result
