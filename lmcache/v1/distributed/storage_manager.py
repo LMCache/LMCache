@@ -45,7 +45,6 @@ class StorageManager:
 
         # Eviction controller
         self._eviction_controller = EvictionController(
-            storage_manager=self,
             l1_manager=self._l1_manager,
             eviction_config=config.eviction_config,
         )
