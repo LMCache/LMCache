@@ -94,6 +94,21 @@ class SafeLocalCPUBackend(LocalCPUBackend):
         return "SafeLocalCPUBackend(dummy)"
 
 
+def extract_plugin_type(plugin_name: str) -> str:
+    """Extract the type portion from a plugin name.
+
+    Plugin name format: ``{type}`` or ``{type}.{instance}``.
+    Returns the *type* part so that adapters can match by type.
+
+    Examples:
+        >>> extract_plugin_type("fs")
+        'fs'
+        >>> extract_plugin_type("fs.primary")
+        'fs'
+    """
+    return plugin_name.split(".", 1)[0]
+
+
 class ConnectorContext:
     """
     Context for creating a connector.
@@ -104,7 +119,8 @@ class ConnectorContext:
         local_cpu_backend: The local CPU backend
             (wrapped as SafeLocalCPUBackend if None)
         config: Optional LMCache engine configuration
-        parsed_url: Parsed representation of the URL
+        plugin_name: Optional plugin instance name
+            (e.g. "fs", "fs.primary")
     """
 
     def __init__(
@@ -114,6 +130,7 @@ class ConnectorContext:
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig],
         metadata: Optional[LMCacheMetadata],
+        plugin_name: Optional[str] = None,
     ):
         self.url = url
         self.loop = loop
@@ -126,6 +143,7 @@ class ConnectorContext:
         )
         self.config = config
         self.metadata = metadata
+        self.plugin_name = plugin_name
 
     def get_full_chunk_size_bytes(self) -> int:
         """
@@ -168,6 +186,7 @@ class ConnectorManager:
         local_cpu_backend: Optional[LocalCPUBackend],
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheMetadata] = None,
+        plugin_name: Optional[str] = None,
     ) -> None:
         logger.info("Initializing ConnectorManager")
         self.context = ConnectorContext(
@@ -176,6 +195,7 @@ class ConnectorManager:
             local_cpu_backend=local_cpu_backend,
             config=config,
             metadata=metadata,
+            plugin_name=plugin_name,
         )
         self.adapters: List[ConnectorAdapter] = []
         self._remote_adapters_builtin_launcher()
@@ -298,6 +318,7 @@ def CreateConnector(
     local_cpu_backend: Optional[LocalCPUBackend],
     config: Optional[LMCacheEngineConfig] = None,
     metadata: Optional[LMCacheMetadata] = None,
+    plugin_name: Optional[str] = None,
 ) -> InstrumentedRemoteConnector:
     """
     Create a remote connector from the given URL.
@@ -351,7 +372,9 @@ def CreateConnector(
     if "://" not in url:
         raise ValueError(f"Invalid remote url {url}: missing scheme")
 
-    manager = ConnectorManager(url, loop, local_cpu_backend, config, metadata)
+    manager = ConnectorManager(
+        url, loop, local_cpu_backend, config, metadata, plugin_name
+    )
     connector = manager.create_connector()
 
     return InstrumentedRemoteConnector(connector)

@@ -17,7 +17,7 @@ from lmcache.v1.storage_backend.gds_backend import GdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
-from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+from lmcache.v1.storage_backend.remote_backend import RemoteBackend  # noqa: F401
 
 if TYPE_CHECKING:
     # First Party
@@ -218,6 +218,38 @@ def CreateStorageBackends(
         )
         storage_backends[str(gds_backend)] = gds_backend
 
+    # Handle remote storage plugins (new way)
+    if config.remote_storage_plugins and "RemoteBackend" not in _skip:
+        for plugin_name in config.remote_storage_plugins:
+            assert local_cpu_backend is not None, (
+                "Remote backend requires local CPU backend as a buffer."
+                "Please turn on local cpu backend with max_local_cpu_size > 0"
+            )
+            try:
+                remote_backend = RemoteBackend(
+                    config,
+                    metadata,
+                    loop,
+                    local_cpu_backend,
+                    dst_device,
+                    plugin_name=plugin_name,
+                )
+                backend_name = "RemoteBackend-%s" % plugin_name
+                storage_backends[backend_name] = remote_backend
+                logger.info(
+                    "Created remote backend for plugin: %s",
+                    plugin_name,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to create remote backend for plugin %s: %s",
+                    plugin_name,
+                    e,
+                )
+
+    # Handle legacy remote_url (deprecated but still supported)
+>>>>>>> 01afc8d8 (Refactor remote plugin to accept multiply connector.)
+=======
     if config.maru_path is not None and "MaruBackend" not in _skip:
         try:
             # First Party
@@ -232,10 +264,73 @@ def CreateStorageBackends(
         maru_backend = MaruBackend(config, metadata, loop, dst_device)
         storage_backends[str(maru_backend)] = maru_backend
 
+    # Handle remote storage plugins (new way)
+    if config.remote_storage_plugins and "RemoteBackend" not in _skip:
+        for plugin_name in config.remote_storage_plugins:
+            assert local_cpu_backend is not None, (
+                "Remote backend requires local CPU backend as a buffer."
+                "Please turn on local cpu backend with max_local_cpu_size > 0"
+            )
+            try:
+                remote_backend = RemoteBackend(
+                    config,
+                    metadata,
+                    loop,
+                    local_cpu_backend,
+                    dst_device,
+                    plugin_name=plugin_name,
+                )
+                backend_name = "RemoteBackend-%s" % plugin_name
+                storage_backends[backend_name] = remote_backend
+                logger.info(
+                    "Created remote backend for plugin: %s",
+                    plugin_name,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to create remote backend for plugin %s: %s",
+                    plugin_name,
+                    e,
+                )
+
+    # Handle legacy remote_url (deprecated but still supported)
+=======
+    # Handle remote storage plugins (new way)
+    if config.remote_storage_plugins and "RemoteBackend" not in _skip:
+        for plugin_name in config.remote_storage_plugins:
+            assert local_cpu_backend is not None, (
+                "Remote backend requires local CPU backend as a buffer."
+                "Please turn on local cpu backend with max_local_cpu_size > 0"
+            )
+            try:
+                remote_backend = RemoteBackend(
+                    config,
+                    metadata,
+                    loop,
+                    local_cpu_backend,
+                    dst_device,
+                    plugin_name=plugin_name,
+                )
+                backend_name = "RemoteBackend-%s" % plugin_name
+                storage_backends[backend_name] = remote_backend
+                logger.info(
+                    "Created remote backend for plugin: %s",
+                    plugin_name,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to create remote backend for plugin %s: %s",
+                    plugin_name,
+                    e,
+                )
+
+    # Handle legacy remote_url (deprecated but still supported)
+>>>>>>> 01afc8d8 (Refactor remote plugin to accept multiply connector.)
     if config.remote_url is not None and "RemoteBackend" not in _skip:
-        assert local_cpu_backend is not None, (
-            "Remote backend requires local CPU backend as a buffer."
-            "Please turn on local cpu backend with max_local_cpu_size > 0"
+        # Log deprecation warning
+        logger.warning(
+            "remote_url is deprecated and will be removed in a future release. "
+            "Please use remote_storage_plugins instead."
         )
         remote_backend = RemoteBackend(
             config,
