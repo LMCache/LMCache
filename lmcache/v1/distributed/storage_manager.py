@@ -281,8 +281,11 @@ class StorageManager:
         self._l1_manager.close()
 
     # Functions for debugging and testing
-    def memcheck(self) -> None:
+    def memcheck(self) -> bool:
         """
         Perform memory check for all storage tiers.
+
+        Returns:
+            True if memory is consistent, False otherwise.
         """
-        self._l1_manager.memcheck()
+        return self._l1_manager.memcheck()
