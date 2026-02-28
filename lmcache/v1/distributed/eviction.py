@@ -88,23 +88,23 @@ class EvictionPolicy(L1ManagerListener):
         pass
 
     # L1ManagerListener implementations
-    def on_keys_reserved_read(self, keys: list[ObjectKey]):
+    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]):
         # No-op
         pass
 
-    def on_keys_read_finished(self, keys: list[ObjectKey]):
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]):
         self.on_keys_touched(keys)
 
-    def on_keys_reserved_write(self, keys: list[ObjectKey]):
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
         # No-op
         pass
 
-    def on_keys_write_finished(self, keys: list[ObjectKey]):
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
         # TODO (ApostaC): we don't differentiate between the created
         # keys and updated keys here. Probably need to fix that by introducing
         # a new callback in L1ManagerListener or adding `mode` argument into
         # on_keys_reserved_write.
         self.on_keys_created(keys)
 
-    def on_keys_deleted_by_manager(self, keys: list[ObjectKey]):
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         self.on_keys_removed(keys)
