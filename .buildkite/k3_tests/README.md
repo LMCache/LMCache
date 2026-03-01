@@ -17,6 +17,9 @@ Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, Git
 1. Go to your org → **New Pipeline**
 2. In the **Steps** editor, paste the contents of that test's `buildkite-pipeline.yml`:
    ```yaml
+   agents:
+     queue: "k8s"
+
    steps:
      - label: ":pipeline: Upload pipeline"
        command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
@@ -73,6 +76,9 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
 
 4. Write a `buildkite-pipeline.yml` (the upload step for the Buildkite UI):
    ```yaml
+   agents:
+     queue: "k8s"
+
    steps:
      - label: ":pipeline: Upload pipeline"
        command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml

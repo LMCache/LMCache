@@ -1,5 +1,8 @@
 # Paste this into the Buildkite pipeline's "Steps" editor.
 # It uploads the real pipeline definition from the repo.
+agents:
+  queue: "k8s"
+
 steps:
   - label: ":pipeline: Upload pipeline"
     command: buildkite-agent pipeline upload .buildkite/k3_tests/comprehensive/pipeline.yml

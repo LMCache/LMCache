@@ -8,6 +8,9 @@
 4. In the **Steps** editor, paste:
 
 ```yaml
+agents:
+  queue: "k8s"
+
 steps:
   - label: ":pipeline: Upload pipeline"
     command: buildkite-agent pipeline upload .buildkite/k3_tests/comprehensive/pipeline.yml
