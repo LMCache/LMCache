@@ -13,4 +13,4 @@ echo "--- :python: Installing LMCache from source"
 uv pip install . --no-build-isolation
 
 echo "--- :white_check_mark: Environment ready"
-python -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed')"
+python -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation')"
