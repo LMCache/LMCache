@@ -53,13 +53,15 @@ wait_for_vllm_server() {
     done
 }
 
-# Wait for vLLM with LMCache
-if ! wait_for_vllm_server "$VLLM_PORT" "vLLM (with LMCache)" \
-        "/tmp/build_${BUILD_ID}_vllm.log"; then
+# vLLM with LMCache is already waited on in launch-processes.sh
+# (sequential startup to avoid torch.distributed port conflicts).
+# Just verify it's still up.
+if ! curl -sf "http://localhost:${VLLM_PORT}/v1/models" > /dev/null 2>&1; then
+    echo "vLLM (with LMCache) on port $VLLM_PORT is not responding!"
+    tail -50 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
     exit 1
 fi
-
-echo ""
+echo "vLLM (with LMCache) on port $VLLM_PORT is up."
 
 # Wait for vLLM baseline
 if ! wait_for_vllm_server "$VLLM_BASELINE_PORT" "vLLM baseline (without LMCache)" \

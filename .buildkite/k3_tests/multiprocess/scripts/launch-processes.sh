@@ -79,6 +79,16 @@ VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
 echo "vLLM with LMCache started (PID=$VLLM_PID)"
 
+# Wait for vLLM with LMCache to be ready before starting baseline.
+# Both vLLM instances use port+1 for torch.distributed internally;
+# starting them simultaneously can cause EADDRINUSE on the distributed port.
+echo "Waiting for vLLM with LMCache to be ready before starting baseline..."
+if ! wait_for_server "$VLLM_PORT" 300; then
+    echo "vLLM with LMCache failed to start"
+    tail -100 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+    exit 1
+fi
+
 # ── 3. vLLM Baseline (without LMCache) ──────────────────────
 echo "=== Launching vLLM baseline ==="
 echo "Port: $VLLM_BASELINE_PORT"
