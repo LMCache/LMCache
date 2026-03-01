@@ -15,7 +15,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     add_l2_adapters_args,
     parse_args_to_l2_adapters_config,
 )
-from lmcache.v1.mp_observability.config import PrometheusConfig
 
 
 @dataclass
@@ -83,9 +82,6 @@ class StorageManagerConfig:
 
     eviction_config: EvictionConfig
     """ The configuration for eviction policies. """
-
-    prometheus_config: PrometheusConfig = field(default_factory=PrometheusConfig)
-    """ The configuration for the Prometheus observability stack. """
 
     l2_adapter_config: L2AdaptersConfig = field(
         default_factory=lambda: L2AdaptersConfig([])
@@ -162,29 +158,6 @@ def add_storage_manager_args(
         type=int,
         default=300,
         help="Time to live for each object's read lock. Default is 300s.",
-    )
-
-    # Prometheus Config
-    prometheus_group = parser.add_argument_group(
-        "Prometheus Observability", "Configuration for Prometheus metrics"
-    )
-    prometheus_group.add_argument(
-        "--disable-prometheus",
-        action="store_true",
-        default=False,
-        help="Disable Prometheus metrics collection and HTTP server.",
-    )
-    prometheus_group.add_argument(
-        "--prometheus-port",
-        type=int,
-        default=9090,
-        help="Port to expose the Prometheus /metrics endpoint on. Default is 9090.",
-    )
-    prometheus_group.add_argument(
-        "--prometheus-log-interval",
-        type=float,
-        default=10.0,
-        help="How often (in seconds) to flush stats to Prometheus. Default is 10.0.",
     )
 
     # Eviction Config
@@ -267,17 +240,11 @@ def parse_args_to_config(
         eviction_ratio=args.eviction_ratio,
     )
 
-    prometheus_config = PrometheusConfig(
-        enabled=not args.disable_prometheus,
-        port=args.prometheus_port,
-        log_interval=args.prometheus_log_interval,
-    )
     l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
     return StorageManagerConfig(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
-        prometheus_config=prometheus_config,
         l2_adapter_config=l2_adapter_config,
     )
 
