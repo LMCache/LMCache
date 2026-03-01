@@ -6,10 +6,10 @@ import threading
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1ManagerListener
-from lmcache.v1.distributed.observability.logger.prometheus_logger import (
+from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
-from lmcache.v1.distributed.observability.stats.l1_stats import L1Stats
+from lmcache.v1.mp_observability.stats.l1_stats import L1Stats
 
 _stats_lock = threading.Lock()
 

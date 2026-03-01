@@ -28,6 +28,15 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.config import (
+    PrometheusConfig,
+    add_prometheus_args,
+    parse_args_to_prometheus_config,
+)
+from lmcache.v1.mp_observability.prometheus_controller import (
+    get_prometheus_controller,
+    init_prometheus_controller,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
@@ -453,6 +462,7 @@ def add_handler_helper(
 
 def run_cache_server(
     storage_manager_config: StorageManagerConfig,
+    prometheus_config: PrometheusConfig,
     host: str = "localhost",
     port: int = 5555,
     chunk_size: int = 256,
@@ -465,6 +475,7 @@ def run_cache_server(
 
     Args:
         storage_manager_config: Configuration for the storage manager
+        prometheus_config: Configuration for the Prometheus observability stack
         host: ZMQ server host
         port: ZMQ server port
         chunk_size: Chunk size for KV cache operations
@@ -477,15 +488,18 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
+    # Initialize global prometheus controller
+    init_prometheus_controller(prometheus_config)
+
     # Start Prometheus metrics HTTP server if enabled
-    if storage_manager_config.prometheus_config.enabled:
-        metrics_port = storage_manager_config.prometheus_config.port
-        prometheus_client.start_http_server(metrics_port)
+    if prometheus_config.enabled:
+        prometheus_client.start_http_server(prometheus_config.port)
         logger.info(
-            "Prometheus metrics available at http://0.0.0.0:%d/metrics", metrics_port
+            "Prometheus metrics available at http://0.0.0.0:%d/metrics",
+            prometheus_config.port,
         )
 
-    # Initialize the engine
+    # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
         storage_manager_config=storage_manager_config,
         chunk_size=chunk_size,
@@ -515,6 +529,9 @@ def run_cache_server(
     # Start the ZMQ server
     torch.cuda.init()
     server.start()
+
+    # Start prometheus controller after engine creation (loggers are registered)
+    get_prometheus_controller().start()
     logger.info("LMCache cache server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -527,6 +544,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_prometheus_controller().stop()
         server.close()
         engine.close()
 
@@ -554,14 +572,17 @@ def parse_args():
         help="Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)",
     )
     parser = add_storage_manager_args(parser)
+    parser = add_prometheus_args(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     storage_manager_config = parse_args_to_config(args)
+    prometheus_config = parse_args_to_prometheus_config(args)
     run_cache_server(
         storage_manager_config=storage_manager_config,
+        prometheus_config=prometheus_config,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,

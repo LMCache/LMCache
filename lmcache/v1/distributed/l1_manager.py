@@ -17,6 +17,12 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.logger.l1_stats_logger import (
+    L1ManagerStatsLogger,
+)
+from lmcache.v1.mp_observability.prometheus_controller import (
+    get_prometheus_controller,
+)
 
 logger = init_logger(__name__)
 
@@ -134,6 +140,11 @@ class L1Manager:
         self._read_ttl_seconds = config.read_ttl_seconds
 
         self._registered_listeners: list[L1ManagerListener] = []
+
+        # Self-register observability logger
+        l1_stats_logger = L1ManagerStatsLogger()
+        self.register_listener(l1_stats_logger)
+        get_prometheus_controller().register_logger(l1_stats_logger)
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
