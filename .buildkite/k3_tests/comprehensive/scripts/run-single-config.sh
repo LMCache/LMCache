@@ -489,13 +489,13 @@ check_memory_leak() {
 sleep 30
 echo "--- Checking for memory leaks..."
 
-if [[ "$feature_type" == "pd" ]]; then
+if [[ "$feature_type" == "pd" || "$feature_type" == "p2p" ]]; then
     if ! check_memory_leak "$PORT1"; then
-        echo "Memory leak check failed for prefiller (port $PORT1)"
+        echo "Memory leak check failed for instance 1 (port $PORT1)"
         exit 1
     fi
     if ! check_memory_leak "$PORT2"; then
-        echo "Memory leak check failed for decoder (port $PORT2)"
+        echo "Memory leak check failed for instance 2 (port $PORT2)"
         exit 1
     fi
 elif [[ "$CFG_NAME" == "multi_device.yaml" || "$CFG_NAME" == "layerwise.yaml" ]]; then
