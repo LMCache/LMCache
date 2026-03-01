@@ -22,8 +22,11 @@ from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
+    StorageManagerStatsLogger,
+)
 from lmcache.v1.mp_observability.prometheus_controller import (
-    PrometheusController,
+    get_prometheus_controller,
 )
 
 logger = init_logger(__name__)
@@ -42,23 +45,15 @@ class StorageManager:
 
         # Eviction controller
         self._eviction_controller = EvictionController(
-            storage_manager=self,
             l1_manager=self._l1_manager,
             eviction_config=config.eviction_config,
         )
         self._eviction_controller.start()
 
-        if config.prometheus_config.enabled:
-            self._prometheus_controller: PrometheusController | None = (
-                PrometheusController(
-                    storage_manager=self,
-                    l1_manager=self._l1_manager,
-                    log_interval=config.prometheus_config.log_interval,
-                )
-            )
-            self._prometheus_controller.start()
-        else:
-            self._prometheus_controller = None
+        # Self-register observability logger
+        sm_stats_logger = StorageManagerStatsLogger()
+        self.register_listener(sm_stats_logger)
+        get_prometheus_controller().register_logger(sm_stats_logger)
 
     def register_listener(self, listener: StorageManagerListener) -> None:
         """Register a listener for StorageManager events.
@@ -276,8 +271,6 @@ class StorageManager:
         Close the storage manager and release all resources.
         """
         self._eviction_controller.stop()
-        if self._prometheus_controller is not None:
-            self._prometheus_controller.stop()
         self._l1_manager.close()
 
     # Functions for debugging and testing

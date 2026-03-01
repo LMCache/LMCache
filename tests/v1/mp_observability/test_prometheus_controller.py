@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for PrometheusController.
+Unit tests for PrometheusController (global-singleton design).
 
 Tests cover:
-- SMStatsLogger is registered with StorageManager
-- L1StatsLogger is registered with L1Manager
+- register_logger() adds loggers to all_loggers
 - start() / stop() lifecycle (no deadlock, thread terminates)
+- start() is a no-op when config.enabled is False
+- stop() is safe when not started
 - _run() calls log_prometheus() on every logger each interval
+- _run() takes a snapshot of loggers under lock (thread-safe with late registration)
 - Exceptions raised by a logger do not crash the run loop
-- The stop flag terminates the loop even mid-sleep
+- Global singleton: get_prometheus_controller() / init_prometheus_controller()
 """
 
 # Standard
@@ -19,12 +21,16 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.mp_observability.config import PrometheusConfig
 from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
 from lmcache.v1.mp_observability.prometheus_controller import (
     PrometheusController,
+    get_prometheus_controller,
+    init_prometheus_controller,
 )
+import lmcache.v1.mp_observability.prometheus_controller as _ctrl_module
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -38,62 +44,43 @@ def mock_prometheus_classes(monkeypatch):
     monkeypatch.setattr(PrometheusLogger, "_histogram_cls", MagicMock)
 
 
-@pytest.fixture
-def mock_l1_manager():
-    """Minimal L1Manager mock that tracks registered listeners."""
-    l1 = MagicMock()
-    l1._registered_listeners = []
-    l1.register_listener.side_effect = lambda lst: l1._registered_listeners.append(lst)
-    return l1
+@pytest.fixture(autouse=True)
+def restore_global_controller():
+    """Save and restore the global _global_controller so tests don't leak state."""
+    saved = _ctrl_module._global_controller
+    yield
+    _ctrl_module._global_controller = saved
 
 
 @pytest.fixture
-def mock_storage_manager():
-    """Minimal StorageManager mock that tracks registered listeners."""
-    sm = MagicMock()
-    sm._registered_listeners = []
-    sm.register_listener.side_effect = lambda lst: sm._registered_listeners.append(lst)
-    return sm
-
-
-@pytest.fixture
-def controller(mock_storage_manager, mock_l1_manager):
+def controller():
     """PrometheusController with a very short log interval for fast tests."""
     return PrometheusController(
-        storage_manager=mock_storage_manager,
-        l1_manager=mock_l1_manager,
-        log_interval=0.02,
+        PrometheusConfig(enabled=True, log_interval=0.02),
     )
 
 
 # ---------------------------------------------------------------------------
-# Listener registration
+# Logger registration
 # ---------------------------------------------------------------------------
 
 
-class TestListenerRegistration:
-    def test_sm_stats_logger_registered_with_storage_manager(
-        self, controller, mock_storage_manager
-    ):
-        mock_storage_manager.register_listener.assert_called_once_with(
-            controller.sm_stats_logger
-        )
+class TestLoggerRegistration:
+    def test_register_logger_adds_to_all_loggers(self, controller):
+        mock_logger = MagicMock(spec=PrometheusLogger)
+        controller.register_logger(mock_logger)
+        assert mock_logger in controller.all_loggers
 
-    def test_l1_stats_logger_registered_with_l1_manager(
-        self, controller, mock_l1_manager
-    ):
-        mock_l1_manager.register_listener.assert_called_once_with(
-            controller.l1_stats_logger
-        )
+    def test_register_multiple_loggers(self, controller):
+        loggers = [MagicMock(spec=PrometheusLogger) for _ in range(3)]
+        for lg in loggers:
+            controller.register_logger(lg)
+        assert len(controller.all_loggers) == 3
+        for lg in loggers:
+            assert lg in controller.all_loggers
 
-    def test_sm_stats_logger_in_all_loggers(self, controller):
-        assert controller.sm_stats_logger in controller.all_loggers
-
-    def test_l1_stats_logger_in_all_loggers(self, controller):
-        assert controller.l1_stats_logger in controller.all_loggers
-
-    def test_all_loggers_has_two_entries(self, controller):
-        assert len(controller.all_loggers) == 2
+    def test_all_loggers_empty_initially(self, controller):
+        assert len(controller.all_loggers) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -103,8 +90,8 @@ class TestListenerRegistration:
 
 class TestLifecycle:
     def test_start_launches_thread(self, controller):
-        assert not controller._thread.is_alive()
         controller.start()
+        assert controller._thread is not None
         assert controller._thread.is_alive()
         controller.stop()
 
@@ -114,17 +101,28 @@ class TestLifecycle:
         assert not controller._thread.is_alive()
 
     def test_stop_without_start_does_not_raise(self, controller):
-        """Calling stop() before start() sets the flag and join() returns immediately
-        because the thread was never started (join on a non-started thread raises, so
-        we verify the flag is set and the thread is not alive)."""
-        controller._stop_flag.set()
-        assert not controller._thread.is_alive()
+        """Calling stop() before start() must not raise."""
+        controller.stop()
+
+    def test_start_noop_when_disabled(self):
+        ctrl = PrometheusController(PrometheusConfig(enabled=False))
+        ctrl.start()
+        assert ctrl._thread is None
+
+    def test_stop_safe_when_disabled(self):
+        ctrl = PrometheusController(PrometheusConfig(enabled=False))
+        ctrl.start()
+        ctrl.stop()  # Should not raise
 
     def test_thread_is_daemon(self, controller):
+        controller.start()
         assert controller._thread.daemon is True
+        controller.stop()
 
     def test_thread_name(self, controller):
+        controller.start()
         assert controller._thread.name == "PrometheusController"
+        controller.stop()
 
     def test_double_stop_is_safe(self, controller):
         """Calling stop() twice must not raise."""
@@ -140,42 +138,38 @@ class TestLifecycle:
 
 class TestPeriodicFlushing:
     def test_log_prometheus_called_multiple_times_during_run(self, controller):
-        """With a 20 ms interval, running for ~150 ms should trigger ≥ 3 flushes."""
-        flush_count = 0
-        original_log = controller.sm_stats_logger.log_prometheus
+        """With a 20 ms interval, running for ~150 ms should trigger >= 3 flushes."""
+        mock_logger = MagicMock()
+        controller.register_logger(mock_logger)
 
-        def counting_log():
-            nonlocal flush_count
-            flush_count += 1
-            original_log()
-
-        controller.sm_stats_logger.log_prometheus = counting_log
         controller.start()
         time.sleep(0.15)
         controller.stop()
 
-        assert flush_count >= 3, (
-            f"Expected at least 3 flushes in 150 ms with 20 ms interval, "
-            f"got {flush_count}"
-        )
+        assert mock_logger.log_prometheus.call_count >= 3
 
     def test_log_prometheus_not_called_before_first_interval(self, controller):
-        """log_prometheus() must NOT be called immediately on start — only after
-        the first interval elapses."""
-        call_times: list[float] = []
-        start_time = time.perf_counter()
+        """log_prometheus() must NOT be called immediately on start."""
+        mock_logger = MagicMock()
+        controller.register_logger(mock_logger)
 
-        def recording_log():
-            call_times.append(time.perf_counter() - start_time)
-
-        controller.sm_stats_logger.log_prometheus = recording_log
         controller.start()
         time.sleep(0.005)
         controller.stop()
 
-        assert call_times == [], (
-            "log_prometheus() was called before the first interval elapsed"
-        )
+        assert mock_logger.log_prometheus.call_count == 0
+
+    def test_late_registered_logger_is_flushed(self, controller):
+        """A logger registered after start() should still be flushed."""
+        controller.start()
+        time.sleep(0.01)
+
+        late_logger = MagicMock()
+        controller.register_logger(late_logger)
+        time.sleep(0.10)
+        controller.stop()
+
+        assert late_logger.log_prometheus.call_count >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -184,41 +178,25 @@ class TestPeriodicFlushing:
 
 
 class TestExceptionIsolation:
-    def test_exception_in_logger_does_not_crash_loop(
-        self, mock_storage_manager, mock_l1_manager
-    ):
-        """If a logger's log_prometheus() raises, the loop must continue and
-        call the next logger in all_loggers without crashing."""
-        controller = PrometheusController(
-            storage_manager=mock_storage_manager,
-            l1_manager=mock_l1_manager,
-            log_interval=0.02,
-        )
-
+    def test_exception_in_logger_does_not_crash_loop(self, controller):
+        """If a logger's log_prometheus() raises, the loop continues."""
         bad_logger = MagicMock()
         bad_logger.log_prometheus.side_effect = RuntimeError("boom")
         good_logger = MagicMock()
 
-        controller.all_loggers = [bad_logger, good_logger]
+        controller.register_logger(bad_logger)
+        controller.register_logger(good_logger)
         controller.start()
         time.sleep(0.12)
         controller.stop()
 
         assert good_logger.log_prometheus.call_count >= 3
 
-    def test_bad_logger_does_not_prevent_repeated_calls(
-        self, mock_storage_manager, mock_l1_manager
-    ):
-        """Even after an exception, the bad logger is retried in each interval."""
-        controller = PrometheusController(
-            storage_manager=mock_storage_manager,
-            l1_manager=mock_l1_manager,
-            log_interval=0.02,
-        )
-
+    def test_bad_logger_does_not_prevent_repeated_calls(self, controller):
+        """Even after an exception, the bad logger is retried each interval."""
         bad_logger = MagicMock()
         bad_logger.log_prometheus.side_effect = ValueError("always fails")
-        controller.all_loggers = [bad_logger]
+        controller.register_logger(bad_logger)
 
         controller.start()
         time.sleep(0.12)
@@ -243,3 +221,28 @@ class TestStopFlag:
         elapsed = time.perf_counter() - t0
 
         assert elapsed < 0.5, f"stop() took too long: {elapsed:.3f}s"
+
+
+# ---------------------------------------------------------------------------
+# Global singleton
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalSingleton:
+    def test_get_returns_valid_instance(self):
+        ctrl = get_prometheus_controller()
+        assert isinstance(ctrl, PrometheusController)
+
+    def test_init_replaces_global(self):
+        old = get_prometheus_controller()
+        new = init_prometheus_controller(PrometheusConfig(enabled=False))
+        assert get_prometheus_controller() is new
+        assert get_prometheus_controller() is not old
+
+    def test_default_singleton_is_disabled(self):
+        """The module-level default should be disabled (safe no-op)."""
+        # After restore_global_controller fixture restores the original:
+        # just check we can register without error
+        ctrl = get_prometheus_controller()
+        mock_logger = MagicMock(spec=PrometheusLogger)
+        ctrl.register_logger(mock_logger)
