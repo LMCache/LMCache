@@ -18,8 +18,15 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import StorageManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
+    StoreController,
+)
+from lmcache.v1.distributed.storage_controllers.store_policy import (
+    AdapterDescriptor,
+    DefaultStorePolicy,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
@@ -49,6 +56,24 @@ class StorageManager:
             eviction_config=config.eviction_config,
         )
         self._eviction_controller.start()
+
+        # L2 adapters and store controller
+        self._l2_adapters: list[L2AdapterInterface] = [
+            create_l2_adapter(ac) for ac in config.l2_adapter_config.adapters
+        ]
+
+        adapter_descriptors = [
+            AdapterDescriptor(index=i, config=ac)
+            for i, ac in enumerate(config.l2_adapter_config.adapters)
+        ]
+
+        self._store_controller = StoreController(
+            l1_manager=self._l1_manager,
+            l2_adapters=self._l2_adapters,
+            adapter_descriptors=adapter_descriptors,
+            policy=DefaultStorePolicy(),
+        )
+        self._store_controller.start()
 
         # Self-register observability logger
         sm_stats_logger = StorageManagerStatsLogger()
@@ -118,7 +143,6 @@ class StorageManager:
             listener.on_sm_write_finished(successful_keys, failed_keys)
 
         # TODO: global key states update
-        # TODO: trigger L2 controller
 
     @contextmanager
     def read_prefetched_results(
@@ -270,7 +294,12 @@ class StorageManager:
         """
         Close the storage manager and release all resources.
         """
+        self._store_controller.stop()
         self._eviction_controller.stop()
+
+        for adapter in self._l2_adapters:
+            adapter.close()
+
         self._l1_manager.close()
 
     # Functions for debugging and testing
