@@ -20,9 +20,6 @@ from lmcache.v1.distributed.internal_api import StorageManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
-from lmcache.v1.distributed.observability.prometheus_controller import (
-    PrometheusController,
-)
 from lmcache.v1.distributed.storage_controllers import (
     EvictionController,
     StoreController,
@@ -77,7 +74,7 @@ class StorageManager:
             policy=DefaultStorePolicy(),
         )
         self._store_controller.start()
-        
+
         # Self-register observability logger
         sm_stats_logger = StorageManagerStatsLogger()
         self.register_listener(sm_stats_logger)
@@ -299,10 +296,10 @@ class StorageManager:
         """
         self._store_controller.stop()
         self._eviction_controller.stop()
-        
+
         for adapter in self._l2_adapters:
             adapter.close()
-            
+
         self._l1_manager.close()
 
     # Functions for debugging and testing

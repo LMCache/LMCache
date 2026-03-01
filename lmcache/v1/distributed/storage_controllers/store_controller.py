@@ -78,7 +78,7 @@ class StoreListener(L1ManagerListener):
 
     # L1ManagerListener implementation
 
-    def on_keys_write_finished(self, keys: list[ObjectKey]) -> None:
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
         """
         Enqueue keys and signal the eventfd.
 
@@ -92,16 +92,16 @@ class StoreListener(L1ManagerListener):
             self._pending_keys.extend(keys)
         os.eventfd_write(self._event_fd, 1)
 
-    def on_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
+    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
         pass
 
-    def on_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
         pass
 
-    def on_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
         pass
 
-    def on_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
         pass
 
     def close(self) -> None:

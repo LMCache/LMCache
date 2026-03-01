@@ -170,12 +170,12 @@ class TestStoreListener:
         assert listener.pop_pending_keys() == []
         listener.close()
 
-    def test_on_keys_write_finished_enqueues_keys(self):
-        """Keys passed to on_keys_write_finished should be retrievable via pop."""
+    def test_on_l1_keys_write_finished_enqueues_keys(self):
+        """Keys passed to on_l1_keys_write_finished should be retrievable via pop."""
         listener = StoreListener()
         keys = [make_object_key(i) for i in range(3)]
 
-        listener.on_keys_write_finished(keys)
+        listener.on_l1_keys_write_finished(keys)
         popped = listener.pop_pending_keys()
 
         assert popped == keys
@@ -184,30 +184,30 @@ class TestStoreListener:
     def test_pop_pending_keys_clears_queue(self):
         """pop_pending_keys should drain the queue."""
         listener = StoreListener()
-        listener.on_keys_write_finished([make_object_key(0)])
+        listener.on_l1_keys_write_finished([make_object_key(0)])
         listener.pop_pending_keys()
 
         assert listener.pop_pending_keys() == []
         listener.close()
 
-    def test_on_keys_write_finished_signals_eventfd(self):
-        """The eventfd should become readable after on_keys_write_finished."""
+    def test_on_l1_keys_write_finished_signals_eventfd(self):
+        """The eventfd should become readable after on_l1_keys_write_finished."""
         listener = StoreListener()
         efd = listener.get_event_fd()
         poller = select.poll()
         poller.register(efd, select.POLLIN)
 
-        listener.on_keys_write_finished([make_object_key(0)])
+        listener.on_l1_keys_write_finished([make_object_key(0)])
 
         events = poller.poll(1000)
         assert len(events) > 0
         listener.close()
 
     def test_multiple_writes_accumulate(self):
-        """Multiple on_keys_write_finished calls should accumulate keys."""
+        """Multiple on_l1_keys_write_finished calls should accumulate keys."""
         listener = StoreListener()
-        listener.on_keys_write_finished([make_object_key(0)])
-        listener.on_keys_write_finished([make_object_key(1), make_object_key(2)])
+        listener.on_l1_keys_write_finished([make_object_key(0)])
+        listener.on_l1_keys_write_finished([make_object_key(1), make_object_key(2)])
 
         popped = listener.pop_pending_keys()
         assert len(popped) == 3
