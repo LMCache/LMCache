@@ -500,8 +500,8 @@ class L1Manager:
             successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_keys_write_finished(successful_keys)
-            listener.on_keys_reserved_read(successful_keys)
+            listener.on_l1_keys_write_finished(successful_keys)
+            listener.on_l1_keys_reserved_read(successful_keys)
         return ret
 
     @l1_mgr_synchronized
