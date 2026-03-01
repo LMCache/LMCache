@@ -1,85 +1,93 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import TYPE_CHECKING, List
+from typing import List
 import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.storage_controller import (
-    StorageControllerInterface,
-)
-from lmcache.v1.mp_observability.logger.l1_stats_logger import (
-    L1ManagerStatsLogger,
-)
+from lmcache.v1.mp_observability.config import PrometheusConfig
 from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
-from lmcache.v1.mp_observability.logger.storage_manager_stats_logger import (
-    StorageManagerStatsLogger,
-)
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.distributed.storage_manager import StorageManager
 
 logger = init_logger(__name__)
 
 
-class PrometheusController(StorageControllerInterface):
-    def __init__(
-        self,
-        storage_manager: "StorageManager",
-        l1_manager: L1Manager,
-        log_interval: float,
-    ):
-        super().__init__(storage_manager, l1_manager)
-
-        self._log_interval = log_interval
+class PrometheusController:
+    def __init__(self, config: PrometheusConfig):
+        self._config = config
+        self._lock = threading.Lock()
         self.all_loggers: List[PrometheusLogger] = []
 
-        self.sm_stats_logger: StorageManagerStatsLogger = StorageManagerStatsLogger()
-        self.get_storage_manager().register_listener(self.sm_stats_logger)
-        self.all_loggers.append(self.sm_stats_logger)
-
-        self.l1_stats_logger: L1ManagerStatsLogger = L1ManagerStatsLogger()
-        self.get_l1_manager().register_listener(self.l1_stats_logger)
-        self.all_loggers.append(self.l1_stats_logger)
-
-        # TODO: adding more stats loggers, e.g., integrator logger or mp server logger
-
         self._stop_flag = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def register_logger(self, prom_logger: PrometheusLogger) -> None:
+        """Register a logger for periodic flushing.
+
+        Thread-safe: may be called after start().
+
+        Args:
+            prom_logger: The PrometheusLogger to register.
+        """
+        with self._lock:
+            self.all_loggers.append(prom_logger)
+
+    def start(self) -> None:
+        """Start the periodic flush thread.
+
+        No-op when ``config.enabled`` is False.
+        """
+        if not self._config.enabled:
+            return
 
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
             name="PrometheusController",
         )
-
-    def start(self):
         logger.info(
-            "Starting PrometheusController (interval=%.1fs)...", self._log_interval
+            "Starting PrometheusController (interval=%.1fs)...",
+            self._config.log_interval,
         )
-        all_logger_names = [
-            type(prometheus_logger).__name__ for prometheus_logger in self.all_loggers
-        ]
-        logger.info(f"Registered PrometheusLogger: {all_logger_names}.")
+        with self._lock:
+            all_logger_names = [type(pl).__name__ for pl in self.all_loggers]
+        logger.info("Registered PrometheusLogger: %s.", all_logger_names)
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
+        """Stop the flush thread. Safe to call when not started."""
         self._stop_flag.set()
-        self._thread.join()
-        for prometheus_logger in self.all_loggers:
-            prometheus_logger.unregister()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join()
+            for pl in self.all_loggers:
+                pl.unregister()
 
-    def _run(self):
-        while not self._stop_flag.wait(timeout=self._log_interval):
-            for prometheus_logger in self.all_loggers:
+    def _run(self) -> None:
+        while not self._stop_flag.wait(timeout=self._config.log_interval):
+            with self._lock:
+                snapshot = list(self.all_loggers)
+            for pl in snapshot:
                 try:
-                    prometheus_logger.log_prometheus()
+                    pl.log_prometheus()
                 except Exception:
                     logger.exception(
                         "PrometheusController: error logging %s",
-                        type(prometheus_logger).__name__,
+                        type(pl).__name__,
                     )
+
+
+_global_controller = PrometheusController(PrometheusConfig(enabled=False))
+
+
+def get_prometheus_controller() -> PrometheusController:
+    """Return the current global PrometheusController singleton."""
+    return _global_controller
+
+
+def init_prometheus_controller(config: PrometheusConfig) -> PrometheusController:
+    """Replace the global singleton with a new controller built from *config*."""
+    global _global_controller
+    _global_controller = PrometheusController(config)
+    return _global_controller
