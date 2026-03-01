@@ -209,9 +209,9 @@ echo "--- COMPARISON RESULTS ---"
 echo "${COMPARE_OUT}"
 echo "--------------------------"
 
-DIFFERENT_COUNT=$(echo "${COMPARE_OUT}" | grep "^Different IDs:" | grep -oE '[0-9]+' || echo "0")
-ONLY_FILE1_COUNT=$(echo "${COMPARE_OUT}" | awk '/^—— Only in File 1 ——$/,/^—— Only in File 2 ——$/ {print}' | grep -E "^chatcmpl-" | wc -l || echo "0")
-ONLY_FILE2_COUNT=$(echo "${COMPARE_OUT}" | awk '/^—— Only in File 2 ——$/,/^$/ {print}' | grep -E "^chatcmpl-" | wc -l || echo "0")
+DIFFERENT_COUNT=$(echo "${COMPARE_OUT}" | grep "^Different IDs:" | grep -oE '[0-9]+' | tail -1 || echo "0")
+ONLY_FILE1_COUNT=$(echo "${COMPARE_OUT}" | awk '/^—— Only in File 1 ——$/,/^—— Only in File 2 ——$/ {print}' | grep -cE "^chatcmpl-" || echo "0")
+ONLY_FILE2_COUNT=$(echo "${COMPARE_OUT}" | awk '/^—— Only in File 2 ——$/,/^$/ {print}' | grep -cE "^chatcmpl-" || echo "0")
 
 echo "[INFO] Analysis: Different=${DIFFERENT_COUNT}, Only in Base=${ONLY_FILE1_COUNT}, Only in LMCache=${ONLY_FILE2_COUNT}"
 

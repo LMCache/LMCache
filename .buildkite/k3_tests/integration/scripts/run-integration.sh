@@ -10,6 +10,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 cd "${REPO_ROOT}"
 source .buildkite/k3_tests/common_scripts/helpers.sh
 
+TEST_NAME="${1:-all}"  # "cpu", "disk", or "all"
+
 MODEL="meta-llama/Llama-3.2-1B-Instruct"
 PORT=8000
 VLLM_PID=""
@@ -88,19 +90,23 @@ run_test() {
 }
 
 # ── Test 1: CPU backend ───────────────────────────────────────
-run_test "local_cpu" \
-    "LMCACHE_CHUNK_SIZE=256" \
-    "LMCACHE_LOCAL_CPU=True" \
-    "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
+if [[ "$TEST_NAME" == "cpu" || "$TEST_NAME" == "all" ]]; then
+    run_test "local_cpu" \
+        "LMCACHE_CHUNK_SIZE=256" \
+        "LMCACHE_LOCAL_CPU=True" \
+        "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
+fi
 
 # ── Test 2: Disk backend ─────────────────────────────────────
-DISK_DIR=$(mktemp -d)
-trap "cleanup; rm -rf $DISK_DIR" EXIT
+if [[ "$TEST_NAME" == "disk" || "$TEST_NAME" == "all" ]]; then
+    DISK_DIR=$(mktemp -d)
+    trap "cleanup; rm -rf $DISK_DIR" EXIT
 
-run_test "local_disk" \
-    "LMCACHE_CHUNK_SIZE=256" \
-    "LMCACHE_LOCAL_CPU=True" \
-    "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-    "LMCACHE_LOCAL_DISK=file://${DISK_DIR}"
+    run_test "local_disk" \
+        "LMCACHE_CHUNK_SIZE=256" \
+        "LMCACHE_LOCAL_CPU=True" \
+        "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
+        "LMCACHE_LOCAL_DISK=file://${DISK_DIR}"
+fi
 
-echo "--- :white_check_mark: All integration tests passed"
+echo "--- :white_check_mark: Integration tests passed (${TEST_NAME})"

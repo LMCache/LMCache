@@ -13,4 +13,4 @@ source .buildkite/k3_harness/setup-env.sh
 uv pip install aiohttp
 
 # ── Run the actual test logic ────────────────────────────────
-exec bash "${SCRIPT_DIR}/scripts/run-integration.sh"
+exec bash "${SCRIPT_DIR}/scripts/run-integration.sh" "$@"
