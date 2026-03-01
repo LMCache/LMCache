@@ -30,6 +30,11 @@ done
 
 echo "=== Cleanup complete ==="
 
+# Copy server logs to the workspace so Buildkite can collect them as artifacts
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+cp /tmp/build_${BUILD_ID}_*.log "${REPO_ROOT}/" 2>/dev/null || true
+
 # Wait for GPU memory to be fully released
 echo "Waiting 5 seconds for GPU memory to be released..."
 sleep 5

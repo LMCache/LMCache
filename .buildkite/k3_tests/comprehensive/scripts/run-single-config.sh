@@ -13,10 +13,13 @@ cd "${REPO_ROOT}"
 source .buildkite/k3_tests/common_scripts/helpers.sh
 
 CONFIG_DIR="${REPO_ROOT}/.buildkite/configs"
-LOGFILE="${CFG_NAME%.yaml}.log"
+LOGFILE="${REPO_ROOT}/${CFG_NAME%.yaml}.log"
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 NEED_UPLOAD="${NEED_UPLOAD:-false}"
 SERVER_WAIT_TIMEOUT="${SERVER_WAIT_TIMEOUT:-240}"
+
+# Tee all output so Buildkite can collect it as an artifact
+exec > >(tee -a "$LOGFILE") 2>&1
 
 # ── Validate config ──────────────────────────────────────────
 cfg_file="${CONFIG_DIR}/${CFG_NAME}"
@@ -28,9 +31,24 @@ fi
 feature_type=$(yq -r '.feature.type // ""' "$cfg_file")
 echo -e "\033[1;33m===== Testing LMCache with ${CFG_NAME} (type=${feature_type:-standard}) =====\033[0m"
 
+# Prevent git from hanging on SSH prompts (e.g. unknown host key)
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o BatchMode=yes"
+
 # PID tracking for cleanup
 PIDS=()
-trap 'echo "--- Cleaning up..."; for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done; sleep 5' EXIT INT TERM
+on_exit() {
+    local rc=$?
+    echo "--- Cleaning up (exit code: $rc)..."
+    for p in "${PIDS[@]}"; do
+        kill "$p" 2>/dev/null || true
+        wait "$p" 2>/dev/null || true
+    done
+    # Copy vLLM server logs to repo root so Buildkite can collect them as artifacts
+    cp /tmp/build_${BUILD_ID}_${CFG_NAME%.yaml}*.log "${REPO_ROOT}/" 2>/dev/null || true
+    sleep 5
+}
+trap on_exit EXIT INT TERM
 
 ###############
 # UTILITIES   #
@@ -79,8 +97,6 @@ start_single_server() {
         tail -50 "$logfile" || true
         return 1
     fi
-
-    echo "$pid"
 }
 
 ###############
@@ -217,8 +233,10 @@ if [[ "$test_mode" == "dummy" ]]; then
 elif [[ "$test_mode" == "long_doc_qa" ]]; then
     echo "--- Running long_doc_qa workload"
 
-    # Build workload JSON (merge workload section with model, remove type)
-    workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type)" "$cfg_file")"
+    # Build workload JSON (merge workload section with model, strip non-CLI fields)
+    # Fields like expected-latency-gain are used by the checking logic, not long_doc_qa.py.
+    # "completion" -> "completions" rename to match the argparse flag.
+    workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type) | del(.[\"expected-latency-gain\"]) | if .completion then .completions = .completion | del(.completion) else . end" "$cfg_file")"
     cfg_json="$(yq '.' "$cfg_file")"
 
     # Determine which checking fields are requested
@@ -291,8 +309,8 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
             return 0
         fi
 
-        # Fetch baseline from branch
-        git fetch origin benchmarks-main >/dev/null 2>&1 || true
+        # Fetch baseline from branch (timeout to prevent hangs on SSH issues)
+        timeout 30 git fetch origin benchmarks-main >/dev/null 2>&1 || true
         local baseline_json
         baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/$feat_type.json 2>/dev/null || echo "")
 

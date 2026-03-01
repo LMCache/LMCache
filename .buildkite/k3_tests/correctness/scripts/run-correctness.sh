@@ -170,8 +170,8 @@ python "${CORRECTNESS_DIR}/async_request.py" \
 # Man bash correctness test (on the LMCache server)
 
 echo "[TEST] Running technical man bash correctness test..."
-CONTEXT="$(man bash | col -b | tr -s '[:space:]' ' ' | awk '{for(i=1;i<=NF;i++){printf "%s ",$i; if(++c==5000) exit}}')"
-HALF_CONTEXT="$(man bash | col -b | tr -s '[:space:]' ' ' | awk '{for(i=1;i<=NF;i++){printf "%s ",$i; if(++c==2500) exit}}')"
+CONTEXT="$(man bash | sed 's/.\x08//g' | tr -s '[:space:]' ' ' | awk '{for(i=1;i<=NF;i++){printf "%s ",$i; if(++c==5000) exit}}')"
+HALF_CONTEXT="$(man bash | sed 's/.\x08//g' | tr -s '[:space:]' ' ' | awk '{for(i=1;i<=NF;i++){printf "%s ",$i; if(++c==2500) exit}}')"
 
 send_completion() {
     curl -s "http://localhost:${PORT}/v1/chat/completions" \
