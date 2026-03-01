@@ -11,7 +11,7 @@ set -euo pipefail
 
 CFG_NAME="${1:?Usage: $0 <config.yaml>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 CONFIG_DIR="${REPO_ROOT}/.buildkite/configs"
 LOGFILE="${CFG_NAME%.yaml}.log"
 

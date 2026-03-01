@@ -57,7 +57,7 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
    ```bash
    #!/usr/bin/env bash
    set -euo pipefail
-   cd "$(cd "$(dirname "$0")/../.." && pwd)"
+   cd "$(cd "$(dirname "$0")/../../.." && pwd)"
    source .buildkite/k3_harness/setup-env.sh
    # ... your test commands ...
    ```
