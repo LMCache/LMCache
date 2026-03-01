@@ -26,9 +26,11 @@ REPEAT_MODE="${REPEAT_MODE:-tile}"
 SHUFFLE_SEED="${SHUFFLE_SEED:-0}"
 MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 
-# Performance thresholds
-MAX_LMCACHE_TTFT="${MAX_LMCACHE_TTFT:-0.22}"
-MAX_LMCACHE_QUERY_ROUND_TIME="${MAX_LMCACHE_QUERY_ROUND_TIME:-0.50}"
+# Relative performance thresholds (compared against baseline run in same job)
+# TTFT: LMCache adds cache-lookup overhead, so allow up to 50% slower than baseline
+MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:-50}"
+# Round time: LMCache should help here; allow at most 10% slower than baseline
+MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:-10}"
 
 # Output directory
 LONG_DOC_QA_DIR="$RESULTS_DIR/long_doc_qa"
@@ -42,9 +44,9 @@ echo "Number of documents: $NUM_DOCUMENTS"
 echo "Output length: $OUTPUT_LEN"
 echo "Results dir: $LONG_DOC_QA_DIR"
 echo ""
-echo "Performance thresholds (LMCache):"
-echo "  Max TTFT: ${MAX_LMCACHE_TTFT}s"
-echo "  Max query round time: ${MAX_LMCACHE_QUERY_ROUND_TIME}s"
+echo "Performance thresholds (relative to baseline):"
+echo "  Max TTFT slowdown: ${MAX_TTFT_SLOWDOWN_PCT}%"
+echo "  Max query round time slowdown: ${MAX_ROUND_TIME_SLOWDOWN_PCT}%"
 echo ""
 
 mkdir -p "$LONG_DOC_QA_DIR"
@@ -167,14 +169,17 @@ EOF
 
 verify_thresholds() {
     local lmcache_result="$LONG_DOC_QA_DIR/lmcache_result.json"
+    local baseline_result="$LONG_DOC_QA_DIR/baseline_result.json"
 
-    echo "=== Verifying LMCache performance thresholds ==="
-    echo "Max allowed TTFT: ${MAX_LMCACHE_TTFT}s"
-    echo "Max allowed query round time: ${MAX_LMCACHE_QUERY_ROUND_TIME}s"
+    echo "=== Verifying LMCache performance vs baseline ==="
+    echo "Max allowed TTFT slowdown: ${MAX_TTFT_SLOWDOWN_PCT}%"
+    echo "Max allowed query round time slowdown: ${MAX_ROUND_TIME_SLOWDOWN_PCT}%"
     echo ""
 
     lmcache_query_ttft=$(extract_json_field "$lmcache_result" "query_ttft_per_prompt")
     lmcache_query_round_time=$(extract_json_field "$lmcache_result" "query_round_time_per_prompt")
+    baseline_query_ttft=$(extract_json_field "$baseline_result" "query_ttft_per_prompt")
+    baseline_query_round_time=$(extract_json_field "$baseline_result" "query_round_time_per_prompt")
 
     python3 << EOF
 import sys
@@ -185,28 +190,29 @@ def safe_float(val):
     except (ValueError, TypeError):
         return None
 
-ttft = safe_float("$lmcache_query_ttft")
-query_round_time = safe_float("$lmcache_query_round_time")
-max_ttft = float("$MAX_LMCACHE_TTFT")
-max_query_round_time = float("$MAX_LMCACHE_QUERY_ROUND_TIME")
+def check_metric(name, lmcache_val, baseline_val, max_slowdown_pct):
+    lmc = safe_float(lmcache_val)
+    base = safe_float(baseline_val)
+    if lmc is None or base is None or base <= 0:
+        print(f"{name}: unable to compare (lmcache={lmcache_val}, baseline={baseline_val}) -- FAIL")
+        return False
+    pct = ((lmc - base) / base) * 100
+    if pct <= max_slowdown_pct:
+        label = f"{abs(pct):.1f}% faster" if pct < 0 else f"{pct:.1f}% slower"
+        print(f"{name}: {lmc:.4f}s vs baseline {base:.4f}s ({label}, max {max_slowdown_pct}% slower) -- PASS")
+        return True
+    else:
+        print(f"{name}: {lmc:.4f}s vs baseline {base:.4f}s ({pct:.1f}% slower, max {max_slowdown_pct}% slower) -- FAIL")
+        return False
+
 failed = False
-
-if ttft is None:
-    print("query_ttft_per_prompt: Unable to parse value -- FAIL")
+if not check_metric("query_ttft_per_prompt",
+                     "$lmcache_query_ttft", "$baseline_query_ttft",
+                     float("$MAX_TTFT_SLOWDOWN_PCT")):
     failed = True
-elif ttft <= max_ttft:
-    print(f"query_ttft_per_prompt: {ttft:.4f}s <= {max_ttft}s -- PASS")
-else:
-    print(f"query_ttft_per_prompt: {ttft:.4f}s > {max_ttft}s -- FAIL")
-    failed = True
-
-if query_round_time is None:
-    print("query_round_time_per_prompt: Unable to parse value -- FAIL")
-    failed = True
-elif query_round_time <= max_query_round_time:
-    print(f"query_round_time_per_prompt: {query_round_time:.4f}s <= {max_query_round_time}s -- PASS")
-else:
-    print(f"query_round_time_per_prompt: {query_round_time:.4f}s > {max_query_round_time}s -- FAIL")
+if not check_metric("query_round_time_per_prompt",
+                     "$lmcache_query_round_time", "$baseline_query_round_time",
+                     float("$MAX_ROUND_TIME_SLOWDOWN_PCT")):
     failed = True
 
 if failed:
