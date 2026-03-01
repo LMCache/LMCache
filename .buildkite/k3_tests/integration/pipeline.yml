@@ -1,0 +1,24 @@
+# Integration tests.
+
+steps:
+  - label: ":pip: Integration Tests"
+    command: .buildkite/k3_tests/integration/run.sh
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: agent
+                image: lmcache/ci-base:latest
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "*.csv"
+      - "*.pdf"
+      - "*.log"

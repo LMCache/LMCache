@@ -1,0 +1,29 @@
+# Reference Helm values for agent-stack-k8s.
+# install-agent-stack.sh generates site-specific values from config.env.
+# This file is for documentation only.
+# Docs: https://github.com/buildkite/agent-stack-k8s
+config:
+  tags:
+    - "queue=k8s"                         # from BUILDKITE_QUEUE
+
+  podSpec:
+    containers:
+      - name: agent
+        image: lmcache/ci-base:latest     # built by setup-cluster.sh
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        volumeMounts:
+          - name: hf-cache
+            mountPath: /root/.cache/huggingface
+          - name: datasets
+            mountPath: /root/correctness
+    volumes:
+      - name: hf-cache
+        hostPath:
+          path: /data/huggingface
+          type: DirectoryOrCreate
+      - name: datasets
+        hostPath:
+          path: /data/datasets
+          type: DirectoryOrCreate
