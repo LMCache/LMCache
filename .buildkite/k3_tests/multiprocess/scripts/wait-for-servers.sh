@@ -53,16 +53,12 @@ wait_for_vllm_server() {
     done
 }
 
-# vLLM with LMCache was already waited on in launch-processes.sh.
-# Just verify it's still up.
-if ! curl -sf "http://localhost:${VLLM_PORT}/v1/models" > /dev/null 2>&1; then
-    echo "vLLM (with LMCache) on port $VLLM_PORT is not responding!"
-    tail -50 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
+# Wait for both servers (they start simultaneously)
+if ! wait_for_vllm_server "$VLLM_PORT" "vLLM with LMCache" \
+        "/tmp/build_${BUILD_ID}_vllm.log"; then
     exit 1
 fi
-echo "vLLM (with LMCache) on port $VLLM_PORT is up."
 
-# Wait for vLLM baseline
 if ! wait_for_vllm_server "$VLLM_BASELINE_PORT" "vLLM baseline (without LMCache)" \
         "/tmp/build_${BUILD_ID}_vllm_baseline.log"; then
     exit 1

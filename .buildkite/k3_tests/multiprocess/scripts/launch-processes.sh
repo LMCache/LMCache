@@ -10,8 +10,8 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 
 # Configuration (inherited from run-mp-test.sh)
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
-VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
+vllm_port="${VLLM_PORT:-8000}"
+vllm_baseline_port="${VLLM_BASELINE_PORT:-9000}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
@@ -58,10 +58,15 @@ echo "LMCache MP server started (PID=$LMCACHE_PID)"
 echo "Waiting for LMCache to initialize..."
 sleep 10
 
+# Unset VLLM_PORT so vLLM's internal get_open_port() picks a random
+# ephemeral port for torch.distributed instead of trying serving_port+1.
+# Without this, both instances fight over the same internal port.
+unset VLLM_PORT
+
 # ── 2. vLLM with LMCache ────────────────────────────────────
 echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
-echo "Port: $VLLM_PORT"
+echo "Port: $vllm_port"
 
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
@@ -70,7 +75,7 @@ PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
     --attention-backend FLASH_ATTN \
-    --port "$VLLM_PORT" \
+    --port "$vllm_port" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
@@ -79,19 +84,9 @@ VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
 echo "vLLM with LMCache started (PID=$VLLM_PID)"
 
-# Wait for first vLLM to fully start before launching baseline.
-# vLLM binds serving_port+1 internally; starting both simultaneously
-# causes EADDRINUSE on that port.
-echo "Waiting for vLLM with LMCache to be ready before starting baseline..."
-if ! wait_for_server "$VLLM_PORT" 300; then
-    echo "vLLM with LMCache failed to start"
-    tail -100 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
-    exit 1
-fi
-
 # ── 3. vLLM Baseline (without LMCache) ──────────────────────
 echo "=== Launching vLLM baseline ==="
-echo "Port: $VLLM_BASELINE_PORT"
+echo "Port: $vllm_baseline_port"
 
 CUDA_VISIBLE_DEVICES="${GPU_FOR_BASELINE}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
@@ -99,7 +94,7 @@ VLLM_BATCH_INVARIANT=1 \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --attention-backend FLASH_ATTN \
-    --port "$VLLM_BASELINE_PORT" \
+    --port "$vllm_baseline_port" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
