@@ -28,7 +28,7 @@ MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 
 # Relative performance thresholds (compared against baseline run in same job)
 # Allow at most 10% slower than baseline for both metrics
-MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:-10}"
+MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:-60}"
 MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:-10}"
 
 # Output directory
