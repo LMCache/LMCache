@@ -71,6 +71,7 @@ vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
     --attention-backend FLASH_ATTN \
     --port "$VLLM_PORT" \
+    --master-port 29501 \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
@@ -79,17 +80,8 @@ VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
 echo "vLLM with LMCache started (PID=$VLLM_PID)"
 
-# Wait for vLLM with LMCache to be ready before starting baseline.
-# Both vLLM instances use port+1 for torch.distributed internally;
-# starting them simultaneously can cause EADDRINUSE on the distributed port.
-echo "Waiting for vLLM with LMCache to be ready before starting baseline..."
-if ! wait_for_server "$VLLM_PORT" 300; then
-    echo "vLLM with LMCache failed to start"
-    tail -100 "/tmp/build_${BUILD_ID}_vllm.log" 2>/dev/null || true
-    exit 1
-fi
-
 # ── 3. vLLM Baseline (without LMCache) ──────────────────────
+# Uses a different --master-port to avoid EADDRINUSE with instance above.
 echo "=== Launching vLLM baseline ==="
 echo "Port: $VLLM_BASELINE_PORT"
 
@@ -100,6 +92,7 @@ PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --attention-backend FLASH_ATTN \
     --port "$VLLM_BASELINE_PORT" \
+    --master-port 29502 \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
