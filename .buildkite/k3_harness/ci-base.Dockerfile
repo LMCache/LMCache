@@ -13,7 +13,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ccache software-properties-common git curl sudo \
+        ccache software-properties-common git curl sudo jq lsof \
         python3 python3-dev python3-venv python3-pip tzdata libxcb1-dev \
     && ldconfig /usr/local/cuda-12.8/compat/ \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
