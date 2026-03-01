@@ -8,10 +8,18 @@ agentToken: "<from install-agent-stack.sh>"
 config:
   queue: "k8s"                              # override with BUILDKITE_QUEUE env var
 
-  # Mount SSH key into the checkout container for private repo access
+  # HTTPS checkout using GitHub token (replaces SSH key)
+  git-credentials-secret:
+    name: buildkite-git-creds               # created by install-agent-stack.sh
+    key: git-credentials                    # contains https://x-access-token:<token>@github.com
+
+  # Inject GITHUB_TOKEN into job containers for git push operations
   pod-spec-patch:
     containers:
-      - name: checkout
-        envFrom:
-          - secretRef:
-              name: buildkite-git-ssh       # created by install-agent-stack.sh
+      - name: container-0
+        env:
+          - name: GITHUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: buildkite-git-creds
+                key: GITHUB_TOKEN

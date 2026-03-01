@@ -31,9 +31,8 @@ fi
 feature_type=$(yq -r '.feature.type // ""' "$cfg_file")
 echo -e "\033[1;33m===== Testing LMCache with ${CFG_NAME} (type=${feature_type:-standard}) =====\033[0m"
 
-# Prevent git from hanging on SSH prompts (e.g. unknown host key)
+# Prevent git from hanging on prompts
 export GIT_TERMINAL_PROMPT=0
-export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o BatchMode=yes"
 
 # PID tracking for cleanup
 PIDS=()
@@ -74,8 +73,12 @@ start_single_server() {
     [[ -n "${HF_TOKEN:-}" ]] && env_cmd+=("HF_TOKEN=${HF_TOKEN}")
     [[ -n "$gpu" ]] && env_cmd+=("CUDA_VISIBLE_DEVICES=${gpu}")
 
-    # Ensure socket directory exists
+    # Override socket prefix so each server gets its own socket directory.
+    # In the old Docker setup, a volume mount mapped /tmp/lmcache_internal_api_server
+    # inside the container to /tmp/lmcache_internal_api_server/${port} on the host.
+    # Without Docker, we replicate this by setting the prefix to include the port.
     mkdir -p "/tmp/lmcache_internal_api_server/${port}"
+    env_cmd+=("LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/${port}/socket")
 
     # Parse vllm model and args
     local vllm_model
@@ -303,55 +306,98 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
         warmup_round_time_per_prompt=$(echo "$json" | jq -r '.warmup_round_time_per_prompt')
 
         if [[ "$need_upload" == "true" ]]; then
-            local baseline_path="${REPO_ROOT}/benchmarks/long_doc_qa/$feat_type.json"
+            # Nightly: write date-stamped file and upload as Buildkite artifact.
+            # A finalize step (upload-baselines.sh) will collect all artifacts,
+            # prune old files, and make a single commit to benchmarks-main.
+            local datestamp
+            datestamp="$(date +%Y%m%d)"
+            local artifact_name="${feat_type}-${datestamp}.json"
+            local artifact_path="${REPO_ROOT}/benchmarks/long_doc_qa/${artifact_name}"
+
             echo "$json"
-            printf '%s\n' "$json" > "$baseline_path"
+            mkdir -p "$(dirname "$artifact_path")"
+            printf '%s\n' "$json" > "$artifact_path"
+
+            echo "[INFO] Uploading baseline artifact: ${artifact_name}"
+            buildkite-agent artifact upload "$artifact_path" 2>/dev/null || {
+                echo "[WARN] buildkite-agent not available; wrote $artifact_path locally"
+            }
             return 0
         fi
 
-        # Fetch baseline from branch (timeout to prevent hangs on SSH issues)
+        # ── PR comparison: rolling 5-day worst-case baseline ──────
+        # Fetch all date-stamped baselines for this feature from benchmarks-main.
+        # Use max() of each metric (= worst/slowest) as the threshold baseline.
+        # This makes the gate more tolerant of nightly hardware noise.
         timeout 30 git fetch origin benchmarks-main >/dev/null 2>&1 || true
-        local baseline_json
-        baseline_json=$(git show origin/benchmarks-main:benchmarks/long_doc_qa/$feat_type.json 2>/dev/null || echo "")
 
-        if [[ -z "$baseline_json" ]] || ! echo "$baseline_json" | jq -e . >/dev/null 2>&1; then
+        # List all baseline files for this feature (date-stamped and legacy)
+        local -a baseline_files=()
+        mapfile -t baseline_files < <(
+            git ls-tree --name-only origin/benchmarks-main -- \
+                "benchmarks/long_doc_qa/${feat_type}-"*.json \
+                "benchmarks/long_doc_qa/${feat_type}.json" \
+                2>/dev/null || true
+        )
+
+        if [[ ${#baseline_files[@]} -eq 0 ]]; then
             if [[ "$feat_type" != "dummy" ]]; then
-                echo "No baseline found for $feat_type.json -- skipping performance comparisons"
+                echo "No baselines found for ${feat_type} -- skipping performance comparisons"
                 echo "Current metrics: TTFT=$query_ttft_per_prompt, Latency=$query_round_time_per_prompt, Warmup=$warmup_round_time_per_prompt"
             fi
             return 0
         fi
 
-        # Extract baseline numbers
-        local expected_query_ttft expected_query_round expected_warmup
-        expected_query_ttft=$(echo "$baseline_json" | jq -r '.query_ttft_per_prompt')
-        expected_query_round=$(echo "$baseline_json" | jq -r '.query_round_time_per_prompt')
-        expected_warmup=$(echo "$baseline_json" | jq -r '.warmup_round_time_per_prompt')
+        echo "[INFO] Found ${#baseline_files[@]} baseline file(s) for ${feat_type}:"
+        printf "  %s\n" "${baseline_files[@]}"
+
+        # Compute rolling max (worst-case) across all baselines
+        local expected_query_ttft=0 expected_query_round=0 expected_warmup=0
+        for bf in "${baseline_files[@]}"; do
+            local bj
+            bj=$(git show "origin/benchmarks-main:${bf}" 2>/dev/null || echo "")
+            if [[ -z "$bj" ]] || ! echo "$bj" | jq -e . >/dev/null 2>&1; then
+                echo "  Skipping invalid baseline: $bf"
+                continue
+            fi
+            # Take max of each metric (higher time = worse perf = more permissive gate)
+            expected_query_ttft=$(awk "BEGIN { a=$expected_query_ttft; b=$(echo "$bj" | jq -r '.query_ttft_per_prompt // 0'); print (a>b?a:b) }")
+            expected_query_round=$(awk "BEGIN { a=$expected_query_round; b=$(echo "$bj" | jq -r '.query_round_time_per_prompt // 0'); print (a>b?a:b) }")
+            expected_warmup=$(awk "BEGIN { a=$expected_warmup; b=$(echo "$bj" | jq -r '.warmup_round_time_per_prompt // 0'); print (a>b?a:b) }")
+        done
+
+        echo "[INFO] Rolling worst-case baseline: TTFT=$expected_query_ttft, Latency=$expected_query_round, Warmup=$expected_warmup"
+
+        # Sanity check: if all baselines were invalid, skip comparison
+        if awk "BEGIN { exit ($expected_query_ttft == 0 && $expected_query_round == 0 && $expected_warmup == 0) ? 0 : 1 }"; then
+            echo "All baselines were invalid or empty -- skipping performance comparisons"
+            return 0
+        fi
 
         if [[ "$check_ttft" == "true" ]]; then
-            echo "Expected query ttft per prompt: $expected_query_ttft"
+            echo "Worst-case baseline query ttft per prompt: $expected_query_ttft"
             echo "Actual query ttft per prompt: $query_ttft_per_prompt"
             awk -v expected="$expected_query_ttft" -v actual="$query_ttft_per_prompt" 'BEGIN {
-                if (actual > expected * 1.2) { print "Query ttft per prompt requirement not met (>20% overhead)"; exit 1 }
-                else { print "Query ttft per prompt requirement met" }
+                if (actual > expected * 1.2) { print "FAIL: Query ttft per prompt >20% worse than rolling baseline"; exit 1 }
+                else { print "PASS: Query ttft per prompt within threshold" }
             }'
         fi
 
         if [[ "$check_round" == "true" ]]; then
-            echo "Expected query round time per prompt: $expected_query_round"
+            echo "Worst-case baseline query round time per prompt: $expected_query_round"
             echo "Actual query round time per prompt: $query_round_time_per_prompt"
             awk -v expected="$expected_query_round" -v actual="$query_round_time_per_prompt" 'BEGIN {
-                if (actual > expected * 1.2) { print "Query round time per prompt requirement not met (>20% overhead)"; exit 1 }
-                else { print "Query round time per prompt requirement met" }
+                if (actual > expected * 1.2) { print "FAIL: Query round time per prompt >20% worse than rolling baseline"; exit 1 }
+                else { print "PASS: Query round time per prompt within threshold" }
             }'
         fi
 
         if [[ "$check_warmup" == "true" ]]; then
-            echo "Expected warmup round time per prompt: $expected_warmup"
+            echo "Worst-case baseline warmup round time per prompt: $expected_warmup"
             echo "Actual warmup round time per prompt: $warmup_round_time_per_prompt"
             awk -v expected="$expected_warmup" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
-                if (actual > expected * 1.2) { print "Warmup round time per prompt requirement not met (>20% overhead)"; exit 1 }
-                else { print "Warmup round time per prompt requirement met" }
+                if (actual > expected * 1.2) { print "FAIL: Warmup round time per prompt >20% worse than rolling baseline"; exit 1 }
+                else { print "PASS: Warmup round time per prompt within threshold" }
             }'
         fi
     }

@@ -5,6 +5,7 @@ steps:
   - label: ":compression: Multiprocess"
     command: .buildkite/k3_tests/multiprocess/run.sh
     timeout_in_minutes: 60
+    priority: 1
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:
