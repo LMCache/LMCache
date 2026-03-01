@@ -43,13 +43,13 @@ This is different from the bare-metal agent setup where you install a Buildkite 
 
 Instead, agent-stack-k8s runs a controller pod in K8s that polls Buildkite for jobs matching the configured queue tag. When a job appears, it creates a K8s pod to run it. When the job finishes, the pod is deleted.
 
-**What you need from the Buildkite web UI**: just an agent token.
+**What you need from the Buildkite web UI**:
 
-- Go to your org's **Agents** page → "Reveal Agent Token" (or create a new one)
-- If your org uses [Clusters](https://buildkite.com/docs/clusters/overview), create a cluster + queue there and get the token from the cluster settings
-- Pass the token to `install-agent-stack.sh`
+1. **Create a queue** — Go to **Organization Settings → Default cluster → Queues → New Queue** and create a queue with the key matching `BUILDKITE_QUEUE` in `config.env` (default: `k8s`). The queue itself needs no configuration — just a name. You do **not** register any agents on it.
+2. **Get an agent token** — From the cluster settings page, copy the agent token (or create a new one).
+3. **Pass the token** to `install-agent-stack.sh`.
 
-You do **not** need to create a queue in the UI. The queue appears automatically when agent-stack-k8s connects with the queue tag from `config.env`. Pipeline steps target it with:
+agent-stack-k8s connects to Buildkite, watches the queue for jobs, and spins up ephemeral K8s pods as agents on demand. Pipeline steps target the queue with:
 
 ```yaml
 agents:

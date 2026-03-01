@@ -1,5 +1,9 @@
 # Buildkite Web UI Setup: Multiprocess Tests
 
+## Prerequisites
+
+A queue named `k8s` must exist in your Buildkite cluster (**Organization Settings → Default cluster → Queues → New Queue**). No agents need to be registered on it — agent-stack-k8s creates ephemeral pod-based agents automatically.
+
 ## Create Pipeline
 
 1. Go to **Pipelines → New Pipeline**

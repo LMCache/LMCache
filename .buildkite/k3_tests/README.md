@@ -11,6 +11,12 @@ Each subdirectory under `k3_tests/` is a self-contained test with these files:
 
 ## Buildkite Web UI Setup
 
+### Prerequisites
+
+Before creating pipelines, make sure a queue named `k8s` exists in your Buildkite cluster. Go to **Organization Settings → Default cluster → Queues → New Queue** and create it. The queue needs no configuration and no agents — agent-stack-k8s creates ephemeral pod-based agents automatically when jobs arrive.
+
+### Per-pipeline setup
+
 For each test directory, create a pipeline in the Buildkite UI.
 Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, GitHub trigger filters, and recommendations for that test. The short version:
 
@@ -24,6 +30,7 @@ Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, Git
      - label: ":pipeline: Upload pipeline"
        command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
+   The `agents.queue` must match the queue you created above. This routes the initial upload step to agent-stack-k8s, which checks out the repo and uploads the real pipeline definition. Each subsequent step in `pipeline.yml` also targets the same queue.
 3. Under **Environment Variables**, add `HF_TOKEN` with your HuggingFace token (needed for gated model access)
 4. Under **GitHub Settings**, configure trigger filters per the test's `BK_WEB_SETUP.md`
 5. Save — jobs will run on the K8s queue automatically
