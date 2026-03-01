@@ -7,53 +7,44 @@ Single-node K3s + NVIDIA GPU Operator for running LMCache CI on any GPU machine.
 - Linux host with NVIDIA GPU(s) and driver installed
 - Docker (for building the CI base image)
 - Root access
+- An SSH private key authorized to clone the repo from GitHub
 
 ## Setup (one-time)
 
 ```bash
-# 1. Edit config.env with your Buildkite org and queue name
-vim .buildkite/k3_harness/config.env
-
-# 2. Install K3s + GPU Operator + build CI base image
+# 1. Install K3s + GPU Operator + build CI base image
 .buildkite/k3_harness/setup-cluster.sh
 
-# 3. Verify GPUs work in pods
+# 2. Verify GPUs work in pods
 .buildkite/k3_harness/smoke-test.sh
 
-# 4. Connect to Buildkite
-.buildkite/k3_harness/install-agent-stack.sh <BUILDKITE_AGENT_TOKEN>
+# 3. Connect to Buildkite (needs agent token + SSH key for git checkout)
+.buildkite/k3_harness/install-agent-stack.sh <BUILDKITE_AGENT_TOKEN> <SSH_PRIVATE_KEY_PATH>
 ```
 
 `setup-cluster.sh` does everything: installs K3s, Helm, GPU Operator, builds the CI base image from `ci-base.Dockerfile`, imports it into K3s containerd locally, and creates host volume directories. Safe to re-run.
 
-## Configuration
-
-`config.env` has only the two values that change per-site:
-
-| Variable | Default | What |
-|----------|---------|------|
-| `BUILDKITE_ORG` | `lmcache` | Buildkite organization slug |
-| `BUILDKITE_QUEUE` | `k8s` | Queue name that pipelines target |
-
-Everything else (image name, data paths, kubeconfig) uses sensible defaults.
-
-## How Buildkite integration works (what needs to be done in the Buildkite Web UI)
+## How Buildkite integration works
 
 This is different from the bare-metal agent setup where you install a Buildkite agent binary on your own machine, register it with a queue created on the Web UI, and manage it as a systemd service. With agent-stack-k8s, there are **no persistent agents on the machine**.
 
-Instead, agent-stack-k8s runs a controller pod in K8s that polls Buildkite for jobs matching the configured queue tag. When a job appears, it creates a K8s pod to run it. When the job finishes, the pod is deleted.
+Instead, agent-stack-k8s runs a controller pod in K8s that polls Buildkite for jobs matching the configured queue. When a job appears, it creates a K8s pod to run it. When the job finishes, the pod is deleted.
 
 **What you need from the Buildkite web UI**:
 
-1. **Create a queue** — Go to **Organization Settings → Default cluster → Queues → New Queue** and create a queue with the key matching `BUILDKITE_QUEUE` in `config.env` (default: `k8s`). The queue itself needs no configuration — just a name. You do **not** register any agents on it.
+1. **Create a queue** — Go to **Organization Settings → Default cluster → Queues → New Queue** and create a queue named `k8s` (or your chosen name). The queue needs no configuration — just a name. You do **not** register any agents on it.
 2. **Get an agent token** — From the cluster settings page, copy the agent token (or create a new one).
-3. **Pass the token** to `install-agent-stack.sh`.
+3. **Run `install-agent-stack.sh`** with the token and an SSH private key that has access to your GitHub repo. The script creates a K8s secret with the SSH key and installs agent-stack-k8s.
 
-agent-stack-k8s connects to Buildkite, watches the queue for jobs, and spins up ephemeral K8s pods as agents on demand. Pipeline steps target the queue with:
+To use a queue name other than `k8s`, set `BUILDKITE_QUEUE` when running install:
+```bash
+BUILDKITE_QUEUE=my-queue .buildkite/k3_harness/install-agent-stack.sh <TOKEN> <SSH_KEY>
+```
 
+Pipeline steps target the queue with:
 ```yaml
 agents:
-  queue: "k8s"   # matches BUILDKITE_QUEUE in config.env
+  queue: "k8s"   # must match the queue name
 ```
 
 ## Per-job environment
@@ -67,8 +58,8 @@ command: |
 ```
 
 This installs:
-1. **vLLM** from nightly wheel (~2 min)
-2. **LMCache** from PR source (~30s)
+1. **vLLM** from nightly wheel
+2. **LMCache** from PR source
 
 Each pod has its own ephemeral filesystem that is cleanly erased after being shut down — no shared pip/uv cache, no cross-pod contention.
 
@@ -110,10 +101,9 @@ REBUILD_IMAGE=1 .buildkite/k3_harness/setup-cluster.sh
 
 ```
 k3_harness/
-├── config.env             # Buildkite org + queue (edit this)
 ├── ci-base.Dockerfile     # CI base image definition
 ├── setup-cluster.sh       # One-time: K3s + GPU Operator + base image
-├── install-agent-stack.sh # One-time: Buildkite agent (needs token)
+├── install-agent-stack.sh # One-time: Buildkite agent (needs token + SSH key)
 ├── values.yaml            # Reference Helm values (documentation only)
 ├── setup-env.sh           # Per-job: install vLLM + LMCache
 ├── smoke-test.sh          # Verify: GPU pod runs in K3s

@@ -9,7 +9,7 @@ steps:
       - kubernetes:
           podSpec:
             containers:
-              - name: agent
+              - name: container-0
                 image: lmcache/ci-base:latest
                 resources:
                   limits:

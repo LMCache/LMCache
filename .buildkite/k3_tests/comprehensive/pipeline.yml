@@ -12,7 +12,7 @@ steps:
           - kubernetes:
               podSpec: &pod-1gpu
                 containers:
-                  - name: agent
+                  - name: container-0
                     image: lmcache/ci-base:latest
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts: &vol-mounts
@@ -75,7 +75,7 @@ steps:
           - kubernetes:
               podSpec: &pod-2gpu
                 containers:
-                  - name: agent
+                  - name: container-0
                     image: lmcache/ci-base:latest
                     resources: { limits: { "nvidia.com/gpu": "2" } }
                     volumeMounts: *vol-mounts

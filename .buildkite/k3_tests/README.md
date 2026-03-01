@@ -26,12 +26,15 @@ Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, Git
    agents:
      queue: "k8s"
 
+   env:
+     HF_TOKEN: "<your HuggingFace token>"
+
    steps:
      - label: ":pipeline: Upload pipeline"
        command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
    The `agents.queue` must match the queue you created above. This routes the initial upload step to agent-stack-k8s, which checks out the repo and uploads the real pipeline definition. Each subsequent step in `pipeline.yml` also targets the same queue.
-3. Under **Environment Variables**, add `HF_TOKEN` with your HuggingFace token (needed for gated model access)
+3. `HF_TOKEN` is needed for gated model access (e.g., Llama, Qwen). Set it in the `env` block as shown above, or under **Pipeline Settings → Environment Variables** in the UI — both work
 4. Under **GitHub Settings**, configure trigger filters per the test's `BK_WEB_SETUP.md`
 5. Save — jobs will run on the K8s queue automatically
 
@@ -70,7 +73,7 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
          - kubernetes:
              podSpec:
                containers:
-                 - name: agent
+                 - name: container-0
                    image: lmcache/ci-base:latest
                    resources:
                      limits:
