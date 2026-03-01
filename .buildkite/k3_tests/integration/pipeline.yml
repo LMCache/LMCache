@@ -11,6 +11,7 @@ steps:
             containers:
               - name: container-0
                 image: lmcache/ci-base:latest
+                imagePullPolicy: Never
                 resources:
                   limits:
                     nvidia.com/gpu: "1"

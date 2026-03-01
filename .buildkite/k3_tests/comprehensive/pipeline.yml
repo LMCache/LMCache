@@ -14,6 +14,7 @@ steps:
                 containers:
                   - name: container-0
                     image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts: &vol-mounts
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
@@ -77,6 +78,7 @@ steps:
                 containers:
                   - name: container-0
                     image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "2" } }
                     volumeMounts: *vol-mounts
                 volumes: *vols

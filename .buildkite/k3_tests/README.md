@@ -75,6 +75,7 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
                containers:
                  - name: container-0
                    image: lmcache/ci-base:latest
+                   imagePullPolicy: Never  # local image, imported into K3s containerd
                    resources:
                      limits:
                        nvidia.com/gpu: "1"
