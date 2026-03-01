@@ -119,9 +119,6 @@ class LMCacheMPSchedulerAdapter:
         self.model_name = model_name
         self.world_size = world_size
 
-        # NOTE: this worker_id should not be used
-        self.worker_id = kv_rank
-
         # Read chunk size from lmcache
         self.chunk_size = get_lmcache_chunk_size(self.mq_client)
         assert self.chunk_size % vllm_block_size == 0, (
