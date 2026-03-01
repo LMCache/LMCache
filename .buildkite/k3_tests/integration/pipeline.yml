@@ -1,7 +1,8 @@
-# Integration tests.
+# Integration tests — starts vLLM with LMCache directly (no Docker),
+# tests CPU and disk backends via the OpenAI API.
 
 steps:
-  - label: ":pip: Integration Tests"
+  - label: ":test_tube: Integration Tests"
     command: .buildkite/k3_tests/integration/run.sh
     timeout_in_minutes: 30
     agents: { queue: "k8s" }
