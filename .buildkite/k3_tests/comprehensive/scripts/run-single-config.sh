@@ -128,8 +128,8 @@ if [[ "$feature_type" == "pd" ]]; then
     alloc=$(yq -er '.["docker-decoder"]["alloc-port"]' "$cfg_file" 2>/dev/null || echo "7400")
 
     # Inject PD-specific env vars into docker sections
-    prefiller_docker=$(echo "$prefiller_docker" | yq -y ". + {\"env\": (.env + [\"LMCACHE_PD_PROXY_PORT=$proxy\"])}")
-    decoder_docker=$(echo "$decoder_docker" | yq -y ". + {\"env\": (.env + [\"LMCACHE_PD_PEER_INIT_PORT=$init\", \"LMCACHE_PD_PEER_ALLOC_PORT=$alloc\"])}")
+    prefiller_docker=$(echo "$prefiller_docker" | yq -y --arg proxy "$proxy" '. + {"env": (.env + ["LMCACHE_PD_PROXY_PORT=" + $proxy])}')
+    decoder_docker=$(echo "$decoder_docker" | yq -y --arg init "$init" --arg alloc "$alloc" '. + {"env": (.env + ["LMCACHE_PD_PEER_INIT_PORT=" + $init, "LMCACHE_PD_PEER_ALLOC_PORT=" + $alloc])}')
 
     echo "--- Starting prefiller on port $PORT1 (GPU 0)"
     # Prefiller needs UCX_TLS for NIXL transport
@@ -171,11 +171,11 @@ elif [[ "$feature_type" == "p2p" ]]; then
     reply=$(yq -er '.docker1["reply-port"]' "$cfg_file" 2>/dev/null || echo "8400")
 
     # Inject controller URLs
-    docker1=$(echo "$docker1" | yq -y ". + {\"env\": (.env + [\"LMCACHE_CONTROLLER_PULL_URL=localhost:$pull\", \"LMCACHE_CONTROLLER_REPLY_URL=localhost:$reply\", \"UCX_TLS=tcp\"])}")
+    docker1=$(echo "$docker1" | yq -y --arg pull "$pull" --arg reply "$reply" '. + {"env": (.env + ["LMCACHE_CONTROLLER_PULL_URL=localhost:" + $pull, "LMCACHE_CONTROLLER_REPLY_URL=localhost:" + $reply, "UCX_TLS=tcp"])}')
 
     pull2=$(yq -er '.docker2["pull-port"]' "$cfg_file" 2>/dev/null || echo "$pull")
     reply2=$(yq -er '.docker2["reply-port"]' "$cfg_file" 2>/dev/null || echo "$reply")
-    docker2=$(echo "$docker2" | yq -y ". + {\"env\": (.env + [\"LMCACHE_CONTROLLER_PULL_URL=localhost:$pull2\", \"LMCACHE_CONTROLLER_REPLY_URL=localhost:$reply2\", \"UCX_TLS=tcp\"])}")
+    docker2=$(echo "$docker2" | yq -y --arg pull2 "$pull2" --arg reply2 "$reply2" '. + {"env": (.env + ["LMCACHE_CONTROLLER_PULL_URL=localhost:" + $pull2, "LMCACHE_CONTROLLER_REPLY_URL=localhost:" + $reply2, "UCX_TLS=tcp"])}')
 
     # Start controller
     echo "--- Starting P2P controller on port $PORT"
@@ -239,7 +239,7 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
     # Build workload JSON (merge workload section with model, strip non-CLI fields)
     # Fields like expected-latency-gain are used by the checking logic, not long_doc_qa.py.
     # "completion" -> "completions" rename to match the argparse flag.
-    workload_yaml="$(yq "(.workload * {\"model\": \"$model\"}) | del(.type) | del(.[\"expected-latency-gain\"]) | if .completion then .completions = .completion | del(.completion) else . end" "$cfg_file")"
+    workload_yaml="$(yq --arg model "$model" '(.workload * {"model": $model}) | del(.type) | del(.["expected-latency-gain"]) | if .completion then .completions = .completion | del(.completion) else . end' "$cfg_file")"
     cfg_json="$(yq '.' "$cfg_file")"
 
     # Determine which checking fields are requested

@@ -8,9 +8,9 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 echo "=== Teardown ==="
 
 # agent-stack-k8s
-if helm status buildkite-agent -n buildkite &>/dev/null; then
+if helm status agent-stack-k8s -n buildkite &>/dev/null; then
     echo "→ Removing agent-stack-k8s..."
-    helm uninstall buildkite-agent -n buildkite --wait
+    helm uninstall agent-stack-k8s -n buildkite --wait
 fi
 
 # GPU Operator
