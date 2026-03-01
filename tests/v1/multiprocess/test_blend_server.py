@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
 from lmcache.v1.multiprocess.blend_server import get_sep_tokens
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -264,6 +265,7 @@ def server_process_runner(
     )
     run_cache_server(
         storage_manager_config=storage_manager_config,
+        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
         host=host,
         port=port,
         chunk_size=chunk_size,

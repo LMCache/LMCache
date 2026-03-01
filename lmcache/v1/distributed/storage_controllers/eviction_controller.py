@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import TYPE_CHECKING
 import threading
 import time
 
@@ -18,21 +17,16 @@ from lmcache.v1.distributed.storage_controller import (
     StorageControllerInterface,
 )
 
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.distributed.storage_manager import StorageManager
-
 logger = init_logger(__name__)
 
 
 class EvictionController(StorageControllerInterface):
     def __init__(
         self,
-        storage_manager: "StorageManager",
         l1_manager: L1Manager,
         eviction_config: EvictionConfig,
     ):
-        super().__init__(storage_manager, l1_manager)
+        super().__init__(l1_manager)
 
         self._eviction_config = eviction_config
         self._eviction_policy = CreateEvictionPolicy(self._eviction_config)
