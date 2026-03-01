@@ -209,6 +209,49 @@ class MockL2Adapter(L2AdapterInterface):
         os.close(self._load_efd)
 
     ##################
+    # Debug / test-only functions
+    ##################
+
+    def debug_get_stored_object_count(self) -> int:
+        """
+        Return the number of objects currently stored in the mock adapter.
+
+        This method is intended for testing and debugging only.
+
+        Returns:
+            int: Number of stored objects.
+        """
+        with self._lock:
+            return len(self._memory_objects)
+
+    def debug_get_locked_key_count(self) -> int:
+        """
+        Return the number of currently locked keys.
+
+        This method is intended for testing and debugging only.
+
+        Returns:
+            int: Number of locked keys.
+        """
+        with self._lock:
+            return len(self._locked_keys)
+
+    def debug_has_key(self, key: ObjectKey) -> bool:
+        """
+        Check whether a specific key is stored in the mock adapter.
+
+        This method is intended for testing and debugging only.
+
+        Args:
+            key: The object key to check.
+
+        Returns:
+            bool: True if the key is stored.
+        """
+        with self._lock:
+            return key in self._memory_objects
+
+    ##################
     # Helper functions
     ##################
 

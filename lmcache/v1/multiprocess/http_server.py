@@ -17,6 +17,10 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
+from lmcache.v1.mp_observability.prometheus_controller import (
+    get_prometheus_controller,
+)
 from lmcache.v1.multiprocess.server import run_cache_server
 
 logger = init_logger(__name__)
@@ -67,6 +71,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting LMCache HTTP server...")
     zmq_server, engine = run_cache_server(
         storage_manager_config=_server_config.to_storage_manager_config(),
+        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
         host=_server_config.zmq_host,
         port=_server_config.zmq_port,
         chunk_size=_server_config.chunk_size,
@@ -81,6 +86,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    get_prometheus_controller().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
     logger.info("LMCache HTTP server stopped")
