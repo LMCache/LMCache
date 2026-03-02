@@ -368,7 +368,7 @@ def test_mq_register_kv_cache():
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
         request_type=RequestType.REGISTER_KV_CACHE,
-        payloads=[gpu_id, kv_cache],
+        payloads=[gpu_id, kv_cache, "testmodel", 1],
         expected_response=None,
         num_requests=1,
     )
@@ -476,13 +476,13 @@ def test_mq_retrieve():
 def test_mq_lookup():
     """
     Test MessageQueue with LOOKUP request type.
-    LOOKUP takes (keys: list[KeyType]) and returns int.
+    LOOKUP takes (key: KeyType) and returns int.
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(4)]
+    # Create a single test key
+    key = create_cache_key(0)
 
-    # Expected response: count of even-indexed keys (0, 2) = 2
-    expected_response = 2
+    # Expected response: 1 (dummy handler always returns 1)
+    expected_response = 1
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
@@ -491,22 +491,22 @@ def test_mq_lookup():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys],
+        payloads=[key],
         expected_response=expected_response,
         num_requests=1,
     )
 
 
-def test_mq_lookup_with_different_key_count():
+def test_mq_lookup_with_different_key():
     """
-    Test MessageQueue with LOOKUP request type with different number of keys.
-    Tests that the handler correctly counts matched keys.
+    Test MessageQueue with LOOKUP request type with a different key.
+    Tests that the handler correctly processes a single key.
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(3)]
+    # Create a different test key
+    key = create_cache_key(42)
 
-    # Expected response: count of even-indexed keys (0, 2) = 2
-    expected_response = 2
+    # Expected response: 1 (dummy handler always returns 1)
+    expected_response = 1
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
@@ -515,7 +515,7 @@ def test_mq_lookup_with_different_key_count():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys],
+        payloads=[key],
         expected_response=expected_response,
         num_requests=1,
     )
