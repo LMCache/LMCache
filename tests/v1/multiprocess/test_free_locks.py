@@ -204,8 +204,9 @@ def test_server_free_locks_filters_by_start_end():
 
 
 def test_server_free_locks_unaligned_start_end():
-    """When start or end is not aligned to chunk_size, the entire chunk
-    containing that boundary should be freed."""
+    """When end is not aligned to chunk_size, the chunk containing the
+    end boundary is NOT freed (floor division).  The caller is responsible
+    for aligning boundaries as desired."""
     # First Party
     from lmcache.v1.multiprocess.server import MPCacheEngine
 
@@ -213,7 +214,8 @@ def test_server_free_locks_unaligned_start_end():
 
     # 4 chunks of tokens (1024 tokens at chunk_size=256).
     # start=100 falls in chunk 0, end=700 falls in chunk 2.
-    # Expected freed chunks: 0, 1, 2  (indices [0:3])
+    # Floor division: start_chunk=0, end_chunk=700//256=2
+    # Expected freed chunks: 0, 1  (indices [0:2])
     token_ids = tuple(range(1024))
     key = IPCCacheEngineKey(
         model_name="testmodel",
@@ -226,7 +228,7 @@ def test_server_free_locks_unaligned_start_end():
     )
 
     hash_keys = [MagicMock(name=f"hk{i}") for i in range(4)]
-    sentinel_obj_keys = [MagicMock(name=f"obj{i}") for i in range(3)]
+    sentinel_obj_keys = [MagicMock(name=f"obj{i}") for i in range(2)]
 
     with (
         patch.object(IPCCacheEngineKey, "to_hash_keys", return_value=hash_keys),
@@ -237,10 +239,10 @@ def test_server_free_locks_unaligned_start_end():
     ):
         MPCacheEngine.free_locks(engine, [key])
 
-    # Chunks 0, 1, 2 should be freed (hash_keys[0:3])
+    # Chunks 0, 1 should be freed (hash_keys[0:2]); chunk 2 is excluded
     passed_ipc_keys = mock_convert.call_args[0][0]
-    assert len(passed_ipc_keys) == 3
-    assert passed_ipc_keys == hash_keys[0:3]
+    assert len(passed_ipc_keys) == 2
+    assert passed_ipc_keys == hash_keys[0:2]
 
     engine.storage_manager.finish_read_prefetched.assert_called_once_with(
         sentinel_obj_keys
