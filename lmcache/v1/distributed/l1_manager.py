@@ -445,6 +445,66 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
+    def finish_write_and_reserve_read(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Atomically finish write and acquire read lock for the given keys.
+
+        This is used by the prefetch controller after successfully loading
+        data from L2 into write-reserved L1 buffers. It transitions the
+        object from write-locked to read-locked in a single atomic step,
+        preventing a race window where eviction could interfere.
+
+        Args:
+            keys: Keys to transition from write-locked to read-locked.
+
+        Returns:
+            A dictionary mapping each object key to a tuple of
+            (L1Error, Optional[MemoryObj]).
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_IN_WRONG_STATE: The key is not write-locked, or it already
+                has read locks.
+        """
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                continue
+
+            if not entry.write_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish_write_and_reserve_read on "
+                    "non-write-locked key %s",
+                    key,
+                )
+                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
+                continue
+
+            if entry.read_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish_write_and_reserve_read on read-locked key %s",
+                    key,
+                )
+                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
+                continue
+
+            entry.write_lock.unlock()
+            entry.read_lock.lock()
+            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            successful_keys.append(key)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_write_finished(successful_keys)
+            listener.on_l1_keys_reserved_read(successful_keys)
+        return ret
+
+    @l1_mgr_synchronized
     def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 

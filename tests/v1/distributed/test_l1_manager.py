@@ -877,6 +877,167 @@ class TestFinishWrite:
 
 
 # =============================================================================
+# Tests for L1Manager.finish_write_and_reserve_read()
+# =============================================================================
+
+
+class TestFinishWriteAndReserveRead:
+    """
+    Tests for L1Manager.finish_write_and_reserve_read() method.
+
+    This method atomically finishes write and acquires read lock,
+    preventing a race window where eviction could interfere.
+
+    Per the docstring:
+    - KEY_NOT_EXIST: The key does not exist.
+    - KEY_IN_WRONG_STATE: Not write-locked, or already read-locked.
+    - SUCCESS: Write unlocked and read lock acquired atomically.
+    """
+
+    def test_normal_transition(self, basic_l1_config, basic_layout):
+        """Test normal write-locked -> read-locked transition."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Reserve write (key is now write-locked)
+        write_result = manager.reserve_write([key], [False], basic_layout)
+        assert write_result[key][0] == L1Error.SUCCESS
+
+        # Atomically finish write and reserve read
+        result = manager.finish_write_and_reserve_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.SUCCESS
+        assert mem_obj is not None
+
+        # Verify state: write unlocked, read locked
+        state = manager.get_object_state(key)
+        assert state is not None
+        assert not state.write_lock.is_locked()
+        assert state.read_lock.is_locked()
+
+        # Should be readable (not write-locked)
+        assert state.available_for_read() is True
+        # Should not be writable (read-locked)
+        assert state.available_for_write() is False
+
+        # Clean up read lock
+        manager.finish_read([key])
+        manager.close()
+
+    def test_key_not_exist(self, basic_l1_config, basic_layout):
+        """Test that non-existing key returns KEY_NOT_EXIST."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        result = manager.finish_write_and_reserve_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.KEY_NOT_EXIST
+        assert mem_obj is None
+
+        manager.close()
+
+    def test_not_write_locked(self, basic_l1_config, basic_layout):
+        """Test that non-write-locked key returns KEY_IN_WRONG_STATE."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create ready object (not write-locked)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        result = manager.finish_write_and_reserve_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.KEY_IN_WRONG_STATE
+        assert mem_obj is None
+
+        manager.close()
+
+    def test_already_read_locked(self, basic_l1_config, basic_layout):
+        """Test that key with both write+read locks returns KEY_IN_WRONG_STATE.
+
+        This is an unexpected state — normally a key shouldn't be both
+        write-locked and read-locked simultaneously.
+        """
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Create write-locked object
+        manager.reserve_write([key], [False], basic_layout)
+
+        # Force a read lock via internal state (unusual state)
+        state = manager.get_object_state(key)
+        assert state is not None
+        state.read_lock.lock()
+
+        result = manager.finish_write_and_reserve_read([key])
+
+        assert key in result
+        error, mem_obj = result[key]
+        assert error == L1Error.KEY_IN_WRONG_STATE
+        assert mem_obj is None
+
+        # Clean up
+        state.read_lock.unlock()
+        manager.close()
+
+    def test_multiple_keys_mixed_results(self, basic_l1_config, basic_layout):
+        """Test with multiple keys where some succeed and some fail."""
+        manager = L1Manager(basic_l1_config)
+        key1 = make_object_key(1)
+        key2 = make_object_key(2)  # will not exist
+        key3 = make_object_key(3)
+
+        # key1: write-locked (should succeed)
+        manager.reserve_write([key1], [False], basic_layout)
+
+        # key3: ready, not write-locked (should fail)
+        manager.reserve_write([key3], [False], basic_layout)
+        manager.finish_write([key3])
+
+        result = manager.finish_write_and_reserve_read([key1, key2, key3])
+
+        # key1: SUCCESS
+        assert result[key1][0] == L1Error.SUCCESS
+        assert result[key1][1] is not None
+
+        # key2: KEY_NOT_EXIST
+        assert result[key2][0] == L1Error.KEY_NOT_EXIST
+        assert result[key2][1] is None
+
+        # key3: KEY_IN_WRONG_STATE (not write-locked)
+        assert result[key3][0] == L1Error.KEY_IN_WRONG_STATE
+        assert result[key3][1] is None
+
+        # Clean up
+        manager.finish_read([key1])
+        manager.close()
+
+    def test_can_unsafe_read_after_transition(self, basic_l1_config, basic_layout):
+        """Test that unsafe_read works on the transitioned key."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        # Write and transition
+        manager.reserve_write([key], [False], basic_layout)
+        result = manager.finish_write_and_reserve_read([key])
+        assert result[key][0] == L1Error.SUCCESS
+
+        # unsafe_read should work (key is read-locked)
+        read_result = manager.unsafe_read([key])
+        assert read_result[key][0] == L1Error.SUCCESS
+        assert read_result[key][1] is not None
+
+        manager.finish_read([key])
+        manager.close()
+
+
+# =============================================================================
 # Tests for L1Manager.delete()
 # =============================================================================
 
