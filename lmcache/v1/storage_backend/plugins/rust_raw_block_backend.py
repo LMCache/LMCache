@@ -1024,7 +1024,9 @@ class RustRawBlockBackend(StoragePluginInterface):
                         key = CacheEngineKey.from_string(k_str)
                     except Exception as e:
                         logger.warning(
-                            "Failed to parse key string '%s' from metadata: %s", k_str, e
+                            "Failed to parse key string '%s' from metadata: %s",
+                            k_str,
+                            e,
                         )
                         continue
 
