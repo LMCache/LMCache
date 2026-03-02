@@ -14,7 +14,6 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
-    PagedCpuGpuMemoryAllocator,
     PagedCpuMemoryAllocator,
 )
 
@@ -41,8 +40,7 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
         )
     elif config.use_page:
         logger.warning(
-            "PagedCpuGpuMemoryAllocator does not support "
-            "explicit alignment configuration."
+            "PagedCpuMemoryAllocator does not support explicit alignment configuration."
         )
         return PagedCpuMemoryAllocator(config.size_in_bytes)
     else:
@@ -67,7 +65,7 @@ class L1MemoryManager:
     def __init__(self, config: L1MemoryManagerConfig):
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
-        if isinstance(self._allocator, PagedCpuGpuMemoryAllocator):
+        if isinstance(self._allocator, PagedCpuMemoryAllocator):
             self._memory_initialized = False
         else:
             self._memory_initialized = True
@@ -81,7 +79,7 @@ class L1MemoryManager:
         """
         Lazily initialize the underlying memory allocator with KV cache
         shape and dtype information. This is only needed for paged allocators
-        (PagedCpuMemoryAllocator, PagedCpuGpuMemoryAllocator) whose CPU
+        (PagedCpuMemoryAllocator, PagedCpuMemoryAllocator) whose CPU
         memory cannot be allocated until shapes/dtypes are known.
 
         This method is idempotent — repeated calls after the first are no-ops.
@@ -94,10 +92,7 @@ class L1MemoryManager:
         if self._memory_initialized:
             return
 
-        if isinstance(
-            self._allocator,
-            (PagedCpuMemoryAllocator, PagedCpuGpuMemoryAllocator),
-        ):
+        if isinstance(self._allocator, PagedCpuMemoryAllocator):
             self._allocator.init_cpu_memory_allocator(
                 self._size_in_bytes, shapes, dtypes, fmt
             )
@@ -203,10 +198,8 @@ class L1MemoryManager:
                 return allocator.pin_allocator.address_manager
             elif isinstance(allocator, LazyMemoryAllocator):
                 return allocator.get_address_manager()
-            elif isinstance(allocator, PagedCpuGpuMemoryAllocator) and hasattr(
-                allocator, "cpu_allocator"
-            ):
-                return allocator.cpu_allocator.address_manager
+            elif isinstance(allocator, PagedCpuMemoryAllocator):
+                return allocator.allocator.address_manager
             else:
                 raise NotImplementedError(
                     "get_memory_usage is not implemented for this allocator type."
