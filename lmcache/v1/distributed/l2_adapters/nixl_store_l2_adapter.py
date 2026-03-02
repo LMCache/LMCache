@@ -564,7 +564,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         except Exception:
             success = False
-
+            for key, storage_obj in zip(keys, storage_objs, strict=True):
         with self._lock:
             for key, storage_obj in zip(keys, storage_objs, strict=False):
                 self._memory_objects[key] = storage_obj
