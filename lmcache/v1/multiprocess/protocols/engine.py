@@ -97,7 +97,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - keys: list[KeyType] - Cache keys whose read locks to release
         # Returns: None
         "FREE_LOCKS": ProtocolDefinition(
-            payload_classes=[list[KeyType]],
+            payload_classes=[KeyType],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),

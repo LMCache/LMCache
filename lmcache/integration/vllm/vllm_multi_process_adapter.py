@@ -211,7 +211,7 @@ class LMCacheMPSchedulerAdapter:
         """
         self.lookup_futures.pop(request_id, None)
 
-    def free_locks(
+    def free_lookup_locks(
         self,
         token_ids: list[int],
         start: int,
@@ -220,14 +220,16 @@ class LMCacheMPSchedulerAdapter:
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
-        Use this when a request is cancelled or aborted after lookup but
+        Use this when some chunks matched by lookup overlap with blocks that
+        vLLM has already computed, so they will never be retrieved.  Calling
+        this prevents those chunks from holding read locks until TTL expiry.
+
+        Or use this when a request is cancelled or aborted after lookup but
         before retrieve to avoid holding read locks until TTL expiry.
 
         When ``start`` or ``end`` is not aligned to the chunk size, the
-        entire chunk containing that boundary is freed.  If the caller
-        needs to preserve locks on part of a boundary chunk, it should
-        align ``start`` / ``end`` to chunk boundaries before calling
-        this method.
+        entire chunk containing start boundary is freed but not end boundary.
+        It is caller's responsibility to properly align the boundaries.
 
         Args:
             token_ids: Token IDs for the key (same as used in lookup).
@@ -241,7 +243,7 @@ class LMCacheMPSchedulerAdapter:
         send_lmcache_request(
             self.mq_client,
             RequestType.FREE_LOCKS,
-            [[key]],
+            [key],
         )
 
     def end_session(self, request_id: str) -> None:
