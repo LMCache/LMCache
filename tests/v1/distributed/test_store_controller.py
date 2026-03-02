@@ -19,24 +19,25 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
-from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
-from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
-from lmcache.v1.distributed.storage_controllers.store_controller import (
-    StoreController,
-    StoreListener,
-)
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-    DefaultStorePolicy,
-    StorePolicy,
-)
+
+if torch.cuda.is_available():
+    # First Party
+    from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+    from lmcache.v1.distributed.l1_manager import L1Manager
+    from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
+    from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
+    from lmcache.v1.distributed.storage_controllers.store_controller import (
+        StoreController,
+        StoreListener,
+    )
+    from lmcache.v1.distributed.storage_controllers.store_policy import (
+        AdapterDescriptor,
+        DefaultStorePolicy,
+        StorePolicy,
+    )
 
 # Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
 # =============================================================================
@@ -90,32 +91,34 @@ def wait_for_condition(
     return False
 
 
-def write_keys_to_l1(
-    l1_manager: L1Manager,
-    keys: list[ObjectKey],
-    layout: MemoryLayoutDesc,
-) -> list[ObjectKey]:
-    """
-    Write keys to L1 (reserve_write + finish_write).
+if torch.cuda.is_available():
 
-    Args:
-        l1_manager: The L1 manager to write to.
-        keys: Object keys to write.
-        layout: Memory layout description.
+    def write_keys_to_l1(
+        l1_manager: L1Manager,
+        keys: list[ObjectKey],
+        layout: MemoryLayoutDesc,
+    ) -> list[ObjectKey]:
+        """
+        Write keys to L1 (reserve_write + finish_write).
 
-    Returns:
-        List of keys that were successfully written.
-    """
-    results = l1_manager.reserve_write(
-        keys=keys,
-        is_temporary=[False] * len(keys),
-        layout_desc=layout,
-        mode="new",
-    )
-    written = [k for k, (e, m) in results.items() if m is not None]
-    if written:
-        l1_manager.finish_write(written)
-    return written
+        Args:
+            l1_manager: The L1 manager to write to.
+            keys: Object keys to write.
+            layout: Memory layout description.
+
+        Returns:
+            List of keys that were successfully written.
+        """
+        results = l1_manager.reserve_write(
+            keys=keys,
+            is_temporary=[False] * len(keys),
+            layout_desc=layout,
+            mode="new",
+        )
+        written = [k for k, (e, m) in results.items() if m is not None]
+        if written:
+            l1_manager.finish_write(written)
+        return written
 
 
 # =============================================================================
@@ -141,19 +144,23 @@ def l1_manager():
     mgr.close()
 
 
-def make_adapter() -> MockL2Adapter:
-    """Create a MockL2Adapter with fast bandwidth."""
-    config = MockL2AdapterConfig(
-        max_size_gb=0.01,
-        mock_bandwidth_gb=10.0,
-    )
-    return MockL2Adapter(config)
+if torch.cuda.is_available():
+
+    def make_adapter() -> MockL2Adapter:
+        """Create a MockL2Adapter with fast bandwidth."""
+        config = MockL2AdapterConfig(
+            max_size_gb=0.01,
+            mock_bandwidth_gb=10.0,
+        )
+        return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    """Create an AdapterDescriptor for testing."""
-    config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+if torch.cuda.is_available():
+
+    def make_descriptor(index: int) -> AdapterDescriptor:
+        """Create an AdapterDescriptor for testing."""
+        config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+        return AdapterDescriptor(index=index, config=config)
 
 
 # =============================================================================

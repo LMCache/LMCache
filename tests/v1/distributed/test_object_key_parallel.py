@@ -26,14 +26,14 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.config import (
-    EvictionConfig,
-    L1ManagerConfig,
-    L1MemoryManagerConfig,
-    StorageManagerConfig,
-)
 
 if torch.cuda.is_available():
+    from lmcache.v1.distributed.config import (
+        EvictionConfig,
+        L1ManagerConfig,
+        L1MemoryManagerConfig,
+        StorageManagerConfig,
+    )
     from lmcache.v1.distributed.storage_manager import StorageManager
 
 # First Party

@@ -25,7 +25,11 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.distributed.config import L1MemoryManagerConfig
+
+if torch.cuda.is_available():
+    from lmcache.v1.distributed.config import L1MemoryManagerConfig
+
+# First Party
 from lmcache.v1.distributed.error import L1Error
 
 try:
@@ -38,9 +42,7 @@ except ImportError:
     pytest.skip("L1MemoryManager could not be imported", allow_module_level=True)
 
 # Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
 def should_use_lazy_alloc() -> bool:

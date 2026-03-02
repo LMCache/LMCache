@@ -26,13 +26,15 @@ import pytest
 import torch
 import zmq
 
+if torch.cuda.is_available():
+    from lmcache.v1.distributed.config import (
+        EvictionConfig,
+        L1ManagerConfig,
+        L1MemoryManagerConfig,
+        StorageManagerConfig,
+    )
+
 # First Party
-from lmcache.v1.distributed.config import (
-    EvictionConfig,
-    L1ManagerConfig,
-    L1MemoryManagerConfig,
-    StorageManagerConfig,
-)
 from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
 
 if torch.cuda.is_available():

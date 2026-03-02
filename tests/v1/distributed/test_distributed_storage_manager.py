@@ -12,16 +12,18 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import (
-    EvictionConfig,
-    L1ManagerConfig,
-    L1MemoryManagerConfig,
-    StorageManagerConfig,
-)
-from lmcache.v1.distributed.l2_adapters.config import (
-    L2AdaptersConfig,
-    MockL2AdapterConfig,
-)
+
+if torch.cuda.is_available():
+    from lmcache.v1.distributed.config import (
+        EvictionConfig,
+        L1ManagerConfig,
+        L1MemoryManagerConfig,
+        StorageManagerConfig,
+    )
+    from lmcache.v1.distributed.l2_adapters.config import (
+        L2AdaptersConfig,
+        MockL2AdapterConfig,
+    )
 
 try:
     # First Party
@@ -33,9 +35,7 @@ except ImportError:
     )
 
 # Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
 def should_use_lazy_alloc() -> bool:

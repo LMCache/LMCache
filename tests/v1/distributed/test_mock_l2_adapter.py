@@ -17,13 +17,20 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
-from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
+
+if torch.cuda.is_available():
+    from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
+    from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
+
+# First Party
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+
+# Skip all tests in this module if CUDA is not available
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 # =============================================================================
 # Test Fixtures
@@ -66,7 +73,12 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     if events:
         # Read and consume the event
         try:
-            os.eventfd_read(event_fd)
+            # Replaces os.eventfd_read(event_fd) as only added in Python 3.12
+            # os.eventfd_read() is a thin wrapper that calls os.read(fd, 8) and
+            # unpacks the result. It is a clean portable solution here as the
+            # return value is unused
+            # Fixes any runtime failures for Python 3.10/3.11
+            os.read(event_fd, 8)
         except BlockingIOError:
             pass
         return True

@@ -11,13 +11,22 @@ These tests verify the basic functionality of the LRUEvictionPolicy:
 """
 
 # Third Party
+import pytest
+import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
+
+if torch.cuda.is_available():
+    from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
+
+# First Party
 from lmcache.v1.distributed.internal_api import (
     EvictionDestination,
 )
+
+# Skip all tests in this module if CUDA is not available
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 # =============================================================================
 # Helper Functions
