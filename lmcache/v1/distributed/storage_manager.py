@@ -41,8 +41,14 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class PrefetchHandle:
-    prefix_hit_chunks: int
-    """ how many chunks are hit in the prefix of the requested keys """
+    request_id: int
+    """Opaque ID for tracking L2 prefetch in the controller. -1 if no L2 request."""
+
+    l1_prefix_hit_count: int
+    """Number of leading keys already in L1 at submission time."""
+
+    total_requested_keys: int
+    """Total number of keys originally requested."""
 
 
 class StorageManager:
@@ -266,7 +272,12 @@ class StorageManager:
 
         for listener in self._registered_listeners:
             listener.on_sm_read_prefetched(keys[:hit_count], keys[hit_count:])
-        return PrefetchHandle(prefix_hit_chunks=hit_count)
+
+        return PrefetchHandle(
+            request_id=-1,
+            l1_prefix_hit_count=hit_count,
+            total_requested_keys=len(keys),
+        )
 
     def query_prefetch_status(
         self,
@@ -282,7 +293,7 @@ class StorageManager:
             the number of prefix hit chunks if the prefetch is done, None if
             it's still in progress.
         """
-        return handle.prefix_hit_chunks
+        return handle.l1_prefix_hit_count
 
     def clear(self):
         """
