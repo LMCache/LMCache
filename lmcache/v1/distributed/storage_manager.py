@@ -231,6 +231,7 @@ class StorageManager:
     def submit_prefetch_task(
         self,
         keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
     ) -> PrefetchHandle:
         """
         Prefetch the objects into L1 memory asynchronously. The prefetched object
