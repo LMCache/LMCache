@@ -100,42 +100,33 @@ class MyListener(PrometheusLogger):
 
 ---
 
-## Step 3 — Register with PrometheusController
+## Step 3 — Self-register with the global PrometheusController
 
-In `lmcache/v1/mp_observability/prometheus_controller.py`, add your logger
-in `__init__` alongside the existing loggers:
+Each module creates its own logger and registers it with the global singleton.
+No changes to `PrometheusController` are needed.
+
+In your module's `__init__` (or wherever setup happens):
 
 ```python
 from lmcache.v1.mp_observability.logger.my_logger import MyListener
+from lmcache.v1.mp_observability.prometheus_controller import get_prometheus_controller
 
-class PrometheusController(StorageControllerInterface):
-    def __init__(self, storage_manager, l1_manager, log_interval):
-        super().__init__(storage_manager, l1_manager)
-        self._log_interval = log_interval
-        self.all_loggers: List[PrometheusLogger] = []
+class MyModule:
+    def __init__(self):
+        # ... existing setup ...
 
-        # Existing loggers
-        self.sm_stats_logger = StorageManagerStatsLogger()
-        self.get_storage_manager().register_listener(self.sm_stats_logger)
-        self.all_loggers.append(self.sm_stats_logger)
-
-        self.l1_stats_logger = L1ManagerStatsLogger()
-        self.get_l1_manager().register_listener(self.l1_stats_logger)
-        self.all_loggers.append(self.l1_stats_logger)
-
-        # New logger — register with whatever event source it needs
-        self.my_logger = MyListener()
-        # e.g. self.get_storage_manager().register_listener(self.my_logger)
-        self.all_loggers.append(self.my_logger)   # <-- this is all that's needed
-                                                  #     for periodic flushing
-
-        # ... thread setup unchanged ...
+        # Self-register observability logger
+        my_logger = MyListener()
+        # If your logger also implements a listener interface, register it:
+        # self.register_listener(my_logger)
+        get_prometheus_controller().register_logger(my_logger)
 ```
 
-`PrometheusController._run()` iterates `self.all_loggers` and calls `log_prometheus()`
-on each one at every interval. Adding to `all_loggers` is the only change required —
-no modifications to `_run()` are needed. Exceptions from individual loggers are caught
-and logged, so a broken logger cannot crash the loop.
+`PrometheusController._run()` iterates `all_loggers` and calls `log_prometheus()`
+on each one at every interval. Calling `register_logger()` is the only step required —
+no modifications to the controller are needed. The controller takes a thread-safe
+snapshot of loggers before each flush cycle, so late registration is safe. Exceptions
+from individual loggers are caught and logged, so a broken logger cannot crash the loop.
 
 ---
 
