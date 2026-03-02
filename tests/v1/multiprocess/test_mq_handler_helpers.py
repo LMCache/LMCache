@@ -160,3 +160,23 @@ def lookup_handler(key: KeyType) -> int:
     # For testing, we just validate the input and return a dummy result
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     return 1
+
+
+# ==============================================================================
+# FREE_LOCKS Request Handlers
+# ==============================================================================
+
+
+def free_locks_handler(keys: list[KeyType]) -> None:
+    """
+    Dummy handler for FREE_LOCKS requests.
+
+    Args:
+        keys: List of cache keys whose read locks should be released
+
+    Returns:
+        None
+    """
+    assert isinstance(keys, list), f"Expected keys to be list, got {type(keys)}"
+    for key in keys:
+        assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"

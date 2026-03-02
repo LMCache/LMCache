@@ -211,6 +211,39 @@ class LMCacheMPSchedulerAdapter:
         """
         self.lookup_futures.pop(request_id, None)
 
+    def free_locks(
+        self,
+        token_ids: list[int],
+        start: int,
+        end: int,
+        request_id: str,
+    ) -> None:
+        """Release read locks acquired during lookup without a full retrieve.
+
+        Use this when a request is cancelled or aborted after lookup but
+        before retrieve to avoid holding read locks until TTL expiry.
+
+        When ``start`` or ``end`` is not aligned to the chunk size, the
+        entire chunk containing that boundary is freed.  If the caller
+        needs to preserve locks on part of a boundary chunk, it should
+        align ``start`` / ``end`` to chunk boundaries before calling
+        this method.
+
+        Args:
+            token_ids: Token IDs for the key (same as used in lookup).
+            start: Start token index.
+            end: End token index.
+            request_id: The request ID.
+        """
+        key = self._create_key(
+            token_ids, start=start, end=end, request_id=request_id
+        ).no_worker_id_version()
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.FREE_LOCKS,
+            [[key]],
+        )
+
     def end_session(self, request_id: str) -> None:
         """
         Notify LMCache server to remove the session for a finished request.

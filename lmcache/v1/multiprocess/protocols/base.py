@@ -44,6 +44,7 @@ class RequestType(enum.Enum):
     STORE = enum.auto()
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()
+    FREE_LOCKS = enum.auto()
     END_SESSION = enum.auto()
 
     # Controller operations
