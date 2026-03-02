@@ -28,13 +28,17 @@ def noop_handler() -> str:
 # ==============================================================================
 
 
-def register_kv_cache_handler(gpu_id: int, kv_cache: KVCache) -> None:
+def register_kv_cache_handler(
+    gpu_id: int, kv_cache: KVCache, model_name: str, world_size: int
+) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
 
     Args:
         gpu_id: GPU device ID
         kv_cache: List of CudaIPCWrapper objects representing KV cache
+        model_name: Name of the model associated with this KV cache
+        world_size: World size associated with this KV cache
 
     Returns:
         None
@@ -44,6 +48,12 @@ def register_kv_cache_handler(gpu_id: int, kv_cache: KVCache) -> None:
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(kv_cache, list), (
         f"Expected kv_cache to be list, got {type(kv_cache)}"
+    )
+    assert isinstance(model_name, str), (
+        f"Expected model_name to be str, got {type(model_name)}"
+    )
+    assert isinstance(world_size, int), (
+        f"Expected world_size to be int, got {type(world_size)}"
     )
     # No return value (returns None implicitly)
 
@@ -136,18 +146,17 @@ def retrieve_handler(
 # ==============================================================================
 
 
-def lookup_handler(keys: list[KeyType]) -> int:
+def lookup_handler(key: KeyType) -> int:
     """
     Dummy handler for LOOKUP requests.
 
     Args:
-        keys: List of cache keys to look up (request_id embedded in each key)
+        key: Cache key to look up (request_id embedded in the key)
 
     Returns:
-        int: Number of matched keys (count of even-indexed keys for testing)
+        int: Number of matched chunks (always returns 1 for testing)
     """
-    # In a real implementation, this would look up keys in the cache
-    # For testing, we just validate the inputs and return dummy results
-    assert isinstance(keys, list), f"Expected keys to be list, got {type(keys)}"
-    # Return count of "found" keys (alternating pattern for testing)
-    return sum(1 for i in range(len(keys)) if i % 2 == 0)
+    # In a real implementation, this would look up the key in the cache
+    # For testing, we just validate the input and return a dummy result
+    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
+    return 1
