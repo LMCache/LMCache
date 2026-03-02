@@ -256,24 +256,31 @@ class ConnectorManager:
         for remote_storage_plugin in remote_storage_plugins:
             try:
                 extra_config = config.extra_config
-                if extra_config is None:
-                    logger.warning(
-                        f"Remote connector {remote_storage_plugin} configuration is "
-                        f"missing 'extra_config'."
-                    )
-                    continue
 
-                module_path = extra_config.get(
-                    f"remote_storage_plugin.{remote_storage_plugin}.module_path"
+                module_path = (
+                    extra_config.get(
+                        "remote_storage_plugin.%s.module_path" % remote_storage_plugin
+                    )
+                    if extra_config
+                    else None
                 )
-                class_name = extra_config.get(
-                    f"remote_storage_plugin.{remote_storage_plugin}.class_name"
+                class_name = (
+                    extra_config.get(
+                        "remote_storage_plugin.%s.class_name" % remote_storage_plugin
+                    )
+                    if extra_config
+                    else None
                 )
 
                 if not module_path or not class_name:
+                    # Skip silently when a builtin adapter
+                    # already handles this plugin type.
+                    plugin_url = "plugin://%s" % remote_storage_plugin
+                    if any(a.can_parse(plugin_url) for a in self.adapters):
+                        continue
                     logger.warning(
-                        f"Remote connector {remote_storage_plugin} missing adapter "
-                        f"module_path or class_name"
+                        "Remote connector %s missing adapter module_path or class_name",
+                        remote_storage_plugin,
                     )
                     continue
 
