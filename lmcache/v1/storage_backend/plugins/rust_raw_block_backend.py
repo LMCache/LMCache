@@ -155,7 +155,15 @@ class RustRawBlockBackend(StoragePluginInterface):
         if callable(get_full_chunk_size_bytes):
             full_chunk_bytes = int(get_full_chunk_size_bytes())
         else:
-            full_chunk_bytes = int(self.local_cpu_backend.get_full_chunk_size())
+            get_full_chunk_size = getattr(
+                self.local_cpu_backend, "get_full_chunk_size", None
+            )
+            if not callable(get_full_chunk_size):
+                raise ValueError(
+                    "local_cpu_backend must expose get_full_chunk_size_bytes() "
+                    "or get_full_chunk_size()"
+                )
+            full_chunk_bytes = int(get_full_chunk_size())
         default_slot_bytes = _round_up(
             self.header_bytes + full_chunk_bytes, self.block_align
         )
@@ -591,7 +599,9 @@ class RustRawBlockBackend(StoragePluginInterface):
                     try:
                         on_complete_callback(key)
                     except Exception as e:
-                        logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                        logger.warning(
+                            f"on_complete_callback failed for key {key}: {e}"
+                        )
             else:
                 raise write_error
         finally:
