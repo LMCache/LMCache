@@ -118,7 +118,6 @@ class LMCacheMPSchedulerAdapter:
 
         self.model_name = model_name
         self.world_size = world_size
-        self.worker_id = kv_rank
 
         # Read chunk size from lmcache
         self.chunk_size = get_lmcache_chunk_size(self.mq_client)
@@ -157,19 +156,17 @@ class LMCacheMPSchedulerAdapter:
 
         aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
 
-        keys = [
-            self._create_key(
-                token_ids,
-                start=0,
-                end=aligned_end,
-                request_id=request_id,
-            ).no_worker_id_version()
-        ]
+        key = self._create_key(
+            token_ids,
+            start=0,
+            end=aligned_end,
+            request_id=request_id,
+        ).no_worker_id_version()
 
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
-            [keys],
+            [key],
         )
         self.lookup_futures[request_id] = future
 
@@ -235,10 +232,12 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
+        # NOTE: for the scheduler adapter, we don't have a worker id,
+        # so we set it to None in the key.
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
-            worker_id=self.worker_id,
+            worker_id=None,
             token_ids=tuple(token_ids),
             start=start,
             end=end,
@@ -313,7 +312,12 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
-            [self.instance_id, wrap_kv_caches(kv_caches)],
+            [
+                self.instance_id,
+                wrap_kv_caches(kv_caches),
+                self.model_name,
+                self.world_size,
+            ],
         )
         future.result()
 
