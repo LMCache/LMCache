@@ -17,6 +17,12 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.logger.l1_stats_logger import (
+    L1ManagerStatsLogger,
+)
+from lmcache.v1.mp_observability.prometheus_controller import (
+    get_prometheus_controller,
+)
 
 logger = init_logger(__name__)
 
@@ -134,6 +140,11 @@ class L1Manager:
         self._read_ttl_seconds = config.read_ttl_seconds
 
         self._registered_listeners: list[L1ManagerListener] = []
+
+        # Self-register observability logger
+        l1_stats_logger = L1ManagerStatsLogger()
+        self.register_listener(l1_stats_logger)
+        get_prometheus_controller().register_logger(l1_stats_logger)
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -431,6 +442,66 @@ class L1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_write_finished(successful_keys)
+        return ret
+
+    @l1_mgr_synchronized
+    def finish_write_and_reserve_read(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Atomically finish write and acquire read lock for the given keys.
+
+        This is used by the prefetch controller after successfully loading
+        data from L2 into write-reserved L1 buffers. It transitions the
+        object from write-locked to read-locked in a single atomic step,
+        preventing a race window where eviction could interfere.
+
+        Args:
+            keys: Keys to transition from write-locked to read-locked.
+
+        Returns:
+            A dictionary mapping each object key to a tuple of
+            (L1Error, Optional[MemoryObj]).
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_IN_WRONG_STATE: The key is not write-locked, or it already
+                has read locks.
+        """
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                continue
+
+            if not entry.write_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish_write_and_reserve_read on "
+                    "non-write-locked key %s",
+                    key,
+                )
+                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
+                continue
+
+            if entry.read_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish_write_and_reserve_read on read-locked key %s",
+                    key,
+                )
+                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
+                continue
+
+            entry.write_lock.unlock()
+            entry.read_lock.lock()
+            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            successful_keys.append(key)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_write_finished(successful_keys)
+            listener.on_l1_keys_reserved_read(successful_keys)
         return ret
 
     @l1_mgr_synchronized
