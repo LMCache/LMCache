@@ -17,6 +17,12 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.logger.l1_stats_logger import (
+    L1ManagerStatsLogger,
+)
+from lmcache.v1.mp_observability.prometheus_controller import (
+    get_prometheus_controller,
+)
 
 logger = init_logger(__name__)
 
@@ -135,6 +141,11 @@ class L1Manager:
 
         self._registered_listeners: list[L1ManagerListener] = []
 
+        # Self-register observability logger
+        l1_stats_logger = L1ManagerStatsLogger()
+        self.register_listener(l1_stats_logger)
+        get_prometheus_controller().register_logger(l1_stats_logger)
+
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
 
@@ -179,7 +190,7 @@ class L1Manager:
             successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_keys_reserved_read(successful_keys)
+            listener.on_l1_keys_reserved_read(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -284,8 +295,8 @@ class L1Manager:
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
-            listener.on_keys_read_finished(successful_keys)
-            listener.on_keys_deleted_by_manager(need_to_free_keys)
+            listener.on_l1_keys_read_finished(successful_keys)
+            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
 
         return ret
 
@@ -377,7 +388,7 @@ class L1Manager:
                 successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_keys_reserved_write(successful_keys)
+            listener.on_l1_keys_reserved_write(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -430,7 +441,7 @@ class L1Manager:
             successful_keys.append(key)
 
         for listener in self._registered_listeners:
-            listener.on_keys_write_finished(successful_keys)
+            listener.on_l1_keys_write_finished(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -470,7 +481,7 @@ class L1Manager:
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
-            listener.on_keys_deleted_by_manager(successful_keys)
+            listener.on_l1_keys_deleted_by_manager(successful_keys)
         return ret
 
     @l1_mgr_synchronized
@@ -481,7 +492,7 @@ class L1Manager:
         self._memory_manager.free(all_memory_objs)
         self._objects.clear()
         for listener in self._registered_listeners:
-            listener.on_keys_deleted_by_manager(all_keys)
+            listener.on_l1_keys_deleted_by_manager(all_keys)
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
@@ -518,9 +529,9 @@ class L1Manager:
         return self._objects.get(key, None)
 
     @l1_mgr_synchronized
-    def memcheck(self) -> None:
+    def memcheck(self) -> bool:
         """Perform memory check for L1 cache."""
-        self._memory_manager.memcheck()
+        mem_check_result = self._memory_manager.memcheck()
 
         # Log the locked objects for debugging
         num_write_locked = 0
@@ -538,3 +549,4 @@ class L1Manager:
             num_write_locked,
             num_read_locked,
         )
+        return mem_check_result

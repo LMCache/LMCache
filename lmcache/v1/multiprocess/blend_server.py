@@ -5,13 +5,12 @@ import os
 import time
 
 # Third Party
-from transformers import AutoTokenizer
 import torch
 import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import ParallelPatternMatcher
+from lmcache.native_storage_ops import RangePatternMatcher
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -27,6 +26,14 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.config import (
+    PrometheusConfig,
+    parse_args_to_prometheus_config,
+)
+from lmcache.v1.mp_observability.prometheus_controller import (
+    get_prometheus_controller,
+    init_prometheus_controller,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
@@ -100,7 +107,7 @@ class BlendEngine(MPCacheEngine):
 
     def __init__(
         self,
-        sep_tokens: list[int],
+        sep_tokens: tuple[list[int], list[int]],
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
     ):
@@ -108,8 +115,9 @@ class BlendEngine(MPCacheEngine):
 
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
 
-        self._sep_token_len = len(sep_tokens)
-        self._token_matcher = ParallelPatternMatcher(sep_tokens)
+        # self._sep_token_len = len(sep_tokens)
+        # self._token_matcher = ParallelPatternMatcher(sep_tokens)
+        self._token_matcher = RangePatternMatcher(sep_tokens[0], sep_tokens[1])
 
     def cb_register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
         """
@@ -171,7 +179,7 @@ class BlendEngine(MPCacheEngine):
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             ipc_keys = temp_ipc_key.to_hash_keys(
                 hasher=self.token_hasher,
-                full_chunk_only=False,
+                full_chunk_only=True,
                 prefix_hash=self.BLEND_HASH_PREFIX,
             )
 
@@ -202,14 +210,15 @@ class BlendEngine(MPCacheEngine):
             found_count = found_count // world_size
 
             # All found or not
-            if found_count == exp_count:
-                found_ranges.append((start, end))
-                logger.debug(
-                    "Found all pre-computed chunks for paragraph with range (%d, %d)",
-                    start,
-                    end,
-                )
-            elif found_count > 0:
+            # if found_count == exp_count:
+            #    found_ranges.append((start, end))
+            #    logger.debug(
+            #        "Found all pre-computed chunks for paragraph with range (%d, %d)",
+            #        start,
+            #        end,
+            #    )
+            # elif found_count > 0:
+            if found_count > 0:
                 found_ranges.append((start, start + found_count * self.chunk_size))
                 logger.debug(
                     "Partially found pre-computed chunks for paragraph with range "
@@ -335,7 +344,7 @@ class BlendEngine(MPCacheEngine):
         # Compute blend-only hash for the keys
         hashed_ipc_keys = key.to_hash_keys(
             hasher=self.token_hasher,
-            full_chunk_only=False,
+            full_chunk_only=True,
             prefix_hash=self.BLEND_HASH_PREFIX,
         )
         # convert to object key
@@ -401,7 +410,7 @@ class BlendEngine(MPCacheEngine):
             temp_ipc_key = create_temp_ipc_key_by_range(key, start, end)
             hash_ipc_keys = temp_ipc_key.to_hash_keys(
                 hasher=self.token_hasher,
-                full_chunk_only=False,
+                full_chunk_only=True,
                 prefix_hash=self.BLEND_HASH_PREFIX,
             )
             obj_keys = ipc_keys_to_object_keys(hash_ipc_keys)
@@ -414,30 +423,23 @@ class BlendEngine(MPCacheEngine):
             obj_keys: list[ObjectKey],
             memory_objs: list[MemoryObj],
             gpu_offset: int,
-            last_chunk_num_tokens: int,
         ):
             for idx, (key, memory_obj) in enumerate(
                 zip(obj_keys, memory_objs, strict=False)
             ):
                 offset_start = gpu_offset + idx * self.chunk_size
                 offset_end = offset_start + self.chunk_size
-                target_buffer_end = (
-                    offset_start + last_chunk_num_tokens
-                    if idx == len(obj_keys) - 1
-                    else offset_end
-                )
-                target_buffer_len = target_buffer_end - offset_start
 
                 # Copy from CPU to GPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(offset_end - offset_start)
                 target_buffer = gpu_context.slice_kv_cache_on_tokens(
-                    offset_start, target_buffer_end
+                    offset_start, offset_end
                 )
 
                 with self.lock:
                     lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                     target_buffer.copy_(
-                        tmp_buffer[:, :, :target_buffer_len, :],  # NOTE: 2LTD
+                        tmp_buffer,
                         non_blocking=True,
                     )
 
@@ -467,10 +469,7 @@ class BlendEngine(MPCacheEngine):
                     strict=False,
                 ):
                     gpu_offset = start + offset
-                    last_chunk_num_tokens = (end - start - 1) % self.chunk_size + 1
-                    _retrieve_one_paragraph(
-                        obj_keys, memory_objs, gpu_offset, last_chunk_num_tokens
-                    )
+                    _retrieve_one_paragraph(obj_keys, memory_objs, gpu_offset)
 
             except Exception as e:
                 logger.error("Error during retrieving prefetched results: %s", e)
@@ -561,48 +560,41 @@ class BlendEngine(MPCacheEngine):
             paragraph in the input token ids.
         """
         matches = self._token_matcher.match(list(token_ids))
-        if not matches:
-            return [(0, len(token_ids))]
-
-        ranges = []
-        prev_end = 0
-        for match_start in matches:
-            if prev_end < match_start:
-                ranges.append((prev_end, match_start))
-            prev_end = match_start + self._sep_token_len
-        if prev_end < len(token_ids):
-            ranges.append((prev_end, len(token_ids)))
-
         logger.debug(
-            "Separated tokens into %d paragraphs with ranges: %s", len(ranges), ranges
+            "Separated tokens into %d paragraphs with ranges: %s", len(matches), matches
         )
-        return ranges
+        return matches
 
 
-def get_sep_tokens() -> list[int]:
+def get_sep_tokens() -> tuple[list[int], list[int]]:
     """
     Get the separator tokens used for splitting input sequences into paragraphs.
 
     Returns:
-        List of integer token ids that are used as separators.
+        The start pattern and the end pattern in token ids for separating paragraphs.
 
     Environment variables:
-    - `LMCACHE_BLEND_SEP_STR`: the separator string, default is " # # "
     - `LMCACHE_BLEND_MODEL_NAME`: the model name to load the tokenizer, default
         is "openai/gpt-oss-120b"
-    - `LMCACHE_BLEND_TOKENIZER_OFFSET`: the offset to add to the token ids,
-        default is 1
     """
-    sep_tokens_str = os.getenv("LMCACHE_BLEND_SEP_STR", " # # ")
     model_name = os.getenv("LMCACHE_BLEND_MODEL_NAME", "openai/gpt-oss-120b")
-    tokenizer_offset = int(os.getenv("LMCACHE_BLEND_TOKENIZER_OFFSET", "1"))
+    start_end_family = {
+        "openai/gpt-oss-20b": ([200006], [200007]),
+        "openai/gpt-oss-120b": ([200006], [200007]),
+        "nvidia/Llama-3_3-Nemotron-Super-49B-v1": ([128006], [128009]),
+    }
+    if model_name not in start_end_family:
+        logger.error(
+            "Model name %s not recognized for blend engine. Supported models: %s",
+            model_name,
+            list(start_end_family.keys()),
+        )
+        raise ValueError(
+            f"Model name {model_name} not recognized for blend engine. "
+            f"Supported models: {list(start_end_family.keys())}"
+        )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    sep_tokens = tokenizer.encode(sep_tokens_str)[tokenizer_offset:]
-
-    logger.info("Got sep tokens %s", sep_tokens)
-
-    return sep_tokens
+    return start_end_family[model_name]
 
 
 def add_handler_helper(
@@ -620,6 +612,7 @@ def add_handler_helper(
 
 def run_cache_server(
     storage_manager_config: StorageManagerConfig,
+    prometheus_config: PrometheusConfig,
     host: str = "localhost",
     port: int = 5555,
     chunk_size: int = 256,
@@ -632,6 +625,7 @@ def run_cache_server(
 
     Args:
         storage_manager_config: Configuration for the storage manager
+        prometheus_config: Configuration for the Prometheus observability stack
         host: ZMQ server host
         port: ZMQ server port
         chunk_size: Chunk size for KV cache operations
@@ -644,9 +638,12 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
+    # Initialize global prometheus controller
+    init_prometheus_controller(prometheus_config)
+
     sep_tokens = get_sep_tokens()
 
-    # Initialize the engine
+    # Initialize the engine (loggers self-register with the global controller)
     engine = BlendEngine(
         sep_tokens=sep_tokens,
         storage_manager_config=storage_manager_config,
@@ -694,6 +691,9 @@ def run_cache_server(
     # Start the ZMQ server
     torch.cuda.init()
     server.start()
+
+    # Start prometheus controller after engine creation (loggers are registered)
+    get_prometheus_controller().start()
     logger.info("LMCache cache blend server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -706,6 +706,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_prometheus_controller().stop()
         server.close()
         engine.close()
 
@@ -713,8 +714,10 @@ def run_cache_server(
 if __name__ == "__main__":
     args = parse_args()
     storage_manager_config = parse_args_to_config(args)
+    prometheus_config = parse_args_to_prometheus_config(args)
     run_cache_server(
         storage_manager_config=storage_manager_config,
+        prometheus_config=prometheus_config,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
