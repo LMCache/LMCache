@@ -53,6 +53,25 @@ def get_registered_l2_adapter_types() -> list[str]:
     return list(_L2_ADAPTER_CONFIG_REGISTRY)
 
 
+def get_type_name_for_config(config: L2AdapterConfigBase) -> str:
+    """
+    Reverse-lookup the registered type name for a config instance.
+
+    Args:
+        config: An L2 adapter config instance.
+
+    Returns:
+        The registered type name string (e.g., "mock", "disk").
+
+    Raises:
+        ValueError: If the config's class is not registered.
+    """
+    for name, cls in _L2_ADAPTER_CONFIG_REGISTRY.items():
+        if type(config) is cls:
+            return name
+    raise ValueError(f"Unregistered L2 adapter config type: {type(config).__name__}")
+
+
 # -----------------------------------------------------------------------------
 # Base config class for a single L2 adapter
 # -----------------------------------------------------------------------------
