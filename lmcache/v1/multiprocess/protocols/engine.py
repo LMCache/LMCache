@@ -22,7 +22,7 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
-    "FREE_LOCKS",
+    "FREE_LOOKUP_LOCKS",
     "END_SESSION",
 ]
 
@@ -96,7 +96,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - keys: list[KeyType] - Cache keys whose read locks to release
         # Returns: None
-        "FREE_LOCKS": ProtocolDefinition(
+        "FREE_LOOKUP_LOCKS": ProtocolDefinition(
             payload_classes=[KeyType],
             response_class=None,
             handler_type=HandlerType.BLOCKING,

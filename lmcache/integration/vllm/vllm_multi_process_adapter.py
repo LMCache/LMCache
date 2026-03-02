@@ -242,7 +242,7 @@ class LMCacheMPSchedulerAdapter:
         ).no_worker_id_version()
         send_lmcache_request(
             self.mq_client,
-            RequestType.FREE_LOCKS,
+            RequestType.FREE_LOOKUP_LOCKS,
             [key],
         )
 

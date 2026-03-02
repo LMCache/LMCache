@@ -163,13 +163,13 @@ def lookup_handler(key: KeyType) -> int:
 
 
 # ==============================================================================
-# FREE_LOCKS Request Handlers
+# FREE_LOOKUP_LOCKS Request Handlers
 # ==============================================================================
 
 
 def free_locks_handler(key: KeyType) -> None:
     """
-    Dummy handler for FREE_LOCKS requests.
+    Dummy handler for FREE_LOOKUP_LOCKS requests.
 
     Args:
         key: Cache key whose read locks should be released

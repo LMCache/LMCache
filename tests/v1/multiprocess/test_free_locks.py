@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the FREE_LOCKS protocol: enum registration, protocol definition,
+Tests for the FREE_LOOKUP_LOCKS protocol: enum registration, protocol definition,
 message-queue round-trip, server handler, and client-side adapter API.
 """
 
@@ -31,27 +31,27 @@ from tests.v1.multiprocess.test_mq import (
 
 
 def test_free_locks_in_request_type():
-    """FREE_LOCKS should be a member of RequestType."""
-    assert hasattr(RequestType, "FREE_LOCKS")
-    assert isinstance(RequestType.FREE_LOCKS, RequestType)
+    """FREE_LOOKUP_LOCKS should be a member of RequestType."""
+    assert hasattr(RequestType, "FREE_LOOKUP_LOCKS")
+    assert isinstance(RequestType.FREE_LOOKUP_LOCKS, RequestType)
 
 
 def test_free_locks_payload_classes():
-    """FREE_LOCKS payload should be a single IPCCacheEngineKey."""
-    payload_classes = get_payload_classes(RequestType.FREE_LOCKS)
+    """FREE_LOOKUP_LOCKS payload should be a single IPCCacheEngineKey."""
+    payload_classes = get_payload_classes(RequestType.FREE_LOOKUP_LOCKS)
     assert len(payload_classes) == 1
     assert payload_classes[0] == IPCCacheEngineKey
 
 
 def test_free_locks_response_class():
-    """FREE_LOCKS should have no response (None)."""
-    response_class = get_response_class(RequestType.FREE_LOCKS)
+    """FREE_LOOKUP_LOCKS should have no response (None)."""
+    response_class = get_response_class(RequestType.FREE_LOOKUP_LOCKS)
     assert response_class is None
 
 
 def test_free_locks_handler_type():
-    """FREE_LOCKS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RequestType.FREE_LOCKS)
+    """FREE_LOOKUP_LOCKS should use BLOCKING handler type."""
+    handler_type = get_handler_type(RequestType.FREE_LOOKUP_LOCKS)
     assert handler_type == HandlerType.BLOCKING
 
 
@@ -62,18 +62,18 @@ def test_free_locks_handler_type():
 
 def test_mq_free_locks():
     """
-    Test MessageQueue with FREE_LOCKS request type.
-    FREE_LOCKS takes (key: KeyType) and returns None.
+    Test MessageQueue with FREE_LOOKUP_LOCKS request type.
+    FREE_LOOKUP_LOCKS takes (key: KeyType) and returns None.
     """
     key = create_cache_key(0)
 
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5570")
     helper.register_handler(
-        RequestType.FREE_LOCKS, test_mq_handler_helpers.free_locks_handler
+        RequestType.FREE_LOOKUP_LOCKS, test_mq_handler_helpers.free_locks_handler
     )
 
     helper.run_test(
-        request_type=RequestType.FREE_LOCKS,
+        request_type=RequestType.FREE_LOOKUP_LOCKS,
         payloads=[key],
         expected_response=None,
         num_requests=1,
@@ -143,7 +143,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
 
 
 def test_server_handler_registered():
-    """run_cache_server should register a FREE_LOCKS handler."""
+    """run_cache_server should register a FREE_LOOKUP_LOCKS handler."""
     # First Party
     from lmcache.v1.multiprocess.server import MPCacheEngine
 
@@ -158,7 +158,7 @@ def test_server_handler_registered():
 
 
 def test_adapter_free_lookup_locks_sends_request():
-    """LMCacheMPSchedulerAdapter.free_lookup_locks should send a FREE_LOCKS
+    """LMCacheMPSchedulerAdapter.free_lookup_locks should send a FREE_LOOKUP_LOCKS
     request with the correct key payload."""
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
@@ -190,7 +190,7 @@ def test_adapter_free_lookup_locks_sends_request():
     call_args = mock_client.submit_request.call_args
     req_type = call_args[0][0]
     payloads = call_args[0][1]
-    assert req_type == RequestType.FREE_LOCKS
+    assert req_type == RequestType.FREE_LOOKUP_LOCKS
 
     # Payload should be a single-element list containing the key
     assert isinstance(payloads, list)
