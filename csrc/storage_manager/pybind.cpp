@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include "ttl_lock.h"
+#include "bitmap.h"
+#include "utils.h"
 
 namespace py = pybind11;
 
+using lmcache::storage_manager::Bitmap;
 using lmcache::storage_manager::TTLLock;
+using lmcache::utils::ParallelPatternMatcher;
+using lmcache::utils::RangePatternMatcher;
 
 PYBIND11_MODULE(native_storage_ops, m) {
   m.doc() = "Native storage operations for LMCache";
@@ -23,4 +29,41 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Check if the lock is held (counter > 0 and TTL not expired).")
       .def("reset", &TTLLock::reset,
            "Reset the lock to initial state (counter = 0, TTL expired).");
+
+  py::class_<Bitmap>(m, "Bitmap")
+      .def(py::init<size_t>(), py::arg("size"),
+           "Construct a Bitmap with the specified size.")
+      .def("set", &Bitmap::set, py::arg("index"),
+           "Set the bit at the specified index to 1.")
+      .def("clear", &Bitmap::clear, py::arg("index"),
+           "Clear the bit at the specified index to 0.")
+      .def("test", &Bitmap::test, py::arg("index"),
+           "Test the bit at the specified index.")
+      .def("popcount", &Bitmap::popcount, "Count the number of bits set to 1.")
+      .def("count_leading_zeros", &Bitmap::clz,
+           "Count the number of leading zeros.")
+      .def("count_leading_ones", &Bitmap::clo,
+           "Count the number of leading ones.")
+      .def("__and__", &Bitmap::operator&, py::arg("other"),
+           "Bitwise AND operation between two bitmaps.")
+      .def("__repr__", &Bitmap::to_string,
+           "Convert the bitmap to a string representation.");
+
+  py::class_<ParallelPatternMatcher>(m, "ParallelPatternMatcher")
+      .def(py::init<const std::vector<int>&>(), py::arg("pattern"),
+           "Construct a ParallelPatternMatcher with the specified pattern.")
+      .def("match", &ParallelPatternMatcher::match, py::arg("data"),
+           "Match the pattern in the given data and return a sorted list "
+           "of positions where the pattern starts.");
+
+  py::class_<RangePatternMatcher>(m, "RangePatternMatcher")
+      .def(py::init<const std::vector<int>&, const std::vector<int>&>(),
+           py::arg("start_pattern"), py::arg("end_pattern"),
+           "Construct a RangePatternMatcher with start and end patterns. ")
+      .def("match", &RangePatternMatcher::match, py::arg("data"),
+           "Match ranges in the given data. Returns a list of (start_pos, "
+           "end_pos) tuples where start_pos is the beginning of the start "
+           "pattern and end_pos is the exclusive index after the end pattern. "
+           "When multiple end patterns exist after a start pattern, matches "
+           "the first one (minimal range).");
 }

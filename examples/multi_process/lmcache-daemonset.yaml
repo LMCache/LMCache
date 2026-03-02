@@ -30,8 +30,10 @@ spec:
             - "0.0.0.0"
             - --port
             - "6555"
-            - --cpu-buffer-size
+            - --l1-size-gb
             - "60"
+            - --eviction-policy
+            - LRU
             - --max-workers
             - "4"
           volumeMounts:
@@ -39,7 +41,7 @@ spec:
               mountPath: /dev/shm
           resources:
             requests:
-              # 65Gi = 60GB cpu-buffer-size + ~5GB overhead for Python runtime and server operations
+              # 65Gi = 60GB l1-size-gb + ~5GB overhead for Python runtime and server operations
               memory: "65Gi"
               cpu: "4"
             limits:
