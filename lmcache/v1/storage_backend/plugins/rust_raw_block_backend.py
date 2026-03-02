@@ -1016,10 +1016,16 @@ class RustRawBlockBackend(StoragePluginInterface):
             if isinstance(entries, dict):
                 for k_str, entry in entries.items():
                     if not isinstance(entry, dict):
+                        logger.warning(
+                            "Invalid entry in metadata for key '%s': not a dict.", k_str
+                        )
                         continue
                     try:
                         key = CacheEngineKey.from_string(k_str)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to parse key string '%s' from metadata: %s", k_str, e
+                        )
                         continue
 
                     offset = int(entry.get("offset", 0))
