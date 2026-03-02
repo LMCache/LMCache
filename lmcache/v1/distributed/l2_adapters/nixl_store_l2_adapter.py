@@ -489,8 +489,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         if self._loop.is_running():
             future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
-            try:
-                future.result(timeout=5)  # Wait for tasks to be cancelled
+            except Exception as e:
+                logger.warning("Exception during L2 adapter shutdown: %s", e)
             except Exception:
                 pass  # Ignore exceptions during shutdown
             self._loop.call_soon_threadsafe(self._loop.stop)
