@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from typing import Literal
 import threading
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import TTLLock
@@ -154,6 +157,19 @@ class L1Manager:
         """
         with self._lock:
             self._registered_listeners.append(listener)
+
+    def lazy_init_memory(
+        self,
+        shapes: list[torch.Size],
+        dtypes: list[torch.dtype],
+    ) -> None:
+        """Lazily initialize the memory allocator with KV cache metadata.
+
+        Args:
+            shapes: KV cache tensor shapes.
+            dtypes: KV cache tensor dtypes.
+        """
+        self._memory_manager.lazy_init_memory(shapes, dtypes)
 
     @l1_mgr_synchronized
     def reserve_read(

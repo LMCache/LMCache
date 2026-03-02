@@ -27,7 +27,10 @@ class L1MemoryManagerConfig:
     """ The size of L1 memory in bytes. """
 
     use_lazy: bool
-    """ Whether to use lazy loading for L1 memory. """
+    """ Whether to use lazy initialization for L1 memory. """
+
+    use_page: bool = field(default=False)
+    """ Whether to use page-aligned memory allocation. Default is False. """
 
     init_size_in_bytes: int = field(default=20 << 30)
     """ The initial size when using lazy allocation. Default is 20GB. """

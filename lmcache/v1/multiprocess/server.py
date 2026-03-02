@@ -149,6 +149,15 @@ class MPCacheEngine:
         """
         gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
         self.gpu_contexts[instance_id] = gpu_context
+
+        # Lazily initialize CPU memory with KV cache shapes/dtypes
+        # Used for memory registration (e.g., NIXL).
+        kv_shape = gpu_context.get_kv_buffer_shape(self.chunk_size)
+        self.storage_manager.lazy_init_memory(
+            shapes=[kv_shape],
+            dtypes=[gpu_context.dtype],
+        )
+
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
             instance_id,

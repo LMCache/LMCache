@@ -8,6 +8,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Literal
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
@@ -259,6 +262,22 @@ class StorageManager:
             it's still in progress.
         """
         return handle.prefix_hit_chunks
+
+    def lazy_init_memory(
+        self,
+        shapes: list[torch.Size],
+        dtypes: list[torch.dtype],
+    ) -> None:
+        """Lazily initialize memory allocator with KV cache metadata.
+
+        Called by the server after registering KV caches so that paged
+        allocators can allocate CPU memory with the correct shapes/dtypes.
+
+        Args:
+            shapes: KV cache tensor shapes.
+            dtypes: KV cache tensor dtypes.
+        """
+        self._l1_manager.lazy_init_memory(shapes, dtypes)
 
     def clear(self):
         """

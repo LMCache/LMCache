@@ -1442,6 +1442,25 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return "TensorMemoryAllocator"
 
 
+class PagedAddressManager:
+    """
+    A lightweight address manager for PagedTensorMemoryAllocator.
+    Provides get_free_size() and get_heap_size() by reading the
+    paged allocator's state.
+    """
+
+    def __init__(self, paged_allocator: "PagedTensorMemoryAllocator"):
+        self._allocator = paged_allocator
+
+    def get_heap_size(self) -> int:
+        """Get the total size of the paged address space in bytes."""
+        return self._allocator.buffer_size
+
+    def get_free_size(self) -> int:
+        """Get the total free size in bytes."""
+        return len(self._allocator.free_blocks) * self._allocator.align_bytes
+
+
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
     Implements a paged memory allocator.
@@ -1499,6 +1518,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 parent_allocator=self,
             )
             self.free_blocks.append(mem_obj)
+
+        # Address manager for memory usage tracking
+        self.address_manager = PagedAddressManager(self)
 
         # For debugging purposes
         self.num_active_allocations = 0
@@ -2285,6 +2307,67 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
 
     def __str__(self):
         return "CuFileMemoryAllocator"
+
+
+class PagedCpuMemoryAllocator(MemoryAllocatorInterface):
+    """
+    Paged Memory Allocator for both CPU and GPU memory.
+    This is a paged memory allocator for PD and P2P sharing
+    when NIXL is enabled as NIXL relies on the paging abstraction.
+    """
+
+    def __init__(self, size):
+        self.size = size
+
+    def init_cpu_memory_allocator(
+        self,
+        size: int,
+        shapes: list[torch.Size],
+        dtypes: list[torch.dtype],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        numa_mapping: Optional[NUMAMapping] = None,
+    ):
+        self.cpu_buffer = _allocate_cpu_memory(size, numa_mapping)
+        self.allocator = PagedTensorMemoryAllocator(
+            self.cpu_buffer,
+            shapes,
+            dtypes,
+            fmt,
+        )
+        self.align_bytes = self.allocator.align_bytes
+
+    def allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[MemoryObj]:
+        return self.allocator.allocate(shapes, dtypes, fmt)
+
+    def batched_allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[List[MemoryObj]]:
+        return self.allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
+
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+        self.allocator.free(memory_obj)
+
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
+        self.allocator.batched_free(memory_objs, update_stats=update_stats)
+
+    def __str__(self):
+        return "PagedCpuMemoryAllocator"
 
 
 class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):

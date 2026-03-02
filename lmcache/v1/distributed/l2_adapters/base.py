@@ -56,6 +56,23 @@ class L2AdapterInterface(ABC):
     """
 
     #####################
+    # Memory Registration Interface
+    #####################
+    def lazy_init_memory(self, **kwargs) -> None:  # noqa: B027
+        """
+        Lazily initialize the memory for the L2 adapter
+        (e.g., NIXL). This function will be called before any
+        store or load task is submitted, and the L2 adapter can
+        use this function to lazily initialize the memory if
+        needed.
+
+        Args:
+            kwargs: the keyword arguments for lazy
+                initialization.
+        """
+        pass
+
+    #####################
     # Event Fd Interface
     #####################
 
