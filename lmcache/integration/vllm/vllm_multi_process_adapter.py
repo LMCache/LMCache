@@ -87,7 +87,7 @@ class LoadStoreOp:
 
 
 StoreResult = bool
-RetrieveResult = list[bool]
+RetrieveResult = bool
 LookupResult = int
 
 
@@ -118,7 +118,6 @@ class LMCacheMPSchedulerAdapter:
 
         self.model_name = model_name
         self.world_size = world_size
-        self.worker_id = kv_rank
 
         # Read chunk size from lmcache
         self.chunk_size = get_lmcache_chunk_size(self.mq_client)
@@ -157,19 +156,17 @@ class LMCacheMPSchedulerAdapter:
 
         aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
 
-        keys = [
-            self._create_key(
-                token_ids,
-                start=0,
-                end=aligned_end,
-                request_id=request_id,
-            ).no_worker_id_version()
-        ]
+        key = self._create_key(
+            token_ids,
+            start=0,
+            end=aligned_end,
+            request_id=request_id,
+        ).no_worker_id_version()
 
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
-            [keys],
+            [key],
         )
         self.lookup_futures[request_id] = future
 
@@ -235,10 +232,12 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key"""
+        # NOTE: for the scheduler adapter, we don't have a worker id,
+        # so we set it to None in the key.
         return IPCCacheEngineKey(
             model_name=self.model_name,
             world_size=self.world_size,
-            worker_id=self.worker_id,
+            worker_id=None,
             token_ids=tuple(token_ids),
             start=start,
             end=end,
@@ -265,13 +264,9 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches: dict[str, torch.Tensor] = {}
 
         # Request futures
-        # request_id -> (future, other merged requests)
-        self.store_futures: dict[
-            str, tuple[MessagingFuture[StoreResult], list[str]]
-        ] = {}
-        self.retrieve_futures: dict[
-            str, tuple[MessagingFuture[RetrieveResult], list[str]]
-        ] = {}
+        # request_id -> future
+        self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
+        self.retrieve_futures: dict[str, MessagingFuture[RetrieveResult]] = {}
 
         # The store requests that have finished execution in LMCache
         self.finished_stores: set[str] = set()
@@ -317,7 +312,12 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
-            [self.instance_id, wrap_kv_caches(kv_caches)],
+            [
+                self.instance_id,
+                wrap_kv_caches(kv_caches),
+                self.model_name,
+                self.world_size,
+            ],
         )
         future.result()
 
@@ -334,13 +334,14 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = [self._create_key(op.token_ids, op.start, op.end, request_id=request_id)]
+        assert op.token_ids is not None
+        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
-            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
+            [key, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
-        self.store_futures[request_id] = (future, [])
+        self.store_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -355,13 +356,14 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        keys = [self._create_key(op.token_ids, op.start, op.end, request_id=request_id)]
+        assert op.token_ids is not None
+        key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
+            [key, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
-        self.retrieve_futures[request_id] = (future, [])
+        self.retrieve_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -380,24 +382,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        all_keys: list[IPCCacheEngineKey] = []
-        block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
-            all_keys.append(
-                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
-            )
-            block_ids.extend(op.block_ids)
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.STORE,
-            [
-                all_keys,
-                self.instance_id,
-                block_ids,
-                event.ipc_handle(),
-            ],
-        ).to_cuda_future()
-        self.store_futures[request_ids[0]] = (future, list(request_ids[1:]))
+            self.submit_store_request(request_id, op, event)
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -416,24 +402,8 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
-        all_keys: list[IPCCacheEngineKey] = []
-        block_ids: list[int] = []
         for request_id, op in zip(request_ids, ops, strict=False):
-            all_keys.append(
-                self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
-            )
-            block_ids.extend(op.block_ids)
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.RETRIEVE,
-            [
-                all_keys,
-                self.instance_id,
-                block_ids,
-                event.ipc_handle(),
-            ],
-        ).to_cuda_future()
-        self.retrieve_futures[request_ids[0]] = (future, list(request_ids[1:]))
+            self.submit_retrieve_request(request_id, op, event)
 
     @_lmcache_nvtx_annotate
     def get_finished(
@@ -461,13 +431,12 @@ class LMCacheMPWorkerAdapter:
         """
         finished_stores = set()
         finished_retrieves = set()
-        for request_id, (s_future, other_reqs) in self.store_futures.items():
+        for request_id, s_future in self.store_futures.items():
             if not s_future.query():
                 continue
 
             s_result = s_future.result()
             finished_stores.add(request_id)
-            finished_stores.update(other_reqs)
 
             if not s_result:
                 # TODO: add error handling here
@@ -477,15 +446,14 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, other_reqs) in self.retrieve_futures.items():
+        for request_id, r_future in self.retrieve_futures.items():
             if not r_future.query():
                 continue
 
             r_result = r_future.result()
             finished_retrieves.add(request_id)
-            finished_retrieves.update(other_reqs)
 
-            if not all(r_result):
+            if not r_result:
                 # TODO: add error handing here
                 logger.error(
                     "Something went wrong when processing the "

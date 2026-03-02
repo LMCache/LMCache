@@ -9,6 +9,13 @@ from dataclasses import dataclass, field
 from typing import Literal
 import argparse
 
+# First Party
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdaptersConfig,
+    add_l2_adapters_args,
+    parse_args_to_l2_adapters_config,
+)
+
 
 @dataclass
 class L1MemoryManagerConfig:
@@ -75,6 +82,11 @@ class StorageManagerConfig:
 
     eviction_config: EvictionConfig
     """ The configuration for eviction policies. """
+
+    l2_adapter_config: L2AdaptersConfig = field(
+        default_factory=lambda: L2AdaptersConfig([])
+    )
+    """ The configuration for L2 adapters. """
 
 
 def add_storage_manager_args(
@@ -173,6 +185,9 @@ def add_storage_manager_args(
         help="The fraction of memory to evict when triggered (0.0 to 1.0). "
         "Default is 0.2.",
     )
+
+    # Adapter config
+    add_l2_adapters_args(parser)
     return parser
 
 
@@ -225,9 +240,12 @@ def parse_args_to_config(
         eviction_ratio=args.eviction_ratio,
     )
 
+    l2_adapter_config = parse_args_to_l2_adapters_config(args)
+
     return StorageManagerConfig(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
+        l2_adapter_config=l2_adapter_config,
     )
 
 

@@ -82,6 +82,7 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/utils.cpp",
     ]
     storage_manager_sources = [
+        "csrc/storage_manager/bitmap.cpp",
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
         "csrc/storage_manager/utils.cpp",
@@ -137,6 +138,7 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/utils_hip.cpp",
     ]
     storage_manager_sources = [
+        "csrc/storage_manager/bitmap.cpp",
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
         "csrc/storage_manager/utils.cpp",

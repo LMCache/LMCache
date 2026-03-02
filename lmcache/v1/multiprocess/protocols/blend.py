@@ -89,9 +89,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - kv_cache: KVCache - The CB KV cache configuration
+        #   - model_name: str - Name of the model associated with the engine
+        #   - world_size: int - World size of the engine
         # Returns: None
         "CB_REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache],
+            payload_classes=[int, KVCache, str, int],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

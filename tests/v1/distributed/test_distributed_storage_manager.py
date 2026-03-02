@@ -207,7 +207,7 @@ class TestStorageManagerBasic:
         storage_manager.finish_write(list(ret.keys()))
 
         # Prefetch all the objects
-        handle = storage_manager.submit_prefetch_task(object_keys)
+        handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
         hit_count = storage_manager.query_prefetch_status(handle)
         assert hit_count is not None
@@ -233,7 +233,7 @@ class TestStorageManagerBasic:
         storage_manager.finish_write(list(ret.keys()))
 
         # Prefetch all the objects
-        handle = storage_manager.submit_prefetch_task(object_keys)
+        handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
         hit_count = storage_manager.query_prefetch_status(handle)
         assert hit_count is not None
@@ -263,7 +263,7 @@ class TestStorageManagerBasic:
         storage_manager.finish_write(list(ret.keys()))
 
         # Prefetch all the objects
-        handle = storage_manager.submit_prefetch_task(object_keys)
+        handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
         hit_count = storage_manager.query_prefetch_status(handle)
         assert hit_count is not None
@@ -301,7 +301,7 @@ class TestStorageManagerBasic:
         storage_manager.finish_write(list(ret.keys()))
 
         # Prefetch objects except the first one
-        handle = storage_manager.submit_prefetch_task(object_keys[1:])
+        handle = storage_manager.submit_prefetch_task(object_keys[1:], basic_layout)
         hit_count = storage_manager.query_prefetch_status(handle)
         assert hit_count is not None
         assert hit_count == len(object_keys) - 1
