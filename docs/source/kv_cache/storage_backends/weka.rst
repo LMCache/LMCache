@@ -22,7 +22,7 @@ Ways to configure LMCache WEKA Offloading
     export LMCACHE_CHUNK_SIZE=256
     # Path to Weka Mount
     export LMCACHE_GDS_PATH="/mnt/weka/cache"
-    # CuFile Buffer Size in MiB
+    # CuFile/HipFile Buffer Size in MiB
     export LMCACHE_CUFILE_BUFFER_SIZE="8192"
     # Disabling CPU RAM offload is sometimes recommended as the
     # CPU can get in the way of GPUDirect operations
@@ -44,16 +44,16 @@ Example ``config.yaml``:
     local_cpu: false
     # Path to Weka Mount
     gds_path: "/mnt/weka/cache"
-    # CuFile Buffer Size in MiB
+    # CuFile/HipFile Buffer Size in MiB
     cufile_buffer_size: 8192
     # GDS I/O Threads
     extra_config:
       gds_io_threads: 32
 
-CuFile Buffer Size Explanation
-------------------------------
+CuFile/HipFile Buffer Size Explanation
+--------------------------------------
 
-The backend currently pre-registers buffer space to speed up cuFile operations. This buffer space
+The backend currently pre-registers buffer space to speed up cuFile/hipFile operations. This buffer space
 is registered in VRAM so options like ``--gpu-memory-utilization`` from ``vllm`` should be considered
 when setting it. For example, a good rule of thumb for H100 which generally has 80GiBs of VRAM would
 be to start with 8GiB and set ``--gpu-memory-utilization 0.85`` and depending on your workflow fine-tune

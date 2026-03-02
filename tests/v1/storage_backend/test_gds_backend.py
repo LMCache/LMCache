@@ -24,7 +24,7 @@ from lmcache.v1.storage_backend.gds_backend import (
     UnsupportedMetadataVersion,
     pack_metadata,
 )
-from tests.v1.utils import create_test_memory_obj, has_cufile
+from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
 
 
 def create_test_config(gds_path: str):
@@ -98,9 +98,9 @@ def gds_backend(temp_gds_path, async_loop):
     reason="Requires CUDA for TestGdsBackend",
 )
 @pytest.mark.skipif(
-    not has_cufile(),
-    reason="Requires NVIDIA cuFile (libcufile.so). "
-    "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
+    not (has_cufile() or has_hipfile()),
+    reason="Requires NVIDIA cuFile (libcufile.so) or AMD hipFile (libhipfile.so). "
+    "Skipping on systems without GDS support.",
 )
 @pytest.mark.skipif(sys.platform != "linux", reason="TestGdsBackend runs only on Linux")
 class TestGdsBackend:
@@ -156,9 +156,9 @@ class TestGdsBackend:
         reason="Requires CUDA for GdsBackend get_blocking",
     )
     @pytest.mark.skipif(
-        not has_cufile(),
-        reason="Requires NVIDIA cuFile (libcufile.so). "
-        "Skipping on systems without GDS/cuFile (e.g., AMD ROCm).",
+        not (has_cufile() or has_hipfile()),
+        reason="Requires NVIDIA cuFile (libcufile.so) or AMD hipFile (libhipfile.so). "
+        "Skipping on systems without GDS support.",
     )
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
         key = create_test_key(0)
