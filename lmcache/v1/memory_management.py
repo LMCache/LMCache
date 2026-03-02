@@ -2311,7 +2311,7 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
 
 class PagedCpuMemoryAllocator(MemoryAllocatorInterface):
     """
-    Paged Memory Allocator for both CPU and GPU memory.
+    Paged Memory Allocator for CPU memory.
     This is a paged memory allocator for PD and P2P sharing
     when NIXL is enabled as NIXL relies on the paging abstraction.
     """
