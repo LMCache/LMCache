@@ -150,7 +150,9 @@ class NixlStorageAgent:
                 num_pages=self.pool_size,
                 page_size=page_size,
                 file_path=self.backend_params["file_path"],
-                use_direct_io=self.backend_params["use_direct_io"],
+                # TODO(Jiayi): Need to make argument parsing more elegant
+                use_direct_io=str(self.backend_params["use_direct_io"]).lower()
+                == "true",
             )
         elif self.backend in ["OBJ"]:
             self.init_storage_handlers_object(
