@@ -461,10 +461,9 @@ class MPCacheEngine:
         overlap with the key's ``[start, end)`` range.
 
         When ``start`` or ``end`` is not aligned to ``chunk_size``, the
-        entire chunk containing that boundary is freed.  If the caller
-        needs to preserve locks on the portion of a chunk outside the
-        desired range, it must adjust ``start`` / ``end`` to chunk
-        boundaries itself before calling this method.
+        entire chunk containing ``start`` boundary is freed but the one containing
+        ``end`` boundary will not be freed.  It caller's responsibility to align
+        the boundaries as desired.
 
         Args:
             keys: List of cache keys whose read locks should be released.
@@ -474,7 +473,7 @@ class MPCacheEngine:
             all_hash_keys = key.to_hash_keys(self.token_hasher)
             chunk_size = self.token_hasher.chunk_size
             start_chunk = key.start // chunk_size
-            end_chunk = (key.end + chunk_size - 1) // chunk_size
+            end_chunk = key.end // chunk_size
             ipc_keys.extend(all_hash_keys[start_chunk:end_chunk])
         if not ipc_keys:
             return
