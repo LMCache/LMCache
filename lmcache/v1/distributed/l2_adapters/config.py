@@ -153,7 +153,7 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
     - backend: Nixl storage backend (GDS, GDS_MT, POSIX, HF3FS, OBJ).
     - backend_params: Backend-specific parameters as a dict of string key-value
       pairs. For file-based backends (GDS, GDS_MT, POSIX, HF3FS), must include
-      "path". May also include "use_direct_io" (default "false") and other
+      "file_path". May also include "use_direct_io" (default "false") and other
       backend-specific keys.
     - pool_size: Number of storage descriptors to pre-allocate (must be > 0).
     """
@@ -180,9 +180,10 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(backend_params, dict):
             raise ValueError("backend_params must be a dict of string key-value pairs")
 
-        if backend in _FILE_BACKENDS and not backend_params.get("path"):
+        if backend in _FILE_BACKENDS and not backend_params.get("file_path"):
             raise ValueError(
-                f"backend_params must include 'path' for file-based backend {backend!r}"
+                "backend_params must include 'file_path' "
+                f"for file-based backend {backend!r}"
             )
 
         pool_size = d.get("pool_size")

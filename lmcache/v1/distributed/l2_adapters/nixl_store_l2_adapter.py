@@ -489,10 +489,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         if self._loop.is_running():
             future = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
-            except Exception as e:
-                logger.warning("Exception during L2 adapter shutdown: %s", e)
-            except Exception:
-                pass  # Ignore exceptions during shutdown
+
+            future.result(timeout=5)  # Wait for tasks to be cancelled, with a timeout
+
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
@@ -564,7 +563,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         except Exception:
             success = False
-            for key, storage_obj in zip(keys, storage_objs, strict=True):
+
         with self._lock:
             for key, storage_obj in zip(keys, storage_objs, strict=False):
                 self._memory_objects[key] = storage_obj
@@ -625,8 +624,6 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 await self.nixl_agent.post_non_blocking(handle)
         except Exception as e:
             logger.warning("NIXL load failed: %s", e)
-        except Exception:
-            pass
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
