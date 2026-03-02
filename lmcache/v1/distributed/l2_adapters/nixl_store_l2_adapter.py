@@ -623,8 +623,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     storage_indices,
                 )
                 await self.nixl_agent.post_non_blocking(handle)
-                self.nixl_agent.release_handle(handle)
-
+        except Exception as e:
+            logger.warning("NIXL load failed: %s", e)
         except Exception:
             pass
 
