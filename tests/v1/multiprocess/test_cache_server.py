@@ -144,12 +144,26 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
     )
 
 
-def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
-    """Create lookup keys: worker_id=None."""
-    return [k.no_worker_id_version() for k in keys]
-
-
 BLOCKS_PER_KEY = 16
+
+
+def lookup_all(
+    client: MessageQueueClient,
+    keys: list[IPCCacheEngineKey],
+    timeout: float = DEFAULT_TIMEOUT,
+) -> int:
+    """Lookup all keys individually and return total found count."""
+    total = 0
+    for key in keys:
+        lookup_key = key.no_worker_id_version()
+        future = client.submit_request(
+            RequestType.LOOKUP,
+            [lookup_key],
+            get_response_class(RequestType.LOOKUP),
+        )
+        result = future.result(timeout=timeout)
+        total += result
+    return total
 
 
 def store_keys(
@@ -304,7 +318,7 @@ def registered_instance(
     # Register KV cache
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache()],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -354,7 +368,7 @@ def test_register_unregister_kv_cache(
     # Register
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache()],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -392,22 +406,12 @@ def test_store_and_lookup(
     store_keys(client, keys, registered_instance, gpu_block_ids, event)
 
     # Lookup - keys that exist
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, keys)
     assert lookup_result == num_keys, "All stored keys should exist"
 
     # Lookup - keys that don't exist
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
-    lookup_future2 = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(non_existent_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result2 = lookup_all(client, non_existent_keys)
     assert lookup_result2 == 0, "Non-existent keys should not be found"
 
 
@@ -436,12 +440,7 @@ def test_store_retrieve_verify(
     event.record()
 
     # Call look up to ensure the data is ready to be retrieved
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, keys)
     assert lookup_result == num_keys
 
     # Retrieve to a different location in the cache
@@ -496,12 +495,7 @@ def test_retrieve_partial_miss(
     store_keys(client, stored_keys, registered_instance, store_block_ids, event)
 
     # Lookup to ensure keys are stored
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(stored_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, stored_keys)
     assert lookup_result == num_stored
 
     # Try to retrieve 60 keys (only first 30 exist)
@@ -529,12 +523,7 @@ def test_retrieve_partial_miss(
     )
 
     # Doing look up again to ensure data is ready
-    lookup_future_2 = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(stored_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result_2 = lookup_future_2.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result_2 = lookup_all(client, stored_keys)
     assert lookup_result_2 == num_stored
 
     # Try to retrieve the first 30 keys only (all exist)
@@ -595,13 +584,7 @@ def test_multiple_retrieve_operations(
         for batch_idx in range(num_batches)
         for i in range(keys_per_batch)
     ]
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(all_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, all_keys)
     assert lookup_result == num_batches * keys_per_batch, "All stored keys should exist"
 
     # Retrieve in batches
@@ -669,12 +652,7 @@ def test_multiple_store_operations(
 
     # Verify all keys exist
     all_keys = keys1 + keys2
-    lookup_result = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(all_keys)],
-        get_response_class(RequestType.LOOKUP),
-    ).result(timeout=DEFAULT_TIMEOUT)
-
+    lookup_result = lookup_all(client, all_keys)
     assert lookup_result == 50, "All stored keys from both batches should exist"
 
 

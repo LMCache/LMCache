@@ -22,6 +22,7 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
+    "FREE_LOOKUP_LOCKS",
     "END_SESSION",
 ]
 
@@ -41,9 +42,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - kv_cache: KVCache - The KV cache configuration
+        #   - model_name: str - Name of the model associated with the engine
+        #   - world_size: int - World size of the engine
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache],
+            payload_classes=[int, KVCache, str, int],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
@@ -82,11 +85,20 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         # Lookup keys in cache
         # Payload:
-        #   - keys: list[KeyType] - Cache keys to look up
+        #   - key: KeyType - Cache key to look up
         # Returns: int - Number of keys found in cache
         "LOOKUP": ProtocolDefinition(
-            payload_classes=[list[KeyType]],
+            payload_classes=[KeyType],
             response_class=int,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Free locks (release read locks without a full RETRIEVE)
+        # Payload:
+        #   - keys: list[KeyType] - Cache keys whose read locks to release
+        # Returns: None
+        "FREE_LOOKUP_LOCKS": ProtocolDefinition(
+            payload_classes=[KeyType],
+            response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
         # End session
