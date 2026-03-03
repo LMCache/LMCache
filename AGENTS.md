@@ -125,7 +125,7 @@ Every public function and method must have a clear docstring covering:
 
 ### Encapsulation
 
-Never access private members (prefixed with `_`) of other classes. Interact only through their public API.
+Never access private members (prefixed with `_`) of other classes. Interact only through their public APIs.
 
 ### Code Organization
 
