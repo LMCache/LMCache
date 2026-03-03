@@ -508,7 +508,7 @@ class MPCacheEngine:
         """
         with self.lock:
             self.storage_manager.memcheck()
-            self.storage_manager.clear()
+            self.storage_manager.clear(force=True)
             self.storage_manager.memcheck()
 
     def close(self) -> None:
