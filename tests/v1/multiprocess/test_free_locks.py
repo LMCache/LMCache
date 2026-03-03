@@ -7,6 +7,10 @@ message-queue round-trip, server handler, and client-side adapter API.
 # Standard
 from unittest.mock import MagicMock, patch
 
+# Third Party
+import pytest
+import torch
+
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -85,6 +89,10 @@ def test_mq_free_locks():
 # ============================================================================
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for MPCacheEngine",
+)
 def test_server_free_lookup_locks_calls_finish_read_prefetched():
     """MPCacheEngine.free_lookup_locks should resolve hash keys and call
     finish_read_prefetched on the storage manager."""
@@ -116,6 +124,10 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for MPCacheEngine",
+)
 def test_server_free_lookup_locks_no_matching_chunks():
     """MPCacheEngine.free_lookup_locks with no chunks in range should be a no-op."""
     # First Party
@@ -142,6 +154,10 @@ def test_server_free_lookup_locks_no_matching_chunks():
     engine.storage_manager.finish_read_prefetched.assert_not_called()
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for MPCacheEngine",
+)
 def test_server_handler_registered():
     """run_cache_server should register a FREE_LOOKUP_LOCKS handler."""
     # First Party

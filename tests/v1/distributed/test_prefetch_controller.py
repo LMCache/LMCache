@@ -19,20 +19,24 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
-from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
-from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
-from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
-    PrefetchController,
-)
-from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-    DefaultPrefetchPolicy,
-)
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+
+if torch.cuda.is_available():
+    from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+    from lmcache.v1.distributed.error import L1Error
+    from lmcache.v1.distributed.l1_manager import L1Manager
+    from lmcache.v1.distributed.l2_adapters.config import MockL2AdapterConfig
+    from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
+    from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+        PrefetchController,
+    )
+    from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+        DefaultPrefetchPolicy,
+    )
+    from lmcache.v1.distributed.storage_controllers.store_policy import (
+        AdapterDescriptor,
+    )
+
+# First Party
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 
 # Skip all tests in this module if CUDA is not available
@@ -81,60 +85,61 @@ def wait_for_condition(
     return False
 
 
-def wait_for_prefetch_result(
-    ctrl: PrefetchController,
-    req_id: int,
-    timeout: float = 5.0,
-    poll_interval: float = 0.05,
-) -> int | None:
-    """Poll query_prefetch_result until it returns a non-None value."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = ctrl.query_prefetch_result(req_id)
-        if result is not None:
-            return result
-        time.sleep(poll_interval)
-    return None
+if torch.cuda.is_available():
 
+    def wait_for_prefetch_result(
+        ctrl: PrefetchController,
+        req_id: int,
+        timeout: float = 5.0,
+        poll_interval: float = 0.05,
+    ) -> int | None:
+        """Poll query_prefetch_result until it returns a non-None value."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = ctrl.query_prefetch_result(req_id)
+            if result is not None:
+                return result
+            time.sleep(poll_interval)
+        return None
 
-def make_adapter() -> MockL2Adapter:
-    """Create a MockL2Adapter with fast bandwidth."""
-    config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return MockL2Adapter(config)
+    def make_adapter() -> MockL2Adapter:
+        """Create a MockL2Adapter with fast bandwidth."""
+        config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+        return MockL2Adapter(config)
 
+    def make_descriptor(index: int) -> AdapterDescriptor:
+        """Create an AdapterDescriptor for testing."""
+        config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+        return AdapterDescriptor(index=index, config=config)
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    """Create an AdapterDescriptor for testing."""
-    config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
-
-
-def store_keys_in_l2(
-    adapter: MockL2Adapter,
-    keys: list[ObjectKey],
-    layout: MemoryLayoutDesc,
-) -> None:
-    """Store test data directly in L2 adapter and wait for completion."""
-    if not keys:
-        return
-    objs = []
-    for _ in keys:
-        tensor = torch.randn(layout.shapes[0], dtype=layout.dtypes[0])
-        metadata = MemoryObjMetadata(
-            shape=layout.shapes[0],
-            dtype=layout.dtypes[0],
-            address=0,
-            phy_size=tensor.nelement() * tensor.element_size(),
-            ref_count=0,
+    def store_keys_in_l2(
+        adapter: MockL2Adapter,
+        keys: list[ObjectKey],
+        layout: MemoryLayoutDesc,
+    ) -> None:
+        """Store test data directly in L2 adapter and wait for completion."""
+        if not keys:
+            return
+        objs = []
+        for _ in keys:
+            tensor = torch.randn(layout.shapes[0], dtype=layout.dtypes[0])
+            metadata = MemoryObjMetadata(
+                shape=layout.shapes[0],
+                dtype=layout.dtypes[0],
+                address=0,
+                phy_size=tensor.nelement() * tensor.element_size(),
+                ref_count=0,
+            )
+            obj = TensorMemoryObj(
+                raw_data=tensor, metadata=metadata, parent_allocator=None
+            )
+            objs.append(obj)
+        adapter.submit_store_task(keys, objs)  # type: ignore
+        ok = wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in keys),
+            timeout=5.0,
         )
-        obj = TensorMemoryObj(raw_data=tensor, metadata=metadata, parent_allocator=None)
-        objs.append(obj)
-    adapter.submit_store_task(keys, objs)  # type: ignore
-    ok = wait_for_condition(
-        lambda: all(adapter.debug_has_key(k) for k in keys),
-        timeout=5.0,
-    )
-    assert ok, "Failed to store test data in L2 adapter"
+        assert ok, "Failed to store test data in L2 adapter"
 
 
 # =============================================================================
