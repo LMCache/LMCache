@@ -106,7 +106,11 @@ def store_handler(
 
 
 def retrieve_handler(
-    key: KeyType, gpu_id: int, gpu_block_ids: list[int], event_handler: bytes
+    key: KeyType,
+    gpu_id: int,
+    gpu_block_ids: list[int],
+    event_handler: bytes,
+    skip_first_n_tokens: int = 0,
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for RETRIEVE requests.
@@ -116,6 +120,7 @@ def retrieve_handler(
         gpu_id: GPU device ID
         gpu_block_ids: List of GPU block IDs
         event_handler: CUDA event IPC handle
+        skip_first_n_tokens: Number of tokens to skip at retrieve start
 
     Returns:
         tuple[bytes, bool]: (event handle, success flag)
@@ -127,6 +132,9 @@ def retrieve_handler(
     )
     assert isinstance(event_handler, bytes), (
         f"Expected event_handler to be bytes, got {type(event_handler)}"
+    )
+    assert isinstance(skip_first_n_tokens, int), (
+        f"Expected skip_first_n_tokens to be int, got {type(skip_first_n_tokens)}"
     )
     return b"\x01" * 64, True
 
