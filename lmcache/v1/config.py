@@ -565,6 +565,21 @@ def _validate_config(self):
                 "including partial chunks will be transferred to decode node"
             )
 
+        # for receiver, PDBackend is for retrieve location
+        # can't take PDBackend as store location
+        # as PDBackend is now one way from producer to receiver only
+        if self.pd_role == "receiver":
+            assert self.store_location != "PDBackend", (
+                "store_location cannot be PDBackend for receiver"
+            )
+            if self.retrieve_locations not in (None, ["PDBackend"]):
+                logger.warning(
+                    "for pd receiver,"
+                    'retrieve_locations are expected to be ["PDBackend"]'
+                    "now, it is %s",
+                    self.retrieve_locations,
+                )
+
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
         assert self.extra_config.get("nixl_pool_size") is not None
