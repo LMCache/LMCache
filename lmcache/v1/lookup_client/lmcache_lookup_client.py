@@ -75,7 +75,6 @@ class LMCacheLookupClient(LookupClientInterface):
             )
             for rank in ranks
         ]
-        self.timeout_ms = config.lookup_timeout_ms
 
         # NOTE: map from lookup_id (i.e., req_id) to req's status.
         # int indicates number of hit tokens.
@@ -99,8 +98,8 @@ class LMCacheLookupClient(LookupClientInterface):
             )
 
             # Set socket timeout during initialization
-            socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
-            socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+            socket.setsockopt(zmq.RCVTIMEO, self.config.lookup_timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, self.config.lookup_timeout_ms)
 
             self.sockets.append(socket)
 
@@ -151,8 +150,8 @@ class LMCacheLookupClient(LookupClientInterface):
                 zmq.REQ,
                 "connect",
             )
-            new_socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
-            new_socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+            new_socket.setsockopt(zmq.RCVTIMEO, self.config.lookup_timeout_ms)
+            new_socket.setsockopt(zmq.SNDTIMEO, self.config.lookup_timeout_ms)
 
             self.sockets[rank_idx] = new_socket
 
