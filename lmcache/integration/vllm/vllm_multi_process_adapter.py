@@ -361,8 +361,13 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [key, self.instance_id, op.block_ids, event.ipc_handle(),
-             op.skip_first_n_tokens],
+            [
+                key,
+                self.instance_id,
+                op.block_ids,
+                event.ipc_handle(),
+                op.skip_first_n_tokens,
+            ],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = future
 

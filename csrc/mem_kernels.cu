@@ -324,8 +324,8 @@ __global__ void load_and_reshape_multi_layer_kernel(
   /** Copy the data from page buffer to key_value **/
   for (int i = tid; i < scalars_per_token; i += num_threads) {
     const int64_t lmcache_offset =
-        key_value_offset(k_or_v, layer_id, kv_token_id, i,
-                         scalars_per_token, num_tokens, num_layers);
+        key_value_offset(k_or_v, layer_id, kv_token_id, i, scalars_per_token,
+                         num_tokens, num_layers);
 
     const int64_t vllm_offset = page_buffer_offset<format>(
         k_or_v, slot_idx, i, scalars_per_token, page_buffer_size, block_size);
@@ -435,12 +435,12 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  *  - direction: H2D  means LMCache to PagedBuffer, D2H  means PagedBuffer to
  * LMCache
  */
-#define LAUNCH_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)                       \
-  lmc::load_and_reshape_multi_layer_kernel<T, DIRECTION, FORMAT>              \
-      <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,           \
-                                   slot_mapping_ptr, num_xwords, num_tokens,  \
-                                   num_layers, page_buffer_size, block_size,  \
-                                   skip_prefix_n_tokens);                     \
+#define LAUNCH_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)                      \
+  lmc::load_and_reshape_multi_layer_kernel<T, DIRECTION, FORMAT>             \
+      <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,          \
+                                   slot_mapping_ptr, num_xwords, num_tokens, \
+                                   num_layers, page_buffer_size, block_size, \
+                                   skip_prefix_n_tokens);                    \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 template <typename T>
