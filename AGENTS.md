@@ -112,7 +112,7 @@ SLF lint rules are currently enforced by CI only in `lmcache/v1/multiprocess/` a
 
 ### Type Hints
 
-All functions and methods must have type hints for arguments and return values.
+All functions and methods must have type hints for their arguments and return values.
 
 ### Docstrings
 
