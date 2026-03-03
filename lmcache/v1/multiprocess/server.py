@@ -448,6 +448,36 @@ class MPCacheEngine:
         found_count = found_count // ipc_keys[0].world_size
         return found_count
 
+    def free_lookup_locks(
+        self,
+        key: IPCCacheEngineKey,
+    ) -> None:
+        """Release read locks acquired during lookup without performing a
+        full retrieve.  This is used when a request is cancelled or aborted
+        after LOOKUP but before RETRIEVE.
+
+        ``to_hash_keys`` always expands over the entire ``token_ids``
+        sequence, so we slice the result to only include the chunks that
+        overlap with the key's ``[start, end)`` range.
+        This means when ``start`` or ``end`` is not aligned to ``chunk_size``, the
+        entire chunk containing ``start`` boundary is freed but the one containing
+        ``end`` boundary will not be freed.  It caller's responsibility to align
+        the boundaries as desired.
+
+        Args:
+            keys: List of cache keys whose read locks should be released.
+        """
+        ipc_keys: list[IPCCacheEngineKey] = []
+        all_hash_keys = key.to_hash_keys(self.token_hasher)
+        chunk_size = self.token_hasher.chunk_size
+        start_chunk = key.start // chunk_size
+        end_chunk = key.end // chunk_size
+        ipc_keys.extend(all_hash_keys[start_chunk:end_chunk])
+        if not ipc_keys:
+            return
+        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        self.storage_manager.finish_read_prefetched(obj_keys)
+
     # =========================================================================
     # Utility methods
     # =========================================================================
@@ -565,6 +595,7 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
