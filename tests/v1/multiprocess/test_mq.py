@@ -368,7 +368,7 @@ def test_mq_register_kv_cache():
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
         request_type=RequestType.REGISTER_KV_CACHE,
-        payloads=[gpu_id, kv_cache],
+        payloads=[gpu_id, kv_cache, "testmodel", 1],
         expected_response=None,
         num_requests=1,
     )
@@ -424,11 +424,11 @@ def test_mq_unregister_kv_cache_multiple_clients():
 def test_mq_store():
     """
     Test MessageQueue with STORE request type.
-    STORE takes (keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int])
-    and returns bool.
+    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    event_ipc_handle: bytes) and returns (bytes, bool).
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(3)]
+    # Create test key
+    key = create_cache_key(0)
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
     test_handle = b"\x00" * 64
@@ -440,7 +440,7 @@ def test_mq_store():
     # Run test with STORE request
     helper.run_test(
         request_type=RequestType.STORE,
-        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
+        payloads=[key, gpu_id, gpu_block_ids, test_handle],
         expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
@@ -449,11 +449,11 @@ def test_mq_store():
 def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
-    RETRIEVE takes (keys: list[KeyType], gpu_id: int, gpu_block_ids: list[int])
-    and returns bool.
+    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    event_ipc_handle: bytes) and returns (bytes, bool).
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(3)]
+    # Create test key
+    key = create_cache_key(0)
     gpu_id = 0
     gpu_block_ids = [0, 1, 2]
     test_handle = b"\x00" * 64
@@ -467,8 +467,8 @@ def test_mq_retrieve():
     # Run test with RETRIEVE request
     helper.run_test(
         request_type=RequestType.RETRIEVE,
-        payloads=[keys, gpu_id, gpu_block_ids, test_handle],
-        expected_response=(b"\x01" * 64, [True, True, True]),
+        payloads=[key, gpu_id, gpu_block_ids, test_handle],
+        expected_response=(b"\x01" * 64, True),
         num_requests=1,
     )
 
@@ -476,13 +476,13 @@ def test_mq_retrieve():
 def test_mq_lookup():
     """
     Test MessageQueue with LOOKUP request type.
-    LOOKUP takes (keys: list[KeyType]) and returns int.
+    LOOKUP takes (key: KeyType) and returns int.
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(4)]
+    # Create a single test key
+    key = create_cache_key(0)
 
-    # Expected response: count of even-indexed keys (0, 2) = 2
-    expected_response = 2
+    # Expected response: 1 (dummy handler always returns 1)
+    expected_response = 1
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
@@ -491,22 +491,22 @@ def test_mq_lookup():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys],
+        payloads=[key],
         expected_response=expected_response,
         num_requests=1,
     )
 
 
-def test_mq_lookup_with_different_key_count():
+def test_mq_lookup_with_different_key():
     """
-    Test MessageQueue with LOOKUP request type with different number of keys.
-    Tests that the handler correctly counts matched keys.
+    Test MessageQueue with LOOKUP request type with a different key.
+    Tests that the handler correctly processes a single key.
     """
-    # Create test keys
-    keys = [create_cache_key(i) for i in range(3)]
+    # Create a different test key
+    key = create_cache_key(42)
 
-    # Expected response: count of even-indexed keys (0, 2) = 2
-    expected_response = 2
+    # Expected response: 1 (dummy handler always returns 1)
+    expected_response = 1
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
@@ -515,7 +515,7 @@ def test_mq_lookup_with_different_key_count():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[keys],
+        payloads=[key],
         expected_response=expected_response,
         num_requests=1,
     )

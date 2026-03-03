@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
 from lmcache.v1.multiprocess.blend_server import get_sep_tokens
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -264,6 +265,7 @@ def server_process_runner(
     )
     run_cache_server(
         storage_manager_config=storage_manager_config,
+        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
         host=host,
         port=port,
         chunk_size=chunk_size,
@@ -369,7 +371,7 @@ def cb_registered_instance(
     # Register CB KV cache
     future = client.submit_request(
         RequestType.CB_REGISTER_KV_CACHE,
-        [instance_id, cb_client_context.get_kv_cache()],
+        [instance_id, cb_client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.CB_REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -405,7 +407,7 @@ def registered_instance(
     # Register KV cache
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache()],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -492,7 +494,7 @@ def test_cb_register_unregister_kv_cache(
     # Register
     future = client.submit_request(
         RequestType.CB_REGISTER_KV_CACHE,
-        [instance_id, cb_client_context.get_kv_cache()],
+        [instance_id, cb_client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.CB_REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -525,7 +527,7 @@ def test_cb_register_multiple_instances(
     for instance_id in instance_ids:
         future = client.submit_request(
             RequestType.CB_REGISTER_KV_CACHE,
-            [instance_id, cb_client_context.get_kv_cache()],
+            [instance_id, cb_client_context.get_kv_cache(), "testmodel", 1],
             get_response_class(RequestType.CB_REGISTER_KV_CACHE),
         )
         result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -946,8 +948,9 @@ def test_cb_lookup_cannot_find_normal_store(
     ISOLATION TEST: Store via normal STORE, then CB_LOOKUP_PRE_COMPUTED.
     Expected: CB lookup should NOT see normal-stored data (returns empty []).
     """
-    # Store via normal STORE operation
+    # Store via normal STORE operation (one key at a time)
     num_keys = 5
+    blocks_per_key = 16
     keys = [
         create_cache_key(
             tuple(range(CHUNK_SIZE * i, CHUNK_SIZE * (i + 1))),
@@ -955,17 +958,21 @@ def test_cb_lookup_cannot_find_normal_store(
         )
         for i in range(num_keys)
     ]
-    gpu_block_ids = list(range(0, 16 * num_keys))
+    gpu_block_ids = list(range(0, blocks_per_key * num_keys))
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
-    store_future = client.submit_request(
-        RequestType.STORE,
-        [keys, registered_instance, gpu_block_ids, event.ipc_handle()],
-        get_response_class(RequestType.STORE),
-    )
-    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-    assert store_result is True, "Normal store should succeed"
+    for i, key in enumerate(keys):
+        start = i * blocks_per_key
+        end = start + blocks_per_key
+        block_ids = gpu_block_ids[start:end]
+        store_future = client.submit_request(
+            RequestType.STORE,
+            [key, registered_instance, block_ids, event.ipc_handle()],
+            get_response_class(RequestType.STORE),
+        )
+        store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+        assert store_result is True, f"Normal store should succeed for key {i}"
 
     # Now try CB lookup with same token pattern
     # Use same hash value converted to token_ids pattern
@@ -1308,7 +1315,7 @@ def test_cb_store_final_then_normal_lookup_retrieve(
 
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [[lookup_key]],
+        [lookup_key],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
@@ -1320,26 +1327,20 @@ def test_cb_store_final_then_normal_lookup_retrieve(
     )
 
     # Test retrieve
-    retrieve_keys = [
-        create_cb_cache_key(
-            token_ids[:expected_hit_count_per_paragraph],
-            request_id="final-retrieve-test",
-        )
-    ]
+    retrieve_key = create_cb_cache_key(
+        token_ids[:expected_hit_count_per_paragraph],
+        request_id="final-retrieve-test",
+    )
     gpu_block_ids = list(range(0, expected_hit_chunks * 16))  # Retrieve to first
     event2 = torch.cuda.Event(interprocess=True)
     event2.record()
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [retrieve_keys, registered_instance, gpu_block_ids, event2.ipc_handle()],
+        [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle()],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-    assert isinstance(retrieve_result, list), "Retrieve should return a list"
-    assert len(retrieve_result) == expected_hit_chunks, (
-        "Retrieve should return correct number of chunks"
-    )
-    assert all(retrieve_result), "All retrieved chunks should be successful"
+    assert retrieve_result is True, "Retrieve should succeed"
 
     # Verify the correctness
     torch.cuda.synchronize()

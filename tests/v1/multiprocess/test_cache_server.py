@@ -17,6 +17,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -31,7 +32,7 @@ from lmcache.v1.multiprocess.server import run_cache_server
 
 # Configuration constants
 SERVER_HOST = "localhost"
-SERVER_PORT = 5555
+SERVER_PORT = 5599
 SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
@@ -143,9 +144,72 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
     )
 
 
-def lookup_keys(keys: list[IPCCacheEngineKey]) -> list[IPCCacheEngineKey]:
-    """Create lookup keys: worker_id=None."""
-    return [k.no_worker_id_version() for k in keys]
+BLOCKS_PER_KEY = 16
+
+
+def lookup_all(
+    client: MessageQueueClient,
+    keys: list[IPCCacheEngineKey],
+    timeout: float = DEFAULT_TIMEOUT,
+) -> int:
+    """Lookup all keys individually and return total found count."""
+    total = 0
+    for key in keys:
+        lookup_key = key.no_worker_id_version()
+        future = client.submit_request(
+            RequestType.LOOKUP,
+            [lookup_key],
+            get_response_class(RequestType.LOOKUP),
+        )
+        result = future.result(timeout=timeout)
+        total += result
+    return total
+
+
+def store_keys(
+    client: MessageQueueClient,
+    keys: list[IPCCacheEngineKey],
+    instance_id: int,
+    gpu_block_ids: list[int],
+    event: torch.cuda.Event,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> None:
+    """Store keys one at a time using the single-key API."""
+    for i, key in enumerate(keys):
+        start = i * BLOCKS_PER_KEY
+        end = start + BLOCKS_PER_KEY
+        block_ids = gpu_block_ids[start:end]
+        future = client.submit_request(
+            RequestType.STORE,
+            [key, instance_id, block_ids, event.ipc_handle()],
+            get_response_class(RequestType.STORE),
+        )
+        result = future.to_cuda_future().result(timeout=timeout)
+        assert result is True, f"Store should succeed for key {i}"
+
+
+def retrieve_keys(
+    client: MessageQueueClient,
+    keys: list[IPCCacheEngineKey],
+    instance_id: int,
+    gpu_block_ids: list[int],
+    event: torch.cuda.Event,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> list[bool]:
+    """Retrieve keys one at a time using the single-key API."""
+    results = []
+    for i, key in enumerate(keys):
+        start = i * BLOCKS_PER_KEY
+        end = start + BLOCKS_PER_KEY
+        block_ids = gpu_block_ids[start:end]
+        future = client.submit_request(
+            RequestType.RETRIEVE,
+            [key, instance_id, block_ids, event.ipc_handle()],
+            get_response_class(RequestType.RETRIEVE),
+        )
+        result = future.to_cuda_future().result(timeout=timeout)
+        results.append(result)
+    return results
 
 
 def server_process_runner(
@@ -165,6 +229,7 @@ def server_process_runner(
     )
     run_cache_server(
         storage_manager_config=storage_manager_config,
+        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
         host=host,
         port=port,
         chunk_size=chunk_size,
@@ -253,7 +318,7 @@ def registered_instance(
     # Register KV cache
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache()],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -303,7 +368,7 @@ def test_register_unregister_kv_cache(
     # Register
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache()],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -338,31 +403,15 @@ def test_store_and_lookup(
     event.record()
 
     # Store
-    store_future = client.submit_request(
-        RequestType.STORE,
-        [keys, registered_instance, gpu_block_ids, event.ipc_handle()],
-        get_response_class(RequestType.STORE),
-    )
-    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-    assert store_result is True, "Store should succeed"
+    store_keys(client, keys, registered_instance, gpu_block_ids, event)
 
     # Lookup - keys that exist
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, keys)
     assert lookup_result == num_keys, "All stored keys should exist"
 
     # Lookup - keys that don't exist
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
-    lookup_future2 = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(non_existent_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result2 = lookup_future2.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result2 = lookup_all(client, non_existent_keys)
     assert lookup_result2 == 0, "Non-existent keys should not be found"
 
 
@@ -385,36 +434,22 @@ def test_store_retrieve_verify(
 
     # Store at the beginning of the cache
     store_block_ids = list(range(0, 16 * num_keys))
-    store_future = client.submit_request(
-        RequestType.STORE,
-        [keys, registered_instance, store_block_ids, event.ipc_handle()],
-        get_response_class(RequestType.STORE),
-    )
-    store_result = store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
-    assert store_result is True
+    store_keys(client, keys, registered_instance, store_block_ids, event)
 
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
     # Call look up to ensure the data is ready to be retrieved
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, keys)
     assert lookup_result == num_keys
 
     # Retrieve to a different location in the cache
     # Use offset of 40 blocks (640 pages total needed: 320 + 320)
     retrieve_offset = 40 * 16
     retrieve_block_ids = list(range(retrieve_offset, retrieve_offset + 16 * num_keys))
-    retrieve_future = client.submit_request(
-        RequestType.RETRIEVE,
-        [keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
-        get_response_class(RequestType.RETRIEVE),
+    retrieve_result = retrieve_keys(
+        client, keys, registered_instance, retrieve_block_ids, event
     )
-    retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
 
     assert len(retrieve_result) == num_keys
     assert all(retrieve_result), "All keys should be retrieved successfully"
@@ -457,20 +492,10 @@ def test_retrieve_partial_miss(
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
-    store_future = client.submit_request(
-        RequestType.STORE,
-        [stored_keys, registered_instance, store_block_ids, event.ipc_handle()],
-        get_response_class(RequestType.STORE),
-    )
-    assert store_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT) is True
+    store_keys(client, stored_keys, registered_instance, store_block_ids, event)
 
     # Lookup to ensure keys are stored
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(stored_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, stored_keys)
     assert lookup_result == num_stored
 
     # Try to retrieve 60 keys (only first 30 exist)
@@ -486,40 +511,27 @@ def test_retrieve_partial_miss(
     event = torch.cuda.Event(interprocess=True)
     event.record()
 
-    retrieve_future = client.submit_request(
-        RequestType.RETRIEVE,
-        [all_keys, registered_instance, retrieve_block_ids, event.ipc_handle()],
-        get_response_class(RequestType.RETRIEVE),
+    retrieve_result = retrieve_keys(
+        client, all_keys, registered_instance, retrieve_block_ids, event
     )
-    retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
 
     assert len(retrieve_result) == num_requested
-    # assert all(retrieve_result[:num_stored]), "Stored keys should be retrieved"
-    # Remaining should fail
-    assert not any(retrieve_result), (
-        "Retrieve is expected to return all FALSE if any key is missing"
+    # First 30 keys exist, remaining 30 don't
+    assert all(retrieve_result[:num_stored]), "Stored keys should be retrieved"
+    assert not any(retrieve_result[num_stored:]), (
+        "Non-existent keys should fail to retrieve"
     )
 
     # Doing look up again to ensure data is ready
-    lookup_future_2 = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(stored_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result_2 = lookup_future_2.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result_2 = lookup_all(client, stored_keys)
     assert lookup_result_2 == num_stored
 
     # Try to retrieve the first 30 keys only (all exist)
     retrieve_block_ids_2 = list(range(0, 16 * num_stored))
     event = torch.cuda.Event(interprocess=True)
     event.record()
-    retrieve_future_2 = client.submit_request(
-        RequestType.RETRIEVE,
-        [stored_keys, registered_instance, retrieve_block_ids_2, event.ipc_handle()],
-        get_response_class(RequestType.RETRIEVE),
-    )
-    retrieve_result_2 = retrieve_future_2.to_cuda_future().result(
-        timeout=DEFAULT_TIMEOUT
+    retrieve_result_2 = retrieve_keys(
+        client, stored_keys, registered_instance, retrieve_block_ids_2, event
     )
     assert len(retrieve_result_2) == num_stored
     assert all(retrieve_result_2), "All stored keys should be retrieved successfully"
@@ -564,17 +576,7 @@ def test_multiple_retrieve_operations(
         )
         event = torch.cuda.Event(interprocess=True)
         event.record()
-
-        store_result = (
-            client.submit_request(
-                RequestType.STORE,
-                [keys, registered_instance, blocks, event.ipc_handle()],
-                get_response_class(RequestType.STORE),
-            )
-            .to_cuda_future()
-            .result(timeout=DEFAULT_TIMEOUT)
-        )
-        assert store_result is True
+        store_keys(client, keys, registered_instance, blocks, event)
 
     # Doing look up to ensure data is ready to be retrieved
     all_keys = [
@@ -582,18 +584,11 @@ def test_multiple_retrieve_operations(
         for batch_idx in range(num_batches)
         for i in range(keys_per_batch)
     ]
-    lookup_future = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(all_keys)],
-        get_response_class(RequestType.LOOKUP),
-    )
-
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    lookup_result = lookup_all(client, all_keys)
     assert lookup_result == num_batches * keys_per_batch, "All stored keys should exist"
 
     # Retrieve in batches
     retrieve_offset = 32  # Start retrieving at offset of 32 chunks
-    retrieve_futures = []
     event = torch.cuda.Event(interprocess=True)
     event.record()
     for batch_idx in range(num_batches):
@@ -609,15 +604,9 @@ def test_multiple_retrieve_operations(
             )
         )
 
-        retrieve_future = client.submit_request(
-            RequestType.RETRIEVE,
-            [keys, registered_instance, blocks, event.ipc_handle()],
-            get_response_class(RequestType.RETRIEVE),
+        retrieve_result = retrieve_keys(
+            client, keys, registered_instance, blocks, event
         )
-        retrieve_futures.append(retrieve_future.to_cuda_future())
-
-    for retrieve_future in retrieve_futures:
-        retrieve_result = retrieve_future.result(timeout=DEFAULT_TIMEOUT)
         assert len(retrieve_result) == keys_per_batch
         assert all(retrieve_result), "All keys should be retrieved successfully"
 
@@ -652,42 +641,18 @@ def test_multiple_store_operations(
     blocks1 = list(range(0, 16 * 30))
     event = torch.cuda.Event(interprocess=True)
     event.record()
-
-    result1 = (
-        client.submit_request(
-            RequestType.STORE,
-            [keys1, registered_instance, blocks1, event.ipc_handle()],
-            get_response_class(RequestType.STORE),
-        )
-        .to_cuda_future()
-        .result(timeout=DEFAULT_TIMEOUT)
-    )
-    assert result1 is True
+    store_keys(client, keys1, registered_instance, blocks1, event)
 
     # Store batch 2
     keys2 = [create_cache_key(i + 30) for i in range(20)]
     blocks2 = list(range(30 * 16, 50 * 16))
 
     # Test with the same event for 2 store requests
-    result2 = (
-        client.submit_request(
-            RequestType.STORE,
-            [keys2, registered_instance, blocks2, event.ipc_handle()],
-            get_response_class(RequestType.STORE),
-        )
-        .to_cuda_future()
-        .result(timeout=DEFAULT_TIMEOUT)
-    )
-    assert result2 is True
+    store_keys(client, keys2, registered_instance, blocks2, event)
 
     # Verify all keys exist
     all_keys = keys1 + keys2
-    lookup_result = client.submit_request(
-        RequestType.LOOKUP,
-        [lookup_keys(all_keys)],
-        get_response_class(RequestType.LOOKUP),
-    ).result(timeout=DEFAULT_TIMEOUT)
-
+    lookup_result = lookup_all(client, all_keys)
     assert lookup_result == 50, "All stored keys from both batches should exist"
 
 
