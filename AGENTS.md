@@ -123,6 +123,38 @@ Every public function and method must have a clear docstring covering:
 - Raised exceptions (if any)
 - Additional notes when behavior is non-obvious
 
+### Writing Documentation
+
+User-facing and design documentation lives in the `docs/source/` directory and is built with **Sphinx**. Documentation files use reStructuredText (`.rst`). When adding or modifying docs, place them in the appropriate subdirectory under `docs/source/` (e.g., `developer_guide/`, `getting_started/`, `kv_cache/`) and make sure any new pages are linked from a `toctree` so they appear in the built site.
+
+When writing or updating documentation, follow these principles:
+
+- **Be concrete and concise.** State exactly what something does and why — avoid vague, hand-wavy descriptions. One precise sentence beats a paragraph of generalities.
+- **Include examples.** Show concrete code snippets, command invocations, or data formats so the reader can immediately see how things work in practice.
+- **Explain the _why_, not just the _what_.** Briefly state the design motivation or trade-off behind a decision so readers understand the reasoning.
+- **Use diagrams or short flows for complex interactions.** When multiple components interact (e.g., the multiprocess pipeline), a short step-by-step flow or ASCII diagram is far clearer than prose alone.
+- **Keep scope focused.** Each document should have a clear audience and purpose. Don't mix user-facing setup guides with internal architecture notes.
+
+#### Building and verifying docs
+
+Always verify that the Sphinx build passes after making documentation changes:
+
+```bash
+# Install doc dependencies (one-time)
+pip install -r requirements/docs.txt
+
+# Build (from the docs/ directory)
+cd docs
+make clean
+make html
+```
+
+The build must complete **without errors or warnings**. Review the generated HTML in `docs/build/html/` to confirm formatting, links, and examples render correctly. You can preview locally with:
+
+```bash
+python -m http.server -d build/html/
+```
+
 ### Encapsulation
 
 Never access private members (prefixed with `_`) of other classes. Interact only through their public API.
@@ -157,6 +189,12 @@ When reviewing code (or self-checking before submitting), verify all of the foll
 - [ ] New features and bug fixes include corresponding tests.
 - [ ] Tests target the public interface and docstring contract, not implementation details.
 - [ ] Tests pass locally: `pytest -xvs` with the standard ignore flags.
+
+### Documentation
+- [ ] New or updated documentation is concrete, concise, and includes examples.
+- [ ] Design decisions explain the _why_, not just the _what_.
+- [ ] Docs are placed in the correct subdirectory under `docs/source/` and linked from a `toctree`.
+- [ ] Sphinx build passes cleanly: `cd docs && make clean && make html` completes without errors or warnings.
 
 ### Safety & Performance
 - [ ] No security vulnerabilities (injection, unsafe deserialization, etc.).
