@@ -135,6 +135,9 @@ class RequestTracker:
     # Whether the request cache should be saved
     skip_save: bool = False
 
+    # The number of tokens that are cached in LMCache for this request
+    num_lmcache_cached_tokens: int = 0
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -194,6 +197,7 @@ class RequestTracker:
             mm_positions=mm_positions,
             skip_save=skip_save,
             request_configs=request_configs,
+            num_lmcache_cached_tokens=lmcache_cached_tokens,
         )
 
     def update(
@@ -256,6 +260,8 @@ class RequestTracker:
         # TODO: Need to further exclude the case of chunked prefill with 1 token.
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
+
+        self.num_lmcache_cached_tokens = lmcache_cached_tokens
 
 
 @dataclass
@@ -1634,13 +1640,12 @@ class LMCacheConnectorV1Impl:
             return_params = {}
             if "ret_first_tok" in params:
                 return_params["first_tok"] = request._output_token_ids[0]
-            if "ret_num_cached_toks" in params:
-                return_params["vllm_cached_tokens"] = self.load_specs[
-                    request.request_id
-                ].vllm_cached_tokens
-                return_params["lmcache_cached_tokens"] = self.load_specs[
-                    request.request_id
-                ].lmcache_cached_tokens
+            if "ret_num_cached_tok" in params:
+                request_tracker = self._request_trackers.get(request.request_id)
+                if request_tracker is not None:
+                    return_params["num_lmcache_cached_tokens"] = (
+                        request_tracker.num_lmcache_cached_tokens
+                    )
         return False, return_params
 
     @_lmcache_nvtx_annotate
