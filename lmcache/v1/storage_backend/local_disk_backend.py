@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# TODO(Jiayi): handle cases where cache is repetitvely prefetched.
+# TODO(Jiayi): handle cases where cache is repeatedly prefetched.
 class LocalDiskWorker:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.put_lock = threading.Lock()
