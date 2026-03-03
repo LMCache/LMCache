@@ -14,10 +14,10 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.v1.distributed.observability.logger.l2_stats_logger import (
+from lmcache.v1.mp_observability.logger.l2_stats_logger import (
     L2ManagerStatsLogger,
 )
-from lmcache.v1.distributed.observability.logger.prometheus_logger import (
+from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
 

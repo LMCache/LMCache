@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
 from lmcache.v1.multiprocess.blend_server import get_sep_tokens
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -264,6 +265,7 @@ def server_process_runner(
     )
     run_cache_server(
         storage_manager_config=storage_manager_config,
+        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
         host=host,
         port=port,
         chunk_size=chunk_size,
@@ -369,7 +371,7 @@ def cb_registered_instance(
     # Register CB KV cache
     future = client.submit_request(
         RequestType.CB_REGISTER_KV_CACHE,
-        [instance_id, cb_client_context.get_kv_cache()],
+        [instance_id, cb_client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.CB_REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -405,7 +407,7 @@ def registered_instance(
     # Register KV cache
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
-        [instance_id, client_context.get_kv_cache()],
+        [instance_id, client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -492,7 +494,7 @@ def test_cb_register_unregister_kv_cache(
     # Register
     future = client.submit_request(
         RequestType.CB_REGISTER_KV_CACHE,
-        [instance_id, cb_client_context.get_kv_cache()],
+        [instance_id, cb_client_context.get_kv_cache(), "testmodel", 1],
         get_response_class(RequestType.CB_REGISTER_KV_CACHE),
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -525,7 +527,7 @@ def test_cb_register_multiple_instances(
     for instance_id in instance_ids:
         future = client.submit_request(
             RequestType.CB_REGISTER_KV_CACHE,
-            [instance_id, cb_client_context.get_kv_cache()],
+            [instance_id, cb_client_context.get_kv_cache(), "testmodel", 1],
             get_response_class(RequestType.CB_REGISTER_KV_CACHE),
         )
         result = future.result(timeout=DEFAULT_TIMEOUT)
@@ -1313,7 +1315,7 @@ def test_cb_store_final_then_normal_lookup_retrieve(
 
     lookup_future = client.submit_request(
         RequestType.LOOKUP,
-        [[lookup_key]],
+        [lookup_key],
         get_response_class(RequestType.LOOKUP),
     )
     lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
