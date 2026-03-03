@@ -545,14 +545,59 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
-    def clear(self) -> None:
-        """Clear all objects from L1 cache."""
-        all_keys = list(self._objects.keys())
-        all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
-        self._memory_manager.free(all_memory_objs)
-        self._objects.clear()
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_deleted_by_manager(all_keys)
+    def clear(self, force: bool = False) -> None:
+        """Clear objects from L1 cache.
+
+        Args:
+            force: If True, clear ALL objects including locked ones.
+                This may corrupt in-flight store/prefetch operations.
+                If False (default), only clear unlocked objects, keeping
+                write-locked and read-locked objects intact.
+        """
+        if force:
+            logger.warning(
+                "L1Manager: force-clearing all %d objects "
+                "(including locked ones). This may corrupt in-flight "
+                "store/prefetch operations — use with caution.",
+                len(self._objects),
+            )
+            all_keys = list(self._objects.keys())
+            all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            self._memory_manager.free(all_memory_objs)
+            self._objects.clear()
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_deleted_by_manager(all_keys)
+            logger.info(
+                "L1Manager: cleared %d objects, 0 remaining.",
+                len(all_keys),
+            )
+            return
+
+        keys_to_clear: list[ObjectKey] = []
+        objs_to_free: list[MemoryObj] = []
+        locked_count = 0
+
+        for key, entry in list(self._objects.items()):
+            if entry.write_lock.is_locked() or entry.read_lock.is_locked():
+                locked_count += 1
+                continue
+            keys_to_clear.append(key)
+            objs_to_free.append(entry.memory_obj)
+
+        for key in keys_to_clear:
+            del self._objects[key]
+
+        self._memory_manager.free(objs_to_free)
+
+        if keys_to_clear:
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_deleted_by_manager(keys_to_clear)
+
+        logger.info(
+            "L1Manager: cleared %d objects, %d locked objects remaining.",
+            len(keys_to_clear),
+            locked_count,
+        )
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
