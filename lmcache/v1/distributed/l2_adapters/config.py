@@ -183,6 +183,17 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
         backend_params: dict[str, str],
         pool_size: int,
     ):
+        if backend in _FILE_BACKENDS:
+            if "file_path" not in backend_params:
+                raise ValueError(
+                    f"backend_params must include 'file_path' "
+                    f"for file-based backend {backend!r}"
+                )
+            if "use_direct_io" not in backend_params:
+                raise ValueError(
+                    f"backend_params must include 'use_direct_io' "
+                    f"for file-based backend {backend!r}"
+                )
         self.backend = backend
         self.backend_params = backend_params
         self.pool_size = pool_size
@@ -198,12 +209,6 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
         backend_params = d.get("backend_params", {})
         if not isinstance(backend_params, dict):
             raise ValueError("backend_params must be a dict of string key-value pairs")
-
-        if backend in _FILE_BACKENDS and not backend_params.get("file_path"):
-            raise ValueError(
-                "backend_params must include 'file_path' "
-                f"for file-based backend {backend!r}"
-            )
 
         pool_size = d.get("pool_size")
         if not isinstance(pool_size, int) or pool_size <= 0:

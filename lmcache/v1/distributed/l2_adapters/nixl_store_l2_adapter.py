@@ -117,13 +117,6 @@ class NixlStorageAgent:
 
         self.pool = NixlObjPool(num_total_objs=self.pool_size)
         if self.backend in ["GDS", "GDS_MT", "POSIX", "HF3FS"]:
-            assert "file_path" in self.backend_params, (
-                f"file_path is required for backend {self.backend}"
-            )
-            assert "use_direct_io" in self.backend_params, (
-                f"use_direct_io is required for backend {self.backend}"
-            )
-
             self.init_storage_handlers_file(
                 num_pages=self.pool_size,
                 page_size=l1_memory.align_bytes,

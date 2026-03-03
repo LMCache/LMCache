@@ -705,7 +705,6 @@ class TestCloseInterface:
         l1_memory = L1MemoryDesc(
             ptr=buffer.data_ptr(),
             size=buffer.numel(),
-            device_id=0,
             align_bytes=PAGE_SIZE,
         )
         config = NixlStoreL2AdapterConfig(
