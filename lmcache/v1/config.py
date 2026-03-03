@@ -120,6 +120,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
+    "retrieve_locations": {"type": Optional[list[str]], "default": None},
+    "store_location": {"type": Optional[str], "default": None},
     # P2P configurations
     "enable_p2p": {
         "type": bool,
@@ -209,8 +211,6 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "pd_proxy_host": {"type": Optional[str], "default": None, "env_converter": str},
     "pd_proxy_port": {"type": Optional[int], "default": None, "env_converter": int},
-    "pd_retrieve_locations": {"type": Optional[list[str]], "default": None},
-    "pd_store_location": {"type": Optional[str], "default": None},
     # Transfer-related configurations
     "transfer_channel": {"type": Optional[str], "default": None, "env_converter": str},
     # Nixl-related configurations
