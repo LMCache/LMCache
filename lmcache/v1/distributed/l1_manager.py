@@ -445,6 +445,66 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
+    def finish_write_and_reserve_read(
+        self,
+        keys: list[ObjectKey],
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Atomically finish write and acquire read lock for the given keys.
+
+        This is used by the prefetch controller after successfully loading
+        data from L2 into write-reserved L1 buffers. It transitions the
+        object from write-locked to read-locked in a single atomic step,
+        preventing a race window where eviction could interfere.
+
+        Args:
+            keys: Keys to transition from write-locked to read-locked.
+
+        Returns:
+            A dictionary mapping each object key to a tuple of
+            (L1Error, Optional[MemoryObj]).
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_IN_WRONG_STATE: The key is not write-locked, or it already
+                has read locks.
+        """
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        successful_keys: list[ObjectKey] = []
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                continue
+
+            if not entry.write_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish_write_and_reserve_read on "
+                    "non-write-locked key %s",
+                    key,
+                )
+                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
+                continue
+
+            if entry.read_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish_write_and_reserve_read on read-locked key %s",
+                    key,
+                )
+                ret[key] = (L1Error.KEY_IN_WRONG_STATE, None)
+                continue
+
+            entry.write_lock.unlock()
+            entry.read_lock.lock()
+            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            successful_keys.append(key)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_write_finished(successful_keys)
+            listener.on_l1_keys_reserved_read(successful_keys)
+        return ret
+
+    @l1_mgr_synchronized
     def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 
@@ -485,14 +545,59 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
-    def clear(self) -> None:
-        """Clear all objects from L1 cache."""
-        all_keys = list(self._objects.keys())
-        all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
-        self._memory_manager.free(all_memory_objs)
-        self._objects.clear()
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_deleted_by_manager(all_keys)
+    def clear(self, force: bool = False) -> None:
+        """Clear objects from L1 cache.
+
+        Args:
+            force: If True, clear ALL objects including locked ones.
+                This may corrupt in-flight store/prefetch operations.
+                If False (default), only clear unlocked objects, keeping
+                write-locked and read-locked objects intact.
+        """
+        if force:
+            logger.warning(
+                "L1Manager: force-clearing all %d objects "
+                "(including locked ones). This may corrupt in-flight "
+                "store/prefetch operations — use with caution.",
+                len(self._objects),
+            )
+            all_keys = list(self._objects.keys())
+            all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            self._memory_manager.free(all_memory_objs)
+            self._objects.clear()
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_deleted_by_manager(all_keys)
+            logger.info(
+                "L1Manager: cleared %d objects, 0 remaining.",
+                len(all_keys),
+            )
+            return
+
+        keys_to_clear: list[ObjectKey] = []
+        objs_to_free: list[MemoryObj] = []
+        locked_count = 0
+
+        for key, entry in list(self._objects.items()):
+            if entry.write_lock.is_locked() or entry.read_lock.is_locked():
+                locked_count += 1
+                continue
+            keys_to_clear.append(key)
+            objs_to_free.append(entry.memory_obj)
+
+        for key in keys_to_clear:
+            del self._objects[key]
+
+        self._memory_manager.free(objs_to_free)
+
+        if keys_to_clear:
+            for listener in self._registered_listeners:
+                listener.on_l1_keys_deleted_by_manager(keys_to_clear)
+
+        logger.info(
+            "L1Manager: cleared %d objects, %d locked objects remaining.",
+            len(keys_to_clear),
+            locked_count,
+        )
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
