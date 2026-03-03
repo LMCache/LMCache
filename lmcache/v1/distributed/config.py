@@ -29,9 +29,6 @@ class L1MemoryManagerConfig:
     use_lazy: bool
     """ Whether to use lazy initialization for L1 memory. """
 
-    use_page: bool = field(default=False)
-    """ Whether to use page-aligned memory allocation. Default is False. """
-
     init_size_in_bytes: int = field(default=20 << 30)
     """ The initial size when using lazy allocation. Default is 20GB. """
 

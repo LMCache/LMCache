@@ -19,7 +19,7 @@ import torch
 nixl = pytest.importorskip("nixl")
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import L1MemoryDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.config import (  # noqa: E402
     NixlStoreL2AdapterConfig,
 )
@@ -58,17 +58,20 @@ def create_memory_obj(
     buffer: torch.Tensor,
     page_index: int,
     fill_value: float = 1.0,
+    num_pages: int = 1,
 ) -> TensorMemoryObj:
-    """Create a TensorMemoryObj that references a page in the registered buffer.
+    """Create a TensorMemoryObj that references page(s) in the registered buffer.
 
     Args:
         buffer: The flat uint8 buffer registered with NIXL.
-        page_index: Which page in the buffer this object occupies.
+        page_index: Starting page in the buffer this object occupies.
         fill_value: Value to fill the tensor with.
+        num_pages: Number of contiguous pages this object spans.
     """
+    obj_size = PAGE_SIZE * num_pages
     start = page_index * PAGE_SIZE
-    end = start + PAGE_SIZE
-    num_floats = PAGE_SIZE // 4
+    end = start + obj_size
+    num_floats = obj_size // 4
 
     raw_data = buffer[start:end].view(torch.float32)
     raw_data.fill_(fill_value)
@@ -76,8 +79,8 @@ def create_memory_obj(
     metadata = MemoryObjMetadata(
         shape=torch.Size([num_floats]),
         dtype=torch.float32,
-        address=page_index,
-        phy_size=PAGE_SIZE,
+        address=page_index * PAGE_SIZE,
+        phy_size=obj_size,
         fmt=MemoryFormat.KV_2LTD,
         ref_count=1,
     )
@@ -116,20 +119,21 @@ def adapter():
     """
     tmp_dir = tempfile.mkdtemp(prefix="nixl_l2_test_")
 
+    # Allocate a contiguous CPU buffer first so we can pass it to the adapter
+    buffer = torch.empty(PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu")
+
+    l1_memory = L1MemoryDesc(
+        ptr=buffer.data_ptr(),
+        size=buffer.numel(),
+        align_bytes=PAGE_SIZE,
+    )
+
     config = NixlStoreL2AdapterConfig(
         backend="POSIX",
         backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
         pool_size=POOL_SIZE,
     )
-    adapter = NixlStoreL2Adapter(config)
-
-    # Allocate a contiguous CPU buffer and register it with NIXL
-    buffer = torch.empty(PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu")
-    adapter.lazy_init_memory(
-        buffer_ptr=buffer.data_ptr(),
-        buffer_size=buffer.numel(),
-        page_size=PAGE_SIZE,
-    )
+    adapter = NixlStoreL2Adapter(config, l1_memory)
 
     yield adapter, buffer
 
@@ -582,6 +586,45 @@ class TestEndToEndWorkflow:
         # Step 4: Unlock
         adpt.submit_unlock([key])
 
+    def test_multi_page_object_workflow(self, adapter):
+        """Test store-lookup-load with an object spanning multiple pages."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        num_pages = 3
+
+        store_fd = adpt.get_store_event_fd()
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+        load_fd = adpt.get_load_event_fd()
+
+        # Store a 3-page object starting at page 0
+        store_obj = create_memory_obj(
+            buf, page_index=0, fill_value=77.0, num_pages=num_pages
+        )
+        store_task_id = adpt.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        completed = adpt.pop_completed_store_tasks()
+        assert completed[store_task_id] is True
+
+        # Lookup
+        lookup_task_id = adpt.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
+        assert lookup_bitmap.test(0) is True
+
+        # Load into pages 10..12 (initially 0.0)
+        load_obj = create_memory_obj(
+            buf, page_index=10, fill_value=0.0, num_pages=num_pages
+        )
+        load_task_id = adpt.submit_load_task([key], [load_obj])
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+        load_bitmap = adpt.query_load_result(load_task_id)
+        assert load_bitmap.test(0) is True
+
+        # All 3 pages should contain 77.0
+        assert torch.all(load_obj.raw_data == 77.0)
+
+        adpt.submit_unlock([key])
+
     def test_multiple_objects_workflow(self, adapter):
         """Test workflow with multiple objects."""
         adpt, buf = adapter
@@ -634,21 +677,20 @@ class TestCloseInterface:
     def test_close_does_not_raise(self):
         """close() should not raise an exception."""
         tmp_dir = tempfile.mkdtemp(prefix="nixl_l2_close_test_")
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
         config = NixlStoreL2AdapterConfig(
             backend="POSIX",
             backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
             pool_size=POOL_SIZE,
         )
-        adpt = NixlStoreL2Adapter(config)
-
-        buffer = torch.empty(
-            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
-        )
-        adpt.lazy_init_memory(
-            buffer_ptr=buffer.data_ptr(),
-            buffer_size=buffer.numel(),
-            page_size=PAGE_SIZE,
-        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
 
         # Should not raise
         adpt.close()
@@ -657,21 +699,21 @@ class TestCloseInterface:
     def test_close_after_operations(self):
         """close() should work after store/lookup/load operations."""
         tmp_dir = tempfile.mkdtemp(prefix="nixl_l2_close_ops_test_")
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            device_id=0,
+            align_bytes=PAGE_SIZE,
+        )
         config = NixlStoreL2AdapterConfig(
             backend="POSIX",
             backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
             pool_size=POOL_SIZE,
         )
-        adpt = NixlStoreL2Adapter(config)
-
-        buffer = torch.empty(
-            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
-        )
-        adpt.lazy_init_memory(
-            buffer_ptr=buffer.data_ptr(),
-            buffer_size=buffer.numel(),
-            page_size=PAGE_SIZE,
-        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
 
         key = create_object_key(1)
         obj = create_memory_obj(buffer, page_index=0)

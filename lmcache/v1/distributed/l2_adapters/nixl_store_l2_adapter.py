@@ -16,18 +16,14 @@ from nixl._api import nixl_xfer_handle as NixlXferHandle
 from nixl._api import (
     nixlBind,
 )
-import torch
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import L1MemoryDesc, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import NixlStoreL2AdapterConfig
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -41,14 +37,12 @@ class NixlStoreObj:
     Can be used for both file and object.
     """
 
-    page_index: int
+    page_indices: list[int]
 
     size: int  # in bytes
 
-    shape: Optional[torch.Size] = None
-    dtype: Optional[torch.dtype] = None
+    layout: Optional[MemoryLayoutDesc] = None
 
-    fmt: Optional[MemoryFormat] = None
     pin_count: int = 0
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
@@ -64,8 +58,8 @@ class NixlStoreObj:
                 self.pin_count -= 1
             else:
                 logger.warning(
-                    "Trying to decrease pin count of object at page index %d below 0",
-                    self.page_index,
+                    "Trying to decrease pin count of object at page indices %s below 0",
+                    self.page_indices,
                 )
 
 
@@ -99,42 +93,26 @@ class NixlStorageAgent:
         backend: str,
         backend_params: dict[str, str],
         pool_size: int,
+        l1_memory: L1MemoryDesc,
     ):
         self.backend = backend
         self.pool_size = pool_size
         self.device = device
         self.backend_params = backend_params
 
+        self.l1_align_bytes = l1_memory.align_bytes
+
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
         self.nixl_agent.create_backend(backend, backend_params)
 
-    def lazy_init_memory(
-        self,
-        **kwargs,
-    ):
-        """
-        Lazy initialize memory handlers when the memory buffer is ready.
-
-        """
-
-        assert "buffer_ptr" in kwargs, (
-            "buffer_ptr is required for lazy memory initialization"
-        )
-        assert "buffer_size" in kwargs, (
-            "buffer_size is required for lazy memory initialization"
-        )
-        assert "page_size" in kwargs, (
-            "page_size is required for lazy memory initialization"
-        )
-        buffer_ptr = kwargs["buffer_ptr"]
-        buffer_size = kwargs["buffer_size"]
-        page_size = kwargs["page_size"]
-
-        device_id = kwargs.get("device_id", 0)
         self.init_mem_handlers(
-            self.device, buffer_ptr, buffer_size, page_size, device_id
+            self.device,
+            l1_memory.ptr,
+            l1_memory.size,
+            l1_memory.align_bytes,
+            device_id=0,  # 0 indicates cpu
         )
 
         self.pool = NixlObjPool(num_total_objs=self.pool_size)
@@ -148,7 +126,7 @@ class NixlStorageAgent:
 
             self.init_storage_handlers_file(
                 num_pages=self.pool_size,
-                page_size=page_size,
+                page_size=l1_memory.align_bytes,
                 file_path=self.backend_params["file_path"],
                 # TODO(Jiayi): Need to make argument parsing more elegant
                 use_direct_io=str(self.backend_params["use_direct_io"]).lower()
@@ -156,7 +134,7 @@ class NixlStorageAgent:
             )
         elif self.backend in ["OBJ"]:
             self.init_storage_handlers_object(
-                page_size=page_size,
+                page_size=l1_memory.align_bytes,
                 num_pages=self.pool_size,
             )
         else:
@@ -313,6 +291,23 @@ class NixlStorageAgent:
     def get_storage_indices(self, num_objs: int) -> list[int]:
         return self.pool.batched_allocate(num_objs)
 
+    def get_memory_indices(self, raw_addr: int, mem_size: int) -> list[int]:
+        """Get memory indices for the given raw address and size."""
+        # TODO(Jiayi): Now we assume the memory is contiguous and page-aligned. We may
+        # want to support more flexible memory layout in the future.
+        if raw_addr % self.l1_align_bytes != 0:
+            raise ValueError(
+                f"Raw address {raw_addr} is not aligned to "
+                f"page size {self.l1_align_bytes}"
+            )
+        if mem_size % self.l1_align_bytes != 0:
+            raise ValueError(
+                f"Memory size {mem_size} is not a multiple of "
+                f"page size {self.l1_align_bytes}"
+            )
+        num_pages = mem_size // self.l1_align_bytes
+        return [(raw_addr // self.l1_align_bytes + i) for i in range(num_pages)]
+
     def release_handle(self, handle):
         self.nixl_agent.release_xfer_handle(handle)
 
@@ -328,7 +323,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     A Nixl-based L2 adapter
     """
 
-    def __init__(self, config: NixlStoreL2AdapterConfig):
+    def __init__(self, config: NixlStoreL2AdapterConfig, l1_memory: L1MemoryDesc):
         self._config = config
 
         self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
@@ -356,13 +351,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             backend=config.backend,
             backend_params=config.backend_params,
             pool_size=config.pool_size,
+            l1_memory=l1_memory,
         )
-
-    #####################
-    # Memory Registration Interface
-    #####################
-    def lazy_init_memory(self, **kwargs) -> None:
-        self.nixl_agent.lazy_init_memory(**kwargs)
 
     # --------------------
     # Event Fd Interface
@@ -539,23 +529,35 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         success = True
         try:
             # Get memory page indices and storage slot indices
-            mem_indices = [obj.meta.address for obj in objects]
-            storage_indices = self.nixl_agent.get_storage_indices(num_objs=len(keys))
-            storage_objs = [
-                NixlStoreObj(
-                    page_index=storage_idx,
-                    size=obj.meta.phy_size,
-                    shape=obj.meta.shape,
-                    dtype=obj.meta.dtype,
-                    fmt=obj.meta.fmt,
-                    pin_count=1,
+            mem_indices_flat = []
+            storage_indices_flat = []
+            storage_objs = []
+            for key, obj in zip(keys, objects, strict=False):
+                mem_addr = obj.meta.address
+                mem_size = obj.meta.phy_size
+                mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
+                storage_indices = self.nixl_agent.get_storage_indices(
+                    num_objs=len(mem_indices)
                 )
-                for storage_idx, obj in zip(storage_indices, objects, strict=False)
-            ]
+
+                mem_indices_flat.extend(mem_indices)
+                storage_indices_flat.extend(storage_indices)
+
+                storage_objs.append(
+                    NixlStoreObj(
+                        page_indices=storage_indices,
+                        size=obj.meta.phy_size,
+                        layout=MemoryLayoutDesc(
+                            [obj.meta.shape],
+                            [obj.meta.dtype],
+                        ),
+                        pin_count=1,
+                    )
+                )
 
             handle = self.nixl_agent.get_mem_to_storage_handle(
-                mem_indices,
-                storage_indices,
+                mem_indices_flat,
+                storage_indices_flat,
             )
 
             await self.nixl_agent.post_non_blocking(handle)
@@ -604,24 +606,29 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     ) -> None:
         bitmap = Bitmap(len(keys))
         try:
-            mem_indices = []
-            storage_indices = []
+            mem_indices_flat = []
+            storage_indices_flat = []
 
             with self._lock:
                 for i, key in enumerate(keys):
                     if (storage_obj := self._memory_objects.get(key)) is None:
                         continue
-                    mem_indices.append(objects[i].meta.address)
-                    storage_indices.append(storage_obj.page_index)
+                    mem_addr = objects[i].meta.address
+                    mem_size = objects[i].meta.phy_size
+                    mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
+
+                    mem_indices_flat.extend(mem_indices)
+                    storage_indices_flat.extend(storage_obj.page_indices)
 
                     bitmap.set(i)
 
-            if mem_indices:
+            if mem_indices_flat:
                 handle = self.nixl_agent.get_storage_to_mem_handle(
-                    mem_indices,
-                    storage_indices,
+                    mem_indices_flat,
+                    storage_indices_flat,
                 )
                 await self.nixl_agent.post_non_blocking(handle)
+                self.nixl_agent.release_handle(handle)
         except Exception as e:
             logger.warning("NIXL load failed: %s", e)
 

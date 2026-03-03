@@ -11,10 +11,8 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
-    MemoryFormat,
     MemoryObj,
     MixedMemoryAllocator,
-    PagedCpuMemoryAllocator,
 )
 
 logger = init_logger(__name__)
@@ -32,23 +30,13 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
     if config.use_lazy:
-        assert not config.use_page, (
-            "Page mem allocator is not supported with lazy initialization."
-        )
         return LazyMemoryAllocator(
             config.init_size_in_bytes, config.size_in_bytes, config.align_bytes
         )
-    elif config.use_page:
-        logger.warning(
-            "PagedCpuMemoryAllocator does not support explicit alignment configuration."
-        )
-        return PagedCpuMemoryAllocator(config.size_in_bytes)
     else:
-        logger.warning(
-            "MixedMemoryAllocator does not support explicit alignment configuration."
-        )
         return MixedMemoryAllocator(
             config.size_in_bytes,
+            align_bytes=config.align_bytes,
         )
 
 
@@ -65,47 +53,6 @@ class L1MemoryManager:
     def __init__(self, config: L1MemoryManagerConfig):
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
-        if isinstance(self._allocator, PagedCpuMemoryAllocator):
-            self._memory_initialized = False
-        else:
-            self._memory_initialized = True
-
-    def lazy_init_memory(
-        self,
-        shapes: list[torch.Size],
-        dtypes: list[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ) -> None:
-        """
-        Lazily initialize the underlying memory allocator with KV cache
-        shape and dtype information. This is only needed for paged allocators
-        (PagedCpuMemoryAllocator, PagedCpuMemoryAllocator) whose CPU
-        memory cannot be allocated until shapes/dtypes are known.
-
-        This method is idempotent — repeated calls after the first are no-ops.
-
-        Args:
-            shapes: KV cache tensor shapes.
-            dtypes: KV cache tensor dtypes.
-            fmt: Memory format. Default is KV_2LTD.
-        """
-        if self._memory_initialized:
-            return
-
-        if isinstance(self._allocator, PagedCpuMemoryAllocator):
-            self._allocator.init_cpu_memory_allocator(
-                self._size_in_bytes, shapes, dtypes, fmt
-            )
-            logger.info(
-                "Lazily initialized CPU memory for %s "
-                "(size=%d bytes, shapes=%s, dtypes=%s)",
-                self._allocator,
-                self._size_in_bytes,
-                shapes,
-                dtypes,
-            )
-
-        self._memory_initialized = True
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -161,8 +108,6 @@ class L1MemoryManager:
         """
         if isinstance(self._allocator, MixedMemoryAllocator):
             return self._allocator.buffer
-        elif isinstance(self._allocator, PagedCpuMemoryAllocator):
-            return self._allocator.cpu_buffer
         elif isinstance(self._allocator, LazyMemoryAllocator):
             # TODO(ApostaC): need to test if the RDMA registration works
             # before the lazy expansion is finished
@@ -186,9 +131,6 @@ class L1MemoryManager:
             trigger eviction when the memory usage reaches a watermark.
         """
 
-        if not self._memory_initialized:
-            return 0, 0
-
         # HACK: now trying to read this from the address manager in a ad-hoc
         # manner
         def get_address_manager(allocator: MemoryAllocatorInterface):
@@ -198,8 +140,6 @@ class L1MemoryManager:
                 return allocator.pin_allocator.address_manager
             elif isinstance(allocator, LazyMemoryAllocator):
                 return allocator.get_address_manager()
-            elif isinstance(allocator, PagedCpuMemoryAllocator):
-                return allocator.allocator.address_manager
             else:
                 raise NotImplementedError(
                     "get_memory_usage is not implemented for this allocator type."
