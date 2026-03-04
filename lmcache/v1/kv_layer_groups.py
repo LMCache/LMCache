@@ -173,7 +173,9 @@ class KVLayerGroupsManager:
         )
 
         for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
-            # Normalize to iterable
+            # Normalize kv_cache to iterable. Supports:
+            # - GPU (CUDA): A single tensor.
+            # - TPU/HPU: A tuple/list (e.g., (k, v, k_scale, v_scale)).
             tensors = kv_cache if isinstance(kv_cache, (tuple, list)) else [kv_cache]
 
             # Find the first non-None tensor
