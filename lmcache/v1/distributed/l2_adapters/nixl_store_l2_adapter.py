@@ -20,7 +20,8 @@ from nixl._api import (
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import L1MemoryDesc, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import NixlStoreL2AdapterConfig
 from lmcache.v1.memory_management import MemoryObj
@@ -64,19 +65,44 @@ class NixlStoreObj:
 
 
 class NixlObjPool:
+    """Thread-safe pool of integer indices representing pre-allocated storage slots."""
+
     def __init__(self, num_total_objs: int):
+        """
+        Args:
+            num_total_objs: Total number of storage slots to manage.
+        """
         self.indices = list(range(num_total_objs))
         self._lock = threading.Lock()
 
     def batched_allocate(self, num_objs: int) -> list[int]:
+        """
+        Allocate a batch of storage slot indices.
+
+        Args:
+            num_objs: Number of indices to allocate.
+
+        Returns:
+            list[int]: The allocated indices.
+
+        Raises:
+            RuntimeError: If fewer than ``num_objs`` slots remain in the pool.
+        """
         with self._lock:
             if num_objs > len(self.indices):
-                raise RuntimeError("Not enough objects in the pool")
+                logger.debug("NixlObjPool allocation failure.")
+                return []
             allocated = self.indices[:num_objs]
             self.indices = self.indices[num_objs:]
             return allocated
 
     def batched_free(self, obj_indices: list[int]) -> None:
+        """
+        Return a batch of storage slot indices back to the pool.
+
+        Args:
+            obj_indices: Indices previously obtained from ``batched_allocate``.
+        """
         with self._lock:
             self.indices.extend(obj_indices)
 
@@ -93,14 +119,27 @@ class NixlStorageAgent:
         backend: str,
         backend_params: dict[str, str],
         pool_size: int,
-        l1_memory: L1MemoryDesc,
+        l1_memory_desc: L1MemoryDesc,
     ):
+        """
+        Initialize the NixlStorageAgent.
+
+        Args:
+            device: Device type of the L1 memory buffer (e.g. "cpu", "cuda").
+            backend: Nixl storage backend to use. One of: GDS, GDS_MT, POSIX,
+                HF3FS (file-based) or OBJ (object-based).
+            backend_params: Backend-specific parameters. File-based backends
+                require "file_path" and "use_direct_io" keys.
+            pool_size: Number of storage descriptor slots to pre-allocate.
+            l1_memory_desc: Descriptor of the L1 memory buffer to register with Nixl
+                for data transfers.
+        """
         self.backend = backend
         self.pool_size = pool_size
         self.device = device
         self.backend_params = backend_params
 
-        self.l1_align_bytes = l1_memory.align_bytes
+        self.l1_align_bytes = l1_memory_desc.align_bytes
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
@@ -109,9 +148,9 @@ class NixlStorageAgent:
 
         self.init_mem_handlers(
             self.device,
-            l1_memory.ptr,
-            l1_memory.size,
-            l1_memory.align_bytes,
+            l1_memory_desc.ptr,
+            l1_memory_desc.size,
+            l1_memory_desc.align_bytes,
             device_id=0,  # 0 indicates cpu
         )
 
@@ -119,7 +158,7 @@ class NixlStorageAgent:
         if self.backend in ["GDS", "GDS_MT", "POSIX", "HF3FS"]:
             self.init_storage_handlers_file(
                 num_pages=self.pool_size,
-                page_size=l1_memory.align_bytes,
+                page_size=l1_memory_desc.align_bytes,
                 file_path=self.backend_params["file_path"],
                 # TODO(Jiayi): Need to make argument parsing more elegant
                 use_direct_io=str(self.backend_params["use_direct_io"]).lower()
@@ -127,7 +166,7 @@ class NixlStorageAgent:
             )
         elif self.backend in ["OBJ"]:
             self.init_storage_handlers_object(
-                page_size=l1_memory.align_bytes,
+                page_size=l1_memory_desc.align_bytes,
                 num_pages=self.pool_size,
             )
         else:
@@ -282,6 +321,7 @@ class NixlStorageAgent:
             raise RuntimeError("NIXL transfer failed")
 
     def get_storage_indices(self, num_objs: int) -> list[int]:
+        # TODO(Jiayi): Support eviction
         return self.pool.batched_allocate(num_objs)
 
     def get_memory_indices(self, raw_addr: int, mem_size: int) -> list[int]:
@@ -316,7 +356,16 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     A Nixl-based L2 adapter
     """
 
-    def __init__(self, config: NixlStoreL2AdapterConfig, l1_memory: L1MemoryDesc):
+    def __init__(self, config: NixlStoreL2AdapterConfig, l1_memory_desc: L1MemoryDesc):
+        """
+        Initialize the NixlStoreL2Adapter.
+
+        Args:
+            config: Nixl-specific adapter configuration including backend type,
+                backend parameters, and storage pool size.
+            l1_memory_desc: Descriptor of the L1 memory buffer to register with the
+                Nixl backend for DMA transfers.
+        """
         self._config = config
 
         self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
@@ -344,7 +393,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             backend=config.backend,
             backend_params=config.backend_params,
             pool_size=config.pool_size,
-            l1_memory=l1_memory,
+            l1_memory_desc=l1_memory_desc,
         )
 
     # --------------------
@@ -505,7 +554,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         Evict objects from the cache using desired caching policy.
         """
 
-        # TODO(Jiayi): Support caching policy
+        # TODO(Jiayi): Support eviction
 
         pass
 
@@ -519,6 +568,22 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
+        """
+        Coroutine that performs a batched store to Nixl storage.
+
+        For each key-object pair, memory page indices are mapped to storage
+        slot indices and a single batched DMA write is issued. On success the
+        key-to-storage mapping is recorded in ``_memory_objects``. On transfer
+        failure, all allocated storage slots are freed and the task is marked
+        as failed.
+
+        Args:
+            keys: Keys identifying each object to store.
+            objects: Memory objects whose contents will be written to storage.
+                Must be the same length as ``keys``.
+            task_id: Identifier used to report completion via
+                ``_completed_store_tasks``.
+        """
         success = True
         try:
             # Get memory page indices and storage slot indices
@@ -532,6 +597,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 storage_indices = self.nixl_agent.get_storage_indices(
                     num_objs=len(mem_indices)
                 )
+
+                if storage_indices == []:
+                    break
 
                 mem_indices_flat.extend(mem_indices)
                 storage_indices_flat.extend(storage_indices)
@@ -556,17 +624,20 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             await self.nixl_agent.post_non_blocking(handle)
             self.nixl_agent.release_handle(handle)
 
+            with self._lock:
+                for key, storage_obj in zip(keys, storage_objs, strict=False):
+                    self._memory_objects[key] = storage_obj
+                    storage_obj.decrease_pin_count()
+
+        # success is only set to false for transfer failures
         except Exception:
             success = False
 
+            # free storage indices if transfer fails
+            self.nixl_agent.pool.batched_free(storage_indices_flat)
+
         with self._lock:
-            for key, storage_obj in zip(keys, storage_objs, strict=False):
-                self._memory_objects[key] = storage_obj
-
             self._completed_store_tasks[task_id] = success
-
-        for storage_obj in storage_objs:
-            storage_obj.decrease_pin_count()
 
         self._signal_store_event()
 
@@ -577,6 +648,18 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     def _execute_lookup_in_the_loop(
         self, keys: list[ObjectKey], task_id: L2TaskId
     ) -> None:
+        """
+        Performs a batched lookup and pin in the event loop.
+
+        For each key present in ``_memory_objects``, its bit is set in the
+        result bitmap and its pin count is incremented to prevent eviction
+        while the caller holds the lock. Keys not found are left unset.
+
+        Args:
+            keys: Keys to look up.
+            task_id: Identifier used to report completion via
+                ``_completed_lookup_tasks``.
+        """
         bitmap = Bitmap(len(keys))
         with self._lock:
             for i, key in enumerate(keys):
@@ -597,6 +680,21 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
+        """
+        Coroutine that performs a batched load from Nixl storage into L1 memory.
+
+        For each key that exists in ``_memory_objects``, the corresponding
+        storage page indices are gathered and a single batched DMA read is
+        issued into the provided memory objects. Keys that are not found are
+        silently skipped and their bit in the result bitmap is left unset.
+
+        Args:
+            keys: Keys identifying each object to load.
+            objects: Pre-allocated memory objects that will receive the loaded
+                data. Must be the same length as ``keys``.
+            task_id: Identifier used to report completion via
+                ``_completed_load_tasks``.
+        """
         bitmap = Bitmap(len(keys))
         try:
             mem_indices_flat = []

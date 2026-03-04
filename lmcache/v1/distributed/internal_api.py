@@ -12,6 +12,17 @@ import enum
 from lmcache.v1.distributed.api import ObjectKey
 
 
+@dataclass(frozen=True)
+class L1MemoryDesc:
+    """
+    Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+    """
+
+    ptr: int
+    size: int
+    align_bytes: int
+
+
 class EventListener(ABC):  # noqa: B024
     pass
 

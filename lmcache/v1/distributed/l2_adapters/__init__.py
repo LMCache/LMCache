@@ -6,7 +6,7 @@ Provides ``create_l2_adapter`` to instantiate an L2 adapter from its config.
 """
 
 # First Party
-from lmcache.v1.distributed.api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -45,7 +45,9 @@ def create_l2_adapter(
 
     if isinstance(config, NixlStoreL2AdapterConfig):
         if l1_memory_desc is None:
-            raise ValueError("l1_memory is required to create a NixlStoreL2Adapter.")
+            raise ValueError(
+                "l1_memory_desc is required to create a NixlStoreL2Adapter."
+            )
         return NixlStoreL2Adapter(config, l1_memory_desc)
 
     raise ValueError(

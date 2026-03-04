@@ -99,15 +99,6 @@ class ObjectKey:
 
 
 @dataclass(frozen=True)
-class L1MemoryDesc:
-    """Describes the L1 memory buffer registered with Nixl."""
-
-    ptr: int
-    size: int
-    align_bytes: int
-
-
-@dataclass(frozen=True)
 class MemoryLayoutDesc:
     """
     Describes the layout of a memory object
