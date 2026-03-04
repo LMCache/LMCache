@@ -7,6 +7,7 @@
 from enum import Enum, IntEnum
 from multiprocessing import shared_memory
 from pathlib import Path
+from typing import Optional
 import ctypes
 import subprocess
 
@@ -19,6 +20,20 @@ import torch
 _tensor_registry: dict[int, torch.Tensor] = {}
 _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
+
+# Cached copy library for lmcache_memcpy_async (lazy-initialized)
+_copy_lib: Optional[ctypes.CDLL] = None
+
+
+def _get_copy_lib() -> Optional[ctypes.CDLL]:
+    """Lazily load and cache the CUDA runtime library, or None for CPU fallback."""
+    global _copy_lib
+    if _copy_lib is None:
+        try:
+            _copy_lib = ctypes.CDLL("libcudart.so")
+        except OSError:
+            pass
+    return _copy_lib
 
 
 class TransferDirection(Enum):
@@ -46,24 +61,25 @@ class GPUKVFormat(IntEnum):
     NL_X_NBBS_ONE_HS = 5
 
 
-def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
-    """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
-    Note: NUMA and pinned memory are not supported on non-CUDA."""
-
-    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0)
+def _alloc_cpu_ptr(size: int) -> int:
+    """Allocate a zeroed CPU tensor and register it; return its data pointer."""
+    # Create a zeroed 1D uint8 CPU tensor (uint8 == 1 byte)
+    tensor = torch.zeros(size, dtype=torch.uint8, pin_memory=False)
 
     # Get a pointer to the start of the tensor object as this is what is
     # returned by the CUDA equivalent function
     ptr = tensor.data_ptr()
 
-    # Store the tensor so it can be accessed outide this function scope
+    # Store the tensor so it can be accessed outside this function scope
     _tensor_registry[ptr] = tensor
 
     return ptr
+
+
+def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
+    """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
+    Note: NUMA and pinned memory are not supported on non-CUDA."""
+    return _alloc_cpu_ptr(size)
 
 
 def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
@@ -76,21 +92,7 @@ def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
 def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory and returning pointer
     to it. Note: Pinned memory is not supported on non-CUDA."""
-
-    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0)
-
-    # Get a pointer to the start of the tensor object as this is what is
-    # returned by the CUDA equivalent function
-    ptr = tensor.data_ptr()
-
-    # Store the tensor so it can be accessed outide this function scope
-    _tensor_registry[ptr] = tensor
-
-    return ptr
+    return _alloc_cpu_ptr(size)
 
 
 def free_pinned_ptr(ptr: int) -> None:
@@ -113,7 +115,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
             stale = shared_memory.SharedMemory(name=name, create=False)
             stale.close()
             stale.unlink()
-        except FileNotFoundError:
+        except OSError:
             pass
 
     shm = shared_memory.SharedMemory(name=name, create=True, size=size)
@@ -524,15 +526,16 @@ def single_layer_kv_transfer_sgl(
     """
 
     # 1. Get basic dimensions
-    num_tokens = slot_mapping.size(0)
     block_size = sgl_key_cache.size(1)
     num_heads = sgl_key_cache.size(2)
     head_size = sgl_key_cache.size(3)
 
     # 2. Calculate block indices and offsets within the blocks from slot_mapping
     # In SGLang/vLLM, slot_idx = block_idx * block_size + block_offset
-    block_indices = slot_mapping // block_size
-    block_offsets = slot_mapping % block_size
+    valid_mask = slot_mapping >= 0
+    valid_slots = slot_mapping[valid_mask]
+    block_indices = valid_slots // block_size
+    block_offsets = valid_slots % block_size
 
     # 3. Prepare LMCache views for K and V
     if token_major:
@@ -548,8 +551,8 @@ def single_layer_kv_transfer_sgl(
     if direction == TransferDirection.H2D:
         # --- Direction: LMCache to SGLang (Paged Buffer) ---
         # Reshape LMC flat tensors to match SGL [num_heads, head_size]
-        src_k_reshaped = lmc_k.view(num_tokens, num_heads, head_size)
-        src_v_reshaped = lmc_v.view(num_tokens, num_heads, head_size)
+        src_k_reshaped = lmc_k[valid_mask].view(-1, num_heads, head_size)
+        src_v_reshaped = lmc_v[valid_mask].view(-1, num_heads, head_size)
 
         # Advanced indexing: update specific slots in the paged cache
         sgl_key_cache[block_indices, block_offsets] = src_k_reshaped
@@ -562,8 +565,8 @@ def single_layer_kv_transfer_sgl(
         sampled_v = sgl_value_cache[block_indices, block_offsets]
 
         # Flatten the head dimensions and copy into LMC tensors
-        lmc_k.copy_(sampled_k.reshape(num_tokens, -1))
-        lmc_v.copy_(sampled_v.reshape(num_tokens, -1))
+        lmc_k[valid_mask] = sampled_k.reshape(-1, num_heads * head_size)
+        lmc_v[valid_mask] = sampled_v.reshape(-1, num_heads * head_size)
 
 
 def load_and_reshape_flash(
@@ -679,7 +682,9 @@ def lmcache_memcpy_async(
     handling GPU pointers via libcudart.
     """
     # 1. Power of two check (as in C++)
-    if host_buffer_alignments & (host_buffer_alignments - 1) != 0:
+    if host_buffer_alignments <= 0 or (
+        host_buffer_alignments & (host_buffer_alignments - 1) != 0
+    ):
         raise ValueError("host_buffer_alignments must be power of two")
 
     # 2. Get direction value
@@ -694,12 +699,7 @@ def lmcache_memcpy_async(
 
     # 3. Load CUDA runtime library
     # We must use the C library to handle these raw pointers
-    try:
-        libcudart = ctypes.CDLL("libcudart.so")
-    except OSError:
-        # Fallback to libc if CUDA is absolutely not there,
-        # though this will segfault if pointers are GPU pointers
-        libcudart = ctypes.CDLL("libc.so.6")
+    libcudart = _get_copy_lib()
 
     # 4. Pointer arithmetic and aligned copy loop
     offset = 0
@@ -721,7 +721,7 @@ def lmcache_memcpy_async(
 
         # Use cudaMemcpy if available (supports GPU pointers)
         # Note: We use synchronous cudaMemcpy for the fallback to ensure completion
-        if hasattr(libcudart, "cudaMemcpy"):
+        if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
             ret = libcudart.cudaMemcpy(
                 ctypes.c_void_p(current_dest),
                 ctypes.c_void_p(current_src),
@@ -729,18 +729,18 @@ def lmcache_memcpy_async(
                 ctypes.c_int(cuda_kind),
             )
             if ret != 0:
-                # If CUDA call fails, we try libc as a last resort
-                libcudart.memmove(
+                # If CUDA call fails, we try ctypes.memmove as a last resort
+                ctypes.memmove(
                     ctypes.c_void_p(current_dest),
                     ctypes.c_void_p(current_src),
-                    ctypes.c_size_t(max_nbytes),
+                    int(max_nbytes),
                 )
         else:
             # Fallback for CPU-only pointers
-            libcudart.memmove(
+            ctypes.memmove(
                 ctypes.c_void_p(current_dest),
                 ctypes.c_void_p(current_src),
-                ctypes.c_size_t(max_nbytes),
+                int(max_nbytes),
             )
 
         offset += max_nbytes
@@ -846,7 +846,9 @@ def decode_fast_new(cdf, bytestreams, lengths, output):
     Python implementation of Arithmetic Decoding.
     Strictly aligned with CUDA decode_with_accessor_kernel.
     """
-    cdf_np = cdf.cpu().numpy().astype(np.uint16)
+    # Reinterpret raw bytes of cdf as uint16 bit-patterns, then widen to uint32
+    # for arithmetic. This matches encode_fast_new and decode_fast_prefsum.
+    cdf_np = cdf.cpu().numpy().view(np.uint16).astype(np.uint32)
     bs_np = bytestreams.cpu().numpy().astype(np.uint8)
     len_np = lengths.cpu().numpy().astype(np.int32)
 
@@ -887,7 +889,10 @@ def decode_fast_new(cdf, bytestreams, lengths, output):
             current_cdf_slice = cdf_np[layer_idx, c]
             for i in range(n_tokens):
                 # Calculate span and count for symbol search
-                span = int(h_val) - int(l_val) + 1
+                MASK32 = 0xFFFFFFFF
+                span = (int(h_val) - int(l_val) + 1) & MASK32
+                if span == 0:
+                    span = 0x100000000  # 2^32
                 v_minus_l = uint32_val(v_val - l_val)
                 count = ((int(v_minus_l) + 1) * 65536 - 1) // span
                 count = int(count & 0xFFFF)
@@ -1060,7 +1065,7 @@ def calculate_cdf(input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:
     Equivalent to CUDA calculate_cdf.
     Input: Expects a 3D tensor (e.g., [1, N, 1]).
     num_bins: Total number of bins (max_val + 1).
-    Returns: Tensor of length (num_bins) with CDF values.
+    Returns: Tensor of length (num_bins + 1) with CDF values.
     """
     # Force flattening to match bincount expectation
     flat_input = input_tensor.flatten().long()
@@ -1082,8 +1087,28 @@ def calculate_cdf(input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:
 
 
 def rotary_embedding_k_fused(
-    old_positions, new_positions, key, head_size, cos_sin_cache, is_neox
-):
+    old_positions: torch.Tensor,
+    new_positions: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    """Apply fused rotary embedding undo/redo to key tensor in-place.
+
+    Reverses the rotary embedding at old_positions and applies the rotary
+    embedding at new_positions. head_size is unused but kept for API
+    compatibility with the CUDA equivalent.
+
+    Args:
+        old_positions: Token positions whose rotary embedding to reverse.
+        new_positions: Token positions whose rotary embedding to apply.
+        key: Key tensor to update in-place.
+        head_size: Head size (unused; kept for API compatibility).
+        cos_sin_cache: Precomputed cosine/sine cache indexed by position.
+        is_neox: If True, uses NeoX-style rotary (contiguous halves);
+            otherwise uses GPT-J-style (interleaved).
+    """
     rot_dim = cos_sin_cache.shape[1]
     half_rot = rot_dim // 2
 
@@ -1155,21 +1180,22 @@ def get_gpu_pci_bus_id(device_id: int = 0, keyword: str = "NVIDIA") -> str | Non
     matching_devices = []
     target_device_ids = parse_pci_ids(keyword)
 
-    for dev in pci_base.iterdir():
-        try:
-            vendor_file = dev / "vendor"
-            if not vendor_file.exists():
+    if pci_base.exists():
+        for dev in pci_base.iterdir():
+            try:
+                vendor_file = dev / "vendor"
+                if not vendor_file.exists():
+                    continue
+                vendor_id_hex = int(vendor_file.read_text().strip(), 16)
+                if not target_device_ids or vendor_id_hex in target_device_ids:
+                    addr = dev.name
+                    # Ensure full format "0000:BB:DD.F"
+                    parts = addr.split(":")
+                    if len(parts) == 2:  # short format
+                        addr = "0000:" + addr
+                    matching_devices.append(addr)
+            except Exception:
                 continue
-            vendor_id_hex = int(vendor_file.read_text().strip(), 16)
-            if not target_device_ids or vendor_id_hex in target_device_ids:
-                addr = dev.name
-                # Ensure full format "0000:BB:DD.F"
-                parts = addr.split(":")
-                if len(parts) == 2:  # short format
-                    addr = "0000:" + addr
-                matching_devices.append(addr)
-        except Exception:
-            continue
 
     # Sort by bus number to guarantee stable device order
     def pci_key(addr: str) -> int:
@@ -1208,7 +1234,7 @@ def get_gpu_pci_bus_id(device_id: int = 0, keyword: str = "NVIDIA") -> str | Non
         if device_id < len(lspci_addrs):
             addr = lspci_addrs[device_id]
             return addr.upper()
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.CalledProcessError):
         return None
 
     return None
