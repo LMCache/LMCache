@@ -22,6 +22,8 @@ docker1:
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
     - "LMCACHE_SAVE_UNFULL_CHUNK=False"
     - "PYTHONHASHSEED=123"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
   pull-port: 8300
   reply-port: 8400
 
@@ -40,6 +42,8 @@ docker2:
     - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
     - "LMCACHE_SAVE_UNFULL_CHUNK=False"
     - "PYTHONHASHSEED=123"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
   pull-port: 8300
   reply-port: 8400
 

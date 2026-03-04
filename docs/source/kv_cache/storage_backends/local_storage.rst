@@ -24,7 +24,7 @@ Two ways to configure LMCache Disk Offloading:
     # Otherwise, enable by setting the directory where LMCache will
     # create files for each KV cache chunks
     # (this directory does NOT need to exist beforehand)
-    export LMCACHE_LOCAL_DISK="file:///local/disk_test/local_disk/"
+    export LMCACHE_LOCAL_DISK="file://$HOME/local/disk_test/local_disk/"
     # 5GB of Disk
     export LMCACHE_MAX_LOCAL_DISK_SIZE=5.0
 
@@ -387,6 +387,11 @@ If you look at the logs of your vLLM server, you should see (the logs are trunca
     LMCache INFO: Reqid: chatcmpl-136d9dac1ba94bd4b4ae85007e8ad437, Total tokens 15410,
     LMCache hit tokens: 15409, need to load: 1
 
+Check out your KV Cache in your SSD:
+
+.. code-block:: bash
+
+    ls "$HOME/local/disk_test/local_disk/"
 
 .. _local-storage-tips:
 
