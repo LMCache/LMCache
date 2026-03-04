@@ -1097,6 +1097,7 @@ def scenario_multi_layer_kv_transfer():
     # ── Format-specific test cases ──
     # Each: (gpu_kv_format, is_mla, block_size_arg)
     format_cases = [
+        (ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS, False, 1),  # vLLM cross layer
         (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, 1),  # flash attn
         (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, block_size),  # flash infer
         (ops.GPUKVFormat.NL_X_NB_BS_HS, True, 1),  # vLLM MLA
@@ -1143,6 +1144,7 @@ def scenario_multi_layer_kv_transfer():
                         device=device,
                     )
                 else:
+                    # Handles NB_NL_TWO_BS_NH_HS and NL_X_TWO_NB_BS_NH_HS
                     pb = torch.zeros(
                         (2, page_buffer_size, head_size),
                         dtype=dtype,
@@ -1165,6 +1167,7 @@ def scenario_multi_layer_kv_transfer():
                             elif is_mla:
                                 pb[s] = val
                             else:
+                                # Handles NB_NL_TWO_BS_NH_HS and NL_X_TWO_NB_BS_NH_HS
                                 pb[kv, s] = val
 
                 page_buffers.append(pb)
@@ -1207,6 +1210,7 @@ def scenario_multi_layer_kv_transfer():
                         elif is_mla:
                             paged_val = page_buffers[ly][s_idx]
                         else:
+                            # Handles NB_NL_TWO_BS_NH_HS and NL_X_TWO_NB_BS_NH_HS
                             paged_val = page_buffers[ly][kv, s_idx]
 
                         torch.testing.assert_close(
