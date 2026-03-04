@@ -115,6 +115,7 @@ from-first = true
 
 [tool.mypy]
 
+platform = "linux"
 modules = ["lmcache", "tests", "benchmarks"]
 
 disable_error_code = [
