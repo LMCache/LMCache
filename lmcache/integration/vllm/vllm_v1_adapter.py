@@ -224,7 +224,13 @@ class RequestTracker:
         elif isinstance(new_block_ids, tuple):
             new_block_ids = new_block_ids[0]
         elif isinstance(new_block_ids, list):
-            pass
+            # If input is a list, flatten it to handle potential nesting.
+            # This also correctly processes already-flat lists.
+            new_block_ids = [
+                i
+                for elem in new_block_ids
+                for i in (elem if isinstance(elem, list) else [elem])
+            ]
         else:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
 
