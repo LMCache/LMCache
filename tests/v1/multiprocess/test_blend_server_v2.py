@@ -981,6 +981,139 @@ def test_cb_lookup_v2_cannot_find_normal_store(
     )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CB Lookup V2 multiple chunks aligned requires CUDA",
+)
+def test_cb_lookup_v2_multiple_chunks_found(
+    client: MessageQueueClient,
+    cb_client_context: CBClientContext,
+    cb_registered_instance: int,
+):
+    """
+    Store two independent chunks then look up with a query containing both at
+    aligned positions.  Both CBMatchResults should be returned.
+
+    Stored:  chunk_A (30000..30256), chunk_B (31000..31256) – separate docs.
+    Query:   [chunk_A || chunk_B]  (2 × CHUNK_SIZE tokens, aligned)
+    Expected: 2 results – cur_st=0 for chunk_A, cur_st=CHUNK_SIZE for chunk_B.
+    """
+    chunk_a = tuple(range(30000, 30000 + CHUNK_SIZE))
+    chunk_b = tuple(range(31000, 31000 + CHUNK_SIZE))
+
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
+    client.submit_request(
+        RequestType.CB_STORE_PRE_COMPUTED,
+        [
+            create_cb_cache_key(chunk_a, request_id="multi-aligned-store-a"),
+            0,
+            cb_registered_instance,
+            event.ipc_handle(),
+        ],
+        get_response_class(RequestType.CB_STORE_PRE_COMPUTED),
+    ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+
+    client.submit_request(
+        RequestType.CB_STORE_PRE_COMPUTED,
+        [
+            create_cb_cache_key(chunk_b, request_id="multi-aligned-store-b"),
+            CHUNK_SIZE,
+            cb_registered_instance,
+            event.ipc_handle(),
+        ],
+        get_response_class(RequestType.CB_STORE_PRE_COMPUTED),
+    ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+
+    query_tokens = chunk_a + chunk_b
+    lookup_key = create_cb_cache_key(query_tokens, request_id="multi-aligned-lookup-v2")
+
+    cb_results = client.submit_request(
+        RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+        [lookup_key],
+        get_response_class(RequestType.CB_LOOKUP_PRE_COMPUTED_V2),
+    ).result(timeout=DEFAULT_TIMEOUT)
+
+    assert isinstance(cb_results, list)
+    assert len(cb_results) == 2, "Both stored chunks must be found"
+    sorted_results = sorted(cb_results, key=lambda r: r.cur_st)
+    assert sorted_results[0].cur_st == 0
+    assert sorted_results[0].cur_ed == CHUNK_SIZE
+    assert sorted_results[1].cur_st == CHUNK_SIZE
+    assert sorted_results[1].cur_ed == 2 * CHUNK_SIZE
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CB Lookup V2 multiple chunks unaligned requires CUDA",
+)
+def test_cb_lookup_v2_multiple_chunks_unaligned(
+    client: MessageQueueClient,
+    cb_client_context: CBClientContext,
+    cb_registered_instance: int,
+):
+    """
+    Store two independent chunks then look up with a query where each chunk
+    appears at a non-zero, non-consecutive position (separated by dummy chunks).
+
+    Stored:  chunk_A (32000..32256), chunk_B (33000..33256) – separate docs.
+    Query:   [prefix_X || chunk_A || prefix_Y || chunk_B]  (4 × CHUNK_SIZE)
+    Expected: cur_st=CHUNK_SIZE for chunk_A, cur_st=3×CHUNK_SIZE for chunk_B.
+    """
+    chunk_a = tuple(range(32000, 32000 + CHUNK_SIZE))
+    chunk_b = tuple(range(33000, 33000 + CHUNK_SIZE))
+    prefix_x = tuple(range(34000, 34000 + CHUNK_SIZE))
+    prefix_y = tuple(range(35000, 35000 + CHUNK_SIZE))
+
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
+    client.submit_request(
+        RequestType.CB_STORE_PRE_COMPUTED,
+        [
+            create_cb_cache_key(chunk_a, request_id="multi-unaligned-store-a"),
+            0,
+            cb_registered_instance,
+            event.ipc_handle(),
+        ],
+        get_response_class(RequestType.CB_STORE_PRE_COMPUTED),
+    ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+
+    client.submit_request(
+        RequestType.CB_STORE_PRE_COMPUTED,
+        [
+            create_cb_cache_key(chunk_b, request_id="multi-unaligned-store-b"),
+            CHUNK_SIZE,
+            cb_registered_instance,
+            event.ipc_handle(),
+        ],
+        get_response_class(RequestType.CB_STORE_PRE_COMPUTED),
+    ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+
+    # Query: prefix_X || chunk_A || prefix_Y || chunk_B  (non-consecutive positions)
+    query_tokens = prefix_x + chunk_a + prefix_y + chunk_b
+    lookup_key = create_cb_cache_key(
+        query_tokens, request_id="multi-unaligned-lookup-v2"
+    )
+
+    cb_results = client.submit_request(
+        RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+        [lookup_key],
+        get_response_class(RequestType.CB_LOOKUP_PRE_COMPUTED_V2),
+    ).result(timeout=DEFAULT_TIMEOUT)
+
+    assert isinstance(cb_results, list)
+    assert len(cb_results) == 2, "Both chunks must be found at non-aligned positions"
+    sorted_results = sorted(cb_results, key=lambda r: r.cur_st)
+    # chunk_A appears after one prefix chunk
+    assert sorted_results[0].cur_st == CHUNK_SIZE
+    assert sorted_results[0].cur_ed == 2 * CHUNK_SIZE
+    # chunk_B appears after prefix_X + chunk_A + prefix_Y
+    assert sorted_results[1].cur_st == 3 * CHUNK_SIZE
+    assert sorted_results[1].cur_ed == 4 * CHUNK_SIZE
+
+
 # ---------------------------------------------------------------------------
 # 5. CB Retrieve Pre-Computed V2
 # ---------------------------------------------------------------------------
@@ -1178,6 +1311,203 @@ def test_cb_retrieve_v2_sub_sequence(
     dst_slice = cb_client_context.get_tensor_slice(CHUNK_SIZE, CHUNK_SIZE)
     assert torch.allclose(src_slice, dst_slice, atol=1e-4), (
         "Sub-sequence retrieve must copy data to cur_st + offset in the GPU buffer"
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CB Retrieve V2 multiple chunks data correctness requires CUDA",
+)
+def test_cb_retrieve_v2_multiple_chunks_data_correctness(
+    client: MessageQueueClient,
+    cb_client_context: CBClientContext,
+    cb_registered_instance: int,
+):
+    """
+    Store two chunks with distinct fill values, look up both, then retrieve
+    both to separate destination slots and verify data at each slot.
+
+    GPU layout (slots of CHUNK_SIZE tokens each):
+      slot 0 (source A) → value 0.25  ← chunk_A stored here
+      slot 1 (source B) → value 0.50  ← chunk_B stored here
+      slot 2 (dest A)   ← retrieve with offset=2*CHUNK_SIZE, cur_st=0
+      slot 3 (dest B)   ← retrieve with offset=2*CHUNK_SIZE, cur_st=CHUNK_SIZE
+
+    gpu_st formula: cur_st + offset
+      chunk_A: 0       + 2*CHUNK_SIZE = 2*CHUNK_SIZE  (slot 2)
+      chunk_B: CHUNK_SIZE + 2*CHUNK_SIZE = 3*CHUNK_SIZE  (slot 3)
+    """
+    value_a, value_b = 0.25, 0.50
+
+    cb_client_context.set_tensor_slice(0, cb_client_context.num_tokens, 0.0)
+    cb_client_context.set_tensor_slice(0, CHUNK_SIZE, value_a)
+    cb_client_context.set_tensor_slice(CHUNK_SIZE, CHUNK_SIZE, value_b)
+
+    chunk_a = tuple(range(36000, 36000 + CHUNK_SIZE))
+    chunk_b = tuple(range(37000, 37000 + CHUNK_SIZE))
+
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
+    client.submit_request(
+        RequestType.CB_STORE_PRE_COMPUTED,
+        [
+            create_cb_cache_key(chunk_a, request_id="multi-ret-store-a"),
+            0,
+            cb_registered_instance,
+            event.ipc_handle(),
+        ],
+        get_response_class(RequestType.CB_STORE_PRE_COMPUTED),
+    ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+
+    client.submit_request(
+        RequestType.CB_STORE_PRE_COMPUTED,
+        [
+            create_cb_cache_key(chunk_b, request_id="multi-ret-store-b"),
+            CHUNK_SIZE,
+            cb_registered_instance,
+            event.ipc_handle(),
+        ],
+        get_response_class(RequestType.CB_STORE_PRE_COMPUTED),
+    ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+
+    # Lookup with query = [chunk_A || chunk_B]
+    query_tokens = chunk_a + chunk_b
+    lookup_key = create_cb_cache_key(query_tokens, request_id="multi-ret-lookup-v2")
+
+    cb_results = client.submit_request(
+        RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+        [lookup_key],
+        get_response_class(RequestType.CB_LOOKUP_PRE_COMPUTED_V2),
+    ).result(timeout=DEFAULT_TIMEOUT)
+    assert len(cb_results) == 2
+
+    # Clear dest slots before retrieve
+    dest_offset = 2 * CHUNK_SIZE
+    cb_client_context.set_tensor_slice(dest_offset, 2 * CHUNK_SIZE, 0.0)
+
+    event2 = torch.cuda.Event(interprocess=True)
+    event2.record()
+
+    result = (
+        client.submit_request(
+            RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+            [
+                lookup_key,
+                cb_results,
+                dest_offset,
+                cb_registered_instance,
+                event2.ipc_handle(),
+            ],
+            get_response_class(RequestType.CB_RETRIEVE_PRE_COMPUTED_V2),
+        )
+        .to_cuda_future()
+        .result(timeout=DEFAULT_TIMEOUT)
+    )
+    assert result is True
+
+    torch.cuda.synchronize()
+
+    # chunk_A → gpu_st = 0 + 2*CHUNK_SIZE = slot 2
+    src_a = cb_client_context.get_tensor_slice(0, CHUNK_SIZE)
+    dst_a = cb_client_context.get_tensor_slice(dest_offset, CHUNK_SIZE)
+    assert torch.allclose(dst_a, src_a, atol=1e-4), (
+        "Slot 2 must match slot 0 (chunk_A source)"
+    )
+
+    # chunk_B → gpu_st = CHUNK_SIZE + 2*CHUNK_SIZE = slot 3
+    src_b = cb_client_context.get_tensor_slice(CHUNK_SIZE, CHUNK_SIZE)
+    dst_b = cb_client_context.get_tensor_slice(dest_offset + CHUNK_SIZE, CHUNK_SIZE)
+    assert torch.allclose(dst_b, src_b, atol=1e-4), (
+        "Slot 3 must match slot 1 (chunk_B source)"
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CB Retrieve V2 unaligned with non-zero offset requires CUDA",
+)
+def test_cb_retrieve_v2_unaligned_nonzero_offset(
+    client: MessageQueueClient,
+    cb_client_context: CBClientContext,
+    cb_registered_instance: int,
+):
+    """
+    Retrieve a chunk that is unaligned in the query (cur_st = CHUNK_SIZE) with
+    a non-zero offset, so the effective GPU destination is cur_st + offset =
+    2 × CHUNK_SIZE.
+
+    GPU layout:
+      slot 0 (source) → value 0.75  ← chunk stored here (offset=0)
+      slot 1 (prefix) → irrelevant dummy prefix tokens in the query
+      slot 2 (dest)   ← gpu_st = CHUNK_SIZE + CHUNK_SIZE = 2*CHUNK_SIZE
+
+    Confirms that the gpu_st = cur_st + offset formula applies correctly when
+    both terms are non-zero.
+    """
+    source_value = 0.75
+
+    cb_client_context.set_tensor_slice(0, cb_client_context.num_tokens, 0.0)
+    cb_client_context.set_tensor_slice(0, CHUNK_SIZE, source_value)
+
+    stored_tokens = tuple(range(38000, 38000 + CHUNK_SIZE))
+    store_key = create_cb_cache_key(
+        stored_tokens, request_id="unaligned-offset-store-v2"
+    )
+
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
+    client.submit_request(
+        RequestType.CB_STORE_PRE_COMPUTED,
+        [store_key, 0, cb_registered_instance, event.ipc_handle()],
+        get_response_class(RequestType.CB_STORE_PRE_COMPUTED),
+    ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
+
+    # Query: [prefix || stored_chunk] → cur_st = CHUNK_SIZE
+    prefix_tokens = tuple(range(39000, 39000 + CHUNK_SIZE))
+    query_tokens = prefix_tokens + stored_tokens
+    lookup_key = create_cb_cache_key(
+        query_tokens, request_id="unaligned-offset-lookup-v2"
+    )
+
+    cb_results = client.submit_request(
+        RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+        [lookup_key],
+        get_response_class(RequestType.CB_LOOKUP_PRE_COMPUTED_V2),
+    ).result(timeout=DEFAULT_TIMEOUT)
+    assert len(cb_results) == 1
+    assert cb_results[0].cur_st == CHUNK_SIZE
+
+    # Retrieve with offset=CHUNK_SIZE → gpu_st = CHUNK_SIZE + CHUNK_SIZE = 2*CHUNK_SIZE
+    retrieve_offset = CHUNK_SIZE
+    cb_client_context.set_tensor_slice(2 * CHUNK_SIZE, CHUNK_SIZE, 0.0)
+
+    event2 = torch.cuda.Event(interprocess=True)
+    event2.record()
+
+    result = (
+        client.submit_request(
+            RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+            [
+                lookup_key,
+                cb_results,
+                retrieve_offset,
+                cb_registered_instance,
+                event2.ipc_handle(),
+            ],
+            get_response_class(RequestType.CB_RETRIEVE_PRE_COMPUTED_V2),
+        )
+        .to_cuda_future()
+        .result(timeout=DEFAULT_TIMEOUT)
+    )
+    assert result is True
+
+    torch.cuda.synchronize()
+    src_slice = cb_client_context.get_tensor_slice(0, CHUNK_SIZE)
+    dst_slice = cb_client_context.get_tensor_slice(2 * CHUNK_SIZE, CHUNK_SIZE)
+    assert torch.allclose(src_slice, dst_slice, atol=1e-4), (
+        "gpu_st = cur_st + offset = 2*CHUNK_SIZE must hold the stored source data"
     )
 
 
