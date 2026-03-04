@@ -1,0 +1,24 @@
+# Multiprocess test — LMCache MP server + vLLM + vLLM baseline.
+# Needs 2 GPUs. All processes run natively in the pod (no Docker).
+
+steps:
+  - label: ":compression: Multiprocess"
+    command: .buildkite/k3_tests/multiprocess/run.sh
+    timeout_in_minutes: 60
+    priority: 1
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "2"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths: ["*.log"]
