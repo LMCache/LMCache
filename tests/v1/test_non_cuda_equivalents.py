@@ -1559,6 +1559,27 @@ def scenario_alloc_free_pinned_numa_ptr():
     )
 
 
+def scenario_alloc_free_shm_pinned_ptr():
+    ops, scene_info = get_test_context()
+
+    alloc_size = 4096
+    shm_name = "/test_lmcache_shm"
+
+    # 1. Allocate
+    ptr = ops.alloc_shm_pinned_ptr(alloc_size, shm_name)
+    assert isinstance(ptr, int), f"Expected int, got {type(ptr)}"
+    assert ptr != 0, "alloc_shm_pinned_ptr returned null"
+
+    # 2. Free
+    ops.free_shm_pinned_ptr(ptr, alloc_size, shm_name)
+
+    # 3. Save: 1 = PASS
+    save_result(
+        "alloc_free_shm_pinned_ptr",
+        torch.tensor([1], dtype=torch.int32),
+    )
+
+
 def scenario_transfer_direction_enum():
     ops, scene_info = get_test_context()
 
@@ -1608,6 +1629,7 @@ SCENARIO_REGISTRY = {
     "alloc_free_pinned_ptr": scenario_alloc_free_pinned_ptr,
     "alloc_free_pinned_numa_ptr": scenario_alloc_free_pinned_numa_ptr,
     "alloc_free_numa_ptr": scenario_alloc_free_numa_ptr,
+    "alloc_free_shm_pinned_ptr": scenario_alloc_free_shm_pinned_ptr,
     "get_gpu_pci_bus_id": scenario_get_gpu_pci_bus_id,
 }
 
