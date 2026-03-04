@@ -724,24 +724,31 @@ def scenario_single_layer_kv_transfer():
         device=device,
     ).to(torch.int64)
 
-    # (use_mla, token_major, vllm_two_major, direction)
-    # direction: False = LMC→vLLM, True = vLLM→LMC
+    # (gpu_kv_format, is_mla, token_major, direction)
+    # direction: False = LMC→vLLM (H2D), True = vLLM→LMC (D2H)
     test_cases = [
-        (False, True, True, False),
-        (False, False, False, False),
-        (False, True, True, True),
-        (True, True, True, False),
-        (True, True, True, True),
+        # flash attn: [2, NB, BS, NH, HS] — two_major
+        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, True, False),
+        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, False, False),
+        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, True, True),
+        # flash infer: [NB, 2, BS, NH, HS]
+        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, True, False),
+        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, False, False),
+        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, True, True),
+        # vLLM MLA: [NB, BS, HS]
+        (ops.GPUKVFormat.NL_X_NB_BS_HS, True, True, False),
+        (ops.GPUKVFormat.NL_X_NB_BS_HS, True, True, True),
     ]
 
-    for use_mla, token_major, vllm_two_major, direction in test_cases:
+    for gpu_kv_format, is_mla, token_major, direction in test_cases:
         dir_tag = "v2l" if direction else "l2v"
+        is_two_major = gpu_kv_format == ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
         case_desc = (
-            f"MLA={use_mla}, TM={token_major}, 2Maj={vllm_two_major}, Dir={dir_tag}"
+            f"fmt={gpu_kv_format}, MLA={is_mla}, TM={token_major}, Dir={dir_tag}"
         )
 
-        # 1. Setup Shapes
-        if use_mla:
+        # ── 1. Setup Shapes ──
+        if is_mla:
             lmc_shape = (num_tokens, hidden_size)
             vllm_shape = (num_blocks, block_size, hidden_size)
         else:
@@ -750,24 +757,14 @@ def scenario_single_layer_kv_transfer():
                 if token_major
                 else (2, num_tokens, hidden_size)
             )
-            if vllm_two_major:
-                vllm_shape = (
-                    2,
-                    num_blocks,
-                    block_size,
-                    num_heads,
-                    head_size,
-                )
+            if is_two_major:
+                # flash attn: [2, num_blocks, block_size, num_heads, head_size]
+                vllm_shape = (2, num_blocks, block_size, num_heads, head_size)
             else:
-                vllm_shape = (
-                    num_blocks,
-                    2,
-                    block_size,
-                    num_heads,
-                    head_size,
-                )
+                # flash infer: [num_blocks, 2, block_size, num_heads, head_size]
+                vllm_shape = (num_blocks, 2, block_size, num_heads, head_size)
 
-        # 2. Deterministic Data
+        # ── 2. Deterministic Data ──
         lmc_size = 1
         for s in lmc_shape:
             lmc_size *= s
@@ -786,34 +783,31 @@ def scenario_single_layer_kv_transfer():
             .reshape(vllm_shape)
         )
 
-        # 3. Golden Reference
+        # ── 3. Golden Reference ──
         lmc_ref = lmc_tensor.clone()
         vllm_ref = vllm_tensor.clone()
         block_indices = slot_mapping // block_size
         block_offsets = slot_mapping % block_size
 
         if not direction:  # LMC → vLLM
-            if use_mla:
+            if is_mla:
                 vllm_ref[block_indices, block_offsets, :] = lmc_ref
             else:
                 src = lmc_ref if token_major else lmc_ref.permute(1, 0, 2)
-                src = src.view(
-                    num_tokens,
-                    2,
-                    num_heads,
-                    head_size,
-                )
-                if vllm_two_major:
+                src = src.view(num_tokens, 2, num_heads, head_size)
+                if is_two_major:
+                    # [2, NB, BS, NH, HS]
                     vllm_ref[0, block_indices, block_offsets] = src[:, 0, :, :]
                     vllm_ref[1, block_indices, block_offsets] = src[:, 1, :, :]
                 else:
+                    # [NB, 2, BS, NH, HS]
                     vllm_ref[block_indices, 0, block_offsets] = src[:, 0, :, :]
                     vllm_ref[block_indices, 1, block_offsets] = src[:, 1, :, :]
         else:  # vLLM → LMC
-            if use_mla:
+            if is_mla:
                 lmc_ref = vllm_ref[block_indices, block_offsets, :]
             else:
-                if vllm_two_major:
+                if is_two_major:
                     k = vllm_ref[0, block_indices, block_offsets]
                     v = vllm_ref[1, block_indices, block_offsets]
                 else:
@@ -825,20 +819,20 @@ def scenario_single_layer_kv_transfer():
                 ).view(num_tokens, 2, hidden_size)
                 lmc_ref = combined if token_major else combined.permute(1, 0, 2)
 
-        # 4. Execute
+        # ── 4. Execute ──
+        xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
         ops.single_layer_kv_transfer(
             lmc_tensor,
             vllm_tensor,
             slot_mapping,
-            direction,
+            xfer_dir,
+            gpu_kv_format,
             token_major,
-            vllm_two_major,
-            use_mla,
         )
         if is_cuda_backend:
             torch.cuda.synchronize()
 
-        # 5. Verify
+        # ── 5. Verify ──
         if not direction:
             torch.testing.assert_close(
                 vllm_tensor,
@@ -856,10 +850,60 @@ def scenario_single_layer_kv_transfer():
                 msg=f"Mismatch in {case_desc}",
             )
 
-        # 6. Save each case separately
+    # ── 6. Save canonical results for cross-backend comparison ──
+    # Use flash attn (two_major) format to match original file names
+    canonical_cases = [
+        (False, True, False),  # l2v, non-MLA
+        (False, True, True),  # v2l, non-MLA
+        (True, True, False),  # l2v, MLA
+        (True, True, True),  # v2l, MLA
+    ]
+
+    for is_mla, token_major, direction in canonical_cases:
+        dir_tag = "v2l" if direction else "l2v"
+
+        if is_mla:
+            lmc_shape = (num_tokens, hidden_size)
+            vllm_shape = (num_blocks, block_size, hidden_size)
+            fmt = ops.GPUKVFormat.NL_X_NB_BS_HS
+        else:
+            lmc_shape = (num_tokens, 2, hidden_size)
+            vllm_shape = (2, num_blocks, block_size, num_heads, head_size)
+            fmt = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+        lmc_size = 1
+        for s in lmc_shape:
+            lmc_size *= s
+        vllm_size = 1
+        for s in vllm_shape:
+            vllm_size *= s
+
+        lmc_tensor = (
+            (torch.arange(lmc_size, device=device) % 1000)
+            .to(torch.float16)
+            .reshape(lmc_shape)
+        )
+        vllm_tensor = (
+            (torch.arange(vllm_size, device=device) % 1000)
+            .to(torch.float16)
+            .reshape(vllm_shape)
+        )
+
+        xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
+        ops.single_layer_kv_transfer(
+            lmc_tensor,
+            vllm_tensor,
+            slot_mapping,
+            xfer_dir,
+            fmt,
+            token_major,
+        )
+        if is_cuda_backend:
+            torch.cuda.synchronize()
+
         result = lmc_tensor.cpu() if direction else vllm_tensor.cpu()
         save_result(
-            f"single_layer_kv_transfer_{dir_tag}_mla_{use_mla}",
+            f"single_layer_kv_transfer_{dir_tag}_mla_{is_mla}",
             result,
         )
 
@@ -979,7 +1023,7 @@ def scenario_single_layer_kv_transfer_sgl():
             sgl_k_tensor,
             sgl_v_tensor,
             slot_mapping,
-            direction,
+            ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D,
             token_major,
         )
         if is_cuda_backend:
@@ -1033,6 +1077,7 @@ def scenario_multi_layer_kv_transfer():
     num_tokens = 4
     head_size = 16
     page_buffer_size = 10
+    block_size = 5
     dtype = torch.float32
 
     slot_mapping = torch.tensor(
@@ -1041,17 +1086,140 @@ def scenario_multi_layer_kv_transfer():
         device=device,
     )
 
+    # ── Format-specific test cases ──
+    # Each: (gpu_kv_format, is_mla, block_size_arg)
+    format_cases = [
+        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, 1),  # flash attn
+        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, block_size),  # flash infer
+        (ops.GPUKVFormat.NL_X_NB_BS_HS, True, 1),  # vLLM MLA
+        (ops.GPUKVFormat.NL_X_NBBS_ONE_HS, True, 1),  # SGLang MLA
+    ]
+
+    for gpu_kv_format, is_mla, bs_arg in format_cases:
+        k_or_v_size = 1 if is_mla else 2
+
+        for direction in [True, False]:
+            dir_tag = "paged2lmc" if direction else "lmc2paged"
+            fmt_name = str(gpu_kv_format).split(".")[-1]
+
+            # ── 1. LMCache Tensor ──
+            lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
+            key_value = torch.zeros(lmc_shape, dtype=dtype, device=device)
+
+            if not direction:  # LMC → Paged
+                for kv in range(k_or_v_size):
+                    for ly in range(num_layers):
+                        for t in range(num_tokens):
+                            val = (
+                                kv * 5000
+                                + ly * 1000
+                                + t * 10
+                                + torch.arange(head_size, device=device)
+                            ).to(dtype)
+                            key_value[kv, ly, t] = val
+
+            # ── 2. Paged Buffers (one per layer) ──
+            page_buffers = []
+            for ly in range(num_layers):
+                if gpu_kv_format == ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+                    num_blocks = page_buffer_size // bs_arg
+                    pb = torch.zeros(
+                        (num_blocks, 2, bs_arg, head_size),
+                        dtype=dtype,
+                        device=device,
+                    )
+                elif is_mla:
+                    pb = torch.zeros(
+                        (page_buffer_size, head_size),
+                        dtype=dtype,
+                        device=device,
+                    )
+                else:
+                    pb = torch.zeros(
+                        (2, page_buffer_size, head_size),
+                        dtype=dtype,
+                        device=device,
+                    )
+
+                if direction:  # Paged → LMC
+                    for s in range(page_buffer_size):
+                        for kv in range(k_or_v_size):
+                            val = (
+                                kv * 7000
+                                + ly * 2000
+                                + s * 10
+                                + torch.arange(head_size, device=device)
+                            ).to(dtype)
+                            if gpu_kv_format == ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+                                blk_idx = s // bs_arg
+                                blk_off = s % bs_arg
+                                pb[blk_idx, kv, blk_off] = val
+                            elif is_mla:
+                                pb[s] = val
+                            else:
+                                pb[kv, s] = val
+
+                page_buffers.append(pb)
+
+            # ── 3. Pointer Tensor ──
+            key_value_ptrs = torch.tensor(
+                [pb.data_ptr() for pb in page_buffers],
+                dtype=torch.int64,
+                device=device,
+            )
+
+            # ── 4. Execute ──
+            xfer_dir = (
+                ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
+            )
+            ops.multi_layer_kv_transfer(
+                key_value,
+                key_value_ptrs,
+                slot_mapping,
+                torch.device(device),
+                page_buffer_size,
+                xfer_dir,
+                gpu_kv_format,
+                bs_arg,
+            )
+            if is_cuda_backend:
+                torch.cuda.synchronize()
+
+            # ── 5. Verify (internal, per-format) ──
+            for t_id in range(num_tokens):
+                s_idx = slot_mapping[t_id].item()
+                for ly in range(num_layers):
+                    for kv in range(k_or_v_size):
+                        lmc_val = key_value[kv, ly, t_id]
+
+                        if gpu_kv_format == ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+                            blk_idx = s_idx // bs_arg
+                            blk_off = s_idx % bs_arg
+                            paged_val = page_buffers[ly][blk_idx, kv, blk_off]
+                        elif is_mla:
+                            paged_val = page_buffers[ly][s_idx]
+                        else:
+                            paged_val = page_buffers[ly][kv, s_idx]
+
+                        torch.testing.assert_close(
+                            lmc_val,
+                            paged_val,
+                            msg=(
+                                f"Mismatch: {fmt_name} {dir_tag}, "
+                                f"kv={kv}, layer={ly}, token={t_id}"
+                            ),
+                        )
+
+    # ── 6. Save ONE canonical result for cross-backend comparison ──
+    # Use flash attn format (NL_X_TWO_NB_BS_NH_HS), direction=True (paged→lmc)
+    # Re-run the canonical case to get a clean result
+    canonical_format = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
     for direction in [True, False]:
         dir_tag = "paged2lmc" if direction else "lmc2paged"
-
-        # 1. LMCache Tensor
         lmc_shape = (2, num_layers, num_tokens, head_size)
-        key_value = torch.zeros(
-            lmc_shape,
-            dtype=dtype,
-            device=device,
-        )
-        if not direction:  # LMC → Paged
+        key_value = torch.zeros(lmc_shape, dtype=dtype, device=device)
+
+        if not direction:
             for ly in range(num_layers):
                 for t in range(num_tokens):
                     val = (
@@ -1060,7 +1228,6 @@ def scenario_multi_layer_kv_transfer():
                     key_value[0, ly, t] = val
                     key_value[1, ly, t] = val + 500
 
-        # 2. Paged Buffers
         page_buffers = []
         for ly in range(num_layers):
             pb = torch.zeros(
@@ -1068,56 +1235,35 @@ def scenario_multi_layer_kv_transfer():
                 dtype=dtype,
                 device=device,
             )
-            if direction:  # Paged → LMC
+            if direction:
                 for s in range(page_buffer_size):
                     val = (
-                        ly * 2000
-                        + s * 10
-                        + torch.arange(
-                            head_size,
-                            device=device,
-                        )
+                        ly * 2000 + s * 10 + torch.arange(head_size, device=device)
                     ).to(dtype)
                     pb[0, s] = val
                     pb[1, s] = val + 700
             page_buffers.append(pb)
 
-        # 3. Pointer Tensor
         key_value_ptrs = torch.tensor(
             [pb.data_ptr() for pb in page_buffers],
             dtype=torch.int64,
             device=device,
         )
 
-        # 4. Execute
+        xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
         ops.multi_layer_kv_transfer(
             key_value,
             key_value_ptrs,
             slot_mapping,
             torch.device(device),
             page_buffer_size,
-            direction,
-            False,  # use_mla
+            xfer_dir,
+            canonical_format,
+            1,
         )
         if is_cuda_backend:
             torch.cuda.synchronize()
 
-        # 5. Verify
-        for t_id in range(num_tokens):
-            s_idx = slot_mapping[t_id].item()
-            for ly in range(num_layers):
-                torch.testing.assert_close(
-                    key_value[0, ly, t_id],
-                    page_buffers[ly][0, s_idx],
-                    msg=(f"K mismatch: {dir_tag}, layer={ly}, token={t_id}"),
-                )
-                torch.testing.assert_close(
-                    key_value[1, ly, t_id],
-                    page_buffers[ly][1, s_idx],
-                    msg=(f"V mismatch: {dir_tag}, layer={ly}, token={t_id}"),
-                )
-
-        # 6. Save
         save_result(
             f"multi_layer_kv_transfer_{dir_tag}",
             key_value.cpu(),
@@ -1146,18 +1292,149 @@ def scenario_multi_layer_kv_transfer_unilateral():
         device=device,
     )
 
+    # ── Test cases: (gpu_kv_format, is_mla) ──
+    format_cases = [
+        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False),  # SGLang MHA (unilateral path)
+        (
+            ops.GPUKVFormat.NL_X_NB_BS_HS,
+            True,
+        ),  # vLLM MLA (delegates to multi_layer_kv_transfer)
+        (
+            ops.GPUKVFormat.NL_X_NBBS_ONE_HS,
+            True,
+        ),  # SGLang MLA (delegates to multi_layer_kv_transfer)
+    ]
+
+    for gpu_kv_format, is_mla in format_cases:
+        k_or_v_size = 1 if is_mla else 2
+
+        for direction in [True, False]:
+            dir_tag = "p2l" if direction else "l2p"
+
+            # ── 1. LMCache Tensor ──
+            lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
+            lmc_tensor = torch.zeros(lmc_shape, dtype=dtype, device=device)
+
+            if not direction:  # LMC → Paged
+                for kv in range(k_or_v_size):
+                    for ly in range(num_layers):
+                        for t in range(num_tokens):
+                            val = (
+                                kv * 5000
+                                + ly * 1000
+                                + t * 10
+                                + torch.arange(head_size, device=device)
+                            ).to(dtype)
+                            lmc_tensor[kv, ly, t] = val
+
+            # ── 2. Paged Buffers ──
+            if is_mla:
+                # MLA delegates to multi_layer_kv_transfer
+                # ptrs: [layer0, layer1, ...], each -> [page_buffer_size, head_size]
+                page_buffers = []
+                for ly in range(num_layers):
+                    pb = torch.zeros(
+                        (page_buffer_size, head_size),
+                        dtype=dtype,
+                        device=device,
+                    )
+                    if direction:  # Paged → LMC
+                        for s in range(page_buffer_size):
+                            val = (
+                                ly * 2000
+                                + s * 10
+                                + torch.arange(head_size, device=device)
+                            ).to(dtype)
+                            pb[s] = val
+                    page_buffers.append(pb)
+
+                key_value_ptrs = torch.tensor(
+                    [pb.data_ptr() for pb in page_buffers],
+                    dtype=torch.int64,
+                    device=device,
+                )
+            else:
+                # Non-MLA unilateral: separate K/V buffers
+                # ptrs: [K_l0, K_l1, ..., V_l0, V_l1, ...]
+                # each -> [page_buffer_size, head_size]
+                buffers = {}
+                for kv in range(2):
+                    for ly in range(num_layers):
+                        pb = torch.zeros(
+                            (page_buffer_size, head_size),
+                            dtype=dtype,
+                            device=device,
+                        )
+                        if direction:  # Paged → LMC
+                            for s in range(page_buffer_size):
+                                val = (
+                                    kv * 7000
+                                    + ly * 2000
+                                    + s * 10
+                                    + torch.arange(head_size, device=device)
+                                ).to(dtype)
+                                pb[s] = val
+                        buffers[(kv, ly)] = pb
+
+                ptr_list = []
+                for ly in range(num_layers):
+                    ptr_list.append(buffers[(0, ly)].data_ptr())
+                for ly in range(num_layers):
+                    ptr_list.append(buffers[(1, ly)].data_ptr())
+
+                key_value_ptrs = torch.tensor(
+                    ptr_list,
+                    dtype=torch.int64,
+                    device=device,
+                ).contiguous()
+
+            # ── 3. Execute ──
+            xfer_dir = (
+                ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
+            )
+            ops.multi_layer_kv_transfer_unilateral(
+                lmc_tensor,
+                key_value_ptrs,
+                slot_mapping,
+                torch.device(device),
+                page_buffer_size,
+                xfer_dir,
+                gpu_kv_format,
+            )
+            if is_cuda_backend:
+                torch.cuda.synchronize()
+
+            # ── 4. Verify ──
+            for t_id in range(num_tokens):
+                s_idx = slot_mapping[t_id].item()
+                for ly in range(num_layers):
+                    for kv in range(k_or_v_size):
+                        lmc_val = lmc_tensor[kv, ly, t_id]
+
+                        if is_mla:
+                            paged_val = page_buffers[ly][s_idx]
+                        else:
+                            paged_val = buffers[(kv, ly)][s_idx]
+
+                        torch.testing.assert_close(
+                            lmc_val,
+                            paged_val,
+                            msg=(
+                                f"Mismatch: {gpu_kv_format} {dir_tag}, "
+                                f"KV={kv}, layer={ly}, "
+                                f"token={t_id}, slot={s_idx}"
+                            ),
+                        )
+
+    # ── 5. Save canonical result for cross-backend comparison ──
+    # Use non-MLA unilateral (the primary use case of this function)
     for direction in [True, False]:
         dir_tag = "p2l" if direction else "l2p"
 
-        # LMC Layout: [2, num_layers, num_tokens, head_size]
         lmc_shape = (2, num_layers, num_tokens, head_size)
-        lmc_tensor = torch.zeros(
-            lmc_shape,
-            dtype=dtype,
-            device=device,
-        )
+        lmc_tensor = torch.zeros(lmc_shape, dtype=dtype, device=device)
 
-        if not direction:  # LMC → Paged
+        if not direction:
             for kv in range(2):
                 for ly in range(num_layers):
                     for t in range(num_tokens):
@@ -1165,14 +1442,10 @@ def scenario_multi_layer_kv_transfer_unilateral():
                             kv * 5000
                             + ly * 1000
                             + t * 10
-                            + torch.arange(
-                                head_size,
-                                device=device,
-                            )
+                            + torch.arange(head_size, device=device)
                         ).to(dtype)
                         lmc_tensor[kv, ly, t] = val
 
-        # 1. Paged Buffers
         buffers = {}
         for kv in range(2):
             for ly in range(num_layers):
@@ -1181,22 +1454,17 @@ def scenario_multi_layer_kv_transfer_unilateral():
                     dtype=dtype,
                     device=device,
                 )
-                if direction:  # Paged → LMC
-                    val = (
-                        kv * 7000
-                        + ly * 2000
-                        + torch.arange(
-                            head_size,
-                            device=device,
-                        )
-                    ).to(dtype)
+                if direction:
                     for s in range(page_buffer_size):
-                        pb[s] = val + (s * 10)
+                        val = (
+                            kv * 7000
+                            + ly * 2000
+                            + s * 10
+                            + torch.arange(head_size, device=device)
+                        ).to(dtype)
+                        pb[s] = val
                 buffers[(kv, ly)] = pb
 
-        # 2. Grouped Pointer Tensor
-        # C++: ptrs[layer_id] = Key,
-        #      ptrs[layer_id + num_layers] = Value
         ptr_list = []
         for ly in range(num_layers):
             ptr_list.append(buffers[(0, ly)].data_ptr())
@@ -1209,36 +1477,19 @@ def scenario_multi_layer_kv_transfer_unilateral():
             device=device,
         ).contiguous()
 
-        # 3. Execute
+        xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
         ops.multi_layer_kv_transfer_unilateral(
             lmc_tensor,
             key_value_ptrs,
             slot_mapping,
             torch.device(device),
             page_buffer_size,
-            direction,
-            False,  # use_mla
+            xfer_dir,
+            ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         )
         if is_cuda_backend:
             torch.cuda.synchronize()
 
-        # 4. Verify
-        for t_id in range(num_tokens):
-            s_idx = slot_mapping[t_id].item()
-            for ly in range(num_layers):
-                for kv in range(2):
-                    pb_ref = buffers[(kv, ly)]
-                    torch.testing.assert_close(
-                        lmc_tensor[kv, ly, t_id],
-                        pb_ref[s_idx],
-                        msg=(
-                            f"Mismatch: {dir_tag}, "
-                            f"KV={kv}, layer={ly}, "
-                            f"token={t_id}, slot={s_idx}"
-                        ),
-                    )
-
-        # 5. Save
         save_result(
             f"multi_layer_kv_transfer_unilateral_{dir_tag}",
             lmc_tensor.cpu(),
