@@ -13,12 +13,7 @@ import torch
 RESULTS_DIR = Path("test_results")
 
 _is_child = "LMC_TEST_MODE" in os.environ
-
-# Skip entire module if no CUDA hardware (only check in top-level process)
-if not _is_child and not torch.cuda.is_available():
-    pytest.skip(
-        "CUDA is not available, skipping entire test module", allow_module_level=True
-    )
+_cuda_available = torch.cuda.is_available()
 
 
 # ==========================================
@@ -1677,11 +1672,27 @@ else:
 
     @pytest.fixture(scope="module")
     def run_all_children():
-        """Launch 3 child processes. Runs once for the entire module."""
+        """Launch child processes. Runs once for the entire module.
+
+        If CUDA is available: launches 3 child processes for comparison:
+        - CUDA_OPS with GPU visible
+        - NON_CUDA with GPU visible (for comparison)
+        - NON_CUDA without GPU visible
+
+        If CUDA is not available: launches 1 child process:
+        - NON_CUDA without GPU visible (no-crash test only)
+        """
         if RESULTS_DIR.exists():
             shutil.rmtree(RESULTS_DIR)
 
-        for mode, cuda_vis in [("CUDA_OPS", "0"), ("NON_CUDA", "0"), ("NON_CUDA", "")]:
+        if _cuda_available:
+            # CUDA available: run all scenarios for comparison
+            scenarios = [("CUDA_OPS", "0"), ("NON_CUDA", "0"), ("NON_CUDA", "")]
+        else:
+            # CUDA not available: only run non-CUDA without GPU
+            scenarios = [("NON_CUDA", "")]
+
+        for mode, cuda_vis in scenarios:
             r = run_scenario(mode, cuda_vis)
             assert r.returncode == 0, (
                 f"Scenario {mode}/CUDA_VISIBLE_DEVICES='{cuda_vis}' failed:\n"
@@ -1690,49 +1701,67 @@ else:
 
     @pytest.mark.parametrize("name", list(SCENARIO_REGISTRY.keys()))
     def test_compare(run_all_children, name):
-        """Each scenario function gets its own PASS/FAIL."""
+        """Each scenario function gets its own PASS/FAIL.
+
+        If CUDA is available: compares results from all scenarios.
+        If CUDA is not available: just verifies the scenario ran without crashing.
+        """
         # Match: exact name or name as prefix (e.g. calculate_cdf → calculate_cdf_bins*)
         exact_files = sorted(RESULTS_DIR.glob(f"{name}@*.pt"))
         prefix_files = sorted(RESULTS_DIR.glob(f"{name}_*@*.pt"))
         all_files = sorted(set(exact_files + prefix_files))
 
-        assert len(all_files) >= 3, (
-            f"{name}: expected at least 3 results, found {len(all_files)}"
-        )
-
-        # Group by sub-function name
-        sub_funcs = sorted(set(f.name.split("@")[0] for f in all_files))
-
-        for sub in sub_funcs:
-            sub_files = sorted(RESULTS_DIR.glob(f"{sub}@*.pt"))
-            assert len(sub_files) == 3, (
-                f"{sub}: expected 3 results, found {len(sub_files)}"
+        if _cuda_available:
+            # CUDA available: compare results from 3 scenarios
+            assert len(all_files) >= 3, (
+                f"{name}: expected at least 3 results, found {len(all_files)}"
             )
 
-            data = {
-                f.name.split("@")[1].replace(".pt", ""): torch.load(
-                    f, weights_only=False
+            # Group by sub-function name
+            sub_funcs = sorted(set(f.name.split("@")[0] for f in all_files))
+
+            for sub in sub_funcs:
+                sub_files = sorted(RESULTS_DIR.glob(f"{sub}@*.pt"))
+                assert len(sub_files) == 3, (
+                    f"{sub}: expected 3 results, found {len(sub_files)}"
                 )
-                for f in sub_files
-            }
 
-            scenes = list(data.keys())
-            base_scene = scenes[0]
-            base_val = data[base_scene]
+                data = {
+                    f.name.split("@")[1].replace(".pt", ""): torch.load(
+                        f, weights_only=False
+                    )
+                    for f in sub_files
+                }
 
-            for scene in scenes:
-                val = data[scene]
+                scenes = list(data.keys())
+                base_scene = scenes[0]
+                base_val = data[base_scene]
 
-                if isinstance(val, torch.Tensor):
-                    v_current = val.detach().cpu().float()
-                    v_base = base_val.detach().cpu().float()
-                    is_match = torch.allclose(v_current, v_base, rtol=1e-4, atol=1e-4)
-                    if not is_match:
-                        max_diff = (v_current - v_base).abs().max().item()
-                        pytest.fail(
-                            f"{sub}: {scene} vs {base_scene} mismatch, "
-                            f"max diff = {max_diff:.2e}"
+                for scene in scenes:
+                    val = data[scene]
+
+                    if isinstance(val, torch.Tensor):
+                        v_current = val.detach().cpu().float()
+                        v_base = base_val.detach().cpu().float()
+                        is_match = torch.allclose(
+                            v_current, v_base, rtol=1e-4, atol=1e-4
                         )
-                else:
-                    if val != base_val:
-                        pytest.fail(f"{sub}: {scene}={val} != {base_scene}={base_val}")
+                        if not is_match:
+                            max_diff = (v_current - v_base).abs().max().item()
+                            pytest.fail(
+                                f"{sub}: {scene} vs {base_scene} mismatch, "
+                                f"max diff = {max_diff:.2e}"
+                            )
+                    else:
+                        if val != base_val:
+                            pytest.fail(
+                                f"{sub}: {scene}={val} != {base_scene}={base_val}"
+                            )
+        else:
+            # CUDA not available: just verify the scenario ran (result files exist)
+            assert len(all_files) >= 1, (
+                f"{name}: expected at least 1 result (no-crash test)"
+                f"found {len(all_files)}"
+            )
+            # No comparison needed
+            # the fact that we have result files means it didn't crash
