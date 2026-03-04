@@ -261,8 +261,6 @@ class RequestTracker:
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
 
-        self.num_lmcache_cached_tokens = lmcache_cached_tokens
-
 
 @dataclass
 class ReqMeta:
