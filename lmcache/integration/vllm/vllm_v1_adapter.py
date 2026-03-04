@@ -345,7 +345,11 @@ class ReqMeta:
         # NOTE(vladnosiv): for the input_token_len chunk prefill,
         # we are required to discard partial chunks,
         # as new tokens will be added in the next iteration.
-        if not is_last_prefill or discard_partial_chunks:
+
+        # Forcibly retain the last incomplete chunk in Disagg scenarios
+        force_keep_tail = is_last_prefill and (tracker.disagg_spec is not None)
+
+        if not is_last_prefill or (discard_partial_chunks and not force_keep_tail):
             num_tokens_to_save = (
                 input_token_len // lmcache_chunk_size * lmcache_chunk_size
             )

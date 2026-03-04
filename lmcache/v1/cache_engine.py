@@ -382,6 +382,11 @@ class LMCacheEngine:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        is_disagg = kwargs.get("transfer_spec") is not None
+        if is_disagg:
+            # For any cross-node transmission, forcibly allow sending non-full blocks
+            self.token_database.save_unfull_chunk = True
+
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping store operation")
