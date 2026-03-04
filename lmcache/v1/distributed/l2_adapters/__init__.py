@@ -14,9 +14,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     NixlStoreL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
-from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (
-    NixlStoreL2Adapter,
-)
 
 
 def create_l2_adapter(
@@ -44,6 +41,12 @@ def create_l2_adapter(
         return MockL2Adapter(config)
 
     if isinstance(config, NixlStoreL2AdapterConfig):
+        # Lazy import nixl
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (
+            NixlStoreL2Adapter,
+        )
+
         if l1_memory_desc is None:
             raise ValueError(
                 "l1_memory_desc is required to create a NixlStoreL2Adapter."
