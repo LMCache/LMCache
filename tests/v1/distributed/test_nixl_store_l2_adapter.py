@@ -19,7 +19,8 @@ import torch
 nixl = pytest.importorskip("nixl")
 
 # First Party
-from lmcache.v1.distributed.api import L1MemoryDesc, ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.config import (  # noqa: E402
     NixlStoreL2AdapterConfig,
 )
