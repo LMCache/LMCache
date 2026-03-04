@@ -482,6 +482,15 @@ class MPCacheEngine:
     # Utility methods
     # =========================================================================
 
+    def health_check(self) -> bool:
+        """
+        Check if the server is healthy by running a memory check.
+
+        Returns:
+            bool: True if the server memory is healthy.
+        """
+        return self.storage_manager.memcheck()
+
     def get_chunk_size(self) -> int:
         """
         Returns the chunk size used for KV cache operations.
@@ -599,6 +608,7 @@ def run_cache_server(
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
+    add_handler_helper(server, RequestType.HEALTH_CHECK, engine.health_check)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 

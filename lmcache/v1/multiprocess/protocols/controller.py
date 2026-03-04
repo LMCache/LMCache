@@ -14,6 +14,7 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefiniti
 REQUEST_NAMES = [
     "CLEAR",
     "GET_CHUNK_SIZE",
+    "HEALTH_CHECK",
 ]
 
 
@@ -39,6 +40,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "GET_CHUNK_SIZE": ProtocolDefinition(
             payload_classes=[],
             response_class=int,
+            handler_type=HandlerType.SYNC,
+        ),
+        # Health check
+        # Payload: None
+        # Returns: bool - True if server is healthy
+        "HEALTH_CHECK": ProtocolDefinition(
+            payload_classes=[],
+            response_class=bool,
             handler_type=HandlerType.SYNC,
         ),
     }

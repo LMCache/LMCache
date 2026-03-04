@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from typing import Any
 import os
-import time
+import threading
 
 # Third Party
 import torch
@@ -20,10 +20,12 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
 
 LMCACHE_MQ_TIMEOUT = float(os.getenv("LMCACHE_MQ_TIMEOUT", "30"))
+LMCACHE_HEARTBEAT_INTERVAL = float(os.getenv("LMCACHE_HEARTBEAT_INTERVAL", "10"))
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
@@ -69,6 +71,62 @@ def get_lmcache_chunk_size(
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
     chunk_size = future.result(timeout=LMCACHE_MQ_TIMEOUT)
     return chunk_size
+
+
+def send_health_check(
+    mq_client: MessageQueueClient,
+    timeout: float,
+) -> bool:
+    """Send a HEALTH_CHECK request and return the result.
+
+    Returns:
+        True if server is healthy, False on unhealthy or timeout.
+    """
+    try:
+        future = send_lmcache_request(mq_client, RequestType.HEALTH_CHECK, [])
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        return False
+    except Exception:
+        logger.debug("Health check failed with exception", exc_info=True)
+        return False
+
+
+class HeartbeatThread(PeriodicThread):
+    """Periodically checks server health via HEALTH_CHECK.
+
+    Manages a threading.Event that adapters use to gate operations.
+    Once unhealthy, the adapter degrades permanently (no recovery).
+    """
+
+    def __init__(
+        self,
+        mq_client: MessageQueueClient,
+        health_event: threading.Event,
+    ):
+        super().__init__(
+            name="lmcache-heartbeat",
+            interval=LMCACHE_HEARTBEAT_INTERVAL,
+            level=ThreadLevel.CRITICAL,
+        )
+        self._mq_client = mq_client
+        self._health_event = health_event
+
+    def _execute(self) -> ThreadRunSummary:
+        was_healthy = self._health_event.is_set()
+        healthy = send_health_check(self._mq_client, timeout=LMCACHE_HEARTBEAT_INTERVAL)
+
+        if healthy:
+            self._health_event.set()
+        else:
+            self._health_event.clear()
+            if was_healthy:
+                logger.warning("LMCache server is unhealthy — entering degraded mode")
+
+        return ThreadRunSummary(
+            success=True,
+            message="healthy" if healthy else "unhealthy",
+        )
 
 
 @dataclass
@@ -118,7 +176,6 @@ class LMCacheMPSchedulerAdapter:
 
         # Request futures
         self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
-        self.lookup_submit_times: dict[str, float] = {}
 
         self.model_name = model_name
         self.world_size = world_size
@@ -136,6 +193,22 @@ class LMCacheMPSchedulerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = self.chunk_size // vllm_block_size
+
+        # Health state (shared with heartbeat thread)
+        self._health_event = threading.Event()
+        self._health_event.set()
+
+        # Start heartbeat thread
+        self._heartbeat = HeartbeatThread(
+            mq_client=self.mq_client,
+            health_event=self._health_event,
+        )
+        self._heartbeat.start()
+
+    @property
+    def is_healthy(self) -> bool:
+        """Whether the LMCache server is healthy."""
+        return self._health_event.is_set()
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(
@@ -161,6 +234,9 @@ class LMCacheMPSchedulerAdapter:
             In the meantime, this function will record the lookup request, and the
             status of the look up request can be checked by `check_lookup_result`.
         """
+        if not self.is_healthy:
+            return
+
         if request_id in self.lookup_futures:
             # Skip if there is already a lookup request
             return
@@ -180,7 +256,6 @@ class LMCacheMPSchedulerAdapter:
             [key],
         )
         self.lookup_futures[request_id] = future
-        self.lookup_submit_times[request_id] = time.time()
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -196,28 +271,19 @@ class LMCacheMPSchedulerAdapter:
             in LMCache (prefix matching), or
             None if the lookup request is not finished yet.
         """
-        assert request_id in self.lookup_futures, (
-            f"Lookup request for request_id={request_id} has not been submitted"
-        )
+        if request_id not in self.lookup_futures:
+            # No future — either unhealthy at submit time or already cleaned up
+            return 0
 
         future = self.lookup_futures[request_id]
         if not future.query():
-            # Check if lookup has timed out
-            submit_time = self.lookup_submit_times.get(request_id, 0)
-            if time.time() - submit_time > LMCACHE_MQ_TIMEOUT:
-                logger.warning(
-                    "Lookup for request %s timed out after %ss. "
-                    "Falling back to no cache hits.",
-                    request_id,
-                    LMCACHE_MQ_TIMEOUT,
-                )
+            if not self.is_healthy:
+                # Server went down — give up on this lookup
                 self.lookup_futures.pop(request_id)
-                self.lookup_submit_times.pop(request_id, None)
                 return 0
             return None
 
         result = future.result()
-        self.lookup_submit_times.pop(request_id, None)
         num_chunks = result
         return num_chunks * self.chunk_size
 
@@ -235,7 +301,6 @@ class LMCacheMPSchedulerAdapter:
             request_id: The ID of the finished request.
         """
         self.lookup_futures.pop(request_id, None)
-        self.lookup_submit_times.pop(request_id, None)
 
     def free_lookup_locks(
         self,
@@ -263,6 +328,9 @@ class LMCacheMPSchedulerAdapter:
             end: End token index.
             request_id: The request ID.
         """
+        if not self.is_healthy:
+            return
+
         key = self._create_key(
             token_ids, start=start, end=end, request_id=request_id
         ).no_worker_id_version()
@@ -278,6 +346,9 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
+        if not self.is_healthy:
+            return
+
         send_lmcache_request(
             self.mq_client,
             RequestType.END_SESSION,
@@ -325,11 +396,10 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches: dict[str, torch.Tensor] = {}
 
         # Request futures
-        # request_id -> (future, submit_time)
-        self.store_futures: dict[str, tuple[MessagingFuture[StoreResult], float]] = {}
-        # request_id -> (future, block_ids, submit_time)
+        self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
+        # request_id -> (future, block_ids)
         self.retrieve_futures: dict[
-            str, tuple[MessagingFuture[RetrieveResult], list[int], float]
+            str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
 
         # Block IDs that failed due to retrieve timeout
@@ -359,6 +429,17 @@ class LMCacheMPWorkerAdapter:
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
 
+        # Health state (shared with heartbeat thread)
+        self._health_event = threading.Event()
+        self._health_event.set()
+
+        # Start heartbeat thread
+        self._heartbeat = HeartbeatThread(
+            mq_client=self.mq_client,
+            health_event=self._health_event,
+        )
+        self._heartbeat.start()
+
         # request telemetry, used for prefill-decode disagg
         # TODO: pass down the configuration via vLLM connector config
         # instead of env var
@@ -371,6 +452,11 @@ class LMCacheMPWorkerAdapter:
                 ),
             },
         )
+
+    @property
+    def is_healthy(self) -> bool:
+        """Whether the LMCache server is healthy."""
+        return self._health_event.is_set()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
@@ -414,6 +500,9 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
+        if not self.is_healthy:
+            return
+
         assert op.token_ids is not None
         key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
         future = send_lmcache_request(
@@ -421,7 +510,7 @@ class LMCacheMPWorkerAdapter:
             RequestType.STORE,
             [key, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
-        self.store_futures[request_id] = (future, time.time())
+        self.store_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -436,6 +525,10 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
         """
+        if not self.is_healthy:
+            self.error_block_ids.update(op.block_ids)
+            return
+
         assert op.token_ids is not None
         key = self._create_key(op.token_ids, op.start, op.end, request_id=request_id)
         future = send_lmcache_request(
@@ -443,11 +536,7 @@ class LMCacheMPWorkerAdapter:
             RequestType.RETRIEVE,
             [key, self.instance_id, op.block_ids, event.ipc_handle()],
         ).to_cuda_future()
-        self.retrieve_futures[request_id] = (
-            future,
-            list(op.block_ids),
-            time.time(),
-        )
+        self.retrieve_futures[request_id] = (future, list(op.block_ids))
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -513,52 +602,53 @@ class LMCacheMPWorkerAdapter:
             take care of deduplicating the request IDs and only return the request
             IDs that have not been returned before.
         """
+        # If unhealthy, drain all pending futures immediately
+        if not self.is_healthy:
+            finished_stores = set(self.store_futures.keys())
+            finished_retrieves = set()
+            for request_id, (
+                _r_future,
+                r_block_ids,
+            ) in self.retrieve_futures.items():
+                finished_retrieves.add(request_id)
+                self.error_block_ids.update(r_block_ids)
+            self.store_futures.clear()
+            self.retrieve_futures.clear()
+
+            self.finished_stores.update(finished_stores)
+            ret_stores = set()
+            for req_id in finished_req_ids_from_engine:
+                if req_id in self.finished_stores:
+                    self.previously_finished.add(req_id)
+                else:
+                    ret_stores.add(req_id)
+            ret_stores.update(self._update_and_get_finished_store())
+            return ret_stores, finished_retrieves
+
         finished_stores = set()
         finished_retrieves = set()
-        for request_id, (s_future, submit_time) in self.store_futures.items():
+        for request_id, s_future in self.store_futures.items():
             if not s_future.query():
-                if time.time() - submit_time > LMCACHE_MQ_TIMEOUT:
-                    logger.warning(
-                        "Store for request %s timed out after %ss. Discarding.",
-                        request_id,
-                        LMCACHE_MQ_TIMEOUT,
-                    )
-                    finished_stores.add(request_id)
                 continue
 
             s_result = s_future.result()
             finished_stores.add(request_id)
 
             if not s_result:
-                # TODO: add error handling here
                 logger.error(
                     "Something went wrong when processing the "
                     "store request for request_id=%s",
                     request_id,
                 )
 
-        for request_id, (
-            r_future,
-            r_block_ids,
-            submit_time,
-        ) in self.retrieve_futures.items():
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
             if not r_future.query():
-                if time.time() - submit_time > LMCACHE_MQ_TIMEOUT:
-                    logger.warning(
-                        "Retrieve for request %s timed out after %ss. "
-                        "Reporting as failed.",
-                        request_id,
-                        LMCACHE_MQ_TIMEOUT,
-                    )
-                    finished_retrieves.add(request_id)
-                    self.error_block_ids.update(r_block_ids)
                 continue
 
             r_result = r_future.result()
             finished_retrieves.add(request_id)
 
             if not r_result:
-                # TODO: add error handing here
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
