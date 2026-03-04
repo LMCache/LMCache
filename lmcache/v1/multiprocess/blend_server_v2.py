@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Copy-Blend (CB) KV cache server — blend_server_v2.
-
 Overview
 --------
 This server enables KV cache reuse across requests that share token
