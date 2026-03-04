@@ -89,9 +89,14 @@ def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
     _tensor_registry.pop(ptr, None)
 
 
-def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
+def alloc_pinned_ptr(size: int, flags: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory and returning pointer
-    to it. Note: Pinned memory is not supported on non-CUDA."""
+    to it. Note: Pinned memory is not supported on non-CUDA.
+
+    Args:
+        size: Number of bytes to allocate.
+        flags: Allocation flags (ignored in non-CUDA implementation).
+    """
     return _alloc_cpu_ptr(size)
 
 
