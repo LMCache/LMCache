@@ -117,29 +117,42 @@ def scenario_rotary_embedding_k_fused():
     old_positions = torch.randint(0, 1000, (num_tokens,), dtype=torch.long)
     new_positions = old_positions + 1
 
-    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=torch.float32)
     cos_sin_cache = torch.randn(max_position, rotary_dim, dtype=torch.float32)
-    is_neox = True
 
-    if is_cuda_backend:
-        target_dev = f"cuda:{torch.cuda.current_device()}"
-        old_positions = old_positions.to(target_dev)
-        new_positions = new_positions.to(target_dev)
-        key = key.to(target_dev)
-        cos_sin_cache = cos_sin_cache.to(target_dev)
+    # Test both is_neox=True (NeoX-style, contiguous halves) and
+    # is_neox=False (GPT-J-style, interleaved)
+    for is_neox in [True, False]:
+        # Reset seed for consistent key tensor across both tests
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
 
-    # 3. Execute (in-place update on key)
-    ops.rotary_embedding_k_fused(
-        old_positions,
-        new_positions,
-        key,
-        head_size,
-        cos_sin_cache,
-        is_neox,
-    )
+        key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=torch.float32)
 
-    # 4. Save
-    save_result("rotary_embedding_k_fused", key.cpu())
+        if is_cuda_backend:
+            target_dev = f"cuda:{torch.cuda.current_device()}"
+            old_positions_dev = old_positions.to(target_dev)
+            new_positions_dev = new_positions.to(target_dev)
+            key = key.to(target_dev)
+            cos_sin_cache_dev = cos_sin_cache.to(target_dev)
+        else:
+            old_positions_dev = old_positions
+            new_positions_dev = new_positions
+            cos_sin_cache_dev = cos_sin_cache
+
+        # 3. Execute (in-place update on key)
+        ops.rotary_embedding_k_fused(
+            old_positions_dev,
+            new_positions_dev,
+            key,
+            head_size,
+            cos_sin_cache_dev,
+            is_neox,
+        )
+
+        # 4. Save with is_neox suffix to distinguish the two test cases
+        neox_suffix = "neox" if is_neox else "gptj"
+        save_result(f"rotary_embedding_k_fused_{neox_suffix}", key.cpu())
 
 
 def scenario_lmcache_memcpy_async():
