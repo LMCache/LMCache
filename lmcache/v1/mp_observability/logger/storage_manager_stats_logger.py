@@ -6,10 +6,10 @@ import threading
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import StorageManagerListener
-from lmcache.v1.distributed.observability.logger.prometheus_logger import (
+from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
-from lmcache.v1.distributed.observability.stats.storage_manager_stats import (
+from lmcache.v1.mp_observability.stats.storage_manager_stats import (
     StorageManagerStats,
 )
 

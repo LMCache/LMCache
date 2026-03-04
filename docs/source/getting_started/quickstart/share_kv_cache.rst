@@ -33,6 +33,8 @@ Centralized KV cache sharing
 
 This section demonstrates how to share KV cache across multiple vLLM instances using a centralized LMCache server.
 
+**Important**: For centralized cache sharing (which is cross-process cases), ensure all processes use the same `PYTHONHASHSEED` to keep the hash of the KV cache consistent across processes: ``export PYTHONHASHSEED=0``.
+
 Setup centralized sharing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -58,6 +60,7 @@ Run centralized sharing example
 
 .. code-block:: bash
 
+    PYTHONHASHSEED=0 \
     LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=0 \
     vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
@@ -69,6 +72,7 @@ In another terminal,
 
 .. code-block:: bash
 
+    PYTHONHASHSEED=0 \
     LMCACHE_CONFIG_FILE=lmcache_config.yaml \
     CUDA_VISIBLE_DEVICES=1 \
     vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
