@@ -2,7 +2,7 @@ aiofile
 aiofiles
 aiohttp
 cufile-python
-infinistore
+infinistore; platform_machine == 'x86_64'
 msgspec
 numpy
 nvtx

@@ -15,6 +15,7 @@ from lmcache.v1.lookup_server import LookupServerInterface
 from lmcache.v1.memory_management import MemoryAllocatorInterface
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.gds_backend import GdsBackend
+from lmcache.v1.storage_backend.xds_backend import XdsBackend
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
@@ -41,6 +42,20 @@ def CreateStorageBackends(
         dst_device = f"cuda:{torch.cuda.current_device()}"
 
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
+
+    if config.xds_path is not None:
+        xds_backend = XdsBackend(config, loop, memory_allocator, dst_device)
+        storage_backends[str(xds_backend)] = xds_backend
+
+        local_cpu_backend = LocalCPUBackend(
+            config,
+            memory_allocator,
+            lookup_server,
+            lmcache_worker,
+        )
+        backend_name = str(local_cpu_backend)
+        storage_backends[backend_name] = local_cpu_backend
+        return storage_backends
 
     if config.enable_nixl:
         if config.enable_xpyd:

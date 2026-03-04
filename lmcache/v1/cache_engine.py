@@ -81,6 +81,10 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
 
         self.enable_p2p = config.enable_p2p
+        if config.xds_path:
+            self.enable_xds = True
+        else:
+            self.enable_xds = False
 
         self.enable_controller = config.enable_controller
 
@@ -413,6 +417,9 @@ class LMCacheEngine:
         start_mapping: Dict[str, List[int]] = {}
         end_mapping: Dict[str, List[int]] = {}
 
+        slot_mappings: torch.Tensor = kwargs["slot_mapping"]
+        real_kv: List[torch.Tensor] = kwargs["kvcaches"]
+
         reordered_keys = []
         reordered_memory_objs = []
         reordered_starts = []
@@ -469,32 +476,41 @@ class LMCacheEngine:
             start_mapping[location].append(start)
             end_mapping[location].append(end)
 
+        if not self.enable_xds:
         # TODO(Jiayi): We can parallelize the retrieval from
         # different storage backends.
-        for location, keys in key_mapping.items():
-            memory_objs = self.storage_manager.batched_get(
-                keys=keys,
-                location=location,
+            for location, keys in key_mapping.items():
+                memory_objs = self.storage_manager.batched_get(
+                    keys=keys,
+                    location=location,
+                )
+                reordered_memory_objs.extend(memory_objs)
+                reordered_keys.extend(keys)
+                reordered_starts.extend(start_mapping[location])
+                reordered_ends.extend(end_mapping[location])
+
+            # NOTE(Jiayi): memory_obj doesn't have to be a pinned
+            # cpu tensor for the sake of performance.
+            # For example, disk->gpu is faster than disk->cpu->gpu.
+            # RDMA is another example.
+            self.gpu_connector.batched_to_gpu(
+                reordered_memory_objs, reordered_starts, reordered_ends, **kwargs
             )
-            reordered_memory_objs.extend(memory_objs)
-            reordered_keys.extend(keys)
-            reordered_starts.extend(start_mapping[location])
-            reordered_ends.extend(end_mapping[location])
 
-        # NOTE(Jiayi): memory_obj doesn't have to be a pinned
-        # cpu tensor for the sake of performance.
-        # For example, disk->gpu is faster than disk->cpu->gpu.
-        # RDMA is another example.
-        self.gpu_connector.batched_to_gpu(
-            reordered_memory_objs, reordered_starts, reordered_ends, **kwargs
-        )
-
-        # TODO(Jiayi): Remove the following for loop with batched operations
-        for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
-            if self.remove_after_retrieve:
-                self.storage_manager.remove(key)
-            memory_obj.ref_count_down()
-
+            # TODO(Jiayi): Remove the following for loop with batched operations
+            for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
+                if self.remove_after_retrieve:
+                    self.storage_manager.remove(key)
+                memory_obj.ref_count_down()
+        else:
+            self.storage_manager.xds_batched_get(
+                key_mapping["XdsBackend"],
+                read_kv,
+                slot_mappings,
+                start_mapping["XdsBackend"],
+                end_mapping["XdsBackend"],
+                "XdsBackend"
+            )
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
         logger.info(

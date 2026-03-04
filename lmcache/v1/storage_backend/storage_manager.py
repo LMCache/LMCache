@@ -264,6 +264,24 @@ class StorageManager:
                 return memory_objs
         return None
 
+    def xds_batched_get(
+        self,
+        keys: List[CacheEngineKey],
+        kv_pointers: List[torch.Tensor],
+        slot_mapping: torch.Tensor,
+        starts: List[int],
+        ends: List[int],
+        location: Optional[str] = None,
+    ) -> Optional[List[MemoryObj]]:
+        """
+        Blocking function to get the memory objects from the storages.
+        """
+        for backend_name, storage_backend in self.storage_backends.items():
+            if location and backend_name != location:
+                continue
+            backend.get_xds_non_blocking(keys, kv_pointers, slot_mapping, starts, ends)
+        return
+
     def layerwise_batched_get(
         self,
         keys: List[List[CacheEngineKey]],

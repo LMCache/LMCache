@@ -101,6 +101,16 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def get_xds_non_blocking(
+        self,
+        keys: List[CacheEngineKey],
+        kv_pointers: List[torch.Tensor],
+        slot_mappings: torch.Tensor,
+        starts: List[int],
+        ends: List[int]
+    ):
+        raise NotImplementedError
+
     @abc.abstractmethod
     def get_non_blocking(
         self,

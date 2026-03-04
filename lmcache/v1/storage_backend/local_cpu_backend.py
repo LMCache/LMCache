@@ -56,6 +56,8 @@ class LocalCPUBackend(StorageBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
+        self.xds = config.xds_path is not None
+
         self.stream = torch.cuda.Stream()
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -105,8 +107,9 @@ class LocalCPUBackend(StorageBackendInterface):
         with self.cpu_lock:
             if key in self.hot_cache:
                 return None
-            self.hot_cache[key] = memory_obj
-            memory_obj.ref_count_up()
+            if not self.xds:
+                self.hot_cache[key] = memory_obj
+                memory_obj.ref_count_up()
 
             self.usage += memory_obj.get_size()
             self.stats_monitor.update_local_cache_usage(self.usage)

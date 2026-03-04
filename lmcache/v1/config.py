@@ -43,6 +43,7 @@ def to_int_list(
 @dataclass
 class LMCacheEngineConfig:
     chunk_size: int
+    block_size: int
     local_cpu: bool
     max_local_cpu_size: float  # in GB
     # need to be assigned a non-zero
@@ -119,6 +120,11 @@ class LMCacheEngineConfig:
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
 
+    #The path under xds_path that the cache will be stored
+    xds_path: Optional[str] = None
+    # The xds bdev
+    xds_bdev: Optional[str] = None
+
     # The extra config
     extra_config: Optional[dict] = None
 
@@ -138,6 +144,7 @@ class LMCacheEngineConfig:
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
+        block_size: int = 128,
         local_cpu: bool = True,
         max_local_cpu_size: float = 5.0,
         local_disk: Optional[str] = None,
@@ -176,6 +183,8 @@ class LMCacheEngineConfig:
         weka_path: Optional[str] = None,
         gds_path: Optional[str] = None,
         cufile_buffer_size: Optional[int] = None,
+        xds_path: Optional[str] = None,
+        xds_bdev: Optional[str] = None,
         extra_config: Optional[dict] = None,
         save_unfull_chunk: bool = True,
         blocking_timeout_secs: int = 10,
@@ -184,6 +193,7 @@ class LMCacheEngineConfig:
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
             chunk_size,
+            block_size,
             local_cpu,
             max_local_cpu_size,
             local_disk,
@@ -222,6 +232,8 @@ class LMCacheEngineConfig:
             weka_path,
             gds_path,
             cufile_buffer_size,
+            xds_path,
+            xds_bdev,
             extra_config,
             save_unfull_chunk,
             blocking_timeout_secs,
@@ -320,6 +332,7 @@ class LMCacheEngineConfig:
             config = yaml.safe_load(fin)
 
         chunk_size = config.get("chunk_size", 256)
+        block_size = config.get("block_size", 128)
 
         local_cpu = config.get("local_cpu", True)
         max_local_cpu_size = config.get("max_local_cpu_size", 5)
@@ -395,6 +408,8 @@ class LMCacheEngineConfig:
         weka_path = config.get("weka_path", None)
         gds_path = config.get("gds_path", None)
         cufile_buffer_size = config.get("cufile_buffer_size", None)
+        xds_path = config.get("xds_path", None)
+        xds_bdev = config.get("xds_bdev", None)
 
         save_unfull_chunk = config.get("save_unfull_chunk", True)
 
@@ -415,6 +430,7 @@ class LMCacheEngineConfig:
         return (
             LMCacheEngineConfig(
                 chunk_size,
+                block_size,
                 local_cpu,
                 max_local_cpu_size,
                 local_disk_path,
@@ -453,6 +469,8 @@ class LMCacheEngineConfig:
                 weka_path,
                 gds_path,
                 cufile_buffer_size,
+                xds_path,
+                xds_bdev,
                 extra_config,
                 save_unfull_chunk,
                 blocking_timeout_secs,
@@ -506,6 +524,9 @@ class LMCacheEngineConfig:
         config = LMCacheEngineConfig.from_defaults(remote_url=None, remote_serde=None)
         config.chunk_size = to_int(
             parse_env(get_env_name("chunk_size"), config.chunk_size)
+        )
+        config.block_size = to_int(
+            parse_env(get_env_name("block_size"), config.block_size)
         )
         config.local_cpu = to_bool(
             parse_env(get_env_name("local_cpu"), config.local_cpu)
@@ -662,6 +683,14 @@ class LMCacheEngineConfig:
                 config.cufile_buffer_size,
             )
         )
+        config.xds_path = parse_env(
+            get_env_name("xds_path"),
+            config.xds_path,
+        )
+        config.xds_bdev = parse_env(
+            get_env_name("xds_bdev"),
+            config.xds_bdev,
+        )
         config.extra_config = to_dict(parse_env(get_env_name("extra_config"), None))
         config.save_unfull_chunk = to_bool(
             parse_env(get_env_name("save_unfull_chunk"), config.save_unfull_chunk)
@@ -719,6 +748,7 @@ class LMCacheEngineConfig:
         """log the configuration in LMCache"""
         config_dict = {
             "chunk_size": self.chunk_size,
+            "block_size": self.block_size,
             "cufile_buffer_size": self.cufile_buffer_size,
             "local_cpu": self.local_cpu,
             "max_local_cpu_size": f"{self.max_local_cpu_size} GB",
@@ -753,6 +783,8 @@ class LMCacheEngineConfig:
             "nixl_proxy_port": self.nixl_proxy_port,
             "weka_path": self.weka_path,
             "gds_path": self.gds_path,
+            "xds_path": self.xds_path,
+            "xds_bdev": self.xds_bdev,
             "extra_config": self.extra_config,
             "save_unfull_chunk": self.save_unfull_chunk,
             "blocking_timeout_secs": self.blocking_timeout_secs,
