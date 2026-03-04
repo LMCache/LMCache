@@ -5,7 +5,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import L1MemoryDesc, MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
@@ -53,6 +53,7 @@ class L1MemoryManager:
     def __init__(self, config: L1MemoryManagerConfig):
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
+        self._align_bytes = config.align_bytes
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -150,6 +151,20 @@ class L1MemoryManager:
         total_size = address_manager.get_heap_size()
         used_size = total_size - free_size
         return used_size, total_size
+
+    def get_l1_memory_desc(self) -> L1MemoryDesc:
+        """
+        Return an L1MemoryDesc describing the underlying memory buffer.
+
+        Returns:
+            L1MemoryDesc: Pointer, size, and alignment of the L1 buffer.
+        """
+        buffer = self.get_vm_space()
+        return L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=self._size_in_bytes,
+            align_bytes=self._align_bytes,
+        )
 
     def close(self) -> None:
         """
