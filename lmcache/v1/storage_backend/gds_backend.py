@@ -404,8 +404,8 @@ class GdsBackend(AllocatorBackendInterface):
                 return self._read_metadata(key, path, subdir_key)
             except FileNotFoundError:
                 logger.warning(
-                    f"[GDS] File not found for key {key} at expected path {path},"
-                    f" returning None"
+                    f"[GDS] File not found for key {key.to_string()} at expected path "
+                    f"{path}, returning None"
                 )
             except PermissionError:
                 logger.warning(
@@ -418,12 +418,13 @@ class GdsBackend(AllocatorBackendInterface):
                 logger.error(
                     f"Failed to read metadata file {path}: {type(e).__name__}: {e}. "
                     f"File may be corrupted or inaccessible. "
-                    f"Ignoring cache entry for key {key}."
+                    f"Ignoring cache entry for key {key.to_string()}."
                 )
             except Exception as e:
                 logger.error(
                     f"Unexpected error reading metadata file {path}: "
-                    f"{type(e).__name__}: {e}. Ignoring cache entry for key {key}."
+                    f"{type(e).__name__}: {e}. Ignoring cache entry for key "
+                    f"{key.to_string()}."
                 )
 
         return None
@@ -533,8 +534,9 @@ class GdsBackend(AllocatorBackendInterface):
                 )
             except Exception as e:
                 logger.error(
-                    f"GDS/cuFile write operation failed for key {key} at path {path}: "
-                    f"tensor_shape={kv_chunk.shape}, tensor_dtype={kv_chunk.dtype}, "
+                    f"GDS/cuFile write operation failed for key {key.to_string()} at "
+                    f"path {path}: tensor_shape={kv_chunk.shape}, "
+                    f"tensor_dtype={kv_chunk.dtype}, "
                     f"tensor_size_bytes={kv_chunk.nbytes}, error={e}",
                     exc_info=True,
                 )
@@ -554,14 +556,15 @@ class GdsBackend(AllocatorBackendInterface):
                 task.add_done_callback(self.save_metadata_tasks.discard)
             except Exception as e:
                 logger.error(
-                    f"POSIX metadata write operation failed for key {key} at path "
-                    f"{path + _METADATA_FILE_SUFFIX}: "
+                    f"POSIX metadata write operation failed for key {key.to_string()} "
+                    f"at path {path + _METADATA_FILE_SUFFIX}: "
                     f"metadata_size_bytes={len(metadata)}, "
                     f"tmp_suffix={tmp}, error={e}",
                     exc_info=True,
                 )
                 with self.hot_lock:
                     self.hot_cache.pop(key, None)
+                return
         finally:
             memory_obj.ref_count_down()
             with self.put_lock:
@@ -573,7 +576,8 @@ class GdsBackend(AllocatorBackendInterface):
                 on_complete_callback(key)
             except Exception as e:
                 logger.error(
-                    f"on_complete_callback failed for key {key}: {e}", exc_info=True
+                    f"on_complete_callback failed for key {key.to_string()}: {e}",
+                    exc_info=True,
                 )
 
     def insert_key(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
@@ -1034,7 +1038,7 @@ class GdsBackend(AllocatorBackendInterface):
             else:  # break to failure case after max attempts is reached
                 break
 
-        logger.error(
+        logger.warning(
             f"GDS batched allocation failed after {num_attempts} "
             f"attempt(s). Returning None."
         )
