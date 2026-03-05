@@ -34,6 +34,15 @@ from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
     init_prometheus_controller,
 )
+from lmcache.v1.mp_observability.telemetry import (
+    TelemetryConfig,
+    get_telemetry_controller,
+    init_telemetry_controller,
+    parse_args_to_telemetry_config,
+)
+from lmcache.v1.mp_observability.telemetry.config import (
+    DEFAULT_TELEMETRY_CONFIG,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
@@ -647,6 +656,7 @@ def add_handler_helper(
 def run_cache_server(
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
+    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
     host: str = "localhost",
     port: int = 5555,
     chunk_size: int = 256,
@@ -660,6 +670,7 @@ def run_cache_server(
     Args:
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
+        telemetry_config: Configuration for the telemetry event system
         host: ZMQ server host
         port: ZMQ server port
         chunk_size: Chunk size for KV cache operations
@@ -674,6 +685,9 @@ def run_cache_server(
     """
     # Initialize global prometheus controller
     init_prometheus_controller(prometheus_config)
+
+    # Initialize global telemetry controller
+    init_telemetry_controller(telemetry_config)
 
     sep_tokens = get_sep_tokens()
 
@@ -728,6 +742,9 @@ def run_cache_server(
 
     # Start prometheus controller after engine creation (loggers are registered)
     get_prometheus_controller().start()
+
+    # Start telemetry controller
+    get_telemetry_controller().start()
     logger.info("LMCache cache blend server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -740,6 +757,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_telemetry_controller().stop()
         get_prometheus_controller().stop()
         server.close()
         engine.close()
@@ -749,9 +767,11 @@ if __name__ == "__main__":
     args = parse_args()
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
+        telemetry_config=telemetry_config,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
