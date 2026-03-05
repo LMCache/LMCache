@@ -95,6 +95,9 @@ logger = init_logger(__name__)
 
 
 class BlendTokenRangeMatcher:
+    # TODO(Jiayi): Needs thread-safety for this class.
+    # TODO(Jiayi): Currently, the table size is fixed. We need to support
+    # dynamic expanding or eviction.
     """Fast token-range matcher using polynomial rolling/chunk hashes and a
     direct-address lookup table.
 
@@ -373,6 +376,8 @@ class BlendEngineV2(MPCacheEngine):
                 group[0].cur_st,
             )
 
+        # TODO(Jiayi): We need avoid busy waiting once we have support
+        # for L2 storage.
         # Collect only the CBMatchResults for chunks actually found in storage
         for handle, group in zip(prefetch_handles, groups, strict=False):
             found_count = None
@@ -465,7 +470,7 @@ class BlendEngineV2(MPCacheEngine):
                     tmp_buffer.copy_(gpu_kv_slice, non_blocking=True)
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
-                event.record()
+            event.record()
 
         # Call finish_write after the copy is done
         gpu_context.cupy_stream.launch_host_func(
@@ -531,7 +536,12 @@ class BlendEngineV2(MPCacheEngine):
             assert k.chunk_hash is not None
             token_hashes.append(k.chunk_hash)
 
-        self._token_range_matcher.on_new_token_hashes(list(key.token_ids), token_hashes)
+        # NOTE(Jiayi): We only register the token hashes for worker_id 0 or None to
+        # avoid duplicate registration across workers.
+        if key.worker_id in [0, None]:
+            self._token_range_matcher.on_new_token_hashes(
+                list(key.token_ids), token_hashes
+            )
 
         logger.info(
             "Stored pre-computed doc with %d tokens, num stored chunks: %d",

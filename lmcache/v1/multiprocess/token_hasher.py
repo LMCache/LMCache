@@ -290,7 +290,34 @@ def rolling_hash_windows_numba(
 
 @njit(cache=True)
 def chunk_hash_windows_numba(arr_u64, k, base):
-    """Specialized for non-overlapping windows (stride = k)."""
+    """Compute polynomial hashes over non-overlapping (chunked) windows.
+
+    Unlike the rolling-hash variant, each window's hash is computed
+    independently from scratch, which is efficient when stride equals the
+    window size (i.e., windows do not overlap).
+
+    The hash for a window starting at position ``s`` is:
+
+        h = arr[s]*base^(k-1) + arr[s+1]*base^(k-2) + ... + arr[s+k-1]
+
+    computed with natural ``uint64`` overflow (mod 2^64).
+
+    Parameters
+    ----------
+    arr_u64 : np.ndarray[np.uint64]
+        1-D array of token values cast to ``uint64``.
+    k : int
+        Window (chunk) size.
+    base : np.uint64
+        Base of the polynomial hash.
+
+    Returns
+    -------
+    np.ndarray[np.uint64]
+        Array of length ``len(arr_u64) // k`` containing one hash per
+        non-overlapping chunk. Trailing tokens that do not fill a
+        complete chunk are ignored.
+    """
     n = arr_u64.shape[0]
     num_windows = n // k
     out = np.empty(num_windows, dtype=np.uint64)

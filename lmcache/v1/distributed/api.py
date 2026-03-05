@@ -35,16 +35,6 @@ class ObjectKey:
     """ The rank that uniquely identifies the slice of the KV cache """
 
     @staticmethod
-    def HashToKey(chunk_hash: int, model_name: str, kv_rank: int) -> "ObjectKey":
-        """
-        A helper function to create ObjectKey from int hash."""
-        return ObjectKey(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_hash),
-            model_name=model_name,
-            kv_rank=kv_rank,
-        )
-
-    @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
         # NOTE: this is only used by tests
         return chunk_hash.to_bytes(4, byteorder="big")
