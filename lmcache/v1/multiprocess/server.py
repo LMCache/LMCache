@@ -49,6 +49,7 @@ from lmcache.v1.mp_observability.telemetry import (
 )
 from lmcache.v1.mp_observability.telemetry.config import (
     DEFAULT_TELEMETRY_CONFIG,
+)
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
