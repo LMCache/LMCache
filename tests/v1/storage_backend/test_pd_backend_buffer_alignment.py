@@ -6,18 +6,12 @@ This test verifies that the PDBackend correctly aligns the buffer size
 to be a multiple of align_bytes (chunk size).
 """
 
-# Standard
-
-try:
-    # Third Party
-    import pytest
-except ImportError:
-    pytest = None
-
 # Third Party
+import pytest
 import torch
 
 # First Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.pd_backend import PDBackend
@@ -34,6 +28,13 @@ def create_test_metadata(kv_shape=(4, 2, 256, 8, 128)) -> LMCacheMetadata:
         kv_dtype=torch.bfloat16,
         kv_shape=kv_shape,
     )
+
+
+def _get_allocator(backend, config):
+    """Get the appropriate memory allocator based on the buffer device config."""
+    if config.pd_buffer_device == "cpu":
+        return backend.memory_allocator.cpu_allocator
+    return backend.memory_allocator.gpu_allocator
 
 
 def test_buffer_size_alignment_cpu():
@@ -71,12 +72,9 @@ def test_buffer_size_alignment_cpu():
         assert backend.memory_allocator is not None
 
         # Get the actual buffer size used
-        if config.pd_buffer_device == "cpu":
-            actual_buffer_size = backend.memory_allocator.cpu_allocator.buffer_size
-            align_bytes = backend.memory_allocator.cpu_allocator.align_bytes
-        else:
-            actual_buffer_size = backend.memory_allocator.gpu_allocator.buffer_size
-            align_bytes = backend.memory_allocator.gpu_allocator.align_bytes
+        allocator = _get_allocator(backend, config)
+        actual_buffer_size = allocator.buffer_size
+        align_bytes = allocator.align_bytes
 
         # Verify that the actual buffer size is aligned
         assert actual_buffer_size % align_bytes == 0, (
@@ -129,10 +127,8 @@ def test_buffer_size_already_aligned():
     assert backend.memory_allocator is not None
 
     # Get the actual buffer size
-    if config.pd_buffer_device == "cpu":
-        actual_buffer_size = backend.memory_allocator.cpu_allocator.buffer_size
-    else:
-        actual_buffer_size = backend.memory_allocator.gpu_allocator.buffer_size
+    allocator = _get_allocator(backend, config)
+    actual_buffer_size = allocator.buffer_size
 
     # Verify that the size was not changed
     assert actual_buffer_size == aligned_buffer_size
@@ -141,8 +137,25 @@ def test_buffer_size_already_aligned():
     backend.running = False
 
 
-if __name__ == "__main__":
-    # Run tests
-    test_buffer_size_alignment_cpu()
-    test_buffer_size_already_aligned()
-    print("All tests passed!")
+def test_buffer_size_too_small():
+    """
+    Test that an error is raised if the buffer size is smaller than a chunk.
+    """
+    metadata = create_test_metadata(kv_shape=(28, 2, 256, 8, 128))
+
+    # Calculate the chunk size from the KV shape and dtype
+    chunk_size = get_size_bytes([torch.Size(metadata.kv_shape)], [metadata.kv_dtype])
+
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=256,
+        pd_buffer_size=chunk_size - 1,  # smaller than one chunk
+        pd_buffer_device="cpu",
+        pd_role="receiver",
+        pd_peer_host="localhost",
+        pd_peer_init_port=[12349],
+        pd_peer_alloc_port=[12350],
+        transfer_channel="mock_memory",
+    )
+
+    with pytest.raises(ValueError, match="is smaller than a single chunk"):
+        PDBackend(config, metadata)
