@@ -229,9 +229,9 @@ class RequestTracker:
             raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
 
         if preempted:
-            assert all_token_ids is not None, (
-                f"Preempted request {self.req_id} has no all_token_ids"
-            )
+            assert (
+                all_token_ids is not None
+            ), f"Preempted request {self.req_id} has no all_token_ids"
             # the block ids will change after preemption
             self.allocated_block_ids = new_block_ids
             # reset the number of saved tokens
@@ -358,9 +358,9 @@ class ReqMeta:
         if tracker.mm_hashes:
             # TODO: Optimize this
             token_ids = torch.tensor(token_ids)
-            assert tracker.mm_positions is not None, (
-                "tracker got mm_hashes but no mm_positions"
-            )
+            assert (
+                tracker.mm_positions is not None
+            ), "tracker got mm_hashes but no mm_positions"
             apply_mm_hashes_to_token_ids(
                 token_ids, tracker.mm_hashes, tracker.mm_positions
             )
@@ -446,9 +446,9 @@ class LMCacheConnectorV1Impl:
 
         # Load and configure LMCache config
         config = lmcache_get_or_create_config()
-        assert isinstance(config, LMCacheEngineConfig), (
-            "LMCache v1 configuration is should be passed for vLLM v1."
-        )
+        assert isinstance(
+            config, LMCacheEngineConfig
+        ), "LMCache v1 configuration is should be passed for vLLM v1."
         self._apply_extra_config(config, vllm_config)
         self.config = config
 
@@ -519,9 +519,9 @@ class LMCacheConnectorV1Impl:
 
             if self.enable_blending:
                 assert self.lmcache_engine is not None
-                assert self.lmcache_engine.gpu_connector is not None, (
-                    "GPU connector must be available for blending"
-                )
+                assert (
+                    self.lmcache_engine.gpu_connector is not None
+                ), "GPU connector must be available for blending"
                 self.blender = LMCBlenderBuilder.get_or_create(
                     ENGINE_NAME,
                     self.lmcache_engine,
@@ -1527,9 +1527,9 @@ class LMCacheConnectorV1Impl:
                     f"This might be due to an unsupported vLLM version."
                 )
             if preempted:
-                assert load_spec is not None, (
-                    f"Request {req_id} is preempted but was not given a load spec"
-                )
+                assert (
+                    load_spec is not None
+                ), f"Request {req_id} is preempted but was not given a load spec"
                 # num_computed_tokens should be reset to 0 during preemption
                 # and then set to the number of already cached tokens (maxxing
                 # prefix caching and lmcache)
@@ -1543,8 +1543,9 @@ class LMCacheConnectorV1Impl:
                     f"{max(lmcache_cached_tokens, vllm_cached_tokens)}"
                 )
 
-            # When retrieve fail, vllm will call _handle_invalid_blocks to reset request.num_computed_tokens,
-            # this will lead to request_tracker.token_ids being not matched with vllm
+            # When retrieve fail, vllm will call _handle_invalid_blocks to
+            # reset request.num_computed_tokens, this will lead to
+            # request_tracker.token_ids being not matched with vllm
             if num_current_tokens < len(request_tracker.token_ids):
                 logger.warning(
                     "Request %s rolled back from %d to %d tokens; "
@@ -1553,7 +1554,9 @@ class LMCacheConnectorV1Impl:
                     len(request_tracker.token_ids),
                     num_current_tokens,
                 )
-                num_token_slots = (len(request_tracker.allocated_block_ids) * self._block_size)
+                num_token_slots = (
+                    len(request_tracker.allocated_block_ids) * self._block_size
+                )
                 tokens_to_keep = num_current_tokens
                 if num_token_slots < num_current_tokens:
                     logger.warning(
@@ -1566,7 +1569,9 @@ class LMCacheConnectorV1Impl:
                     tokens_to_keep = num_token_slots
 
                 request_tracker.token_ids = list(request.all_token_ids[:tokens_to_keep])
-                request_tracker.num_saved_tokens = min(request_tracker.num_saved_tokens, tokens_to_keep)
+                request_tracker.num_saved_tokens = min(
+                    request_tracker.num_saved_tokens, tokens_to_keep
+                )
 
             # Pass all_token_ids for preempted requests to restore
             # token_ids correctly for chunk key computation
@@ -1605,9 +1610,7 @@ class LMCacheConnectorV1Impl:
             # Cancel any ongoing async lookup and prefetch tasks on workers
             lookup_id = request.request_id
             assert self.lookup_client is not None
-            self.lookup_client.cancel_lookup(  # type: ignore[attr-defined]
-                lookup_id
-            )
+            self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params
