@@ -175,14 +175,17 @@ def lookup_handler(key: KeyType) -> int:
 # ==============================================================================
 
 
-def free_locks_handler(key: KeyType) -> None:
+def free_locks_handler(key: KeyType, tp_size: int) -> None:
     """
     Dummy handler for FREE_LOOKUP_LOCKS requests.
 
     Args:
         key: Cache key whose read locks should be released
+        tp_size: Tensor-parallel size for MLA
+            multi-reader locking
 
     Returns:
         None
     """
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
+    assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
