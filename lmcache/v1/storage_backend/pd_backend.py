@@ -12,6 +12,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -219,9 +220,6 @@ class PDBackend(AllocatorBackendInterface):
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
-        # First Party
-        from lmcache.integration.vllm.utils import get_size_bytes
-
         if self.corrected_device != "cpu":
             logger.info(f"Setting cuda device to {self.corrected_device} ")
             torch.cuda.set_device(self.corrected_device)
@@ -240,6 +238,14 @@ class PDBackend(AllocatorBackendInterface):
         chunk_size_bytes = get_size_bytes(shapes, dtypes)
         origin_buffer_size = config.pd_buffer_size
         aligned_buffer_size = origin_buffer_size // chunk_size_bytes * chunk_size_bytes
+
+        if aligned_buffer_size == 0 and origin_buffer_size > 0:
+            raise ValueError(
+                f"pd_buffer_size ({origin_buffer_size}) is smaller than a "
+                f"single chunk ({chunk_size_bytes}), resulting in an aligned "
+                f"buffer of size 0. Please increase pd_buffer_size to be at "
+                f"least {chunk_size_bytes}."
+            )
 
         if aligned_buffer_size != origin_buffer_size:
             logger.info(
