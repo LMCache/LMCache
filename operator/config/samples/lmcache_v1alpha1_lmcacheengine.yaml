@@ -1,0 +1,10 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache
+  namespace: default
+spec:
+  server:
+    port: 6555
+  l1:
+    sizeGB: 60
