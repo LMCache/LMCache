@@ -1634,16 +1634,21 @@ class LMCacheConnectorV1Impl:
 
         # NOTE: Used to stream back the first token
         # for disagg prefill
-        if params is not None:
-            return_params = {}
-            if "ret_first_tok" in params:
-                return_params["first_tok"] = request._output_token_ids[0]
-            if "ret_num_cached_tok" in params:
-                request_tracker = self._request_trackers.get(request.request_id)
-                if request_tracker is not None:
-                    return_params["num_lmcache_cached_tokens"] = (
-                        request_tracker.num_lmcache_cached_tokens
-                    )
+        if params is not None and "ret_first_tok" in params:
+            return_params = {
+                "first_tok": request._output_token_ids[0],
+            }
+
+        if self.config.get_extra_config_value(
+            "enable_cache_usage_details_in_response", False
+        ):
+            request_tracker = self._request_trackers.get(request.request_id)
+            if request_tracker:
+                return_params = return_params or {}
+                return_params["num_lmcache_cached_tokens"] = (
+                    request_tracker.num_lmcache_cached_tokens
+                )
+
         return False, return_params
 
     @_lmcache_nvtx_annotate
