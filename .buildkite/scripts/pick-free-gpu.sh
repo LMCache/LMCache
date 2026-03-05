@@ -44,6 +44,13 @@ while true; do
         | awk -F',' '{print $3}'
     )
     
+    # Validate we found the requested number of GPUs
+    if [ "${#top_gpus[@]}" -lt "$REQUESTED_GPU_COUNT" ]; then
+      echo "⚠️  Warning: Requested $REQUESTED_GPU_COUNT GPUs but only found ${#top_gpus[@]} available. Waiting..."
+      sleep $INTERVAL
+      continue
+    fi
+    
     if [ "${#top_gpus[@]}" -eq 1 ]; then
       # Only one GPU found/requested
       export CUDA_VISIBLE_DEVICES="${top_gpus[0]}"

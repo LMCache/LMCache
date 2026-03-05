@@ -10,6 +10,8 @@ docker:
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=10"
     - "LMCACHE_MAX_LOCAL_DISK_SIZE=10"
     - "LMCACHE_LOCAL_DISK=\"file:///local/end-to-end-tests/local/\""
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
 
 vllm:
   model: "meta-llama/Llama-3.2-1B-Instruct"

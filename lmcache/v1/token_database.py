@@ -28,7 +28,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
-NONE_HASH: int
+NONE_HASH = 0
 
 # Type alias for process_tokens return value
 # (start_index, end_index, cache_engine_key｜hash)
@@ -220,6 +220,25 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             request_configs,
         )
 
+    def _canonicalize_hash_inputs(
+        self,
+        prefix_hash: Optional[int],
+        tokens_tuple: Tuple[int, ...],
+        extra_keys: Optional[List[Any]],
+    ) -> Tuple[int, Tuple[int, ...], Tuple[Any, ...]]:
+        """
+        Canonicalize hash inputs so that semantically identical requests
+        produce structurally identical hash inputs across instances.
+        - prefix_hash: int or NONE_HASH if None
+        - tokens_tuple: tuple of token IDs
+        - extra_keys: tuple of additional keys, empty if None
+        """
+        return (
+            prefix_hash if prefix_hash is not None else NONE_HASH,
+            tokens_tuple,
+            tuple(extra_keys) if extra_keys is not None else (),
+        )
+
     def _hash_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],
@@ -236,7 +255,15 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         # Ignore extra keys for now
         # Extra keys are for multi-modal inputs and
         # request specific metadata (e.g., LoRA ID).
-        return self.hash_func((prefix_hash, tokens_tuple, extra_keys))
+        # Use default values for None to maintain a fixed tuple structure for hashing.
+
+        # Use helper to canonicalize inputs to ensure consistent hashing
+        # This replaces the logic that was causing inconsistency
+        canon_prefix, canon_tokens, canon_extra = self._canonicalize_hash_inputs(
+            prefix_hash, tokens_tuple, extra_keys
+        )
+
+        return self.hash_func((canon_prefix, canon_tokens, canon_extra))
 
 
 class ChunkedTokenDatabase(TokenDatabase):
@@ -248,8 +275,8 @@ class ChunkedTokenDatabase(TokenDatabase):
         super(ChunkedTokenDatabase, self).__init__(config, metadata)
 
         if config is not None:
+            self.config = config
             self.chunk_size = config.chunk_size
-            self.save_unfull_chunk = config.save_unfull_chunk
 
             # Check for cross-process cache sharing setup
             if os.getenv("PYTHONHASHSEED") is None:
@@ -269,8 +296,8 @@ class ChunkedTokenDatabase(TokenDatabase):
                         "This will cause incorrect KV cache transfer."
                     )
         else:  # Default values
+            self.config = None
             self.chunk_size = 256
-            self.save_unfull_chunk = True
 
     def _get_init_hash(self) -> int:
         return NONE_HASH
@@ -288,9 +315,12 @@ class ChunkedTokenDatabase(TokenDatabase):
         :return: a generator of chunks of tokens, each with
                 shape [chunk_size]
         """
+        save_unfull_chunk = (
+            self.config.save_unfull_chunk if self.config is not None else True
+        )
         end = (
             len(tokens)
-            if self.save_unfull_chunk
+            if save_unfull_chunk
             else (len(tokens) - len(tokens) % self.chunk_size)
         )
         for i in range(0, end, self.chunk_size):

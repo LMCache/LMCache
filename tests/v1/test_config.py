@@ -604,3 +604,80 @@ class TestUserSetKeysTracking:
         assert result is True
         # Value SHOULD change because override=True
         assert config.chunk_size == 1024
+
+
+class TestValidateAndSetConfigValueTypeConversion:
+    """Test cases for type conversion in validate_and_set_config_value function."""
+
+    def test_convert_string_to_int(self):
+        """Test that string values are converted to int for int config keys."""
+        config = LMCacheEngineConfig.from_defaults()
+        # chunk_size is defined as int with int() as env_converter
+        result = validate_and_set_config_value(config, "chunk_size", "512")
+        assert result is True
+        assert config.chunk_size == 512
+        assert isinstance(config.chunk_size, int)
+
+    def test_convert_string_to_bool(self):
+        """Test that string values are converted to bool for bool config keys."""
+        config = LMCacheEngineConfig.from_defaults()
+        # save_decode_cache is defined as bool with _to_bool as env_converter
+        result = validate_and_set_config_value(config, "save_decode_cache", "true")
+        assert result is True
+        assert config.save_decode_cache is True
+        assert isinstance(config.save_decode_cache, bool)
+
+    def test_convert_string_false_to_bool(self):
+        """Test that 'false' string is converted to False."""
+        config = LMCacheEngineConfig.from_defaults()
+        result = validate_and_set_config_value(config, "save_decode_cache", "false")
+        assert result is True
+        assert config.save_decode_cache is False
+
+    def test_convert_string_to_int_list(self):
+        """Test that comma-separated string is converted to int list."""
+        config = LMCacheEngineConfig.from_defaults()
+        # internal_api_server_include_index_list uses _to_int_list converter
+        result = validate_and_set_config_value(
+            config, "internal_api_server_include_index_list", "1,2,3"
+        )
+        assert result is True
+        assert config.internal_api_server_include_index_list == [1, 2, 3]
+
+    def test_convert_invalid_string_to_int_fails(self):
+        """Test that invalid string fails to convert to int."""
+        config = LMCacheEngineConfig.from_defaults()
+        original_value = config.chunk_size
+        result = validate_and_set_config_value(config, "chunk_size", "not_a_number")
+        assert result is False
+        # Value should remain unchanged
+        assert config.chunk_size == original_value
+
+    def test_convert_none_value_succeeds(self):
+        """Test that None value can be set without conversion error."""
+        config = LMCacheEngineConfig.from_defaults()
+        # remote_url accepts None
+        result = validate_and_set_config_value(config, "remote_url", None)
+        assert result is True
+        assert config.remote_url is None
+
+    def test_convert_already_correct_type(self):
+        """Test that values of correct type are passed through."""
+        config = LMCacheEngineConfig.from_defaults()
+        result = validate_and_set_config_value(config, "chunk_size", 512)
+        assert result is True
+        assert config.chunk_size == 512
+
+    def test_extra_config_json_string_conversion(self):
+        """Test that JSON string is converted to dict for extra_config."""
+        config = LMCacheEngineConfig.from_defaults()
+        json_str = '{"key": "value", "num": 42}'
+        result = validate_and_set_config_value(config, "extra_config", json_str)
+        assert result is True
+        assert config.extra_config == {"key": "value", "num": 42}
+
+    def test_extra_config_invalid_json_fails(self):
+        """Test that invalid JSON string for extra_config fails."""
+        config = LMCacheEngineConfig.from_defaults()
+        result = validate_and_set_config_value(config, "extra_config", "{invalid_json")
+        assert result is False
