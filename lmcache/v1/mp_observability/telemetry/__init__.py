@@ -15,6 +15,8 @@ from lmcache.v1.mp_observability.telemetry.controller import (
     get_telemetry_controller,
     init_telemetry_controller,
     log_telemetry,
+    make_end_event,
+    make_start_event,
 )
 from lmcache.v1.mp_observability.telemetry.event import (
     EventType,
@@ -38,6 +40,8 @@ __all__ = [
     "init_telemetry_controller",
     "get_telemetry_controller",
     "log_telemetry",
+    "make_start_event",
+    "make_end_event",
     "add_telemetry_args",
     "parse_args_to_telemetry_config",
 ]

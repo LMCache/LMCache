@@ -13,7 +13,7 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.telemetry.config import TelemetryConfig
-from lmcache.v1.mp_observability.telemetry.event import TelemetryEvent
+from lmcache.v1.mp_observability.telemetry.event import EventType, TelemetryEvent
 from lmcache.v1.mp_observability.telemetry.processors.base import (
     TelemetryProcessor,
 )
@@ -42,6 +42,10 @@ class TelemetryController:
         self._thread: threading.Thread | None = None
         self._discard_count: int = 0
         self._last_discard_warning: float = 0.0
+
+    def is_enabled(self) -> bool:
+        """Return True if telemetry is enabled (i.e. controller is active)."""
+        return self._config.enabled
 
     def log(self, event: TelemetryEvent) -> None:
         """Enqueue a telemetry event (non-blocking hot path).
@@ -194,3 +198,27 @@ def init_telemetry_controller(config: TelemetryConfig) -> TelemetryController:
 def log_telemetry(event: TelemetryEvent) -> None:
     """Convenience: log an event to the global controller."""
     _global_controller.log(event)
+
+
+def make_start_event(
+    name: str, session_id: str, **metadata: str | int | float | bool
+) -> TelemetryEvent:
+    """Create a START telemetry event."""
+    return TelemetryEvent(
+        name=name,
+        event_type=EventType.START,
+        session_id=session_id,
+        metadata=metadata,
+    )
+
+
+def make_end_event(
+    name: str, session_id: str, **metadata: str | int | float | bool
+) -> TelemetryEvent:
+    """Create an END telemetry event."""
+    return TelemetryEvent(
+        name=name,
+        event_type=EventType.END,
+        session_id=session_id,
+        metadata=metadata,
+    )
