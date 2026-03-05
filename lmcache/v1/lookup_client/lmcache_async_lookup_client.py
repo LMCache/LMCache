@@ -54,7 +54,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         # lookup_id -> first lookup time
         # this helps us support timeout semantics
         self.first_lookup_time: dict[str, float] = {}
-        self.timeout_ms = config.lookup_timeout_ms
+        self.config = config
 
         self.ctx = get_zmq_context(use_asyncio=False)
         kv_connector_extra_config = metadata.kv_connector_extra_config or {}
@@ -173,7 +173,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 time.sleep(self.lookup_backoff_time)
                 if (
                     time.time() - self.first_lookup_time[lookup_id]
-                ) * 1000 > self.timeout_ms:
+                ) * 1000 > self.config.lookup_timeout_ms:
                     logger.warning(
                         (
                             "Request %s is still waiting for async lookup "
@@ -181,7 +181,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                             "so vllm can recompute"
                         ),
                         lookup_id,
-                        self.timeout_ms // 1000,
+                        self.config.lookup_timeout_ms // 1000,
                     )
                     self.first_lookup_time.pop(lookup_id, None)
                     return 0

@@ -123,3 +123,13 @@ lmcache/experimental/tests
 
 # Ignore all log files
 *.log
+
+# uv
+uv.lock
+
+# Coding agent instructions
+CLAUDE.md
+GEMINI.md
+COPILOT.md
+CURSOR.md
+AIDER.md

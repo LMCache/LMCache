@@ -5,6 +5,8 @@ workload:
 docker:
   env:
     - "LMCACHE_CONFIG_FILE=/etc/lmcache/local_cpu_mla.yaml"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
   gpu_count: 2
 
 vllm:
