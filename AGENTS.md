@@ -112,7 +112,7 @@ SLF lint rules are currently enforced by CI only in `lmcache/v1/multiprocess/` a
 
 ### Type Hints
 
-All functions and methods must have type hints for arguments and return values.
+All functions and methods must have type hints for their arguments and return values.
 
 ### Docstrings
 
@@ -157,7 +157,7 @@ python -m http.server -d build/html/
 
 ### Encapsulation
 
-Never access private members (prefixed with `_`) of other classes. Interact only through their public API.
+Never access private members (prefixed with `_`) of other classes. Interact only through their public APIs.
 
 ### Code Organization
 
