@@ -118,3 +118,9 @@ steps:
                 image: lmcache/ci-base:latest
                 imagePullPolicy: Never
                 resources: { limits: { cpu: "1", memory: "2Gi" } }
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN

@@ -374,11 +374,28 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
             return 0
         fi
 
+        # Adaptive threshold: with fewer baselines the worst-case max is less
+        # representative, so we allow more headroom.
+        #   5+ baselines → 1.2x (20% tolerance, full confidence)
+        #   4  baselines → 1.3x
+        #   3  baselines → 1.4x
+        #   2  baselines → 1.5x
+        #   1  baseline  → 1.6x (60% tolerance, low confidence)
+        local num_baselines=${#baseline_files[@]}
+        local threshold
+        threshold=$(awk -v n="$num_baselines" 'BEGIN {
+            gap = (5 - n); if (gap < 0) gap = 0
+            printf "%.1f", 1.2 + gap * 0.1
+        }')
+        local pct
+        pct=$(awk -v t="$threshold" 'BEGIN { printf "%d", (t - 1) * 100 }')
+        echo "[INFO] Baselines: ${num_baselines}/5 — using ${pct}% tolerance (threshold=${threshold}x)"
+
         if [[ "$check_ttft" == "true" ]]; then
             echo "Worst-case baseline query ttft per prompt: $expected_query_ttft"
             echo "Actual query ttft per prompt: $query_ttft_per_prompt"
-            awk -v expected="$expected_query_ttft" -v actual="$query_ttft_per_prompt" 'BEGIN {
-                if (actual > expected * 1.2) { print "FAIL: Query ttft per prompt >20% worse than rolling baseline"; exit 1 }
+            awk -v expected="$expected_query_ttft" -v actual="$query_ttft_per_prompt" -v t="$threshold" -v pct="$pct" 'BEGIN {
+                if (actual > expected * t) { printf "FAIL: Query ttft per prompt >%d%% worse than rolling baseline\n", pct; exit 1 }
                 else { print "PASS: Query ttft per prompt within threshold" }
             }'
         fi
@@ -386,8 +403,8 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
         if [[ "$check_round" == "true" ]]; then
             echo "Worst-case baseline query round time per prompt: $expected_query_round"
             echo "Actual query round time per prompt: $query_round_time_per_prompt"
-            awk -v expected="$expected_query_round" -v actual="$query_round_time_per_prompt" 'BEGIN {
-                if (actual > expected * 1.2) { print "FAIL: Query round time per prompt >20% worse than rolling baseline"; exit 1 }
+            awk -v expected="$expected_query_round" -v actual="$query_round_time_per_prompt" -v t="$threshold" -v pct="$pct" 'BEGIN {
+                if (actual > expected * t) { printf "FAIL: Query round time per prompt >%d%% worse than rolling baseline\n", pct; exit 1 }
                 else { print "PASS: Query round time per prompt within threshold" }
             }'
         fi
@@ -395,8 +412,8 @@ elif [[ "$test_mode" == "long_doc_qa" ]]; then
         if [[ "$check_warmup" == "true" ]]; then
             echo "Worst-case baseline warmup round time per prompt: $expected_warmup"
             echo "Actual warmup round time per prompt: $warmup_round_time_per_prompt"
-            awk -v expected="$expected_warmup" -v actual="$warmup_round_time_per_prompt" 'BEGIN {
-                if (actual > expected * 1.2) { print "FAIL: Warmup round time per prompt >20% worse than rolling baseline"; exit 1 }
+            awk -v expected="$expected_warmup" -v actual="$warmup_round_time_per_prompt" -v t="$threshold" -v pct="$pct" 'BEGIN {
+                if (actual > expected * t) { printf "FAIL: Warmup round time per prompt >%d%% worse than rolling baseline\n", pct; exit 1 }
                 else { print "PASS: Warmup round time per prompt within threshold" }
             }'
         fi
