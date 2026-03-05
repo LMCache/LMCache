@@ -69,6 +69,7 @@ class TelemetryController:
                 self._last_discard_warning = now
             return
 
+        event.timestamp = time.time()
         self._queue.append(event)
         self._wake.set()
 

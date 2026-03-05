@@ -152,6 +152,20 @@ class TestEventProcessing:
         assert len(proc.events) == 1
         assert proc.events[0].name == "test.op"
 
+    def test_log_stamps_timestamp(self, controller):
+        proc = _RecordingProcessor()
+        controller.register_processor(proc)
+        controller.start()
+
+        before = time.time()
+        controller.log(_make_event())
+        after = time.time()
+        time.sleep(0.15)
+        controller.stop()
+
+        assert len(proc.events) == 1
+        assert before <= proc.events[0].timestamp <= after
+
     def test_multiple_events_in_order(self, controller):
         proc = _RecordingProcessor()
         controller.register_processor(proc)

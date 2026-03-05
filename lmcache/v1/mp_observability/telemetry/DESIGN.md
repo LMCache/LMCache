@@ -66,10 +66,14 @@ class TelemetryEvent:
     event_type: EventType                            # START or END
     session_id: str                                  # correlates START/END pairs
     metadata: dict[str, str | int | float | bool]    # flat, OTel-compatible
+    timestamp: float = 0.0                           # set by controller.log()
 ```
 
-**No timestamp field.** In async code, event creation time is not the same as
-the time the event is logged. Processors record time on receipt if they need it.
+**Timestamp** is stamped by `TelemetryController.log()` using `time.time()`
+(wall-clock), not at event construction time. This ensures the timestamp
+reflects when the event was actually ingested, which matters for GPU callback
+call sites where event objects are created earlier but logged later via
+`launch_host_func`.
 
 **Metadata values** are restricted to `str | int | float | bool` for
 compatibility with OpenTelemetry attribute types.
@@ -304,7 +308,7 @@ python -m lmcache.v1.multiprocess.server \
 
 | Decision | Rationale |
 |---|---|
-| No timestamp in `TelemetryEvent` | Creation time != log time in async code. Processors record time on receipt. |
+| Timestamp set at log time, not construction | Creation time != log time in async code (GPU callbacks). `controller.log()` stamps `time.time()`. |
 | `collections.deque` without lock | CPython GIL makes `append()`/`popleft()` atomic. Single consumer thread. |
 | `threading.Event` wake signal | Immediate drain on new events, unlike timer-based polling. |
 | 0.1 s timeout on wake wait | Safety net so drain thread checks stop flag even with no events. |

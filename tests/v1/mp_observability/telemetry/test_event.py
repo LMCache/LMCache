@@ -45,8 +45,8 @@ class TestTelemetryEvent:
         assert event.metadata["ratio"] == 0.95
         assert event.metadata["model"] == "llama"
 
-    def test_no_timestamp_field(self):
+    def test_timestamp_defaults_to_zero(self):
         event = TelemetryEvent(
             name="mp.store", event_type=EventType.START, session_id="t"
         )
-        assert not hasattr(event, "timestamp")
+        assert event.timestamp == 0.0

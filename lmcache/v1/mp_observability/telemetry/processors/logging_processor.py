@@ -49,10 +49,11 @@ class LoggingProcessor(TelemetryProcessor):
 
     def on_new_event(self, event: TelemetryEvent) -> None:
         self.log_func(
-            "Telemetry: %s %s session=%s metadata=%s",
+            "Telemetry: %s %s session=%s ts=%.6f metadata=%s",
             event.name,
             event.event_type.value,
             event.session_id,
+            event.timestamp,
             event.metadata,
         )
 
