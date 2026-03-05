@@ -171,6 +171,46 @@ class ConnectorAdapter(ABC):
         pass
 
 
+class DynamicConnectorAdapter(ConnectorAdapter):
+    """Adapter that wraps a RemoteConnector class loaded
+    dynamically from plugin config.
+
+    When ``class_name`` points to a ``RemoteConnector`` subclass
+    rather than a ``ConnectorAdapter``, this wrapper is used to
+    instantiate the connector with the proper context.
+    """
+
+    def __init__(
+        self,
+        plugin_name: str,
+        connector_class: type,
+    ) -> None:
+        schema = "plugin://%s" % extract_plugin_type(plugin_name)
+        super().__init__(schema)
+        self._plugin_name = plugin_name
+        self._connector_class = connector_class
+
+    def can_parse(self, url: str) -> bool:
+        if url.startswith(self.schema):
+            return True
+        if url.startswith("plugin://"):
+            pname = url[len("plugin://") :]
+            return extract_plugin_type(pname) == extract_plugin_type(self._plugin_name)
+        return False
+
+    def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        logger.info(
+            "Creating dynamic connector %s via %s",
+            self._plugin_name,
+            self._connector_class.__name__,
+        )
+        return self._connector_class(
+            loop=context.loop,
+            local_cpu_backend=context.local_cpu_backend,
+            config=context.config,
+        )
+
+
 class ConnectorManager:
     """
     Manager for creating connectors based on URL.
@@ -287,17 +327,33 @@ class ConnectorManager:
                 # Dynamically import the module
                 module = importlib.import_module(module_path)
                 # Get the class from the module
-                adapter_class = getattr(module, class_name)
-                adapter_instance = adapter_class()
-                if not isinstance(adapter_instance, ConnectorAdapter):
-                    logger.warning(
-                        f"Remote connector {remote_storage_plugin} adapter does not "
-                        f"implement the 'ConnectorAdapter' interface"
+                loaded_class = getattr(module, class_name)
+
+                if inspect.isclass(loaded_class) and issubclass(
+                    loaded_class, ConnectorAdapter
+                ):
+                    adapter_instance = loaded_class()
+                elif inspect.isclass(loaded_class) and issubclass(
+                    loaded_class, RemoteConnector
+                ):
+                    adapter_instance = DynamicConnectorAdapter(
+                        plugin_name=remote_storage_plugin,
+                        connector_class=loaded_class,
                     )
-                    adapter_instance = None
+                else:
+                    logger.warning(
+                        "Remote connector %s class %s is "
+                        "neither a ConnectorAdapter nor a "
+                        "RemoteConnector subclass",
+                        remote_storage_plugin,
+                        class_name,
+                    )
                     continue
                 self.adapters.append(adapter_instance)
-                logger.info(f"Discovered adapter: {adapter_class.__name__}")
+                logger.info(
+                    "Discovered adapter: %s",
+                    loaded_class.__name__,
+                )
             except (ImportError, AttributeError) as e:
                 logger.error(
                     f"Failed to load remote connector {remote_storage_plugin} due to "
