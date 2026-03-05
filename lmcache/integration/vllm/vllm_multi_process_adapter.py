@@ -96,7 +96,8 @@ class HeartbeatThread(PeriodicThread):
     """Periodically checks server health via HEALTH_CHECK.
 
     Manages a threading.Event that adapters use to gate operations.
-    Once unhealthy, the adapter degrades permanently (no recovery).
+    When unhealthy, the adapter enters degraded mode; if the server
+    recovers, the adapter automatically resumes normal operation.
     """
 
     def __init__(
