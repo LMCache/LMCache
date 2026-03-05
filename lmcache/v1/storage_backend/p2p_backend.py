@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import asyncio
 import enum
 
@@ -12,7 +12,6 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
@@ -27,6 +26,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (
     DEFAULT_SOCKET_RECV_TIMEOUT_MS,
     DEFAULT_SOCKET_SEND_TIMEOUT_MS,
@@ -159,7 +159,7 @@ class P2PBackend(StorageBackendInterface):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         lmcache_worker: "LMCacheWorker",
@@ -219,6 +219,9 @@ class P2PBackend(StorageBackendInterface):
         )
         self.chunk_size = config.chunk_size
 
+        device_type = (
+            "cpu" if config.nixl_buffer_device is None else config.nixl_buffer_device
+        )
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
             async_mode=True,
@@ -231,6 +234,7 @@ class P2PBackend(StorageBackendInterface):
             peer_lookup_url=self.peer_lookup_url,
             backends=config.nixl_backends,
             event_loop=loop,
+            device=device_type,
         )
 
         self.running = asyncio.Event()
@@ -658,6 +662,7 @@ class P2PBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
         # TODO(baoloongmao): Add exception handling for socket operations
         # Code path for `move` operation in controller.
@@ -750,7 +755,9 @@ class P2PBackend(StorageBackendInterface):
         keys: Sequence[CacheEngineKey],
         objs: List[MemoryObj],
         transfer_spec: Any = None,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> None:
+        """P2P backend does not support put operations."""
         pass
 
     # NOTE: Synchronous get is not supported for now.

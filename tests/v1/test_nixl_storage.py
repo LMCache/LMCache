@@ -11,17 +11,16 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PagedTensorMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
 
 
 def create_key(chunk_hash: str):
     return CacheEngineKey(
-        fmt="MemoryFormat.KV_2LTD",
         model_name="meta-llama/Llama-3.1-70B-Instruct",
         world_size=8,
         worker_id=0,
@@ -52,14 +51,14 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         thread = threading.Thread(target=thread_loop.run_forever)
         thread.start()
 
-        metadata = LMCacheEngineMetadata(
-            "Llama-3.1-70B-Instruct",
-            0,
-            0,
-            "MemoryFormat.KV_2LTD",
-            dtype,
-            shape,
-            False,
+        metadata = LMCacheMetadata(
+            model_name="Llama-3.1-70B-Instruct",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=dtype,
+            kv_shape=shape,
         )
 
         backends = CreateStorageBackends(

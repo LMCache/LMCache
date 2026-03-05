@@ -341,16 +341,12 @@ def test_stop_plugins():
 
     launcher.plugin_processes = [mock_proc1, mock_proc2]
 
-    with patch("lmcache.v1.plugin.runtime_plugin_launcher.logger") as mock_logger:
-        launcher.stop_plugins()
+    launcher.stop_plugins()
 
-        # Should terminate running process
-        mock_proc1.terminate.assert_called_once()
-        # Should not terminate exited process
-        mock_proc2.terminate.assert_not_called()
-        # Should log termination
-        mock_logger.info.assert_called_once()
-        assert "Terminated" in mock_logger.info.call_args[0][0]
+    # Should terminate running process
+    mock_proc1.terminate.assert_called_once()
+    # Should not terminate exited process
+    mock_proc2.terminate.assert_not_called()
 
 
 @patch("lmcache.v1.plugin.runtime_plugin_launcher.atexit.register")

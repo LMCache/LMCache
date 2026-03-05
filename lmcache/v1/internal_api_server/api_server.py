@@ -103,7 +103,12 @@ class InternalAPIServer:
         if not self.enable:
             return
         logger.info(f"Starting LMCache internal API server on {self.server_log_info}")
-        threading.Thread(target=asyncio.run, args=(self.run(),), daemon=True).start()
+        threading.Thread(
+            target=asyncio.run,
+            args=(self.run(),),
+            daemon=True,
+            name="api-server-thread",
+        ).start()
 
     def stop(self):
         if not self.enable:

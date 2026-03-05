@@ -9,9 +9,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PinMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
@@ -398,14 +398,15 @@ def test_cluster_metadata_without_kv_bytes(url, autorelease_v1):
 def _get_metadata(use_mla: bool):
     kv_shape = (32, 1 if use_mla else 2, 256, 1 if use_mla else 8, 128)
     dtype = torch.bfloat16
-    metadata = LMCacheEngineMetadata(
-        "deepseek/DeepSeek-R1",
-        1,
-        0,
-        "vllm",
-        dtype,
-        kv_shape,
-        use_mla,
+    metadata = LMCacheMetadata(
+        model_name="deepseek/DeepSeek-R1",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=dtype,
+        kv_shape=kv_shape,
+        use_mla=use_mla,
     )
     return metadata
 

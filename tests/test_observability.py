@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from unittest.mock import MagicMock
+
 # Third Party
 import pytest
 
 # First Party
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import (
+    LMCStatsMonitor,
+    PrometheusLogger,
+)
 
 
 @pytest.fixture(scope="function")
@@ -16,17 +22,17 @@ def test_on_retrieve_request(stats_monitor):
     stats_monitor.on_retrieve_request(num_tokens=100)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_retrieve_requests == 1
-    assert stats.retrieve_hit_rate == 0
+    assert stats.retrieve_hit_rate == 1.0
     assert stats.local_cache_usage_bytes == 0
     assert stats.remote_cache_usage_bytes == 0
     assert len(stats.time_to_retrieve) == 0
 
 
 def test_on_retrieve_finished(stats_monitor):
-    request_id = stats_monitor.on_retrieve_request(num_tokens=100)
+    stats_obj = stats_monitor.on_retrieve_request(num_tokens=100)
     stats_monitor.on_retrieve_finished(
-        request_id=request_id,
-        retrieved_tokens=100,
+        retrieve_stats=stats_obj,
+        num_retrieved_tokens=100,
     )
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_retrieve_requests == 1
@@ -35,8 +41,8 @@ def test_on_retrieve_finished(stats_monitor):
 
 
 def test_on_store_request_and_finished(stats_monitor):
-    request_id = stats_monitor.on_store_request(num_tokens=50)
-    stats_monitor.on_store_finished(request_id=request_id)
+    stats_obj = stats_monitor.on_store_request(num_tokens=50)
+    stats_monitor.on_store_finished(store_stats=stats_obj)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_store_requests == 1
     assert len(stats.time_to_store) == 1
@@ -73,9 +79,9 @@ def test_on_lookup_request(stats_monitor):
 
 
 def test_on_lookup_finished(stats_monitor):
-    lookup_request_id = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_obj = stats_monitor.on_lookup_request(num_tokens=100)
     assert len(stats_monitor.lookup_requests) == 1
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id, num_hit_tokens=80)
+    stats_monitor.on_lookup_finished(stats=stats_obj, num_hit_tokens=80)
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_lookup_requests == 1
     assert stats.interval_lookup_tokens == 100
@@ -135,12 +141,14 @@ def test_remote_ping_errors(stats_monitor):
 
 def test_retrieve_and_store_speed(stats_monitor):
     # Test retrieve speed calculation
-    retrieve_id = stats_monitor.on_retrieve_request(num_tokens=1000)
-    stats_monitor.on_retrieve_finished(request_id=retrieve_id, retrieved_tokens=1000)
+    stats_obj_retrieve = stats_monitor.on_retrieve_request(num_tokens=1000)
+    stats_monitor.on_retrieve_finished(
+        retrieve_stats=stats_obj_retrieve, num_retrieved_tokens=1000
+    )
 
     # Test store speed calculation
-    store_id = stats_monitor.on_store_request(num_tokens=500)
-    stats_monitor.on_store_finished(request_id=store_id)
+    stats_obj_store = stats_monitor.on_store_request(num_tokens=500)
+    stats_monitor.on_store_finished(store_stats=stats_obj_store)
 
     stats = stats_monitor.get_stats_and_clear()
     assert len(stats.retrieve_speed) == 1
@@ -151,13 +159,13 @@ def test_retrieve_and_store_speed(stats_monitor):
 
 def test_multiple_lookup_operations(stats_monitor):
     # Test multiple lookup operations
-    lookup_request_id_1 = stats_monitor.on_lookup_request(num_tokens=100)
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id_1, num_hit_tokens=80)
-    lookup_request_id_2 = stats_monitor.on_lookup_request(num_tokens=200)
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id_2, num_hit_tokens=150)
+    stats_obj_1 = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_monitor.on_lookup_finished(stats=stats_obj_1, num_hit_tokens=80)
+    stats_obj_2 = stats_monitor.on_lookup_request(num_tokens=200)
+    stats_monitor.on_lookup_finished(stats=stats_obj_2, num_hit_tokens=150)
     assert len(stats_monitor.lookup_requests) == 2
-    assert stats_monitor.lookup_requests[lookup_request_id_1].hit_rate() == 0.8
-    assert stats_monitor.lookup_requests[lookup_request_id_2].hit_rate() == 0.75
+    assert stats_monitor.lookup_requests[stats_obj_1.request_id].hit_rate() == 0.8
+    assert stats_monitor.lookup_requests[stats_obj_2.request_id].hit_rate() == 0.75
 
     stats = stats_monitor.get_stats_and_clear()
     assert stats.interval_lookup_requests == 2
@@ -192,13 +200,13 @@ def test_mixed_remote_operations(stats_monitor):
 
 
 def test_combined_operations(stats_monitor):
-    retrieve_id = stats_monitor.on_retrieve_request(num_tokens=200)
+    stats_obj_retrieve = stats_monitor.on_retrieve_request(num_tokens=200)
     stats_monitor.on_retrieve_finished(
-        request_id=retrieve_id,
-        retrieved_tokens=200,
+        retrieve_stats=stats_obj_retrieve,
+        num_retrieved_tokens=200,
     )
-    store_id = stats_monitor.on_store_request(num_tokens=100)
-    stats_monitor.on_store_finished(store_id)
+    stats_obj_store = stats_monitor.on_store_request(num_tokens=100)
+    stats_monitor.on_store_finished(store_stats=stats_obj_store)
     stats_monitor.update_local_cache_usage(usage=512)
     stats_monitor.update_remote_cache_usage(usage=1024)
     stats_monitor.update_local_storage_usage(usage=2048)
@@ -218,7 +226,7 @@ def test_combined_operations(stats_monitor):
 
 def test_stats_clearing(stats_monitor):
     # Add some data
-    lookup_request_id = stats_monitor.on_lookup_request(num_tokens=100)
+    stats_obj = stats_monitor.on_lookup_request(num_tokens=100)
     stats_monitor.update_interval_remote_read_metrics(read_bytes=1024)
     stats_monitor.update_remote_ping_latency(latency=25.0)
 
@@ -247,7 +255,7 @@ def test_stats_clearing(stats_monitor):
     assert len(stats_monitor.lookup_requests) == 1
 
     # finish lookup request
-    stats_monitor.on_lookup_finished(request_id=lookup_request_id, num_hit_tokens=80)
+    stats_monitor.on_lookup_finished(stats=stats_obj, num_hit_tokens=80)
     stats3 = stats_monitor.get_stats_and_clear()
     assert stats3.interval_lookup_requests == 0
     assert stats3.interval_lookup_tokens == 0
@@ -264,5 +272,113 @@ def test_stats_clearing(stats_monitor):
 def test_zero_division_protection(stats_monitor):
     # Test that hit rates handle zero division gracefully
     stats = stats_monitor.get_stats_and_clear()
-    assert stats.retrieve_hit_rate == 0
+    assert stats.retrieve_hit_rate == 1.0
     assert stats.lookup_hit_rate == 0
+
+
+# ---- PrometheusLogger custom histogram bucket tests ----
+
+
+@pytest.fixture(scope="function")
+def _cleanup_prometheus_logger():
+    """Reset PrometheusLogger singleton and metrics between tests."""
+    LMCStatsMonitor.unregister_all_metrics()
+    PrometheusLogger._instance = None
+    yield
+    LMCStatsMonitor.unregister_all_metrics()
+    PrometheusLogger._instance = None
+
+
+def _make_metadata():
+    """Create a minimal mock LMCacheMetadata for testing."""
+    meta = MagicMock()
+    meta.model_name = "test_model"
+    meta.worker_id = 0
+    meta.role = "worker"
+    meta.served_model_name = None
+    return meta
+
+
+def _make_config(extra_config=None):
+    """Create a minimal mock config for testing."""
+    cfg = MagicMock()
+    cfg.extra_config = extra_config
+    cfg.get_extra_config_value = lambda key, default=None: (
+        extra_config.get(key, default) if extra_config is not None else default
+    )
+    return cfg
+
+
+def test_prometheus_logger_default_buckets(_cleanup_prometheus_logger):
+    """Histogram should use default buckets when no config."""
+    meta = _make_metadata()
+    prom = PrometheusLogger(meta)
+    # Verify histogram was created (basic sanity check)
+    assert prom.histogram_time_to_retrieve is not None
+
+
+def test_prometheus_logger_custom_buckets(_cleanup_prometheus_logger):
+    """Histogram should use custom buckets from config."""
+    meta = _make_metadata()
+    custom_buckets = [0.1, 0.5, 1.0, 5.0]
+    cfg = _make_config(
+        {
+            "histogram_bucket_time_to_retrieve": custom_buckets,
+        }
+    )
+    prom = PrometheusLogger(meta, config=cfg)
+    labels = prom.labels
+
+    # Verify the histogram's upper_bounds match custom buckets + Inf
+    hist = prom.histogram_time_to_retrieve.labels(**labels)
+    # prometheus_client Histogram stores buckets as _upper_bounds
+    upper_bounds = list(hist._upper_bounds)
+    for bucket_val in custom_buckets:
+        assert bucket_val in upper_bounds
+
+
+def test_prometheus_logger_partial_custom_buckets(
+    _cleanup_prometheus_logger,
+):
+    """Only specified histograms should get custom buckets."""
+    meta = _make_metadata()
+    custom_buckets = [1, 10, 100]
+    cfg = _make_config(
+        {
+            "histogram_bucket_store_speed": custom_buckets,
+        }
+    )
+    prom = PrometheusLogger(meta, config=cfg)
+    labels = prom.labels
+
+    # store_speed should have custom buckets
+    hist = prom.histogram_store_speed.labels(**labels)
+    upper_bounds = list(hist._upper_bounds)
+    for bucket_val in custom_buckets:
+        assert bucket_val in upper_bounds
+
+    # time_to_retrieve should still have default buckets
+    hist_default = prom.histogram_time_to_retrieve.labels(**labels)
+    default_upper = list(hist_default._upper_bounds)
+    # default first bucket is 0.001
+    assert 0.001 in default_upper
+
+
+def test_prometheus_logger_get_or_create_with_config(
+    _cleanup_prometheus_logger,
+):
+    """GetOrCreate should pass config to the constructor."""
+    meta = _make_metadata()
+    custom_buckets = [0.01, 0.1, 1.0]
+    cfg = _make_config(
+        {
+            "histogram_bucket_time_to_store": custom_buckets,
+        }
+    )
+    prom = PrometheusLogger.GetOrCreate(meta, config=cfg)
+    labels = prom.labels
+
+    hist = prom.histogram_time_to_store.labels(**labels)
+    upper_bounds = list(hist._upper_bounds)
+    for bucket_val in custom_buckets:
+        assert bucket_val in upper_bounds

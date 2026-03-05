@@ -73,7 +73,9 @@ class ZMQOffloadServer(OffloadServerInterface):
                     if not self.running:
                         break
 
-        self.thread = threading.Thread(target=process_request, daemon=True)
+        self.thread = threading.Thread(
+            target=process_request, daemon=True, name="offload-server-thread"
+        )
         self.thread.start()
 
     def offload(

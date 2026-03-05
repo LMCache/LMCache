@@ -4,7 +4,8 @@ Extending LMCache
 LMCache is designed to be extensible, allowing integration of custom functionality without modifying the core. The main extension mechanisms are:
 
 - **Storage Plugin Framework** – integrate new storage backends (custom cache storage modules) via a standardized interface.
-- **External Remote Connector Framework** – integrate new remote KV store connectors for external/distributed storage systems.
+- **External Remote Connector Framework** – integrate new remote KV store connectors for external/distributed storage systems. This is still supported but has a planned deprecation by v0.5.0. It is replaced by **Remote Storage Plugin Framework**.
+- **Remote Storage Plugin Framework** – integrate new remote storage connectors for remote/distributed KV storage systems.
 - **Runtime Plugin Framework** – run custom scripts as separate processes alongside LMCache for added functionality.
 
 .. mermaid::
@@ -29,7 +30,8 @@ LMCache is designed to be extensible, allowing integration of custom functionali
       RemoteBackend --> RedisConnector[["Redis Connector (built-in)"]]
       RemoteBackend --> InfiniConnector[["InfiniStore Connector (built-in)"]]
       RemoteBackend --> MooncakeConnector[["Mooncake Connector (built-in)"]]
-      RemoteBackend --> CustomConnector[["External Connector"]]
+      RemoteBackend --> CustomConnector1[["Custom Remote Storage Connector 1"]]
+      RemoteBackend --> CustomConnector2[["Custom Remote Storage Connector 2"]]
 
       storagePluginMgr --> |"StoragePluginInterface"| strplugin1["Custom Storage Backend 1"]
       storagePluginMgr --> |"StoragePluginInterface"| strplugin2["Custom Storage Backend 2"]
@@ -51,23 +53,30 @@ To add a custom storage backend, you need to:
 
 Multiple storage backends can be enabled simultaneously. They are initialized during LMCache startup. Note that the order of backends can matter: if multiple backends are used, earlier listed backends have higher priority for cache lookups (i.e. LMCache will check those backends first when retrieving KV entries).
 
-**External Remote Connectors** (middle section of diagram) allow LMCache’s remote storage layer to connect to new external KV storage systems. The LMCache `RemoteBackend` uses connector implementations to communicate with various external stores. For example, built-in connectors exist for Redis, InfiniStore, and MooncakeStore. To extend LMCache with a new remote connector, you should:
+**Remote Storage Plugin Framework** allows LMCache's storage layer to connect to new remote KV storage systems. The LMCache `RemoteBackend` uses connector implementations to communicate with various remote stores. Built-in connectors exist for Redis, InfiniStore, MooncakeStore, S3, and more. The plugin system provides the ability to add custom remote storage connectors through dynamic loading, extending remote storage capabilities without modifying core code.
 
-1. **Implement** a class following LMCache’s remote connector interface (similar to existing connectors). This typically involves subclassing the `RemoteConnector` base and providing methods to connect, put, get, etc., for your storage system.
-2. **Expose** your connector for dynamic loading. Each remote connector is associated with a URI scheme in the `remote_url`. For instance, if you create a connector for a new storage called “FooStore” with scheme `foo://`, you will want LMCache to use your class whenever a remote URL starts with `foo://`.
-3. **Configure** LMCache to recognize and load the connector. In recent versions, LMCache supports dynamic loading of external connectors via configuration. For example, you might include in `extra_config`:
+To add a custom remote storage connector, you need to:
+
+1. **Implement** two classes:
+
+   - A ``ConnectorAdapter`` subclass that handles URL parsing and connector instantiation for your scheme
+   - A ``RemoteConnector`` subclass that implements the actual storage operations (get, put, exists, etc.)
+
+2. **Package** as an installable Python module (so that LMCache can import it).
+3. **Configure** LMCache to use it by adding an entry to the ``remote_storage_plugins`` list and specifying the module path and class name in the configuration's ``extra_config``. For example:
 
    .. code-block:: yaml
 
-      # Enable custom remote connector for scheme "foo"
-      external_connector.foo.module_path: my_package.my_foostore_connector
-      external_connector.foo.class_name: FooStoreConnector
+      remote_storage_plugins: ["mystore"]
+      extra_config:
+         remote_storage_plugin.mystore.module_path: my_package.my_connector_adapter
+         remote_storage_plugin.mystore.class_name: MyStoreConnectorAdapter
 
-   With this configuration, when LMCache sees a `remote_url` like `foo://...`, it will import and use the `FooStoreConnector` class for remote operations.
+   With this configuration, when LMCache sees a ``remote_url`` matching your adapter's scheme (e.g., ``mystore://...``), it will import and use your connector for remote operations.
 
-By implementing a custom connector and configuring it as above, you can integrate new remote backends (databases, distributed KV stores, etc.) without changing LMCache’s core code. The `RemoteConnector` interface typically handles connection setup, data serialization, read/write operations, and error handling for the external store.
+Multiple remote storage plugins can be enabled simultaneously. By implementing a custom connector and configuring it as above, you can integrate new remote backends (databases, distributed KV stores, etc.) without changing LMCache's core code.
 
-**Runtime Plugin Framework** (top section of diagram) allows running custom scripts alongside LMCache processes. A runtime plugin is launched as a separate subprocess by LMCache’s runtime plugin launcher. Runtime plugins can target specific LMCache roles – the scheduler (controller), worker processes, or all nodes – depending on their filename. They can be written in Python, Bash, or other scripting languages, and are useful for tasks such as logging and metrics, custom cache management policies, health checks, or integration with external systems.
+**Runtime Plugin Framework** allows running custom scripts alongside LMCache processes. A runtime plugin is launched as a separate subprocess by LMCache’s runtime plugin launcher. Runtime plugins can target specific LMCache roles – the scheduler (controller), worker processes, or all nodes – depending on their filename. They can be written in Python, Bash, or other scripting languages, and are useful for tasks such as logging and metrics, custom cache management policies, health checks, or integration with external systems.
 
 Key points and usage of the runtime plugin system:
 
@@ -106,7 +115,7 @@ Key points and usage of the runtime plugin system:
   - Validate any configuration input (from `LMCACHE_RUNTIME_PLUGIN_CONFIG` or elsewhere) before use.
   - If a plugin performs lengthy operations, implement timeouts or periodic logging so you can detect if it hangs, and ensure it does not block LMCache’s normal operation.
 
-Together, these extension points – custom storage backends, remote connectors, and runtime plugin scripts – let users tailor LMCache's functionality and integrate with external systems in a modular, maintainable way.
+Together, these extension points – custom storage backends, remote storage connectors, and runtime plugin scripts – let users tailor LMCache's functionality and integrate with external systems in a modular, maintainable way.
 
 .. toctree::
    :maxdepth: 1
@@ -114,5 +123,6 @@ Together, these extension points – custom storage backends, remote connectors,
 
    runtime_plugins
    storage_plugins
+   remote_storage_plugins
 
 

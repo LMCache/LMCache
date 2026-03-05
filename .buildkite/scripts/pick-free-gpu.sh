@@ -5,9 +5,9 @@
 MIN_FREE_MEM="${1:-10000}"    # in MiB (default: 10 GB)
 REQUESTED_GPU_COUNT="${2:-1}" # number of GPUs to select (default: 1)
 MAX_UTIL=20                   # hardcoded utilization threshold (%)
-GPU_LIMIT=4                   # reserves GPU 0-3 for CI/Build
-# 30 minutes
-TIMEOUT_SECONDS=1800
+GPU_LIMIT=8                   # reserves GPU 0-7 for CI/Build
+# 60 minutes
+TIMEOUT_SECONDS=3600
 INTERVAL=10
 
 start_time=$(date +%s)
@@ -43,6 +43,13 @@ while true; do
         | head -n"${REQUESTED_GPU_COUNT}" \
         | awk -F',' '{print $3}'
     )
+    
+    # Validate we found the requested number of GPUs
+    if [ "${#top_gpus[@]}" -lt "$REQUESTED_GPU_COUNT" ]; then
+      echo "⚠️  Warning: Requested $REQUESTED_GPU_COUNT GPUs but only found ${#top_gpus[@]} available. Waiting..."
+      sleep $INTERVAL
+      continue
+    fi
     
     if [ "${#top_gpus[@]}" -eq 1 ]; then
       # Only one GPU found/requested

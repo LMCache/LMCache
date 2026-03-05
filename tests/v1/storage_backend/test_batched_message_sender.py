@@ -55,7 +55,13 @@ def create_test_config(
 
 def create_test_key(key_id: str = "test_key") -> CacheEngineKey:
     """Create a test CacheEngineKey."""
-    return CacheEngineKey("vllm", "test_model", 3, 123, hash(key_id), torch.bfloat16)
+    return CacheEngineKey(
+        model_name="test_model",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=hash(key_id),
+        dtype=torch.bfloat16,
+    )
 
 
 class TestBatchedMessageSender:

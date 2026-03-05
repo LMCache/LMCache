@@ -150,6 +150,7 @@ class FSConnector(RemoteConnector):
     def _get_with_odirect(self, file_path: Path) -> Optional[MemoryObj]:
         """Synchronous direct IO read, executed in a thread."""
         fd = -1
+        memory_obj: Optional[MemoryObj] = None
         try:
             memory_obj = self.local_cpu_backend.allocate(
                 self.meta_shapes, self.meta_dtypes, self.meta_fmt
@@ -185,6 +186,8 @@ class FSConnector(RemoteConnector):
 
         except Exception as e:
             logger.error(f"Failed to read from file {file_path}: {str(e)}")
+            if memory_obj is not None:
+                memory_obj.ref_count_down()
             return None
         finally:
             if fd >= 0:
