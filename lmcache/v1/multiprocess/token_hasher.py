@@ -208,7 +208,7 @@ class TokenHasher:
 
     @staticmethod
     def hash_to_bytes(hash_val: Any) -> bytes:
-        """Convert hash value to bytes for IPCCacheEngineKey.chunk_hash.
+        """Convert hash value to bytes for ObjectKey.chunk_hash.
 
         Handles both bytes (sha256_cbor) and int (builtin hash) return types.
         """

@@ -114,69 +114,56 @@ class MemoryLayoutDesc:
             )
 
 
-def ipc_keys_to_object_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[ObjectKey]:
+def ipc_key_to_object_keys(
+    key: IPCCacheEngineKey,
+    chunk_hashes: list[bytes],
+) -> list[ObjectKey]:
     """
-    Convert a list of IPCCacheEngineKey to a list of ObjectKey
+    Convert a single IPCCacheEngineKey and its chunk hashes to a list of ObjectKey.
 
-    When the ipc key's worker id is unspecified (None), this function will generate
-    (explode) multiple ObjectKeys for all workers in the world_size.
+    When the key's worker_id is None, each chunk hash is exploded into
+    multiple ObjectKeys (one per worker in world_size).
 
     Args:
-        ipc_keys (list[IPCCacheEngineKey]): The list of IPC keys to convert
+        key: The IPC key providing model_name, world_size, and worker_id.
+        chunk_hashes: List of chunk hash bytes, one per chunk.
 
     Returns:
-        list[ObjectKey]: The converted list of ObjectKey
-
-    Note:
-        For now, we expect all the ipc keys have the same world size. Although
-        it won't break even if they are different, it's not the intended use case.
+        list[ObjectKey]: The converted list of ObjectKey.
     """
-    if not ipc_keys:
-        return []
-
-    all_world_size_same = all(
-        ipc_key.world_size == ipc_keys[0].world_size for ipc_key in ipc_keys
-    )
-    if not all_world_size_same:
-        logger.warning(
-            "ipc_keys_to_object_keys: ipc keys have different world sizes. "
-            "This is not expected."
-        )
-
     storage_keys = []
-    for ipc_key in ipc_keys:
-        assert ipc_key.chunk_hash is not None
-        if ipc_key.worker_id is None:
+    for chunk_hash in chunk_hashes:
+        if key.worker_id is None:
             # For look up request, we want to expand to all workers
-            for worker_id in range(ipc_key.world_size):
+            for worker_id in range(key.world_size):
                 # TODO (ApostaC): include local world size/rank info
                 # in the future once it's in IPCCacheEngineKey
                 kv_rank = ObjectKey.ComputeKVRank(
-                    world_size=ipc_key.world_size,
+                    world_size=key.world_size,
                     global_rank=worker_id,
-                    local_world_size=ipc_key.world_size,
+                    local_world_size=key.world_size,
                     local_rank=worker_id,
                 )
 
                 storage_keys.append(
                     ObjectKey(
-                        chunk_hash=ipc_key.chunk_hash,
-                        model_name=ipc_key.model_name,
+                        chunk_hash=chunk_hash,
+                        model_name=key.model_name,
                         kv_rank=kv_rank,
                     )
                 )
         else:
             kv_rank = ObjectKey.ComputeKVRank(
-                world_size=ipc_key.world_size,
-                global_rank=ipc_key.worker_id,
-                local_world_size=ipc_key.world_size,
-                local_rank=ipc_key.worker_id,
+                world_size=key.world_size,
+                global_rank=key.worker_id,
+                local_world_size=key.world_size,
+                local_rank=key.worker_id,
             )
 
             storage_keys.append(
                 ObjectKey(
-                    chunk_hash=ipc_key.chunk_hash,
-                    model_name=ipc_key.model_name,
+                    chunk_hash=chunk_hash,
+                    model_name=key.model_name,
                     kv_rank=kv_rank,
                 )
             )

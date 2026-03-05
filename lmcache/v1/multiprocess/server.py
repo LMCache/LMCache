@@ -15,7 +15,7 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    ipc_keys_to_object_keys,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
@@ -58,59 +58,6 @@ if torch.cuda.is_available():
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-
-
-# Helper functions
-def update_session_for_key(
-    key: IPCCacheEngineKey,
-    session_manager: SessionManager,
-) -> None:
-    """Update session state for a token-mode key.
-
-    Sets the token sequence on the session and computes hashes so they
-    are cached for resolve_keys.
-
-    Args:
-        key: An IPC cache engine key.
-        session_manager: The session manager to use.
-    """
-    session = session_manager.get_or_create(key.request_id)
-    session.set_tokens(list(key.token_ids))
-    session.get_hashes(key.start, key.end)
-
-
-def resolve_key(
-    key: IPCCacheEngineKey,
-    session_manager: SessionManager,
-) -> list[IPCCacheEngineKey]:
-    """Convert a token-mode key to hash-mode keys.
-
-    Uses session to retrieve pre-computed rolling hashes, then creates
-    hash-mode IPCCacheEngineKey instances.
-    update_session_for_key must be called before this function.
-
-    Args:
-        key: An IPC cache engine key.
-        session_manager: The session manager to use.
-
-    Returns:
-        List of IPCCacheEngineKey with hash, one per chunk.
-    """
-    session = session_manager.get_or_create(key.request_id)
-    hashes = session.get_hashes(key.start, key.end)
-    return [
-        IPCCacheEngineKey(
-            model_name=key.model_name,
-            world_size=key.world_size,
-            worker_id=key.worker_id,
-            token_ids=key.token_ids,
-            start=key.start,
-            end=key.end,
-            request_id=key.request_id,
-            chunk_hash=TokenHasher.hash_to_bytes(h),
-        )
-        for h in hashes
-    ]
 
 
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
@@ -223,15 +170,16 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_key(key, self.session_manager)
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
 
         st = time.perf_counter()
 
-        assert all(k.worker_id is not None for k in ipc_keys), (
-            "Must store with worker_id != None"
-        )
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        assert key.worker_id is not None, "Must store with worker_id != None"
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -321,15 +269,16 @@ class MPCacheEngine:
                 that signals the completion of the retrieve operation. The second
                 element indicates whether the key was successfully retrieved.
         """
-        update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_key(key, self.session_manager)
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
 
         st = time.perf_counter()
 
-        assert all(k.worker_id is not None for k in ipc_keys), (
-            "Must retrieve with worker_id != None"
-        )
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        assert key.worker_id is not None, "Must retrieve with worker_id != None"
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -411,7 +360,6 @@ class MPCacheEngine:
         Returns:
             Number of matched chunks (prefix match count).
         """
-        ipc_keys: list[IPCCacheEngineKey] = []
         model_name, world_size = key.model_name, key.world_size
 
         # Find the gpu context and calculate the layout desc
@@ -431,11 +379,14 @@ class MPCacheEngine:
             )
             return 0
 
-        # Prepare for the obj keys
-        ipc_keys.extend(key.to_hash_keys(self.token_hasher))
-        if not ipc_keys:
+        # Compute chunk hashes for all full chunks
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h)
+            for h in self.token_hasher.compute_chunk_hashes(list(key.token_ids), True)
+        ]
+        if not chunk_hashes:
             return 0
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
         while True:
@@ -445,7 +396,7 @@ class MPCacheEngine:
         # NOTE(Kuntai): this assumes two things:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the first failure
-        found_count = found_count // ipc_keys[0].world_size
+        found_count = found_count // key.world_size
         return found_count
 
     def free_lookup_locks(
@@ -456,26 +407,27 @@ class MPCacheEngine:
         full retrieve.  This is used when a request is cancelled or aborted
         after LOOKUP but before RETRIEVE.
 
-        ``to_hash_keys`` always expands over the entire ``token_ids``
-        sequence, so we slice the result to only include the chunks that
-        overlap with the key's ``[start, end)`` range.
-        This means when ``start`` or ``end`` is not aligned to ``chunk_size``, the
-        entire chunk containing ``start`` boundary is freed but the one containing
-        ``end`` boundary will not be freed.  It caller's responsibility to align
-        the boundaries as desired.
+        Hashes are computed over the entire ``token_ids`` sequence, then
+        sliced to only include chunks that overlap with ``[start, end)``.
+        When ``start`` or ``end`` is not aligned to ``chunk_size``, the
+        entire chunk containing ``start`` boundary is freed but the one
+        containing ``end`` boundary will not be freed.  It is the caller's
+        responsibility to align the boundaries as desired.
 
         Args:
-            keys: List of cache keys whose read locks should be released.
+            key: Cache key whose read locks should be released.
         """
-        ipc_keys: list[IPCCacheEngineKey] = []
-        all_hash_keys = key.to_hash_keys(self.token_hasher)
+        all_chunk_hashes = [
+            TokenHasher.hash_to_bytes(h)
+            for h in self.token_hasher.compute_chunk_hashes(list(key.token_ids), True)
+        ]
         chunk_size = self.token_hasher.chunk_size
         start_chunk = key.start // chunk_size
         end_chunk = key.end // chunk_size
-        ipc_keys.extend(all_hash_keys[start_chunk:end_chunk])
-        if not ipc_keys:
+        chunk_hashes = all_chunk_hashes[start_chunk:end_chunk]
+        if not chunk_hashes:
             return
-        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
         self.storage_manager.finish_read_prefetched(obj_keys)
 
     # =========================================================================

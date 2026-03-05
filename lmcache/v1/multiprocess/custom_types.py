@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 import pickle
 import threading
 
 # Third Party
 import msgspec
 import torch
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 """
 Defines the types and the customized encoder/decoders for inter-process
@@ -20,8 +16,7 @@ communications.
 Key Types:
 - IPCCacheEngineKey: Token-based cache key
   - Contains token_ids, start, end, request_id (all required)
-  - chunk_hash is optionally set after hashing by the server
-  - Converted to ObjectKey for storage operations via ipc_keys_to_object_keys()
+  - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
 
@@ -169,7 +164,7 @@ class IPCCacheEngineKey:
 
     The client sends token_ids, start, end, and request_id (all required).
     The server computes chunk hashes via TokenHasher and converts to
-    ObjectKey for storage operations.
+    ObjectKey for storage operations using ipc_key_to_object_keys().
 
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
@@ -186,41 +181,6 @@ class IPCCacheEngineKey:
 
     # === Session tracking (not part of cache identity) ===
     request_id: str = field(compare=False)
-
-    chunk_hash: bytes | None = None
-
-    def to_hash_keys(
-        self,
-        hasher: "TokenHasher",
-        full_chunk_only: bool = True,
-        prefix_hash: int | None = None,
-    ) -> list["IPCCacheEngineKey"]:
-        """Compute chunk hashes and return one IPCCacheEngineKey per chunk.
-
-        Preserves all fields in generated keys.
-
-        Args:
-            hasher: TokenHasher instance to compute chunk hashes
-            full_chunk_only: If True, only return keys for full chunks .
-                Else, return keys for all chunks (including partial ones).
-            prefix_hash: Optional int hash to combine with token_ids.
-        """
-        chunk_hashes = hasher.compute_chunk_hashes(
-            list(self.token_ids), full_chunk_only, prefix_hash
-        )
-        return [
-            IPCCacheEngineKey(
-                model_name=self.model_name,
-                world_size=self.world_size,
-                worker_id=self.worker_id,
-                token_ids=self.token_ids,
-                start=self.start,
-                end=self.end,
-                request_id=self.request_id,
-                chunk_hash=hasher.hash_to_bytes(h),
-            )
-            for h in chunk_hashes
-        ]
 
     # Helper function for unit tests only
     @classmethod
@@ -254,7 +214,6 @@ class IPCCacheEngineKey:
             token_ids=self.token_ids,
             start=self.start,
             end=self.end,
-            chunk_hash=self.chunk_hash,
             request_id=self.request_id,
         )
 
