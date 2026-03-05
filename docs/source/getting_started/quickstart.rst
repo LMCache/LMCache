@@ -66,7 +66,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
 
          python -m sglang.launch_server \
-           --model-path Qwen/Qwen3-14B-Instruct \
+           --model-path Qwen/Qwen3-14B \
            --host 0.0.0.0 \
            --port 30000 \
            --enable-lmcache
@@ -118,7 +118,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-14B-Instruct",
+             "model": "Qwen/Qwen3-14B",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts"}],
              "max_tokens": 100,
              "temperature": 0.7
@@ -131,7 +131,7 @@ Open a new terminal. Pick your engine tab, send the first request, then an overl
          curl http://localhost:30000/v1/chat/completions \
            -H "Content-Type: application/json" \
            -d '{
-             "model": "Qwen/Qwen3-14B-Instruct",
+             "model": "Qwen/Qwen3-14B",
              "messages": [{"role": "user", "content": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models"}],
              "max_tokens": 100,
              "temperature": 0.7
@@ -151,7 +151,10 @@ You should see LMCache logs like this (examples for each engine):
 
       .. code-block:: text
 
-         LMCache INFO: Stored 35 out of total 35 tokens. size: 0.0045 gb, cost 2.10 ms, throughput: 2.14 GB/s; offload_time: 2.00 ms, put_time: 0.10 ms
+         Prefill batch, #new-seq: 1, #new-token: 35, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0,
+         Decode batch, #running-req: 1, #token: 74, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1.63, #queue-req: 0,
+         Decode batch, #running-req: 1, #token: 114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
+         LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
 
 **What this means:** The first request caches the prompt. The second reuses the cached prefix and only loads the missing chunk. You should see logs like this:
 
@@ -170,10 +173,11 @@ You should see LMCache logs like this (examples for each engine):
 
       .. code-block:: text
 
-         Prefill batch: new-token=1, cached-token=34
-         LMCache INFO: Retrieved 8 out of 24 required tokens (from 32 total tokens). size: 0.0011 gb, cost 0.55 ms, throughput: 1.98 GB/s
-         LMCache INFO: Storing KV cache for 8 out of 32 tokens (skip_leading_tokens=24)
-         LMCache INFO: Stored 8 out of total 8 tokens. size: 0.0011 gb, cost 0.43 ms, throughput: 2.57 GB/s; offload_time: 0.40 ms, put_time: 0.03 ms
+         Prefill batch, #new-seq: 1, #new-token: 10, #cached-token: 30, token usage: 0.00, #running-req: 0, #queue-req: 0,
+         Decode batch, #running-req: 1, #token: 64, token usage: 0.00, cuda graph: True, gen throughput (token/s): 8.29, #queue-req: 0,
+         Decode batch, #running-req: 1, #token: 104, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
+         Decode batch, #running-req: 1, #token: 144, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.89, #queue-req: 0,
+         LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
 
 **What this means (per engine):**
 
@@ -189,10 +193,11 @@ You should see LMCache logs like this (examples for each engine):
 
    .. tab-item:: SGLang
 
-      - **Prefill batch line**: Shows new-token=1, cached-token=34, meaning most of the prefix is reused.
-      - **Retrieved 8 of 24**: With chunk size 8, LMCache pulled the missing chunk(s) for the overlapping prefix.
-      - **Store 8 of 32 tokens**: The new tail chunk is written back for future requests.
-      - Chunk alignment and reuse follow the same 8-token hashing; counts differ slightly because SGLang reports prefill/cache stats explicitly.
+      - **Total tokens 140**: SGLang stores KV cache for both prefill and decode tokens together, so total = 40 prompt + 100 generated = 140 tokens.
+      - **Cached tokens: 30**: SGLang's Radix Attention Cache reused 30 tokens from the first request.
+      - **LMCache hit tokens: 24**: LMCache detected 24 tokens (3 full 8-token chunks) stored from the first request. Since Radix Cache already provides 30 tokens in GPU memory, these 24 tokens don't need to be loaded from LMCache or stored again.
+      - **New tokens: 10**: Only 10 prompt tokens need prefill computation (40 prompt - 30 cached = 10).
+      - **Stored 112 out of 140**: 24 tokens (3 full chunks) are already in LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token chunks) are stored.
 
 🎉 **You now have LMCache caching and reusing KV caches for both engines.**
 

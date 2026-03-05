@@ -26,7 +26,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
         ccache software-properties-common git curl sudo \
-        python3 python3-dev python3-venv python3-pip tzdata \
+        python3 python3-dev python3-venv python3-pip tzdata libxcb1-dev \
     && ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/ \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv ~/.local/bin/uv /usr/local/bin/ \
