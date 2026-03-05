@@ -270,7 +270,10 @@ class MPCacheEngine:
             # if get_telemetry_controller().is_enabled():
             #    gpu_context.cupy_stream.launch_host_func(
             #        log_telemetry,
-            #        make_start_event("store", key.request_id),
+            #        make_start_event(
+            #            "store", key.request_id,
+            #            device=str(gpu_context.device),
+            #        ),
             #    )
 
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
@@ -319,7 +322,9 @@ class MPCacheEngine:
         #    self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
         #        log_telemetry,
         #        make_end_event(
-        #            "store", key.request_id, stored_count=len(reserved_dict)
+        #            "store", key.request_id,
+        #            stored_count=len(reserved_dict),
+        #            device=str(gpu_context.device),
         #        ),
         #    )
 
@@ -373,7 +378,11 @@ class MPCacheEngine:
         if get_telemetry_controller().is_enabled():
             gpu_context.cupy_stream.launch_host_func(
                 log_telemetry,
-                make_start_event("retrieve", key.request_id),
+                make_start_event(
+                    "retrieve",
+                    key.request_id,
+                    device=str(gpu_context.device),
+                ),
             )
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
@@ -434,6 +443,7 @@ class MPCacheEngine:
                             "retrieve",
                             key.request_id,
                             retrieved_count=len(prefetched_keys),
+                            device=str(gpu_context.device),
                         ),
                     )
 
