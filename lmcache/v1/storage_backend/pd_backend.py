@@ -220,6 +220,7 @@ class PDBackend(AllocatorBackendInterface):
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         # First Party
+        from lmcache.integration.vllm.utils import get_size_bytes
 
         if self.corrected_device != "cpu":
             logger.info(f"Setting cuda device to {self.corrected_device} ")
@@ -233,10 +234,25 @@ class PDBackend(AllocatorBackendInterface):
             else paged_mem_allocator.init_gpu_memory_allocator
         )
 
+        # Calculate the chunk size (align_bytes) and align buffer size
+        shapes = [torch.Size(metadata.kv_shape)]
+        dtypes = [metadata.kv_dtype]
+        chunk_size_bytes = get_size_bytes(shapes, dtypes)
+        origin_buffer_size = config.pd_buffer_size
+        aligned_buffer_size = origin_buffer_size // chunk_size_bytes * chunk_size_bytes
+
+        if aligned_buffer_size != origin_buffer_size:
+            logger.info(
+                f"Auto align pd_buffer_size, origin: {origin_buffer_size}, "
+                f"aligned: {aligned_buffer_size}, chunk size: {chunk_size_bytes}. "
+                f"Excess buffer of {origin_buffer_size - aligned_buffer_size}"
+                f"bytes will be released."
+            )
+
         init_func(
-            config.pd_buffer_size,
-            [torch.Size(metadata.kv_shape)],
-            [metadata.kv_dtype],
+            aligned_buffer_size,
+            shapes,
+            dtypes,
             MemoryFormat.KV_2LTD,  # TODO: remove this hardcode
         )
 
