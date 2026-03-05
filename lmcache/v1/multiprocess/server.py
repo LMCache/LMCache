@@ -320,8 +320,10 @@ class MPCacheEngine:
                 if effective_start >= chunk_end:
                     # Entire chunk is within APC range, skip it
                     continue
-
-                skip_in_chunk = effective_start - chunk_start
+                # clamp to [0, chunk_size - 1]
+                skip_in_chunk = max(
+                    0, min(effective_start - chunk_start, self.chunk_size - 1)
+                )
                 slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
                 # Copy from CPU to GPU
