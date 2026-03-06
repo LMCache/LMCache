@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -98,27 +95,6 @@ class L1MemoryManager:
         self._allocator.batched_free(mem_objs)
         return L1Error.SUCCESS
 
-    def get_vm_space(self) -> torch.Tensor:
-        """
-        Used by RDMA communication to get the underlying virtual memory space.
-
-        Returns:
-            the underlying virtual memory space as a torch.Tensor.
-
-        Raises:
-            NotImplementedError: If the allocator type does not support this operation.
-        """
-        if isinstance(self._allocator, MixedMemoryAllocator):
-            return self._allocator.buffer
-        elif isinstance(self._allocator, LazyMemoryAllocator):
-            # TODO(ApostaC): need to test if the RDMA registration works
-            # before the lazy expansion is finished
-            return self._allocator.get_underlying_buffer()
-        else:
-            raise NotImplementedError(
-                "get_vm_space is not implemented for this allocator type."
-            )
-
     def get_memory_usage(self) -> tuple[int, int]:
         """
         Get the current memory usage. This function will mainly be used to support
@@ -159,8 +135,20 @@ class L1MemoryManager:
 
         Returns:
             L1MemoryDesc: Pointer, size, and alignment of the L1 buffer.
+
+        Raises:
+            NotImplementedError: If the allocator type does not support this operation.
         """
-        buffer = self.get_vm_space()
+        if isinstance(self._allocator, MixedMemoryAllocator):
+            buffer = self._allocator.buffer
+        elif isinstance(self._allocator, LazyMemoryAllocator):
+            # TODO(ApostaC): need to test if the RDMA registration works
+            # before the lazy expansion is finished
+            buffer = self._allocator.get_underlying_buffer()
+        else:
+            raise NotImplementedError(
+                "get_l1_memory_desc is not implemented for this allocator type."
+            )
         return L1MemoryDesc(
             ptr=buffer.data_ptr(),
             size=self._size_in_bytes,
