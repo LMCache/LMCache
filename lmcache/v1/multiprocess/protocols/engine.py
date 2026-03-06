@@ -77,9 +77,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[int] - GPU block IDs to store retrieved data
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
+        #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
+        #     start of the retrieve range (to avoid overwriting APC-shared blocks)
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[int], bytes],
+            payload_classes=[KeyType, int, list[int], bytes, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
