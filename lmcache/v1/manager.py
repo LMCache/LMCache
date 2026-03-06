@@ -59,7 +59,6 @@ class LMCacheManager:
         self,
         config: LMCacheEngineConfig,
         service_factory: BaseServiceFactory,
-        role: str,
         connector: Optional[Any] = None,
     ):
         """
@@ -74,7 +73,6 @@ class LMCacheManager:
         """
         self._config = config
         self._service_factory = service_factory
-        self._role = role
         self._connector: Any = connector
 
         # Flag to track if initialization failed
@@ -154,11 +152,6 @@ class LMCacheManager:
     def health_monitor(self) -> Optional[HealthMonitor]:
         """Get the health monitor instance."""
         return self._health_monitor
-
-    @property
-    def role(self) -> str:
-        """Get the role of this manager (scheduler or worker)."""
-        return self._role
 
     @property
     def kv_caches(self) -> dict[str, torch.Tensor]:
@@ -398,9 +391,8 @@ class LMCacheManager:
         Returns:
             dict: Result with old and new client type info.
         """
-        if self._role != "scheduler":
-            return {"error": "only supported for scheduler role"}
-
+        if self._lookup_client is None:
+            return {"error": "lookup client not available"}
         result = self.close_lookup_client()
         create_result = self.create_lookup_client()
         result.update(create_result)
@@ -467,8 +459,8 @@ class LMCacheManager:
         Returns:
             dict: Result with old and new server type info.
         """
-        if self._role != "worker":
-            return {"error": "only supported for worker role"}
+        if self._lookup_server is None:
+            return {"error": "lookup server not available"}
 
         result = self.close_lookup_server()
         create_result = self.create_lookup_server()
@@ -510,7 +502,6 @@ class LMCacheManager:
         return {
             "client": self._get_lookup_type_str(self._lookup_client),
             "server": self._get_lookup_type_str(self._lookup_server),
-            "role": self._role,
         }
 
     # ==================== Health & Info ====================

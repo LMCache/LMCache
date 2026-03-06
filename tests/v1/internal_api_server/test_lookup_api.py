@@ -22,7 +22,6 @@ class TestLookupAPI:
         manager.get_lookup_info.return_value = {
             "client": "HitLimitLookupClient(LMCacheBypassLookupClient)",
             "server": "None",
-            "role": "scheduler",
         }
         manager.close_lookup_client.return_value = {
             "old": "HitLimitLookupClient(LMCacheBypassLookupClient)"
@@ -42,7 +41,6 @@ class TestLookupAPI:
         manager.get_lookup_info.return_value = {
             "client": "None",
             "server": "LMCacheLookupServer",
-            "role": "worker",
         }
         manager.close_lookup_server.return_value = {"old": "LMCacheLookupServer"}
         manager.create_lookup_server.return_value = {"new": "LMCacheAsyncLookupServer"}
@@ -74,7 +72,6 @@ class TestLookupAPI:
         data = json.loads(response.text)
         assert "LMCacheBypassLookupClient" in data["client"]
         assert data["server"] == "None"
-        assert data["role"] == "scheduler"
         mock_scheduler_manager.get_lookup_info.assert_called_once()
 
     def test_get_lookup_info_worker(self, worker_client, mock_worker_manager):
@@ -85,7 +82,6 @@ class TestLookupAPI:
         data = json.loads(response.text)
         assert data["client"] == "None"
         assert data["server"] == "LMCacheLookupServer"
-        assert data["role"] == "worker"
         mock_worker_manager.get_lookup_info.assert_called_once()
 
     def test_get_lookup_info_not_supported(self):

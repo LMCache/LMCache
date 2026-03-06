@@ -462,9 +462,7 @@ class LMCacheConnectorV1Impl:
         self.config = config
 
         service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
-        self._manager = LMCacheManager(
-            config, service_factory, role=role.name.lower(), connector=self
-        )
+        self._manager = LMCacheManager(config, service_factory, connector=self)
 
         # Start services managed by LMCacheManager
         self._manager.start_services()

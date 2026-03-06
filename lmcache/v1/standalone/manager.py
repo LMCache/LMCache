@@ -58,7 +58,6 @@ class StandaloneLMCacheManager(LMCacheManager):
         super().__init__(
             config=config,
             service_factory=service_factory,
-            role="worker",
             connector=connector,
         )
 
