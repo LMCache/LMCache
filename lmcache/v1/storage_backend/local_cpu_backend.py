@@ -349,6 +349,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
+        use_hugepages = config.local_cpu_use_hugepages
 
         if metadata is not None:
             # save_only_first_rank only works when use mla
@@ -380,6 +381,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
         if config.enable_p2p:
+            assert not use_hugepages, "Hugepages are not supported for P2P mode"
+
             # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
             # For now, keep the original P2P implementation
             assert metadata is not None
@@ -430,11 +433,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     cpu_size_bytes,
                     numa_mapping=numa_mapping,
                     align_bytes=allocator_align_bytes,
+                    use_hugepages=use_hugepages,
                 )
             return MixedMemoryAllocator(
                 cpu_size_bytes,
                 numa_mapping=numa_mapping,
                 config=config,
+                use_hugepages=use_hugepages,
             )
 
     @staticmethod
