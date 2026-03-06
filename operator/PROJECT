@@ -7,7 +7,7 @@ domain: lmcache.ai
 layout:
 - go.kubebuilder.io/v4
 projectName: operator
-repo: github.com/LMCache/LMCache-Operator
+repo: github.com/LMCache/LMCache
 resources:
 - api:
     crdVersion: v1
@@ -16,6 +16,6 @@ resources:
   domain: lmcache.ai
   group: lmcache
   kind: LMCacheEngine
-  path: github.com/LMCache/LMCache-Operator/api/v1alpha1
+  path: github.com/LMCache/LMCache/api/v1alpha1
   version: v1alpha1
 version: "3"

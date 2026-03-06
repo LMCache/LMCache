@@ -24,7 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
 // ComputeResources returns resource requirements, either from overrides or auto-computed from L1 size.

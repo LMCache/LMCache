@@ -1,4 +1,4 @@
-module github.com/LMCache/LMCache-Operator
+module github.com/LMCache/LMCache
 
 go 1.25.3
 

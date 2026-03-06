@@ -32,8 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
-	"github.com/LMCache/LMCache-Operator/internal/resources"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
+	"github.com/LMCache/LMCache/internal/resources"
 )
 
 // handleFinalizer adds or processes the finalizer. Returns (err, done).

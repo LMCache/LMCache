@@ -79,7 +79,6 @@ spec:
     spec:
       # Required for CUDA IPC between vLLM and LMCache
       hostIPC: true
-      hostPID: true
       containers:
         - name: vllm
           image: lmcache/vllm-openai:latest
@@ -113,7 +112,7 @@ spec:
 
 Key points for vLLM pods:
 
-- **`hostIPC: true` and `hostPID: true` are required** — CUDA IPC (`cudaIpcOpenMemHandle`) needs a shared IPC namespace between vLLM and LMCache. Without this, GPU memory mapping fails.
+- **`hostIPC: true` is required** — CUDA IPC (`cudaIpcOpenMemHandle`) needs a shared IPC namespace between vLLM and LMCache. Without this, GPU memory mapping fails.
 - **`PYTHONHASHSEED=0`** — ensures deterministic token hashing so vLLM and LMCache produce consistent cache keys.
 - **ConfigMap mount** — the `$(cat ...)` pattern reads the connection JSON and passes it inline to `--kv-transfer-config`. The ConfigMap name is always `<LMCacheEngine name>-connection`.
 - **No `hostNetwork` needed** — the operator creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy routes traffic to the LMCache pod on the same node automatically. The ConfigMap points to the service DNS name, so neither LMCache nor vLLM pods need `hostNetwork`.
@@ -265,7 +264,7 @@ kubectl create secret docker-registry regcred \
   --docker-server=<your-registry> \
   --docker-username=<username> \
   --docker-password=<password> \
-  -n operator-system
+  -n lmcache-operator-system
 ```
 
 ## License

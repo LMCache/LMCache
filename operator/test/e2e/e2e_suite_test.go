@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/LMCache/LMCache-Operator/test/utils"
+	"github.com/LMCache/LMCache/test/utils"
 )
 
 var (

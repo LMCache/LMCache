@@ -34,7 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 

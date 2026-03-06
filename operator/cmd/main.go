@@ -37,8 +37,8 @@ import (
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
-	"github.com/LMCache/LMCache-Operator/internal/controller"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
+	"github.com/LMCache/LMCache/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 

@@ -15,7 +15,6 @@ spec:
     spec:
       # Required for CUDA IPC between vLLM and LMCache
       hostIPC: true
-      hostPID: true
       containers:
         - name: vllm
           image: lmcache/vllm-openai:latest

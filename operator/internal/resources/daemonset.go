@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
@@ -145,7 +145,6 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					HostIPC:            true,
-					HostPID:            true,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
 					NodeSelector:       spec.NodeSelector,

@@ -23,7 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
 // LookupServiceName returns the name of the node-local lookup Service for discovery.

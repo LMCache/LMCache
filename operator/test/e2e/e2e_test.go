@@ -30,17 +30,17 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/LMCache/LMCache-Operator/test/utils"
+	"github.com/LMCache/LMCache/test/utils"
 )
 
 // namespace where the project is deployed in
-const namespace = "operator-system"
+const namespace = "lmcache-operator-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "operator-controller-manager"
+const serviceAccountName = "lmcache-operator-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "operator-controller-manager-metrics-service"
+const metricsServiceName = "lmcache-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "operator-metrics-binding"

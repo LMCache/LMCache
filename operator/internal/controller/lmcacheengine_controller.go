@@ -27,8 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
-	"github.com/LMCache/LMCache-Operator/internal/resources"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
+	"github.com/LMCache/LMCache/internal/resources"
 )
 
 const finalizerName = "lmcache.ai/cleanup"

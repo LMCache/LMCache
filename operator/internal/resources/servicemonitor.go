@@ -20,7 +20,7 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	lmcachev1alpha1 "github.com/LMCache/LMCache-Operator/api/v1alpha1"
+	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
 // ServiceMonitorEnabled returns true if the ServiceMonitor should be created.

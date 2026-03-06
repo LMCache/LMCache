@@ -15,7 +15,7 @@ LMCache multiprocess mode runs as a separate server process that vLLM instances 
 
 The operator introduces a single CRD (`LMCacheEngine`) that declaratively captures the full LMCache server configuration. The controller reconciles this CR into the underlying K8s resources (DaemonSet, Service, ConfigMap, ServiceMonitor), automatically injecting the required pod-level settings that are easy to forget in hand-written manifests.
 
-**Auto-injected pod settings eliminate manual boilerplate.** The controller always sets `hostIPC: true`, `hostPID: true`, and `--host 0.0.0.0` — settings that the current `lmcache-daemonset.yaml` requires users to specify by hand. Getting any of these wrong (e.g., forgetting `hostIPC`) causes silent connectivity failures or CUDA IPC errors that are hard to debug.
+**Auto-injected pod settings eliminate manual boilerplate.** The controller always sets `hostIPC: true` and `--host 0.0.0.0` — settings that the current `lmcache-daemonset.yaml` requires users to specify by hand. Getting any of these wrong (e.g., forgetting `hostIPC`) causes silent connectivity failures or CUDA IPC errors that are hard to debug.
 
 **A node-local Service with connection ConfigMap provides a stable discovery contract for vLLM.** The operator creates a ClusterIP Service with `internalTrafficPolicy=Local`, which ensures kube-proxy routes traffic only to the LMCache pod on the same node. A ConfigMap (`<name>-connection`) contains the `kv-transfer-config` JSON pointing to this service's cluster DNS name. vLLM deployments simply mount the ConfigMap — no downward API or shell substitution needed. When the LMCache CR changes, the ConfigMap updates automatically and vLLM pods pick up the new values on restart.
 
@@ -208,7 +208,7 @@ spec:
     sizeGB: 60
 ```
 
-This deploys a DaemonSet with 60GB L1 cache, LRU eviction, blake3 hashing, port 5555, auto-computed 65Gi memory request / 98Gi limit, Prometheus on 9090, and a connection ConfigMap for vLLM. The operator auto-injects `hostIPC`, `hostPID`, and `--host 0.0.0.0`, and creates a node-local Service for vLLM discovery.
+This deploys a DaemonSet with 60GB L1 cache, LRU eviction, blake3 hashing, port 5555, auto-computed 65Gi memory request / 98Gi limit, Prometheus on 9090, and a connection ConfigMap for vLLM. The operator auto-injects `hostIPC` and `--host 0.0.0.0`, and creates a node-local Service for vLLM discovery.
 
 ### Production Deployment (all GPU nodes)
 
@@ -313,7 +313,7 @@ OnEvent(LMCacheEngine create/update/delete):
    - memoryLimit = ceil(memoryRequest * 1.5) Gi
    - containerArgs from all spec fields
 3. RECONCILE DaemonSet (CreateOrUpdate, ownerRef)
-   - Always inject: hostIPC, hostPID, --host 0.0.0.0
+   - Always inject: hostIPC, --host 0.0.0.0
 4. RECONCILE node-local lookup Service (internalTrafficPolicy=Local)
 5. RECONCILE headless Service for metrics
 6. RECONCILE connection ConfigMap
