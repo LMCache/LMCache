@@ -1745,7 +1745,7 @@ else:
 
                 data = {
                     f.name.split("@")[1].replace(".pt", ""): torch.load(
-                        f, weights_only=False
+                        f, weights_only=True
                     )
                     for f in sub_files
                 }
