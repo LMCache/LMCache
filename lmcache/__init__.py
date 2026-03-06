@@ -2,19 +2,16 @@
 
 # Standard
 from typing import Any
-import logging
+import importlib
 import sys
 
 # Third Party
 import torch
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# First Party
+from lmcache.logging import init_logger
 
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(levelname)s: %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+logger = init_logger(__name__)
 
 
 # --------------------------
@@ -55,11 +52,15 @@ def _get_backend() -> Any:
             continue
         # 2 Run availability check for the backend
         try:
-            module = __import__(module_name, fromlist=["*"])
+            module = importlib.import_module(module_name)
             logger.info("Using backend: %s", module_name)
             return module
         except ImportError as e:
             logger.warning("Failed to import backend %s: %s", module_name, e)
+            logger.warning("Fallback to python backend lmcache.non_cuda_equivalents")
+            module = importlib.import_module("lmcache.non_cuda_equivalents")
+            logger.info("Using backend: lmcache.non_cuda_equivalents")
+            return module
     raise ImportError("No backend could be imported for lmcache.")
 
 

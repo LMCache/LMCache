@@ -22,17 +22,18 @@ _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
 
 # Cached copy library for lmcache_memcpy_async (lazy-initialized)
-_copy_lib: Optional[ctypes.CDLL] = None
+_copy_lib_NOT_LOADED = object()
+_copy_lib: Optional[ctypes.CDLL] = _copy_lib_NOT_LOADED  # type: ignore
 
 
 def _get_copy_lib() -> Optional[ctypes.CDLL]:
     """Lazily load and cache the CUDA runtime library, or None for CPU fallback."""
     global _copy_lib
-    if _copy_lib is None:
+    if _copy_lib is _copy_lib_NOT_LOADED:
         try:
             _copy_lib = ctypes.CDLL("libcudart.so")
         except OSError:
-            pass
+            _copy_lib = None
     return _copy_lib
 
 
@@ -89,7 +90,7 @@ def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
     _tensor_registry.pop(ptr, None)
 
 
-def alloc_pinned_ptr(size: int, flags: int = 0) -> int:
+def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory and returning pointer
     to it. Note: Pinned memory is not supported on non-CUDA.
 
@@ -699,8 +700,6 @@ def lmcache_memcpy_async(
         cuda_kind = 1
     elif direction == TransferDirection.D2H:
         cuda_kind = 2
-    else:
-        cuda_kind = 1 if direction == 0 else 2
 
     # 3. Load CUDA runtime library
     # We must use the C library to handle these raw pointers
