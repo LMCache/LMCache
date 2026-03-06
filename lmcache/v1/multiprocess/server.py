@@ -37,6 +37,11 @@ from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
     init_prometheus_controller,
 )
+from lmcache.v1.multiprocess.config import (
+    MPServerConfig,
+    add_mp_server_args,
+    parse_args_to_mp_server_config,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
@@ -305,6 +310,7 @@ class MPCacheEngine:
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
+        skip_first_n_tokens: int = 0,
     ) -> tuple[bytes, bool]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
@@ -315,6 +321,10 @@ class MPCacheEngine:
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
+            skip_first_n_tokens (int): Number of tokens to skip writing at
+                the start of the retrieve range. This avoids overwriting
+                APC-shared GPU blocks that may be read concurrently by other
+                requests.
 
         Returns:
             tuple[bytes, bool]: The first element is the IPC handle of the event
@@ -340,9 +350,22 @@ class MPCacheEngine:
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
             ):
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
+                chunk_start = idx * self.chunk_size
+                chunk_end = chunk_start + self.chunk_size
+
+                # Skip tokens that overlap with APC-cached blocks to
+                # avoid a data race: the retrieve writes on the LMCache
+                # CUDA stream while concurrent requests may read from
+                # those same APC-shared blocks on the vLLM CUDA stream.
+                effective_start = max(chunk_start, skip_first_n_tokens)
+                if effective_start >= chunk_end:
+                    # Entire chunk is within APC range, skip it
+                    continue
+                # clamp to [0, chunk_size - 1]
+                skip_in_chunk = max(
+                    0, min(effective_start - chunk_start, self.chunk_size - 1)
+                )
+                slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
@@ -357,6 +380,7 @@ class MPCacheEngine:
                         lmc_ops.TransferDirection.H2D,
                         gpu_context.gpu_kv_format_,
                         gpu_context.block_size,
+                        skip_in_chunk,
                     )
 
         with (
@@ -537,28 +561,20 @@ def add_handler_helper(
 
 
 def run_cache_server(
+    mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
-    host: str = "localhost",
-    port: int = 5555,
-    chunk_size: int = 256,
-    max_workers: int = 1,
     return_engine: bool = False,
-    hash_algorithm: str = "blake3",
 ):
     """
     Run the LMCache cache server with ZMQ message queue.
 
     Args:
+        mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
-        host: ZMQ server host
-        port: ZMQ server port
-        chunk_size: Chunk size for KV cache operations
-        max_workers: Maximum number of worker threads for ZMQ server
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
-        hash_algorithm: Hash algorithm for token-based operations
 
     Returns:
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
@@ -578,14 +594,16 @@ def run_cache_server(
     # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
         storage_manager_config=storage_manager_config,
-        chunk_size=chunk_size,
-        hash_algorithm=hash_algorithm,
+        chunk_size=mp_config.chunk_size,
+        hash_algorithm=mp_config.hash_algorithm,
     )
 
     # Initialize the message queue server
     context = zmq.Context.instance()
     server = MessageQueueServer(
-        bind_url=f"tcp://{host}:{port}", context=context, max_workers=max_workers
+        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
+        context=context,
+        max_workers=mp_config.max_workers,
     )
 
     # Add handlers
@@ -602,7 +620,11 @@ def run_cache_server(
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
-    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
+    logger.info(
+        "LMCache ZMQ cache server is running on tcp://%s:%d",
+        mp_config.host,
+        mp_config.port,
+    )
     # Start the ZMQ server
     torch.cuda.init()
     server.start()
@@ -630,39 +652,19 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="LMCache ZMQ Cache Server (without HTTP)"
     )
-    parser.add_argument(
-        "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
-    )
-    parser.add_argument(
-        "--port", type=int, default=5555, help="Port to bind the ZMQ server"
-    )
-    parser.add_argument(
-        "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
-    )
-    parser.add_argument(
-        "--max-workers", type=int, default=1, help="Maximum number of worker threads"
-    )
-    parser.add_argument(
-        "--hash-algorithm",
-        type=str,
-        default="blake3",
-        help="Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)",
-    )
-    parser = add_storage_manager_args(parser)
-    parser = add_prometheus_args(parser)
+    add_mp_server_args(parser)
+    add_storage_manager_args(parser)
+    add_prometheus_args(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
     run_cache_server(
+        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
-        host=args.host,
-        port=args.port,
-        chunk_size=args.chunk_size,
-        max_workers=args.max_workers,
-        hash_algorithm=args.hash_algorithm,
     )
