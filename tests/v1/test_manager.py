@@ -53,12 +53,10 @@ class TestLMCacheManagerInit:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="scheduler",
             connector=connector,
         )
 
         assert manager._config is config
-        assert manager._role == "scheduler"
         assert manager._connector is connector
 
     def test_init_calls_factory_methods(self):
@@ -69,7 +67,6 @@ class TestLMCacheManagerInit:
         LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         factory.get_or_create_metadata.assert_called_once()
@@ -88,7 +85,6 @@ class TestLMCacheManagerInit:
         LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         factory.maybe_create_health_monitor.assert_not_called()
@@ -106,7 +102,6 @@ class TestLMCacheManagerProperties:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="scheduler",
             connector=MagicMock(),
         )
         return manager
@@ -173,7 +168,6 @@ class TestLMCacheManagerStart:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         manager.start_services()
@@ -189,7 +183,6 @@ class TestLMCacheManagerStart:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="scheduler",
         )
 
         # Should not raise any exception
@@ -208,7 +201,6 @@ class TestLMCacheManagerPostInit:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="scheduler",
         )
 
         manager.post_init()
@@ -228,7 +220,6 @@ class TestLMCacheManagerPostInit:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         manager.post_init()
@@ -256,7 +247,6 @@ class TestLMCacheManagerPostInit:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         manager.post_init()
@@ -289,7 +279,6 @@ class TestLMCacheManagerShutdown:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         with patch("lmcache.v1.manager.LMCacheEngineBuilder") as mock_builder:
@@ -311,7 +300,6 @@ class TestLMCacheManagerShutdown:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="scheduler",
         )
 
         with patch("lmcache.v1.manager.LMCacheEngineBuilder"):
@@ -332,7 +320,6 @@ class TestLMCacheManagerShutdown:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         with patch("lmcache.v1.manager.LMCacheEngineBuilder"):
@@ -427,7 +414,6 @@ class TestLMCacheManagerInitFailure:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         # Verify through is_healthy API
@@ -442,7 +428,6 @@ class TestLMCacheManagerInitFailure:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         mock_engine = MagicMock()
@@ -465,7 +450,6 @@ class TestLMCacheManagerInitFailure:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         manager.post_init()
@@ -485,7 +469,6 @@ class TestLMCacheManagerInitFailure:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         assert manager.is_healthy() is False
@@ -500,7 +483,6 @@ class TestLMCacheManagerInitFailure:
         manager = LMCacheManager(
             config=config,
             service_factory=factory,
-            role="worker",
         )
 
         mock_health_monitor = MagicMock()
