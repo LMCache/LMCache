@@ -214,6 +214,16 @@ var _ = Describe("Manager", Ordered, func() {
 
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
+			By("waiting for metrics service to have endpoints")
+			verifyEndpoints := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "endpoints", metricsServiceName, "-n", namespace,
+					"-o", "jsonpath={.subsets[0].addresses[0].ip}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty(), "metrics service has no endpoints")
+			}
+			Eventually(verifyEndpoints, 5*time.Minute, time.Second).Should(Succeed())
+
 			By("creating the curl-metrics pod to access the metrics endpoint")
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
 				"--namespace", namespace,
