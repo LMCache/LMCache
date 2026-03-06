@@ -805,6 +805,13 @@ class LMCacheConnectorV1Impl:
             )
             token_mask[:masked_token_count] = False
 
+            # prevent lmcache from overwriting APC-shared blocks:
+            # setting slot_mapping=-1 makes the xfer kernel skip
+            # those tokens (checks slot_idx < 0).
+            vllm_cached_tokens = request.load_spec.vllm_cached_tokens
+            if vllm_cached_tokens > masked_token_count:
+                slot_mapping[masked_token_count:vllm_cached_tokens] = -1
+
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
                 if idx == last_idx:
