@@ -37,6 +37,19 @@ from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
     init_prometheus_controller,
 )
+from lmcache.v1.mp_observability.telemetry import (
+    TelemetryConfig,
+    add_telemetry_args,
+    get_telemetry_controller,
+    init_telemetry_controller,
+    log_telemetry,
+    make_end_event,
+    make_start_event,
+    parse_args_to_telemetry_config,
+)
+from lmcache.v1.mp_observability.telemetry.config import (
+    DEFAULT_TELEMETRY_CONFIG,
+)
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     add_mp_server_args,
@@ -256,6 +269,18 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            # NOTE (ApostaC): this will hang the whole process in some special
+            # environments, need to investigate more. Temporarily disable telemetry
+            # for store operation.
+            # if get_telemetry_controller().is_enabled():
+            #    gpu_context.cupy_stream.launch_host_func(
+            #        log_telemetry,
+            #        make_start_event(
+            #            "store", key.request_id,
+            #            device=str(gpu_context.device),
+            #        ),
+            #    )
+
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
             reserved_dict = self.storage_manager.reserve_write(
                 obj_keys, layout_desc, "new"
@@ -294,6 +319,20 @@ class MPCacheEngine:
             self.storage_manager.finish_write,
             list(reserved_dict.keys()),
         )
+
+        # NOTE (ApostaC): As stated above, the telemetry for store operation is
+        # temporarily disabled due to hanging issue in some special environments.
+        # Need to investigate more before enabling it again.
+        # if get_telemetry_controller().is_enabled():
+        #    self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
+        #        log_telemetry,
+        #        make_end_event(
+        #            "store", key.request_id,
+        #            stored_count=len(reserved_dict),
+        #            device=str(gpu_context.device),
+        #        ),
+        #    )
+
         ed = time.perf_counter()
         if length := len(reserved_dict):
             logger.info(
@@ -310,6 +349,7 @@ class MPCacheEngine:
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
+        skip_first_n_tokens: int = 0,
     ) -> tuple[bytes, bool]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
@@ -320,6 +360,10 @@ class MPCacheEngine:
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
+            skip_first_n_tokens (int): Number of tokens to skip writing at
+                the start of the retrieve range. This avoids overwriting
+                APC-shared GPU blocks that may be read concurrently by other
+                requests.
 
         Returns:
             tuple[bytes, bool]: The first element is the IPC handle of the event
@@ -341,13 +385,36 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
+        if get_telemetry_controller().is_enabled():
+            gpu_context.cupy_stream.launch_host_func(
+                log_telemetry,
+                make_start_event(
+                    "retrieve",
+                    key.request_id,
+                    device=str(gpu_context.device),
+                ),
+            )
+
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
             ):
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
+                chunk_start = idx * self.chunk_size
+                chunk_end = chunk_start + self.chunk_size
+
+                # Skip tokens that overlap with APC-cached blocks to
+                # avoid a data race: the retrieve writes on the LMCache
+                # CUDA stream while concurrent requests may read from
+                # those same APC-shared blocks on the vLLM CUDA stream.
+                effective_start = max(chunk_start, skip_first_n_tokens)
+                if effective_start >= chunk_end:
+                    # Entire chunk is within APC range, skip it
+                    continue
+                # clamp to [0, chunk_size - 1]
+                skip_in_chunk = max(
+                    0, min(effective_start - chunk_start, self.chunk_size - 1)
+                )
+                slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
@@ -362,6 +429,7 @@ class MPCacheEngine:
                         lmc_ops.TransferDirection.H2D,
                         gpu_context.gpu_kv_format_,
                         gpu_context.block_size,
+                        skip_in_chunk,
                     )
 
         with (
@@ -392,6 +460,16 @@ class MPCacheEngine:
                     self.storage_manager.finish_read_prefetched,
                     prefetched_keys,
                 )
+                if get_telemetry_controller().is_enabled():
+                    gpu_context.cupy_stream.launch_host_func(
+                        log_telemetry,
+                        make_end_event(
+                            "retrieve",
+                            key.request_id,
+                            retrieved_count=len(prefetched_keys),
+                            device=str(gpu_context.device),
+                        ),
+                    )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
@@ -418,6 +496,7 @@ class MPCacheEngine:
         """
         ipc_keys: list[IPCCacheEngineKey] = []
         model_name, world_size = key.model_name, key.world_size
+        log_telemetry(make_start_event("lookup", key.request_id))
 
         # Find the gpu context and calculate the layout desc
         layout_desc: MemoryLayoutDesc | None = None
@@ -434,12 +513,27 @@ class MPCacheEngine:
                 model_name,
                 world_size,
             )
+            log_telemetry(
+                make_end_event(
+                    "lookup",
+                    key.request_id,
+                    error="no_gpu_context_found",
+                )
+            )
             return 0
 
         # Prepare for the obj keys
         ipc_keys.extend(key.to_hash_keys(self.token_hasher))
         if not ipc_keys:
+            log_telemetry(
+                make_end_event(
+                    "lookup",
+                    key.request_id,
+                    error="no_ipc_keys_generated",
+                )
+            )
             return 0
+
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
         handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
@@ -451,6 +545,14 @@ class MPCacheEngine:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the first failure
         found_count = found_count // ipc_keys[0].world_size
+
+        log_telemetry(
+            make_end_event(
+                "lookup",
+                key.request_id,
+                found_count=found_count,
+            )
+        )
         return found_count
 
     def free_lookup_locks(
@@ -562,6 +664,7 @@ def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
+    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
     return_engine: bool = False,
 ):
     """
@@ -571,6 +674,7 @@ def run_cache_server(
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
+        telemetry_config: Configuration for the telemetry event system
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -580,6 +684,9 @@ def run_cache_server(
     """
     # Initialize global prometheus controller
     init_prometheus_controller(prometheus_config)
+
+    # Initialize global telemetry controller
+    init_telemetry_controller(telemetry_config)
 
     # Start Prometheus metrics HTTP server if enabled
     if prometheus_config.enabled:
@@ -629,6 +736,9 @@ def run_cache_server(
 
     # Start prometheus controller after engine creation (loggers are registered)
     get_prometheus_controller().start()
+
+    # Start telemetry controller
+    get_telemetry_controller().start()
     logger.info("LMCache cache server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -641,6 +751,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_telemetry_controller().stop()
         get_prometheus_controller().stop()
         server.close()
         engine.close()
@@ -653,6 +764,7 @@ def parse_args():
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
     add_prometheus_args(parser)
+    add_telemetry_args(parser)
     return parser.parse_args()
 
 
@@ -661,8 +773,10 @@ if __name__ == "__main__":
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
+        telemetry_config=telemetry_config,
     )
