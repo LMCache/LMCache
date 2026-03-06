@@ -82,6 +82,10 @@ class LoadStoreOp:
     end: int = 0
     """End token index"""
 
+    skip_first_n_tokens: int = 0
+    """Number of tokens to skip writing at the beginning of the retrieve
+    range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
+
     def __len__(self) -> int:
         return len(self.block_ids)
 
@@ -396,7 +400,13 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [key, self.instance_id, op.block_ids, event.ipc_handle()],
+            [
+                key,
+                self.instance_id,
+                op.block_ids,
+                event.ipc_handle(),
+                op.skip_first_n_tokens,
+            ],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = future
 

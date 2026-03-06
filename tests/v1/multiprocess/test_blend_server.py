@@ -1336,7 +1336,7 @@ def test_cb_store_final_then_normal_lookup_retrieve(
     event2.record()
     retrieve_future = client.submit_request(
         RequestType.RETRIEVE,
-        [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle()],
+        [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle(), 0],
         get_response_class(RequestType.RETRIEVE),
     )
     retrieve_result = retrieve_future.to_cuda_future().result(timeout=DEFAULT_TIMEOUT)

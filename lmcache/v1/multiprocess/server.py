@@ -310,6 +310,7 @@ class MPCacheEngine:
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
+        skip_first_n_tokens: int = 0,
     ) -> tuple[bytes, bool]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
@@ -320,6 +321,10 @@ class MPCacheEngine:
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
+            skip_first_n_tokens (int): Number of tokens to skip writing at
+                the start of the retrieve range. This avoids overwriting
+                APC-shared GPU blocks that may be read concurrently by other
+                requests.
 
         Returns:
             tuple[bytes, bool]: The first element is the IPC handle of the event
@@ -345,9 +350,22 @@ class MPCacheEngine:
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
             ):
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
+                chunk_start = idx * self.chunk_size
+                chunk_end = chunk_start + self.chunk_size
+
+                # Skip tokens that overlap with APC-cached blocks to
+                # avoid a data race: the retrieve writes on the LMCache
+                # CUDA stream while concurrent requests may read from
+                # those same APC-shared blocks on the vLLM CUDA stream.
+                effective_start = max(chunk_start, skip_first_n_tokens)
+                if effective_start >= chunk_end:
+                    # Entire chunk is within APC range, skip it
+                    continue
+                # clamp to [0, chunk_size - 1]
+                skip_in_chunk = max(
+                    0, min(effective_start - chunk_start, self.chunk_size - 1)
+                )
+                slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
@@ -362,6 +380,7 @@ class MPCacheEngine:
                         lmc_ops.TransferDirection.H2D,
                         gpu_context.gpu_kv_format_,
                         gpu_context.block_size,
+                        skip_in_chunk,
                     )
 
         with (
