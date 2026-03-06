@@ -125,6 +125,13 @@ class TestLifecycle:
         assert controller._thread.name == "TelemetryController"
         controller.stop()
 
+    def test_double_start_is_idempotent(self, controller):
+        controller.start()
+        thread = controller._thread
+        controller.start()
+        assert controller._thread is thread
+        controller.stop()
+
     def test_double_stop(self, controller):
         controller.start()
         controller.stop()

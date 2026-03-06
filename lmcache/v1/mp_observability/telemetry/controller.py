@@ -79,8 +79,11 @@ class TelemetryController:
             self._processors.append(processor)
 
     def start(self) -> None:
-        """Start the drain thread. No-op when disabled."""
+        """Start the drain thread. No-op when disabled or already started."""
         if not self._config.enabled:
+            return
+
+        if self._thread is not None and self._thread.is_alive():
             return
 
         self._thread = threading.Thread(
