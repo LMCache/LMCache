@@ -41,6 +41,45 @@ _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
 
 
+def _readinto_full(
+    f,  # typing: IO[bytes]
+    buf: Union[bytearray, memoryview, bytes],
+) -> int:
+    """Loop readinto() until *buf* is full or EOF.
+
+    A single ``readinto()`` may return fewer bytes than
+    *len(buf)* even when more data is available.  This
+    helper keeps reading until the buffer is completely
+    filled or the file reaches EOF.
+
+    Returns:
+        Total number of bytes read.
+    """
+    mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
+    total = 0
+    while total < len(mv):
+        n = f.readinto(mv[total:])
+        if n is None or n == 0:
+            break
+        total += n
+    return total
+
+
+async def _async_readinto_full(
+    f,  # aiofiles async file handle
+    buf: Union[bytearray, memoryview, bytes],
+) -> int:
+    """Async version of :func:`_readinto_full`."""
+    mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
+    total = 0
+    while total < len(mv):
+        n = await f.readinto(mv[total:])
+        if n is None or n == 0:
+            break
+        total += n
+    return total
+
+
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
@@ -76,21 +115,19 @@ def _filename_to_object_key(
 
     # Split by ``@``.  Layout:
     #   <model_name> @ <kv_rank> @ <chunk_hash_hex>
-    # model_name itself never contains ``@``, but may
-    # contain ``-`` (the slash replacement).  kv_rank and
-    # chunk_hash are always the **last two** tokens.
-    tokens = stem.split(_KEY_SEP)
-    if len(tokens) < 3:
+    # model_name itself may contain ``@``, so we split
+    # from the right to reliably isolate the last two
+    # fields (kv_rank and chunk_hash).
+    parts = stem.rsplit(_KEY_SEP, 2)
+    if len(parts) != 3:
         return None
 
+    safe_model, kv_rank_str, chunk_hash_hex = parts
     try:
-        chunk_hash = bytes.fromhex(tokens[-1])
-        kv_rank = int(tokens[-2], 16)
-    except (ValueError, IndexError):
+        chunk_hash = bytes.fromhex(chunk_hash_hex)
+        kv_rank = int(kv_rank_str, 16)
+    except ValueError:
         return None
-
-    # Everything before the last two tokens is model_name
-    safe_model = _KEY_SEP.join(tokens[:-2])
     model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
     return ObjectKey(
         chunk_hash=chunk_hash,
@@ -196,7 +233,11 @@ class FSL2Adapter(L2AdapterInterface):
         self._relative_tmp_dir: Optional[Path] = None
         if config.relative_tmp_dir is not None:
             self._relative_tmp_dir = Path(config.relative_tmp_dir)
-            assert not self._relative_tmp_dir.is_absolute()
+            if (
+                self._relative_tmp_dir.is_absolute()
+                or ".." in self._relative_tmp_dir.parts
+            ):
+                raise ValueError("Invalid relative_tmp_dir: " + config.relative_tmp_dir)
             (self._base_path / self._relative_tmp_dir).mkdir(
                 parents=False, exist_ok=True
             )
@@ -434,8 +475,7 @@ class FSL2Adapter(L2AdapterInterface):
                     file_path,
                 )
                 with open(file_path, "rb") as f:
-                    num_read = f.readinto(dst_buf)
-                return num_read if num_read else 0
+                    return _readinto_full(f, dst_buf)
 
             fd = os.open(
                 str(file_path),
@@ -443,8 +483,7 @@ class FSL2Adapter(L2AdapterInterface):
             )
             with os.fdopen(fd, "rb", buffering=0) as fdo:
                 fd = -1  # now managed by fdopen
-                num_read = fdo.readinto(dst_buf)
-            return num_read if num_read else 0
+                return _readinto_full(fdo, dst_buf)
         except Exception:
             logger.exception("Failed to O_DIRECT read %s", file_path)
             return 0
@@ -488,7 +527,7 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> None:
         success = True
         try:
-            for key, obj in zip(keys, objects, strict=False):
+            for key, obj in zip(keys, objects, strict=True):
                 # Skip if already stored
                 if key in self._known_keys:
                     continue
@@ -581,6 +620,7 @@ class FSL2Adapter(L2AdapterInterface):
             file_path = self._key_to_path(key)
             try:
                 dst_buf = objects[i].byte_array
+                expected = len(dst_buf)
                 num_read: Optional[int] = None
 
                 # O_DIRECT path (sync, via executor)
@@ -591,7 +631,14 @@ class FSL2Adapter(L2AdapterInterface):
                         file_path,
                         dst_buf,
                     )
-                    if num_read and num_read > 0:
+                    if num_read != expected:
+                        logger.warning(
+                            "Incomplete O_DIRECT read for %s: expected %d, got %d",
+                            file_path.name,
+                            expected,
+                            num_read or 0,
+                        )
+                    else:
                         bitmap.set(i)
                         logger.debug(
                             "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
@@ -602,25 +649,30 @@ class FSL2Adapter(L2AdapterInterface):
 
                 # Standard async path with optional
                 # read-ahead
+                expected = len(dst_buf)
                 async with aiofiles.open(file_path, "rb") as f:
                     if self._read_ahead_size is None:
-                        num_read = await f.readinto(dst_buf)
+                        num_read = await _async_readinto_full(f, dst_buf)
                     else:
                         if not isinstance(dst_buf, memoryview):
                             dst_buf = memoryview(dst_buf)
                         # Trigger readahead with a
                         # small initial read
                         ra = self._read_ahead_size
-                        n_head = await f.readinto(dst_buf[:ra])
-                        assert n_head is not None
+                        n_head = await _async_readinto_full(f, dst_buf[:ra])
                         if n_head == ra:
-                            n_tail = await f.readinto(dst_buf[ra:])
-                            assert n_tail is not None
+                            n_tail = await _async_readinto_full(f, dst_buf[ra:])
                             num_read = n_head + n_tail
                         else:
                             num_read = n_head
 
-                    if num_read is None or num_read == 0:
+                    if num_read != expected:
+                        logger.warning(
+                            "Incomplete read for %s: expected %d, got %d",
+                            file_path.name,
+                            expected,
+                            num_read,
+                        )
                         continue
 
                     bitmap.set(i)

@@ -14,9 +14,14 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 import argparse
 import json
+
+if TYPE_CHECKING:
+    from lmcache.v1.distributed.l2_adapters.base import (
+        L2AdapterInterface,
+    )
 
 # First Party
 from lmcache.logging import init_logger
@@ -78,7 +83,7 @@ def register_l2_adapter_factory(
 def create_l2_adapter_from_registry(
     config: L2AdapterConfigBase,
     **kwargs: Any,
-) -> Any:
+) -> "L2AdapterInterface":
     """
     Create an L2 adapter using the factory registry.
 
