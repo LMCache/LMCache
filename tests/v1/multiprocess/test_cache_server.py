@@ -18,6 +18,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -218,6 +219,7 @@ def server_process_runner(
     """
     Entry point for the server process.
     """
+    mp_config = MPServerConfig(host=host, port=port, chunk_size=chunk_size)
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -228,11 +230,9 @@ def server_process_runner(
         eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
     run_cache_server(
+        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
-        host=host,
-        port=port,
-        chunk_size=chunk_size,
     )
 
 
