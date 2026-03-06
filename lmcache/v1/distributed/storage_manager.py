@@ -72,8 +72,10 @@ class StorageManager:
         self._eviction_controller.start()
 
         # L2 adapters and store controller
+        l1_memory_desc = self._l1_manager.get_l1_memory_desc()
         self._l2_adapters: list[L2AdapterInterface] = [
-            create_l2_adapter(ac) for ac in config.l2_adapter_config.adapters
+            create_l2_adapter(ac, l1_memory_desc)
+            for ac in config.l2_adapter_config.adapters
         ]
 
         adapter_descriptors = [

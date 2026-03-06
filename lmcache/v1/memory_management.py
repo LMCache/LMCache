@@ -1442,6 +1442,25 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return "TensorMemoryAllocator"
 
 
+class PagedAddressManager:
+    """
+    A lightweight address manager for PagedTensorMemoryAllocator.
+    Provides get_free_size() and get_heap_size() by reading the
+    paged allocator's state.
+    """
+
+    def __init__(self, paged_allocator: "PagedTensorMemoryAllocator"):
+        self._allocator = paged_allocator
+
+    def get_heap_size(self) -> int:
+        """Get the total size of the paged address space in bytes."""
+        return self._allocator.buffer_size
+
+    def get_free_size(self) -> int:
+        """Get the total free size in bytes."""
+        return len(self._allocator.free_blocks) * self._allocator.align_bytes
+
+
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
     Implements a paged memory allocator.
@@ -1499,6 +1518,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 parent_allocator=self,
             )
             self.free_blocks.append(mem_obj)
+
+        # Address manager for memory usage tracking
+        self.address_manager = PagedAddressManager(self)
 
         # For debugging purposes
         self.num_active_allocations = 0
