@@ -82,6 +82,10 @@ class LoadStoreOp:
     end: int = 0
     """End token index"""
 
+    skip_first_n_tokens: int = 0
+    """Number of tokens to skip writing at the beginning of the retrieve
+    range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
+
     def __len__(self) -> int:
         return len(self.block_ids)
 
@@ -210,6 +214,41 @@ class LMCacheMPSchedulerAdapter:
             request_id: The ID of the finished request.
         """
         self.lookup_futures.pop(request_id, None)
+
+    def free_lookup_locks(
+        self,
+        token_ids: list[int],
+        start: int,
+        end: int,
+        request_id: str,
+    ) -> None:
+        """Release read locks acquired during lookup without a full retrieve.
+
+        Use this when some chunks matched by lookup overlap with blocks that
+        vLLM has already computed, so they will never be retrieved.  Calling
+        this prevents those chunks from holding read locks until TTL expiry.
+
+        Or use this when a request is cancelled or aborted after lookup but
+        before retrieve to avoid holding read locks until TTL expiry.
+
+        When ``start`` or ``end`` is not aligned to the chunk size, the
+        entire chunk containing start boundary is freed but not end boundary.
+        It is caller's responsibility to properly align the boundaries.
+
+        Args:
+            token_ids: Token IDs for the key (same as used in lookup).
+            start: Start token index.
+            end: End token index.
+            request_id: The request ID.
+        """
+        key = self._create_key(
+            token_ids, start=start, end=end, request_id=request_id
+        ).no_worker_id_version()
+        send_lmcache_request(
+            self.mq_client,
+            RequestType.FREE_LOOKUP_LOCKS,
+            [key],
+        )
 
     def end_session(self, request_id: str) -> None:
         """
@@ -361,7 +400,13 @@ class LMCacheMPWorkerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
-            [key, self.instance_id, op.block_ids, event.ipc_handle()],
+            [
+                key,
+                self.instance_id,
+                op.block_ids,
+                event.ipc_handle(),
+                op.skip_first_n_tokens,
+            ],
         ).to_cuda_future()
         self.retrieve_futures[request_id] = future
 

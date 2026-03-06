@@ -116,7 +116,11 @@ def store_handler(
 
 
 def retrieve_handler(
-    key: KeyType, gpu_id: int, gpu_block_ids: list[int], event_handler: bytes
+    key: KeyType,
+    gpu_id: int,
+    gpu_block_ids: list[int],
+    event_handler: bytes,
+    skip_first_n_tokens: int = 0,
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for RETRIEVE requests.
@@ -126,6 +130,7 @@ def retrieve_handler(
         gpu_id: GPU device ID
         gpu_block_ids: List of GPU block IDs
         event_handler: CUDA event IPC handle
+        skip_first_n_tokens: Number of tokens to skip at retrieve start
 
     Returns:
         tuple[bytes, bool]: (event handle, success flag)
@@ -137,6 +142,9 @@ def retrieve_handler(
     )
     assert isinstance(event_handler, bytes), (
         f"Expected event_handler to be bytes, got {type(event_handler)}"
+    )
+    assert isinstance(skip_first_n_tokens, int), (
+        f"Expected skip_first_n_tokens to be int, got {type(skip_first_n_tokens)}"
     )
     return b"\x01" * 64, True
 
@@ -160,3 +168,21 @@ def lookup_handler(key: KeyType) -> int:
     # For testing, we just validate the input and return a dummy result
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     return 1
+
+
+# ==============================================================================
+# FREE_LOOKUP_LOCKS Request Handlers
+# ==============================================================================
+
+
+def free_locks_handler(key: KeyType) -> None:
+    """
+    Dummy handler for FREE_LOOKUP_LOCKS requests.
+
+    Args:
+        key: Cache key whose read locks should be released
+
+    Returns:
+        None
+    """
+    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
