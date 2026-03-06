@@ -159,6 +159,83 @@ class MockL2AdapterConfig(L2AdapterConfigBase):
 
 register_l2_adapter_type("mock", MockL2AdapterConfig)
 
+
+_VALID_NIXL_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ")
+_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+
+
+class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
+    """
+    Config for a Nixl-store-based L2 adapter.
+
+    Fields:
+    - backend: Nixl storage backend (GDS, GDS_MT, POSIX, HF3FS, OBJ).
+    - backend_params: Backend-specific parameters as a dict of string key-value
+      pairs. For file-based backends (GDS, GDS_MT, POSIX, HF3FS), must include
+      "file_path". May also include "use_direct_io" (default "false") and other
+      backend-specific keys.
+    - pool_size: Number of storage descriptors to pre-allocate (must be > 0).
+    """
+
+    def __init__(
+        self,
+        backend: str,
+        backend_params: dict[str, str],
+        pool_size: int,
+    ):
+        if backend in _FILE_BACKENDS:
+            if "file_path" not in backend_params:
+                raise ValueError(
+                    f"backend_params must include 'file_path' "
+                    f"for file-based backend {backend!r}"
+                )
+            if "use_direct_io" not in backend_params:
+                raise ValueError(
+                    f"backend_params must include 'use_direct_io' "
+                    f"for file-based backend {backend!r}"
+                )
+        self.backend = backend
+        self.backend_params = backend_params
+        self.pool_size = pool_size
+
+    @classmethod
+    def from_dict(cls, d: dict) -> NixlStoreL2AdapterConfig:
+        backend = d.get("backend")
+        if backend not in _VALID_NIXL_BACKENDS:
+            raise ValueError(
+                f"backend must be one of {_VALID_NIXL_BACKENDS}, got {backend!r}"
+            )
+
+        backend_params = d.get("backend_params", {})
+        if not isinstance(backend_params, dict):
+            raise ValueError("backend_params must be a dict of string key-value pairs")
+
+        pool_size = d.get("pool_size")
+        if not isinstance(pool_size, int) or pool_size <= 0:
+            raise ValueError("pool_size must be a positive integer")
+
+        return cls(
+            backend=backend,
+            backend_params=backend_params,
+            pool_size=pool_size,
+        )
+
+    @classmethod
+    def help(cls) -> str:
+        return (
+            "Nixl store L2 adapter config fields:\n"
+            "- backend (str): Nixl storage backend, one of "
+            f"{_VALID_NIXL_BACKENDS} (required)\n"
+            "- backend_params (dict): backend-specific string key-value pairs "
+            "(optional, default {}). File-based backends require file_path. "
+            "Optional keys include 'use_direct_io' (default 'false').\n"
+            "- pool_size (int): number of storage descriptors to pre-allocate "
+            "(required, >0)"
+        )
+
+
+register_l2_adapter_type("nixl_store", NixlStoreL2AdapterConfig)
+
 # -----------------------------------------------------------------------------
 # Main config: list of adapter configs (order = adapter order)
 # -----------------------------------------------------------------------------
