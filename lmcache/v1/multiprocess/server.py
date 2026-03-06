@@ -274,9 +274,6 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
-            # NOTE (ApostaC): this will hang the whole process in some special
-            # environments, need to investigate more. Temporarily disable telemetry
-            # for store operation.
             if get_telemetry_controller().is_enabled() and self._can_log_store:
                 gpu_context.cupy_stream.launch_host_func(
                     log_telemetry,
@@ -326,9 +323,6 @@ class MPCacheEngine:
             list(reserved_dict.keys()),
         )
 
-        # NOTE (ApostaC): As stated above, the telemetry for store operation is
-        # temporarily disabled due to hanging issue in some special environments.
-        # Need to investigate more before enabling it again.
         if get_telemetry_controller().is_enabled() and self._can_log_store:
             self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
                 log_telemetry,
