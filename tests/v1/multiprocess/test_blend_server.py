@@ -40,9 +40,8 @@ from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
 if torch.cuda.is_available():
     from lmcache.v1.multiprocess.blend_server import get_sep_tokens
 
-from lmcache.v1.multiprocess.config import MPServerConfig
-
 # First Party
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
