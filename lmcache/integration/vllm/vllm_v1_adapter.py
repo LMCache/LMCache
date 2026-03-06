@@ -805,13 +805,6 @@ class LMCacheConnectorV1Impl:
             )
             token_mask[:masked_token_count] = False
 
-            # prevent lmcache from overwriting APC-shared blocks:
-            # setting slot_mapping=-1 makes the xfer kernel skip
-            # those tokens (checks slot_idx < 0).
-            vllm_cached_tokens = request.load_spec.vllm_cached_tokens
-            if vllm_cached_tokens > masked_token_count:
-                slot_mapping[masked_token_count:vllm_cached_tokens] = -1
-
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
             if self.use_layerwise:
                 if idx == last_idx:
@@ -826,6 +819,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -833,6 +827,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -845,6 +840,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
