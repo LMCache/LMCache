@@ -1,4 +1,5 @@
 local_cpu.yaml
+local_cpu_mla.yaml
 local_disk.yaml
 pd.yaml
 multi_device.yaml

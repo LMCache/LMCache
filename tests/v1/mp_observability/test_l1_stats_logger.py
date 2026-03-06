@@ -20,10 +20,10 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.observability.logger.l1_stats_logger import (
+from lmcache.v1.mp_observability.logger.l1_stats_logger import (
     L1ManagerStatsLogger,
 )
-from lmcache.v1.distributed.observability.logger.prometheus_logger import (
+from lmcache.v1.mp_observability.logger.prometheus_logger import (
     PrometheusLogger,
 )
 
