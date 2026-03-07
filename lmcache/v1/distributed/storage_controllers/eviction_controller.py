@@ -21,7 +21,11 @@ logger = init_logger(__name__)
 
 
 class EvictionController(StorageControllerInterface):
-    def __init__(self, l1_manager: L1Manager, eviction_config: EvictionConfig):
+    def __init__(
+        self,
+        l1_manager: L1Manager,
+        eviction_config: EvictionConfig,
+    ):
         super().__init__(l1_manager)
 
         self._eviction_config = eviction_config

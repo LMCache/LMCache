@@ -24,7 +24,12 @@ PYBIND11_MODULE(c_ops, m) {
       .value("TWO_X_NL_X_NBBS_NH_HS", GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS)
       .value("NL_X_NBBS_ONE_HS", GPUKVFormat::NL_X_NBBS_ONE_HS)
       .export_values();
-  m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
+  m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
+        py::arg("key_value"), py::arg("key_value_ptrs"),
+        py::arg("slot_mapping"), py::arg("paged_memory_device"),
+        py::arg("page_buffer_size"), py::arg("direction"),
+        py::arg("gpu_kv_format"), py::arg("block_size") = 0,
+        py::arg("skip_prefix_n_tokens") = 0);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer,

@@ -145,11 +145,7 @@ def ipc_keys_to_object_keys(ipc_keys: list[IPCCacheEngineKey]) -> list[ObjectKey
 
     storage_keys = []
     for ipc_key in ipc_keys:
-        # TODO(yuwei): remove this assertion after token-mode cleanup
-        assert ipc_key.chunk_hash is not None, (
-            "ipc_keys_to_object_keys requires hash-mode keys "
-            "(chunk_hash must not be None)"
-        )
+        assert ipc_key.chunk_hash is not None
         if ipc_key.worker_id is None:
             # For look up request, we want to expand to all workers
             for worker_id in range(ipc_key.world_size):

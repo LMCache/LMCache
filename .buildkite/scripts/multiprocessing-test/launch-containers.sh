@@ -45,7 +45,7 @@ GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounit
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
-if [ "$GPU_MEMORY_GB" -gt 100 ]; then
+if [ "$GPU_MEMORY_GB" -gt 90 ]; then
     echo "GPU memory > 100GB, adding --gpu-memory-utilization 0.5"
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
 fi
@@ -93,7 +93,6 @@ docker run -d \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
     --attention-backend FLASH_ATTN \
     --port "$VLLM_PORT" \
-    --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
 
 echo "vLLM container started"
@@ -116,7 +115,6 @@ docker run -d \
     "$MODEL" \
     --port "$VLLM_BASELINE_PORT" \
     --attention-backend FLASH_ATTN \
-    --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
 
 echo "vLLM baseline container started"
