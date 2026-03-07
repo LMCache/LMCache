@@ -11,6 +11,9 @@ Key Benefits
 
 - **Process isolation** -- LMCache and vLLM run in separate processes (or
   containers), so a cache-related issue does not crash the inference engine.
+- **No GIL contention or Python overhead on the inference path** -- By running
+  LMCache in a separate process, its Python GIL and CPU work (hashing,
+  memory management, L2 I/O) do not compete with vLLM's inference threads.
 - **Shared caching across pods** -- Multiple vLLM instances on the same node
   share a single L1 cache, maximizing KV reuse.
 - **Independent resource scaling** -- Allocate CPU memory for caching
@@ -23,7 +26,7 @@ Key Benefits
 Prerequisites
 -------------
 
-- **vLLM** >= 0.11.1
+- **vLLM** latest version is recommended for best compatibility
 - **LMCache** latest dev branch
 
 Server Variants

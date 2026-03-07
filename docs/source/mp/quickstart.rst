@@ -33,6 +33,24 @@ In a new terminal:
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
+.. note::
+   This connects to the default LMCache port (5555) on localhost.  If you
+   changed the server port with ``--port``, pass it on the vLLM side via
+   ``kv_connector_extra_config``:
+
+   .. code-block:: bash
+
+       vllm serve Qwen/Qwen3-14B \
+           --kv-transfer-config \
+           '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.port": 6555}}'
+
+   To connect to a remote host, also set ``lmcache.mp.host``:
+
+   .. code-block:: bash
+
+       --kv-transfer-config \
+       '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "10.0.0.1", "lmcache.mp.port": 6555}}'
+
 You should see on the **vLLM** side:
 
 .. code-block:: text
