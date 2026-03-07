@@ -990,8 +990,11 @@ def decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output):
                     m = (left + right) // 2
                     if int(current_cdf[m]) < count:
                         left = m
-                    else:
+                    elif int(current_cdf[m]) > count:
                         right = m
+                    else:
+                        left = m
+                        break
 
                 sym_i = left
                 out_np[layer_idx, i, c] = sym_i
