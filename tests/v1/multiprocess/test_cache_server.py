@@ -153,17 +153,30 @@ def lookup_all(
     keys: list[IPCCacheEngineKey],
     timeout: float = DEFAULT_TIMEOUT,
 ) -> int:
-    """Lookup all keys individually and return total found count."""
+    """Lookup all keys individually and return total found count.
+
+    Uses the two-phase lookup protocol: LOOKUP returns a prefetch job ID,
+    then QUERY_PREFETCH_STATUS is polled until the result is ready.
+    """
     total = 0
     for key in keys:
         lookup_key = key.no_worker_id_version()
-        future = client.submit_request(
+        # Phase 1: Get prefetch job ID
+        job_id = client.submit_request(
             RequestType.LOOKUP,
             [lookup_key],
             get_response_class(RequestType.LOOKUP),
-        )
-        result = future.result(timeout=timeout)
-        total += result
+        ).result(timeout=timeout)
+        # Phase 2: Poll until done
+        while True:
+            result = client.submit_request(
+                RequestType.QUERY_PREFETCH_STATUS,
+                [job_id],
+                get_response_class(RequestType.QUERY_PREFETCH_STATUS),
+            ).result(timeout=timeout)
+            if result is not None:
+                total += result
+                break
     return total
 
 

@@ -117,8 +117,8 @@ class LMCacheMPSchedulerAdapter:
         """
         self.mq_client = MessageQueueClient(server_url, context)
 
-        # Request futures
-        self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
+        # Two-phase lookup state: request_id -> server prefetch job ID
+        self._lookup_job_ids: dict[str, int] = {}
 
         self.model_name = model_name
         self.world_size = world_size
@@ -139,6 +139,10 @@ class LMCacheMPSchedulerAdapter:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
+        Sends a LOOKUP request to the server and blocks until a prefetch
+        job ID is returned.  The actual prefetch result can then be polled
+        via ``check_lookup_result``.
+
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
@@ -154,7 +158,7 @@ class LMCacheMPSchedulerAdapter:
             In the meantime, this function will record the lookup request, and the
             status of the look up request can be checked by `check_lookup_result`.
         """
-        if request_id in self.lookup_futures:
+        if request_id in self._lookup_job_ids:
             # Skip if there is already a lookup request
             return
 
@@ -172,12 +176,17 @@ class LMCacheMPSchedulerAdapter:
             RequestType.LOOKUP,
             [key],
         )
-        self.lookup_futures[request_id] = future
+        job_id = future.result()
+        self._lookup_job_ids[request_id] = job_id
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
         Check the result of a previously submitted lookup request.
+
+        Sends a QUERY_PREFETCH_STATUS request to the server and blocks
+        until the server responds.  Returns the matched token count
+        when the prefetch is complete, or None if still in progress.
 
         Args:
             request_id: The ID of the lookup request submitted in
@@ -188,17 +197,21 @@ class LMCacheMPSchedulerAdapter:
             in LMCache (prefix matching), or
             None if the lookup request is not finished yet.
         """
-        assert request_id in self.lookup_futures, (
+        assert request_id in self._lookup_job_ids, (
             f"Lookup request for request_id={request_id} has not been submitted"
         )
 
-        future = self.lookup_futures[request_id]
-        if not future.query():
+        job_id = self._lookup_job_ids[request_id]
+        result = send_lmcache_request(
+            self.mq_client,
+            RequestType.QUERY_PREFETCH_STATUS,
+            [job_id],
+        ).result()
+
+        if result is None:
             return None
 
-        result = future.result()
-        num_chunks = result
-        return num_chunks * self.chunk_size
+        return result * self.chunk_size
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -209,11 +222,11 @@ class LMCacheMPSchedulerAdapter:
 
     def cleanup_lookup_result(self, request_id: str) -> None:
         """
-        Clean up lookup future for a finished request to prevent memory leak.
+        Clean up lookup state for a finished request to prevent memory leak.
         Args:
             request_id: The ID of the finished request.
         """
-        self.lookup_futures.pop(request_id, None)
+        self._lookup_job_ids.pop(request_id, None)
 
     def free_lookup_locks(
         self,
