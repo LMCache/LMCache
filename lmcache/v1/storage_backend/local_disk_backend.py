@@ -447,7 +447,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
-
+            memory_obj.pin()
             mem_objs.append(memory_obj)
             paths.append(path)
 
