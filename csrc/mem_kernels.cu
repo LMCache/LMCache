@@ -266,6 +266,8 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
   const int n = num_heads * head_size_in_64bit;
 
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    // MLA only needs key_idx (single buffer), so value_idx is moved to non MLA
+    // branch.
     const int64_t lmc_key_idx = token_idx * lmc_stride + i;
 
     const int head_idx = i / head_size_in_64bit;

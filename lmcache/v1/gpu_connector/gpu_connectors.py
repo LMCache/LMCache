@@ -1572,6 +1572,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
         self.num_heads = get_num_heads(kv_caches, self.gpu_kv_format)
         self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
+        self.kv_shape = [self.page_buffer_size, 1, self.num_heads, self.head_size]
         if self.use_gpu and self.gpu_buffer_allocator is None:
             self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
             self.elements_per_layer = get_elements_per_layer(
@@ -1682,14 +1683,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     if self.use_mla:
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
-                            [
-                                self.kvcaches[layer_id].view(
-                                    self.page_buffer_size,
-                                    1,
-                                    self.num_heads,
-                                    self.head_size,
-                                )
-                            ],
+                            [self.kvcaches[layer_id].view(*self.kv_shape)],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
                             token_major=True,
@@ -1698,18 +1692,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
                             [
-                                self.kvcaches[0][layer_id].view(
-                                    self.page_buffer_size,
-                                    1,
-                                    self.num_heads,
-                                    self.head_size,
-                                ),
-                                self.kvcaches[1][layer_id].view(
-                                    self.page_buffer_size,
-                                    1,
-                                    self.num_heads,
-                                    self.head_size,
-                                ),
+                                self.kvcaches[0][layer_id].view(*self.kv_shape),
+                                self.kvcaches[1][layer_id].view(*self.kv_shape),
                             ],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
@@ -1720,14 +1704,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 if self.use_mla:
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
-                        [
-                            self.kvcaches[layer_id].view(
-                                self.page_buffer_size,
-                                1,
-                                self.num_heads,
-                                self.head_size,
-                            )
-                        ],
+                        [self.kvcaches[layer_id].view(*self.kv_shape)],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
                         token_major=True,
@@ -1736,18 +1713,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
                         [
-                            self.kvcaches[0][layer_id].view(
-                                self.page_buffer_size,
-                                1,
-                                self.num_heads,
-                                self.head_size,
-                            ),
-                            self.kvcaches[1][layer_id].view(
-                                self.page_buffer_size,
-                                1,
-                                self.num_heads,
-                                self.head_size,
-                            ),
+                            self.kvcaches[0][layer_id].view(*self.kv_shape),
+                            self.kvcaches[1][layer_id].view(*self.kv_shape),
                         ],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
@@ -1837,14 +1804,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 if self.use_mla:
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
-                        [
-                            self.kvcaches[layer_id].view(
-                                self.page_buffer_size,
-                                1,
-                                self.num_heads,
-                                self.head_size,
-                            )
-                        ],
+                        [self.kvcaches[layer_id].view(*self.kv_shape)],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
                         token_major=True,
@@ -1853,18 +1813,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     lmc_ops.single_layer_kv_transfer_sgl(
                         tmp_gpu_buffer_obj.tensor,
                         [
-                            self.kvcaches[0][layer_id].view(
-                                self.page_buffer_size,
-                                1,
-                                self.num_heads,
-                                self.head_size,
-                            ),
-                            self.kvcaches[1][layer_id].view(
-                                self.page_buffer_size,
-                                1,
-                                self.num_heads,
-                                self.head_size,
-                            ),
+                            self.kvcaches[0][layer_id].view(*self.kv_shape),
+                            self.kvcaches[1][layer_id].view(*self.kv_shape),
                         ],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
@@ -1888,14 +1838,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     if self.use_mla:
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
-                            [
-                                self.kvcaches[layer_id].view(
-                                    self.page_buffer_size,
-                                    1,
-                                    self.num_heads,
-                                    self.head_size,
-                                )
-                            ],
+                            [self.kvcaches[layer_id].view(*self.kv_shape)],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
                             token_major=True,
@@ -1904,18 +1847,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                         lmc_ops.single_layer_kv_transfer_sgl(
                             memory_obj.tensor,
                             [
-                                self.kvcaches[0][layer_id].view(
-                                    self.page_buffer_size,
-                                    1,
-                                    self.num_heads,
-                                    self.head_size,
-                                ),
-                                self.kvcaches[1][layer_id].view(
-                                    self.page_buffer_size,
-                                    1,
-                                    self.num_heads,
-                                    self.head_size,
-                                ),
+                                self.kvcaches[0][layer_id].view(*self.kv_shape),
+                                self.kvcaches[1][layer_id].view(*self.kv_shape),
                             ],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
