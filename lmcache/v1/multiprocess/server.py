@@ -311,9 +311,12 @@ class MPCacheEngine:
         )
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        if instance_id not in self.gpu_contexts:
+            logger.warning(
+                "KV cache not registered for GPU ID %d, client should re-register",
+                instance_id,
+            )
+            return b"", False
         gpu_context = self.gpu_contexts[instance_id]
 
         with (
@@ -436,9 +439,12 @@ class MPCacheEngine:
         )
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        if instance_id not in self.gpu_contexts:
+            logger.warning(
+                "KV cache not registered for GPU ID %d, client should re-register",
+                instance_id,
+            )
+            return b"", False
         gpu_context = self.gpu_contexts[instance_id]
 
         if get_telemetry_controller().is_enabled():
