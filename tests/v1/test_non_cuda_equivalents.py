@@ -1,49 +1,72 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from pathlib import Path
-import os
-import shutil
-import subprocess
-import sys
+from typing import Any
+import unittest.mock
 
 # Third Party
 import pytest
 import torch
 
-RESULTS_DIR = Path("test_results")
-
-_is_child = "LMC_TEST_MODE" in os.environ
-_cuda_available = torch.cuda.is_available()
-
-
 # ==========================================
-# 1. Core Logic
+# 1. Backend Configuration
 # ==========================================
 
 
-def get_test_context():
-    mode = os.getenv("LMC_TEST_MODE", "NON_CUDA")
-    cuda_visible = os.getenv("CUDA_VISIBLE_DEVICES", "")
+def _build_backend_params() -> list:
+    """Build pytest parameter list for the backend fixture.
 
-    cuda_status = "cuda_ready" if cuda_visible != "" else "no_cuda"
-    backend = "cuda_ops" if mode == "CUDA_OPS" else "non_cuda"
+    Returns one entry per available backend configuration:
+    - cuda_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
+    - non_cuda_gpu: uses lmcache.non_cuda_equivalents with GPU visible
+    - non_cuda_no_gpu: uses lmcache.non_cuda_equivalents with GPU mocked away
+    """
+    params = []
+    cuda_available = torch.cuda.is_available()
 
-    if backend == "cuda_ops":
-        print(f">>> Importing lmcache.c_ops as ops (Mode: {mode})")
+    if cuda_available:
+        try:
+            # First Party
+            import lmcache.c_ops as _c_ops
+
+            params.append(pytest.param(("cuda_ops", _c_ops, True), id="cuda_ops"))
+        except ImportError:
+            pass
+
         # First Party
-        import lmcache.c_ops as ops
+        import lmcache.non_cuda_equivalents as _non_cuda_ops
+
+        params.append(
+            pytest.param(("non_cuda_gpu", _non_cuda_ops, False), id="non_cuda_gpu")
+        )
+
+    # First Party
+    import lmcache.non_cuda_equivalents as _non_cuda_ops_nv
+
+    params.append(
+        pytest.param(("non_cuda_no_gpu", _non_cuda_ops_nv, False), id="non_cuda_no_gpu")
+    )
+    return params
+
+
+_BACKEND_PARAMS = _build_backend_params()
+
+# Module-level storage: (scenario_name, backend_id) -> {result_key: tensor}
+_results: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+@pytest.fixture(scope="module", params=_BACKEND_PARAMS)
+def backend(request: pytest.FixtureRequest) -> Any:
+    """Yield (backend_id, ops_module, is_cuda_backend) for each backend config.
+
+    For the non_cuda_no_gpu variant, torch.cuda.is_available is patched to
+    return False so the scenario code behaves as if no GPU is present.
+    """
+    backend_id, ops, is_cuda_backend = request.param
+    if backend_id == "non_cuda_no_gpu":
+        with unittest.mock.patch("torch.cuda.is_available", return_value=False):
+            yield backend_id, ops, is_cuda_backend
     else:
-        print(f">>> Importing lmcache.non_cuda_equivalents as ops (Mode: {mode})")
-        # First Party
-        import lmcache.non_cuda_equivalents as ops
-
-    return ops, f"{backend}_{cuda_status}"
-
-
-def save_result(func_name, data):
-    _, scene = get_test_context()
-    RESULTS_DIR.mkdir(exist_ok=True)
-    torch.save(data, RESULTS_DIR / f"{func_name}@{scene}.pt")
+        yield backend_id, ops, is_cuda_backend
 
 
 # ==========================================
@@ -51,28 +74,24 @@ def save_result(func_name, data):
 # ==========================================
 
 
-def scenario_get_gpu_pci_bus_id():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_get_gpu_pci_bus_id(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test get_gpu_pci_bus_id returns a valid string on CUDA backends."""
     res = ops.get_gpu_pci_bus_id(0)
 
     if is_cuda_backend and torch.cuda.is_available():
         assert res is not None, "get_gpu_pci_bus_id returned None"
         assert isinstance(res, str) and len(res) > 0
 
-    # Save 1 = PASS (call succeeded without crash)
-    save_result(
-        "get_gpu_pci_bus_id",
-        torch.tensor([1], dtype=torch.int32),
-    )
+    # 1 = PASS (call succeeded without crash)
+    return {"get_gpu_pci_bus_id": torch.tensor([1], dtype=torch.int32)}
 
 
-def scenario_calculate_cdf():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_calculate_cdf(ops: Any, is_cuda_backend: bool) -> dict[str, torch.Tensor]:
+    """Test calculate_cdf for multiple bin counts."""
     num_bins_list = [1, 2, 5, 11, 15, 31, 32, 63]
+    results: dict[str, torch.Tensor] = {}
 
     for num_bins in num_bins_list:
         torch.manual_seed(42)
@@ -95,13 +114,15 @@ def scenario_calculate_cdf():
         else:
             final_result = out_cpu.float()
 
-        save_result(f"calculate_cdf_bins{num_bins}", final_result)
+        results[f"calculate_cdf_bins{num_bins}"] = final_result
+
+    return results
 
 
-def scenario_rotary_embedding_k_fused():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_rotary_embedding_k_fused(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test rotary_embedding_k_fused for both NeoX and GPT-J rotation styles."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -121,6 +142,7 @@ def scenario_rotary_embedding_k_fused():
 
     # Test both is_neox=True (NeoX-style, contiguous halves) and
     # is_neox=False (GPT-J-style, interleaved)
+    results: dict[str, torch.Tensor] = {}
     for is_neox in [True, False]:
         # Reset seed for consistent key tensor across both tests
         torch.manual_seed(42)
@@ -150,15 +172,17 @@ def scenario_rotary_embedding_k_fused():
             is_neox,
         )
 
-        # 4. Save with is_neox suffix to distinguish the two test cases
+        # 4. Collect with is_neox suffix to distinguish the two test cases
         neox_suffix = "neox" if is_neox else "gptj"
-        save_result(f"rotary_embedding_k_fused_{neox_suffix}", key.cpu())
+        results[f"rotary_embedding_k_fused_{neox_suffix}"] = key.cpu()
+
+    return results
 
 
-def scenario_lmcache_memcpy_async():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_lmcache_memcpy_async(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test lmcache_memcpy_async for H2D and D2H memory transfers."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -209,18 +233,17 @@ def scenario_lmcache_memcpy_async():
     # 3. Internal sanity check
     final_result = dst_host.cpu()
     assert torch.equal(final_result, src_host), (
-        f"Data corrupted during H2D→D2H loop in {scene_info}, "
+        f"Data corrupted during H2D→D2H loop, "
         f"max diff = {(final_result.float() - src_host.float()).abs().max().item()}"
     )
 
-    # 4. Save
-    save_result("lmcache_memcpy_async", final_result)
+    return {"lmcache_memcpy_async": final_result}
 
 
-def scenario_load_and_reshape_flash():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_load_and_reshape_flash(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test load_and_reshape_flash extracts KV cache tokens into contiguous buffer."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -323,14 +346,14 @@ def scenario_load_and_reshape_flash():
                     f"max diff={v_diff}"
                 )
 
-    # 5. Save extracted data for cross-scenario comparison
-    save_result("load_and_reshape_flash", extracted_chunks[0].cpu())
+    # 5. Return extracted data for cross-backend comparison
+    return {"load_and_reshape_flash": extracted_chunks[0].cpu()}
 
 
-def scenario_reshape_and_cache_back_flash():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_reshape_and_cache_back_flash(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test reshape_and_cache_back_flash writes tokens back into paged KV cache."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -443,14 +466,14 @@ def scenario_reshape_and_cache_back_flash():
                 f"expected={expected_v_val}, got={got_v[0, 0].item()}"
             )
 
-    # 7. Save first block of layer 0 key cache for cross-scenario comparison
-    save_result("reshape_and_cache_back_flash", kv_cache[0][0][0].cpu())
+    # 7. Return first block of layer 0 key cache for cross-backend comparison
+    return {"reshape_and_cache_back_flash": kv_cache[0][0][0].cpu()}
 
 
-def scenario_encode_fast_new():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_encode_fast_new(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test encode_fast_new produces valid, non-empty encoded output."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -511,16 +534,16 @@ def scenario_encode_fast_new():
     assert (lengths_cpu > 0).all(), "Encoding produced zero-length output!"
     assert (lengths_cpu <= max_buf_len).all(), "Buffer overflow detected!"
 
-    # 6. Save: first 20 bytes of layer 0, channel 0
+    # 6. Return: first 20 bytes of layer 0, channel 0
     valid_len = lengths_cpu[0, 0].item()
     res = output_buffer[0, 0, : min(valid_len, 20)].cpu()
-    save_result("encode_fast_new", res)
+    return {"encode_fast_new": res}
 
 
-def scenario_decode_fast_new():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_decode_fast_new(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test decode_fast_new correctly decodes a round-tripped encoded stream."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -596,14 +619,14 @@ def scenario_decode_fast_new():
             f"decoded={decoded_sym[ly, t, c].item()}"
         )
 
-    # 6. Save decoded slice for cross-scenario comparison
-    save_result("decode_fast_new", decoded_sym[0, :20, 0].cpu())
+    # 6. Return decoded slice for cross-backend comparison
+    return {"decode_fast_new": decoded_sym[0, :20, 0].cpu()}
 
 
-def scenario_decode_fast_prefsum():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_decode_fast_prefsum(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test decode_fast_prefsum correctly decodes with prefix-sum offsets."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -701,17 +724,16 @@ def scenario_decode_fast_prefsum():
             f"decoded={decoded_sym[ly, t, c].item()}"
         )
 
-    # 8. Save
-    save_result(
-        "decode_fast_prefsum",
-        decoded_sym[0, :20, 0].cpu(),
-    )
+    # 8. Return
+    return {
+        "decode_fast_prefsum": decoded_sym[0, :20, 0].cpu(),
+    }
 
 
-def scenario_single_layer_kv_transfer():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_single_layer_kv_transfer(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test single_layer_kv_transfer for multiple KV formats and directions."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -756,6 +778,8 @@ def scenario_single_layer_kv_transfer():
         )
 
         # ── 1. Setup Shapes ──
+        lmc_shape: tuple[int, ...] = ()
+        vllm_shape: tuple[int, ...] = ()
         if is_mla:
             lmc_shape = (num_tokens, hidden_size)
             vllm_shape = (num_blocks, block_size, hidden_size)
@@ -858,7 +882,7 @@ def scenario_single_layer_kv_transfer():
                 msg=f"Mismatch in {case_desc}",
             )
 
-    # ── 6. Save canonical results for cross-backend comparison ──
+    # ── 6. Collect canonical results for cross-backend comparison ──
     # Use flash attn (two_major) format to match original file names
     canonical_cases = [
         (False, True, False),  # l2v, non-MLA
@@ -867,6 +891,7 @@ def scenario_single_layer_kv_transfer():
         (True, True, True),  # v2l, MLA
     ]
 
+    results: dict[str, torch.Tensor] = {}
     for is_mla, token_major, direction in canonical_cases:
         dir_tag = "v2l" if direction else "l2v"
 
@@ -910,16 +935,15 @@ def scenario_single_layer_kv_transfer():
             torch.cuda.synchronize()
 
         result = lmc_tensor.cpu() if direction else vllm_tensor.cpu()
-        save_result(
-            f"single_layer_kv_transfer_{dir_tag}_mla_{is_mla}",
-            result,
-        )
+        results[f"single_layer_kv_transfer_{dir_tag}_mla_{is_mla}"] = result
+
+    return results
 
 
-def scenario_single_layer_kv_transfer_sgl():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_single_layer_kv_transfer_sgl(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test single_layer_kv_transfer_sgl for SGLang KV format."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -949,6 +973,7 @@ def scenario_single_layer_kv_transfer_sgl():
         (False, True),
     ]
 
+    results: dict[str, torch.Tensor] = {}
     for token_major, direction in test_cases:
         dir_tag = "s2l" if direction else "l2s"
 
@@ -1063,18 +1088,17 @@ def scenario_single_layer_kv_transfer_sgl():
                 msg=f"Mismatch in {case_desc}",
             )
 
-        # 6. Save each case separately
+        # 6. Collect each case separately
         result = lmc_tensor.cpu() if direction else sgl_k_tensor.cpu()
-        save_result(
-            f"single_layer_kv_transfer_sgl_{dir_tag}_tm_{token_major}",
-            result,
-        )
+        results[f"single_layer_kv_transfer_sgl_{dir_tag}_tm_{token_major}"] = result
+
+    return results
 
 
-def scenario_multi_layer_kv_transfer():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_multi_layer_kv_transfer(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test multi_layer_kv_transfer for multiple paged KV formats and directions."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -1222,10 +1246,10 @@ def scenario_multi_layer_kv_transfer():
                             ),
                         )
 
-    # ── 6. Save ONE canonical result for cross-backend comparison ──
-    # Use flash attn format (NL_X_TWO_NB_BS_NH_HS), direction=True (paged→lmc)
-    # Re-run the canonical case to get a clean result
+    # ── 6. Collect ONE canonical result for cross-backend comparison ──
+    # Use flash attn format (NL_X_TWO_NB_BS_NH_HS), re-run canonical cases
     canonical_format = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+    results: dict[str, torch.Tensor] = {}
     for direction in [True, False]:
         dir_tag = "paged2lmc" if direction else "lmc2paged"
         lmc_shape = (2, num_layers, num_tokens, head_size)
@@ -1276,16 +1300,15 @@ def scenario_multi_layer_kv_transfer():
         if is_cuda_backend:
             torch.cuda.synchronize()
 
-        save_result(
-            f"multi_layer_kv_transfer_{dir_tag}",
-            key_value.cpu(),
-        )
+        results[f"multi_layer_kv_transfer_{dir_tag}"] = key_value.cpu()
+
+    return results
 
 
-def scenario_multi_layer_kv_transfer_unilateral():
-    ops, scene_info = get_test_context()
-    is_cuda_backend = scene_info.startswith("cuda_ops")
-
+def scenario_multi_layer_kv_transfer_unilateral(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test multi_layer_kv_transfer_unilateral for non-interleaved K/V pointers."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
@@ -1438,8 +1461,9 @@ def scenario_multi_layer_kv_transfer_unilateral():
                             ),
                         )
 
-    # ── 5. Save canonical result for cross-backend comparison ──
+    # ── 5. Collect canonical result for cross-backend comparison ──
     # Use non-MLA unilateral (the primary use case of this function)
+    results: dict[str, torch.Tensor] = {}
     for direction in [True, False]:
         dir_tag = "p2l" if direction else "l2p"
 
@@ -1502,15 +1526,15 @@ def scenario_multi_layer_kv_transfer_unilateral():
         if is_cuda_backend:
             torch.cuda.synchronize()
 
-        save_result(
-            f"multi_layer_kv_transfer_unilateral_{dir_tag}",
-            lmc_tensor.cpu(),
-        )
+        results[f"multi_layer_kv_transfer_unilateral_{dir_tag}"] = lmc_tensor.cpu()
+
+    return results
 
 
-def scenario_alloc_free_pinned_ptr():
-    ops, scene_info = get_test_context()
-
+def scenario_alloc_free_pinned_ptr(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test alloc_pinned_ptr and free_pinned_ptr round-trip."""
     alloc_size = 4096
     flags = 0  # cudaHostAllocDefault
 
@@ -1522,16 +1546,13 @@ def scenario_alloc_free_pinned_ptr():
     # 2. Free
     ops.free_pinned_ptr(ptr)
 
-    # 3. Save: 1 = PASS
-    save_result(
-        "alloc_free_pinned_ptr",
-        torch.tensor([1], dtype=torch.int32),
-    )
+    return {"alloc_free_pinned_ptr": torch.tensor([1], dtype=torch.int32)}
 
 
-def scenario_alloc_free_numa_ptr():
-    ops, scene_info = get_test_context()
-
+def scenario_alloc_free_numa_ptr(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test alloc_numa_ptr and free_numa_ptr round-trip."""
     alloc_size = 4096
     node = 0  # NUMA node 0 (always exists)
 
@@ -1543,16 +1564,13 @@ def scenario_alloc_free_numa_ptr():
     # 2. Free (must pass same size as alloc)
     ops.free_numa_ptr(ptr, alloc_size)
 
-    # 3. Save: 1 = PASS
-    save_result(
-        "alloc_free_numa_ptr",
-        torch.tensor([1], dtype=torch.int32),
-    )
+    return {"alloc_free_numa_ptr": torch.tensor([1], dtype=torch.int32)}
 
 
-def scenario_alloc_free_pinned_numa_ptr():
-    ops, scene_info = get_test_context()
-
+def scenario_alloc_free_pinned_numa_ptr(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test alloc_pinned_numa_ptr and free_pinned_numa_ptr round-trip."""
     alloc_size = 4096
     node = 0  # NUMA node 0
 
@@ -1564,16 +1582,13 @@ def scenario_alloc_free_pinned_numa_ptr():
     # 2. Free (cudaHostUnregister + munmap)
     ops.free_pinned_numa_ptr(ptr, alloc_size)
 
-    # 3. Save: 1 = PASS
-    save_result(
-        "alloc_free_pinned_numa_ptr",
-        torch.tensor([1], dtype=torch.int32),
-    )
+    return {"alloc_free_pinned_numa_ptr": torch.tensor([1], dtype=torch.int32)}
 
 
-def scenario_alloc_free_shm_pinned_ptr():
-    ops, scene_info = get_test_context()
-
+def scenario_alloc_free_shm_pinned_ptr(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test alloc_shm_pinned_ptr and free_shm_pinned_ptr round-trip."""
     alloc_size = 4096
     shm_name = "/test_lmcache_shm"
 
@@ -1585,16 +1600,13 @@ def scenario_alloc_free_shm_pinned_ptr():
     # 2. Free
     ops.free_shm_pinned_ptr(ptr, alloc_size, shm_name)
 
-    # 3. Save: 1 = PASS
-    save_result(
-        "alloc_free_shm_pinned_ptr",
-        torch.tensor([1], dtype=torch.int32),
-    )
+    return {"alloc_free_shm_pinned_ptr": torch.tensor([1], dtype=torch.int32)}
 
 
-def scenario_transfer_direction_enum():
-    ops, scene_info = get_test_context()
-
+def scenario_transfer_direction_enum(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor]:
+    """Test TransferDirection enum has distinct H2D and D2H members."""
     # 1. Verify enum members exist
     td = ops.TransferDirection
     assert hasattr(td, "H2D"), "Missing TransferDirection.H2D"
@@ -1610,14 +1622,12 @@ def scenario_transfer_direction_enum():
     h2d_val = h2d.value if hasattr(h2d, "value") else int(h2d)
     d2h_val = d2h.value if hasattr(d2h, "value") else int(d2h)
 
-    # 4. Save for cross-backend comparison
-    save_result(
-        "transfer_direction_enum",
-        torch.tensor(
+    return {
+        "transfer_direction_enum": torch.tensor(
             [h2d_val, d2h_val],
             dtype=torch.int32,
-        ),
-    )
+        )
+    }
 
 
 # ==========================================
@@ -1647,138 +1657,85 @@ SCENARIO_REGISTRY = {
 
 
 # ==========================================
-# 4. Subprocess launcher
+# 4. Test functions pytest sees
 # ==========================================
 
 
-def run_scenario(mode, cuda_visible):
-    env = os.environ.copy()
-    env["LMC_TEST_MODE"] = mode
-    env["CUDA_VISIBLE_DEVICES"] = cuda_visible
+@pytest.mark.parametrize("name,fn", list(SCENARIO_REGISTRY.items()))
+def test_scenario(
+    backend: tuple,
+    name: str,
+    fn: Any,
+) -> None:
+    """Run a single scenario with a specific backend configuration.
 
-    print(
-        f"\n>>> Launching Scenario: MODE={mode}, CUDA_VISIBLE_DEVICES='{cuda_visible}'"
+    Each (scenario, backend) pair is a separate pytest test case, giving
+    per-scenario per-backend failure reporting without subprocess indirection.
+
+    Results are stored in the module-level _results dict for later comparison
+    by test_compare.
+    """
+    backend_id, ops, is_cuda_backend = backend
+    result = fn(ops, is_cuda_backend)
+    if result is not None:
+        _results[(name, backend_id)] = result
+
+
+@pytest.mark.parametrize("name", list(SCENARIO_REGISTRY.keys()))
+def test_compare(name: str) -> None:
+    """Compare results across backends for a single scenario.
+
+    When multiple backends ran (CUDA available), asserts that non_cuda
+    equivalents produce numerically identical results to cuda_ops.
+    When only one backend ran (no CUDA), simply verifies results were stored.
+    """
+    available = [p.values[0][0] for p in _BACKEND_PARAMS]  # list of backend_ids
+    backend_results = {
+        bid: _results[(name, bid)] for bid in available if (name, bid) in _results
+    }
+
+    assert len(backend_results) >= 1, (
+        f"{name}: no results collected — were all test_scenario tests skipped?"
     )
 
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", __file__, "-s", "-q"],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
-    return result
+    if len(backend_results) < 2:
+        # Only one backend available (no CUDA); just verify results exist
+        return
 
+    # Collect all result keys across all backends for this scenario
+    all_keys: set[str] = set()
+    for res in backend_results.values():
+        all_keys.update(res.keys())
 
-# ==========================================
-# 5. The test functions pytest sees
-# ==========================================
+    base_bid = next(iter(backend_results))  # first available backend as reference
 
-if _is_child:
-    # --- Child process: each scenario is its own test case ---
+    for key in sorted(all_keys):
+        base_val = backend_results[base_bid].get(key)
+        if base_val is None:
+            continue
 
-    @pytest.mark.parametrize("name", list(SCENARIO_REGISTRY.keys()))
-    def test_scenario(name):
-        SCENARIO_REGISTRY[name]()
-
-else:
-    # --- Top-level: launch all children once, then compare each function ---
-
-    @pytest.fixture(scope="module")
-    def run_all_children():
-        """Launch child processes. Runs once for the entire module.
-
-        If CUDA is available: launches 3 child processes for comparison:
-        - CUDA_OPS with GPU visible
-        - NON_CUDA with GPU visible (for comparison)
-        - NON_CUDA without GPU visible
-
-        If CUDA is not available: launches 1 child process:
-        - NON_CUDA without GPU visible (no-crash test only)
-        """
-        if RESULTS_DIR.exists():
-            shutil.rmtree(RESULTS_DIR)
-
-        if _cuda_available:
-            # CUDA available: run all scenarios for comparison
-            scenarios = [("CUDA_OPS", "0"), ("NON_CUDA", "0"), ("NON_CUDA", "")]
-        else:
-            # CUDA not available: only run non-CUDA without GPU
-            scenarios = [("NON_CUDA", "")]
-
-        for mode, cuda_vis in scenarios:
-            r = run_scenario(mode, cuda_vis)
-            assert r.returncode == 0, (
-                f"Scenario {mode}/CUDA_VISIBLE_DEVICES='{cuda_vis}' failed:\n"
-                f"{r.stdout}\n{r.stderr}"
-            )
-
-    @pytest.mark.parametrize("name", list(SCENARIO_REGISTRY.keys()))
-    def test_compare(run_all_children, name):
-        """Each scenario function gets its own PASS/FAIL.
-
-        If CUDA is available: compares results from all scenarios.
-        If CUDA is not available: just verifies the scenario ran without crashing.
-        """
-        # Match: exact name or name as prefix (e.g. calculate_cdf → calculate_cdf_bins*)
-        exact_files = sorted(RESULTS_DIR.glob(f"{name}@*.pt"))
-        prefix_files = sorted(RESULTS_DIR.glob(f"{name}_*@*.pt"))
-        all_files = sorted(set(exact_files + prefix_files))
-
-        if _cuda_available:
-            # CUDA available: compare results from 3 scenarios
-            assert len(all_files) >= 3, (
-                f"{name}: expected at least 3 results, found {len(all_files)}"
-            )
-
-            # Group by sub-function name
-            sub_funcs = sorted(set(f.name.split("@")[0] for f in all_files))
-
-            for sub in sub_funcs:
-                sub_files = sorted(RESULTS_DIR.glob(f"{sub}@*.pt"))
-                assert len(sub_files) == 3, (
-                    f"{sub}: expected 3 results, found {len(sub_files)}"
+        for bid, res in backend_results.items():
+            if bid == base_bid:
+                continue
+            val = res.get(key)
+            if val is None:
+                pytest.fail(
+                    f"{name}/{key}: backend '{bid}' has no result "
+                    f"(reference backend '{base_bid}' does)"
                 )
+                continue
 
-                data = {
-                    f.name.split("@")[1].replace(".pt", ""): torch.load(
-                        f, weights_only=True
+            if isinstance(val, torch.Tensor):
+                v_current = val.detach().cpu().float()
+                v_base = base_val.detach().cpu().float()
+                if not torch.allclose(v_current, v_base, rtol=1e-4, atol=1e-4):
+                    max_diff = (v_current - v_base).abs().max().item()
+                    pytest.fail(
+                        f"{name}/{key}: '{bid}' vs '{base_bid}' mismatch, "
+                        f"max diff = {max_diff:.2e}"
                     )
-                    for f in sub_files
-                }
-
-                scenes = list(data.keys())
-                base_scene = scenes[0]
-                base_val = data[base_scene]
-
-                for scene in scenes:
-                    val = data[scene]
-
-                    if isinstance(val, torch.Tensor):
-                        v_current = val.detach().cpu().float()
-                        v_base = base_val.detach().cpu().float()
-                        is_match = torch.allclose(
-                            v_current, v_base, rtol=1e-4, atol=1e-4
-                        )
-                        if not is_match:
-                            max_diff = (v_current - v_base).abs().max().item()
-                            pytest.fail(
-                                f"{sub}: {scene} vs {base_scene} mismatch, "
-                                f"max diff = {max_diff:.2e}"
-                            )
-                    else:
-                        if val != base_val:
-                            pytest.fail(
-                                f"{sub}: {scene}={val} != {base_scene}={base_val}"
-                            )
-        else:
-            # CUDA not available: just verify the scenario ran (result files exist)
-            assert len(all_files) >= 1, (
-                f"{name}: expected at least 1 result (no-crash test)"
-                f"found {len(all_files)}"
-            )
-            # No comparison needed
-            # the fact that we have result files means it didn't crash
+            else:
+                if val != base_val:
+                    pytest.fail(
+                        f"{name}/{key}: '{bid}'={val} != '{base_bid}'={base_val}"
+                    )
