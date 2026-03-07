@@ -1120,6 +1120,16 @@ def get_gpu_pci_bus_id(device_id: int = 0, keyword: str = "NVIDIA") -> str | Non
     """
     Get the PCI bus ID of a GPU device on Linux in a stable order.
 
+    This is a best-effort fallback for non-CUDA systems. The default
+    keyword="NVIDIA" matches the CUDA C++ implementation's behavior.
+    On non-NVIDIA hardware (e.g., Ascend, Habana/Gaudi, AMD), callers should
+    pass the appropriate vendor keyword (e.g., keyword="GPU"/"HPU"/"TPU"/etc).
+
+    When no matching device is found (common on non-GPU systems or when
+    the keyword doesn't match any PCI device), this function returns None.
+    Callers should treat None as "PCI bus ID unavailable" and fall back
+    to alternative identification or skip PCI-based logic.
+
     Args:
         device_id (int): Index of the GPU among matching devices.
         keyword (str): Keyword to match in the PCI device description.
