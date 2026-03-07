@@ -240,6 +240,60 @@ def scenario_lmcache_memcpy_async(
     return {"lmcache_memcpy_async": final_result}
 
 
+def scenario_lmcache_memcpy_async_alignment(
+    ops: Any, is_cuda_backend: bool
+) -> dict[str, torch.Tensor] | None:
+    """Validate host-buffer alignment chunking mirrors C++ split logic."""
+    if not hasattr(ops, "_copy_bytes_with_tensor"):
+        pytest.skip("Chunk inspection only applies to Python fallback backend")
+
+    torch.manual_seed(0)
+
+    nbytes = 200
+    host_buffer_offset = 32
+    host_buffer_alignments = 64
+
+    src = torch.arange(nbytes, dtype=torch.uint8)
+    dst = torch.zeros_like(src)
+
+    chunk_sizes: list[int] = []
+    original_copy = ops._copy_bytes_with_tensor
+
+    def tracking_copy(dest_ptr: int, src_ptr: int, num_bytes: int) -> None:
+        chunk_sizes.append(int(num_bytes))
+        original_copy(dest_ptr, src_ptr, num_bytes)
+
+    with (
+        unittest.mock.patch.object(ops, "_get_copy_lib", return_value=None),
+        unittest.mock.patch.object(
+            ops, "_copy_bytes_with_tensor", side_effect=tracking_copy
+        ),
+    ):
+        ops.lmcache_memcpy_async(
+            dst.data_ptr(),
+            src.data_ptr(),
+            nbytes,
+            ops.TransferDirection.H2D,
+            host_buffer_offset,
+            host_buffer_alignments,
+        )
+
+    assert torch.equal(dst, src), (
+        "Data copy should preserve contents with alignment splitting"
+    )
+
+    expected_chunks = [32, 64, 64, 40]
+    assert chunk_sizes == expected_chunks, (
+        f"Chunk sizes {chunk_sizes} did not match expected {expected_chunks}"
+    )
+
+    return {
+        "lmcache_memcpy_async_alignment": torch.tensor(
+            expected_chunks, dtype=torch.int64
+        )
+    }
+
+
 def scenario_load_and_reshape_flash(
     ops: Any, is_cuda_backend: bool
 ) -> dict[str, torch.Tensor]:
@@ -1643,6 +1697,7 @@ SCENARIO_REGISTRY = {
     "load_and_reshape_flash": scenario_load_and_reshape_flash,
     "reshape_and_cache_back_flash": scenario_reshape_and_cache_back_flash,
     "lmcache_memcpy_async": scenario_lmcache_memcpy_async,
+    "lmcache_memcpy_async_alignment": scenario_lmcache_memcpy_async_alignment,
     "encode_fast_new": scenario_encode_fast_new,
     "decode_fast_new": scenario_decode_fast_new,
     "decode_fast_prefsum": scenario_decode_fast_prefsum,
