@@ -5,6 +5,7 @@ import threading
 import time
 
 # Third Party
+import prometheus_client
 import torch
 import zmq
 
@@ -27,6 +28,33 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.config import (
+    PrometheusConfig,
+    add_prometheus_args,
+    parse_args_to_prometheus_config,
+)
+from lmcache.v1.mp_observability.prometheus_controller import (
+    get_prometheus_controller,
+    init_prometheus_controller,
+)
+from lmcache.v1.mp_observability.telemetry import (
+    TelemetryConfig,
+    add_telemetry_args,
+    get_telemetry_controller,
+    init_telemetry_controller,
+    log_telemetry,
+    make_end_event,
+    make_start_event,
+    parse_args_to_telemetry_config,
+)
+from lmcache.v1.mp_observability.telemetry.config import (
+    DEFAULT_TELEMETRY_CONFIG,
+)
+from lmcache.v1.multiprocess.config import (
+    MPServerConfig,
+    add_mp_server_args,
+    parse_args_to_mp_server_config,
+)
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
@@ -69,41 +97,53 @@ def update_session_for_key(
     session.get_hashes(key.start, key.end)
 
 
-def resolve_keys(
-    keys: list[IPCCacheEngineKey],
+def resolve_key(
+    key: IPCCacheEngineKey,
     session_manager: SessionManager,
 ) -> list[IPCCacheEngineKey]:
-    """Convert token-mode keys to hash-mode keys.
+    """Convert a token-mode key to hash-mode keys.
 
     Uses session to retrieve pre-computed rolling hashes, then creates
     hash-mode IPCCacheEngineKey instances.
     update_session_for_key must be called before this function.
 
     Args:
-        keys: List of IPC keys.
+        key: An IPC cache engine key.
         session_manager: The session manager to use.
 
     Returns:
-        List of hash-mode IPCCacheEngineKey.
+        List of IPCCacheEngineKey with hash, one per chunk.
     """
-    resolved: list[IPCCacheEngineKey] = []
-    for key in keys:
-        session = session_manager.get_or_create(key.request_id)
-        hashes = session.get_hashes(key.start, key.end)
-        resolved.extend(
-            IPCCacheEngineKey(
-                model_name=key.model_name,
-                world_size=key.world_size,
-                worker_id=key.worker_id,
-                token_ids=key.token_ids,
-                start=key.start,
-                end=key.end,
-                request_id=key.request_id,
-                chunk_hash=TokenHasher.hash_to_bytes(h),
-            )
-            for h in hashes
+    session = session_manager.get_or_create(key.request_id)
+    hashes = session.get_hashes(key.start, key.end)
+    return [
+        IPCCacheEngineKey(
+            model_name=key.model_name,
+            world_size=key.world_size,
+            worker_id=key.worker_id,
+            token_ids=key.token_ids,
+            start=key.start,
+            end=key.end,
+            request_id=key.request_id,
+            chunk_hash=TokenHasher.hash_to_bytes(h),
         )
-    return resolved
+        for h in hashes
+    ]
+
+
+def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
+    """Get the memory layout description for a given GPU context and number of tokens.
+
+    Args:
+        gpu_context: The GPU cache context containing the KV cache information.
+        num_tokens: The number of tokens to determine the layout for.
+
+    Returns:
+        MemoryLayoutDesc: The memory layout description containing shapes and dtypes.
+    """
+    shape = gpu_context.get_kv_buffer_shape(num_tokens)
+    dtype = gpu_context.dtype
+    return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
 
 # Main class for the mp cache engine
@@ -116,6 +156,12 @@ class MPCacheEngine:
     ):
         # GPU ID -> KV cache tensors
         self.gpu_contexts: dict[int, GPUCacheContext] = {}
+
+        # GPU ID -> (model name, world size) as metadata
+        # NOTE: This is mainly for determining the layout desc during prefetch
+        # We assume that if the (model name, world size) is the same, then
+        # the layout desc returned by the gpu context is the same.
+        self.gpu_context_meta: dict[int, tuple[str, int]] = {}
 
         # chunk size
         self.chunk_size = chunk_size
@@ -132,16 +178,30 @@ class MPCacheEngine:
         )
         self.session_manager = SessionManager(self.token_hasher)
 
-    def register_kv_cache(self, instance_id: int, kv_caches: KVCache) -> None:
+        # FIX: fix the problem of telemetry logging in cupy stream
+        # Need to log a retrieve operation before logging any store
+        # operation in the cupy stream
+        self._can_log_store = False
+
+    def register_kv_cache(
+        self,
+        instance_id: int,
+        kv_caches: KVCache,
+        model_name: str,
+        world_size: int,
+    ) -> None:
         """
         Registers the KV cache tensors for a given GPU instance ID.
 
         Args:
             instance_id (int): The GPU instance ID (such as PID).
             kv_caches (KVCache): The KV cache tensor wrappers from vLLM.
+            model_name (str): The name of the model associated with this KV cache.
+            world_size (int): The world size associated with this KV cache.
         """
         gpu_context = GPUCacheContext(kv_caches, self.chunk_size)
         self.gpu_contexts[instance_id] = gpu_context
+        self.gpu_context_meta[instance_id] = (model_name, world_size)
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
             instance_id,
@@ -157,6 +217,7 @@ class MPCacheEngine:
         """
         if instance_id in self.gpu_contexts:
             del self.gpu_contexts[instance_id]
+            del self.gpu_context_meta[instance_id]
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
             torch.cuda.empty_cache()
         else:
@@ -165,7 +226,7 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def store(
         self,
-        keys: list[IPCCacheEngineKey],
+        key: IPCCacheEngineKey,
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
@@ -174,8 +235,8 @@ class MPCacheEngine:
         Stores the GPU KV cache blocks to CPU.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
-                All keys must have worker_id != None (worker store operation).
+            key (IPCCacheEngineKey): The IPC key for the KV cache blocks.
+                Must have worker_id != None (worker store operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to store.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
@@ -185,9 +246,8 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        for key in keys:
-            update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_keys(keys, self.session_manager)
+        update_session_for_key(key, self.session_manager)
+        ipc_keys = resolve_key(key, self.session_manager)
 
         st = time.perf_counter()
 
@@ -214,11 +274,17 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
-            num_tokens = self.chunk_size
-            cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
-            layout_desc = MemoryLayoutDesc(
-                shapes=[cpu_shape], dtypes=[gpu_context.dtype]
-            )
+            if get_telemetry_controller().is_enabled() and self._can_log_store:
+                gpu_context.cupy_stream.launch_host_func(
+                    log_telemetry,
+                    make_start_event(
+                        "store",
+                        key.request_id,
+                        device=str(gpu_context.device),
+                    ),
+                )
+
+            layout_desc = get_layout_desc(gpu_context, self.chunk_size)
             reserved_dict = self.storage_manager.reserve_write(
                 obj_keys, layout_desc, "new"
             )
@@ -234,7 +300,7 @@ class MPCacheEngine:
                 slot_mapping = slot_mapping_tensor[start:end]
 
                 # Copy from GPU to CPU
-                tmp_buffer = gpu_context.get_tmp_gpu_buffer(num_tokens)
+                tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
                 with self.lock:
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_buffer,
@@ -256,6 +322,18 @@ class MPCacheEngine:
             self.storage_manager.finish_write,
             list(reserved_dict.keys()),
         )
+
+        if get_telemetry_controller().is_enabled() and self._can_log_store:
+            self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
+                log_telemetry,
+                make_end_event(
+                    "store",
+                    key.request_id,
+                    stored_count=len(reserved_dict),
+                    device=str(gpu_context.device),
+                ),
+            )
+
         ed = time.perf_counter()
         if length := len(reserved_dict):
             logger.info(
@@ -268,30 +346,33 @@ class MPCacheEngine:
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
-        keys: list[IPCCacheEngineKey],
+        key: IPCCacheEngineKey,
         instance_id: int,
         gpu_block_ids: list[int],
         event_ipc_handle: bytes,
-    ) -> tuple[bytes, list[bool]]:
+        skip_first_n_tokens: int = 0,
+    ) -> tuple[bytes, bool]:
         """
         Retrieves the CPU KV cache and put into GPU blocks.
 
         Args:
-            keys (list[IPCCacheEngineKey]): The IPC keys for the KV cache blocks.
-                All keys must have worker_id != None (worker retrieve operation).
+            key (IPCCacheEngineKey): The IPC key for the KV cache blocks.
+                Must have worker_id != None (worker retrieve operation).
             instance_id (int): The GPU instance ID (such as PID).
             gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
+            skip_first_n_tokens (int): Number of tokens to skip writing at
+                the start of the retrieve range. This avoids overwriting
+                APC-shared GPU blocks that may be read concurrently by other
+                requests.
 
         Returns:
-            tuple[bytes, list[bool]]: The first element is the IPC handle of the event
+            tuple[bytes, bool]: The first element is the IPC handle of the event
                 that signals the completion of the retrieve operation. The second
-                element is a list indicating whether each IPC key was successfully
-                retrieved.
+                element indicates whether the key was successfully retrieved.
         """
-        for key in keys:
-            update_session_for_key(key, self.session_manager)
-        ipc_keys = resolve_keys(keys, self.session_manager)
+        update_session_for_key(key, self.session_manager)
+        ipc_keys = resolve_key(key, self.session_manager)
 
         st = time.perf_counter()
 
@@ -305,13 +386,36 @@ class MPCacheEngine:
         )
         gpu_context = self.gpu_contexts[instance_id]
 
+        if get_telemetry_controller().is_enabled():
+            gpu_context.cupy_stream.launch_host_func(
+                log_telemetry,
+                make_start_event(
+                    "retrieve",
+                    key.request_id,
+                    device=str(gpu_context.device),
+                ),
+            )
+
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             for idx, (key, memory_obj) in enumerate(
                 zip(keys, memory_objs, strict=False)
             ):
-                start = idx * self.chunk_size
-                end = start + self.chunk_size
-                slot_mapping = slot_mapping_tensor[start:end]
+                chunk_start = idx * self.chunk_size
+                chunk_end = chunk_start + self.chunk_size
+
+                # Skip tokens that overlap with APC-cached blocks to
+                # avoid a data race: the retrieve writes on the LMCache
+                # CUDA stream while concurrent requests may read from
+                # those same APC-shared blocks on the vLLM CUDA stream.
+                effective_start = max(chunk_start, skip_first_n_tokens)
+                if effective_start >= chunk_end:
+                    # Entire chunk is within APC range, skip it
+                    continue
+                # clamp to [0, chunk_size - 1]
+                skip_in_chunk = max(
+                    0, min(effective_start - chunk_start, self.chunk_size - 1)
+                )
+                slot_mapping = slot_mapping_tensor[chunk_start:chunk_end]
 
                 # Copy from CPU to GPU
                 tmp_gpu_buffer_ = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
@@ -326,6 +430,7 @@ class MPCacheEngine:
                         lmc_ops.TransferDirection.H2D,
                         gpu_context.gpu_kv_format_,
                         gpu_context.block_size,
+                        skip_in_chunk,
                     )
 
         with (
@@ -343,19 +448,29 @@ class MPCacheEngine:
                 ) as memory_objs:
                     if not memory_objs or len(memory_objs) != len(obj_keys):
                         logger.error("Some keys not found during retrieve!")
-                        return event.ipc_handle(), [False] * len(obj_keys)
+                        return event.ipc_handle(), False
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     _retrieve_loop(obj_keys, memory_objs)
             except Exception as e:
                 logger.warning("Cannot retrieve keys due to exception: %s", str(e))
-                return event.ipc_handle(), [False] * len(obj_keys)
+                return event.ipc_handle(), False
             finally:
                 event.record()
                 gpu_context.cupy_stream.launch_host_func(
                     self.storage_manager.finish_read_prefetched,
                     prefetched_keys,
                 )
+                if get_telemetry_controller().is_enabled():
+                    gpu_context.cupy_stream.launch_host_func(
+                        log_telemetry,
+                        make_end_event(
+                            "retrieve",
+                            key.request_id,
+                            retrieved_count=len(prefetched_keys),
+                            device=str(gpu_context.device),
+                        ),
+                    )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
@@ -365,11 +480,12 @@ class MPCacheEngine:
             ed - st,
         )
 
-        return event.ipc_handle(), [True] * len(obj_keys)
+        self._can_log_store = True
+        return event.ipc_handle(), True
 
     def lookup(
         self,
-        keys: list[IPCCacheEngineKey],
+        key: IPCCacheEngineKey,
     ) -> int:
         """Lookup prefix cache hits for the given keys.
 
@@ -381,13 +497,48 @@ class MPCacheEngine:
             Number of matched chunks (prefix match count).
         """
         ipc_keys: list[IPCCacheEngineKey] = []
-        for key in keys:
-            ipc_keys.extend(key.to_hash_keys(self.token_hasher))
-        if not ipc_keys:
+        model_name, world_size = key.model_name, key.world_size
+        log_telemetry(make_start_event("lookup", key.request_id))
+
+        # Find the gpu context and calculate the layout desc
+        layout_desc: MemoryLayoutDesc | None = None
+        for gpu_id, (m_name, w_size) in self.gpu_context_meta.items():
+            if m_name == model_name and w_size == world_size:
+                layout_desc = get_layout_desc(
+                    self.gpu_contexts[gpu_id], self.chunk_size
+                )
+                break
+
+        if layout_desc is None:
+            logger.error(
+                "No GPU context found for model %s with world size %d during lookup!",
+                model_name,
+                world_size,
+            )
+            log_telemetry(
+                make_end_event(
+                    "lookup",
+                    key.request_id,
+                    error="no_gpu_context_found",
+                )
+            )
             return 0
+
+        # Prepare for the obj keys
+        ipc_keys.extend(key.to_hash_keys(self.token_hasher))
+        if not ipc_keys:
+            log_telemetry(
+                make_end_event(
+                    "lookup",
+                    key.request_id,
+                    error="no_ipc_keys_generated",
+                )
+            )
+            return 0
+
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        handle = self.storage_manager.submit_prefetch_task(obj_keys)
+        handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
         while True:
             found_count = self.storage_manager.query_prefetch_status(handle)
             if found_count is not None:
@@ -396,7 +547,45 @@ class MPCacheEngine:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the first failure
         found_count = found_count // ipc_keys[0].world_size
+
+        log_telemetry(
+            make_end_event(
+                "lookup",
+                key.request_id,
+                found_count=found_count,
+            )
+        )
         return found_count
+
+    def free_lookup_locks(
+        self,
+        key: IPCCacheEngineKey,
+    ) -> None:
+        """Release read locks acquired during lookup without performing a
+        full retrieve.  This is used when a request is cancelled or aborted
+        after LOOKUP but before RETRIEVE.
+
+        ``to_hash_keys`` always expands over the entire ``token_ids``
+        sequence, so we slice the result to only include the chunks that
+        overlap with the key's ``[start, end)`` range.
+        This means when ``start`` or ``end`` is not aligned to ``chunk_size``, the
+        entire chunk containing ``start`` boundary is freed but the one containing
+        ``end`` boundary will not be freed.  It caller's responsibility to align
+        the boundaries as desired.
+
+        Args:
+            keys: List of cache keys whose read locks should be released.
+        """
+        ipc_keys: list[IPCCacheEngineKey] = []
+        all_hash_keys = key.to_hash_keys(self.token_hasher)
+        chunk_size = self.token_hasher.chunk_size
+        start_chunk = key.start // chunk_size
+        end_chunk = key.end // chunk_size
+        ipc_keys.extend(all_hash_keys[start_chunk:end_chunk])
+        if not ipc_keys:
+            return
+        obj_keys = ipc_keys_to_object_keys(ipc_keys)
+        self.storage_manager.finish_read_prefetched(obj_keys)
 
     # =========================================================================
     # Utility methods
@@ -428,7 +617,7 @@ class MPCacheEngine:
         """
         with self.lock:
             self.storage_manager.memcheck()
-            self.storage_manager.clear()
+            self.storage_manager.clear(force=True)
             self.storage_manager.memcheck()
 
     def close(self) -> None:
@@ -457,42 +646,54 @@ def add_handler_helper(
 
 
 def run_cache_server(
+    mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
-    host: str = "localhost",
-    port: int = 5555,
-    chunk_size: int = 256,
-    max_workers: int = 1,
+    prometheus_config: PrometheusConfig,
+    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
     return_engine: bool = False,
-    hash_algorithm: str = "blake3",
 ):
     """
     Run the LMCache cache server with ZMQ message queue.
 
     Args:
+        mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
-        host: ZMQ server host
-        port: ZMQ server port
-        chunk_size: Chunk size for KV cache operations
-        max_workers: Maximum number of worker threads for ZMQ server
+        prometheus_config: Configuration for the Prometheus observability stack
+        telemetry_config: Configuration for the telemetry event system
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
-        hash_algorithm: Hash algorithm for token-based operations
 
     Returns:
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine)
         If return_engine is False: None (blocks until interrupted)
     """
-    # Initialize the engine
+    # Initialize global prometheus controller
+    init_prometheus_controller(prometheus_config)
+
+    # Initialize global telemetry controller
+    init_telemetry_controller(telemetry_config)
+
+    # Start Prometheus metrics HTTP server if enabled
+    if prometheus_config.enabled:
+        prometheus_client.start_http_server(prometheus_config.port)
+        logger.info(
+            "Prometheus metrics available at http://0.0.0.0:%d/metrics",
+            prometheus_config.port,
+        )
+
+    # Initialize the engine (loggers self-register with the global controller)
     engine = MPCacheEngine(
         storage_manager_config=storage_manager_config,
-        chunk_size=chunk_size,
-        hash_algorithm=hash_algorithm,
+        chunk_size=mp_config.chunk_size,
+        hash_algorithm=mp_config.hash_algorithm,
     )
 
     # Initialize the message queue server
     context = zmq.Context.instance()
     server = MessageQueueServer(
-        bind_url=f"tcp://{host}:{port}", context=context, max_workers=max_workers
+        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
+        context=context,
+        max_workers=mp_config.max_workers,
     )
 
     # Add handlers
@@ -502,16 +703,27 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
     add_handler_helper(server, RequestType.NOOP, engine.debug)
 
-    logger.info("LMCache ZMQ cache server is running on tcp://%s:%d", host, port)
+    logger.info(
+        "LMCache ZMQ cache server is running on tcp://%s:%d",
+        mp_config.host,
+        mp_config.port,
+    )
     # Start the ZMQ server
     torch.cuda.init()
     server.start()
+
+    # Start prometheus controller after engine creation (loggers are registered)
+    get_prometheus_controller().start()
+
+    # Start telemetry controller
+    get_telemetry_controller().start()
     logger.info("LMCache cache server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -524,6 +736,8 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_telemetry_controller().stop()
+        get_prometheus_controller().stop()
         server.close()
         engine.close()
 
@@ -532,36 +746,22 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="LMCache ZMQ Cache Server (without HTTP)"
     )
-    parser.add_argument(
-        "--host", type=str, default="localhost", help="Host to bind the ZMQ server"
-    )
-    parser.add_argument(
-        "--port", type=int, default=5555, help="Port to bind the ZMQ server"
-    )
-    parser.add_argument(
-        "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
-    )
-    parser.add_argument(
-        "--max-workers", type=int, default=1, help="Maximum number of worker threads"
-    )
-    parser.add_argument(
-        "--hash-algorithm",
-        type=str,
-        default="blake3",
-        help="Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)",
-    )
-    parser = add_storage_manager_args(parser)
+    add_mp_server_args(parser)
+    add_storage_manager_args(parser)
+    add_prometheus_args(parser)
+    add_telemetry_args(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
+    prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
+        mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        host=args.host,
-        port=args.port,
-        chunk_size=args.chunk_size,
-        max_workers=args.max_workers,
-        hash_algorithm=args.hash_algorithm,
+        prometheus_config=prometheus_config,
+        telemetry_config=telemetry_config,
     )
