@@ -262,7 +262,7 @@ class NixlStorageAgent:
         reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
         xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_desc, mem_type="FILE"
+            self.agent_name, xfer_descs, mem_type="FILE"
         )
 
         self.storage_reg_descs = reg_descs
@@ -292,7 +292,7 @@ class NixlStorageAgent:
         reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
         xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_desc, mem_type="OBJ"
+            self.agent_name, xfer_descs, mem_type="OBJ"
         )
 
         self.storage_reg_descs = reg_descs
@@ -749,7 +749,13 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     mem_indices_flat,
                     storage_indices_flat,
                 )
+                # Standard
+                import time
+
+                st = time.time()
                 await self.nixl_agent.post_non_blocking(handle)
+                ed = time.time()
+                logger.info(f"NIXL load completed in {ed - st:.2f} seconds")
                 self.nixl_agent.release_handle(handle)
         except Exception as e:
             logger.warning("NIXL load failed: %s", e)
