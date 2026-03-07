@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      # Required for CUDA IPC between vLLM and LMCache
+      hostIPC: true
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:latest
+          env:
+            # Deterministic hashing required by LMCache
+            - name: PYTHONHASHSEED
+              value: "0"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              exec python3 -m vllm.entrypoints.openai.api_server \
+                --model Qwen/Qwen3-4B-Instruct-2507 \
+                --port 8000 \
+                --gpu-memory-utilization 0.8 \
+                --load-format dummy \
+                --kv-transfer-config "$(cat /etc/lmcache/kv-transfer-config.json)"
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: kv-transfer-config
+              mountPath: /etc/lmcache
+              readOnly: true
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+      volumes:
+        - name: kv-transfer-config
+          configMap:
+            name: my-cache-connection

@@ -3,8 +3,14 @@ name: Code Quality
 on:
   workflow_call:
   pull_request:
+    paths-ignore:
+      - 'operator/**'
+      - '.github/workflows/operator_*.yml'
   push:
     branches: [dev]
+    paths-ignore:
+      - 'operator/**'
+      - '.github/workflows/operator_*.yml'
 
 permissions:
   contents: read
