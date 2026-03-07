@@ -154,17 +154,23 @@ class NixlStorageAgent:
             device_id=0,  # 0 indicates cpu
         )
 
-        self.pool = NixlObjPool(num_total_objs=self.pool_size)
         if self.backend in ["GDS", "GDS_MT", "POSIX", "HF3FS"]:
+            file_size = int(
+                self.backend_params.get("file_size", l1_memory_desc.align_bytes)
+            )
+            pages_per_file = file_size // l1_memory_desc.align_bytes
+            self.pool = NixlObjPool(num_total_objs=self.pool_size * pages_per_file)
             self.init_storage_handlers_file(
-                num_pages=self.pool_size,
+                num_files=self.pool_size,
                 page_size=l1_memory_desc.align_bytes,
+                file_size=file_size,
                 file_path=self.backend_params["file_path"],
                 # TODO(Jiayi): Need to make argument parsing more elegant
                 use_direct_io=str(self.backend_params["use_direct_io"]).lower()
                 == "true",
             )
         elif self.backend in ["OBJ"]:
+            self.pool = NixlObjPool(num_total_objs=self.pool_size)
             self.init_storage_handlers_object(
                 page_size=l1_memory_desc.align_bytes,
                 num_pages=self.pool_size,
@@ -198,12 +204,32 @@ class NixlStorageAgent:
 
     def init_storage_handlers_file(
         self,
-        num_pages: int,
+        num_files: int,
         page_size: int,
+        file_size: int,
         file_path: str,
         use_direct_io: bool,
     ):
-        """Initialize storage handlers for file-based backends."""
+        """Initialize storage handlers for file-based backends.
+
+        Each file holds ``file_size // page_size`` pages at successive offsets.
+        ``file_size`` must be a multiple of ``page_size``.
+
+        Args:
+            num_files: Number of storage files to create.
+            page_size: Granularity of L1 memory pages (transfer unit size).
+            file_size: Size in bytes of each storage file. Must be a multiple
+                of ``page_size``.
+            file_path: Directory where storage files are created.
+            use_direct_io: Whether to open files with O_DIRECT.
+        """
+        if file_size % page_size != 0:
+            raise ValueError(
+                f"file_size ({file_size}) must be a multiple of page_size ({page_size})"
+            )
+
+        pages_per_file = file_size // page_size
+        num_pages = num_files * pages_per_file
 
         # Create file descriptors for Nixl to register
         fds: list[int] = []
@@ -216,22 +242,27 @@ class NixlStorageAgent:
                     "use_direct_io is True, but O_DIRECT is not available on "
                     "this system. Falling back to buffered I/O."
                 )
-        for i in range(num_pages):
+        for i in range(num_files):
             filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
             tmp_path = os.path.join(file_path, filename)
             fd = os.open(tmp_path, flags)
             fds.append(fd)
 
-        # Register and prepare xfer handler
+        # Register each file covering the full file_size.
+        # Build one xfer_desc entry per page slot (page index i maps to
+        # offset (i % pages_per_file) * page_size inside fd[i // pages_per_file]).
         reg_list = []
         xfer_desc = []
         for fd in fds:
-            reg_list.append((0, page_size, fd, ""))
-            xfer_desc.append((0, page_size, fd))
+            reg_list.append((0, file_size, fd, ""))
+        for page_idx in range(num_pages):
+            fd = fds[page_idx // pages_per_file]
+            offset = (page_idx % pages_per_file) * page_size
+            xfer_desc.append((offset, page_size, fd))
         reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
         xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_desc, mem_type="FILE"
+            self.agent_name, xfer_descs, mem_type="FILE"
         )
 
         self.storage_reg_descs = reg_descs
@@ -261,7 +292,7 @@ class NixlStorageAgent:
         reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
         xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_desc, mem_type="OBJ"
+            self.agent_name, xfer_descs, mem_type="OBJ"
         )
 
         self.storage_reg_descs = reg_descs

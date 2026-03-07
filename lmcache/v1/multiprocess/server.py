@@ -543,6 +543,8 @@ class MPCacheEngine:
             found_count = self.storage_manager.query_prefetch_status(handle)
             if found_count is not None:
                 break
+
+            time.sleep(0.001)
         # NOTE(Kuntai): this assumes two things:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the first failure
