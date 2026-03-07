@@ -618,9 +618,8 @@ class MPCacheEngine:
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
         handle = self.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_readers=extra_readers)
+            obj_keys, layout_desc, extra_readers=extra_readers
+        )
         return self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
