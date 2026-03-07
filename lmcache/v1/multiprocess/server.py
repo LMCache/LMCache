@@ -192,7 +192,7 @@ class MPCacheEngine:
         self._prefetch_jobs: dict[int, _PrefetchJob] = {}
         self._next_prefetch_job_id: int = 0
         self._prefetch_job_lock = threading.Lock()
-        
+
         # FIX: fix the problem of telemetry logging in cupy stream
         # Need to log a retrieve operation before logging any store
         # operation in the cupy stream
