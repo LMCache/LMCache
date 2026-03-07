@@ -749,13 +749,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     mem_indices_flat,
                     storage_indices_flat,
                 )
-                # Standard
-                import time
-
-                st = time.time()
                 await self.nixl_agent.post_non_blocking(handle)
-                ed = time.time()
-                logger.info(f"NIXL load completed in {ed - st:.2f} seconds")
                 self.nixl_agent.release_handle(handle)
         except Exception as e:
             logger.warning("NIXL load failed: %s", e)
