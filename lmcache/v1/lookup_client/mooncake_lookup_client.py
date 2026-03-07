@@ -37,17 +37,35 @@ class MooncakeLookupClient(LookupClientInterface):
         )
 
         # Initialize token database for processing tokens
-        assert isinstance(config, LMCacheEngineConfig), (
-            "LMCache v1 configuration is should be passed."
-        )
+        assert isinstance(
+            config, LMCacheEngineConfig
+        ), "LMCache v1 configuration is should be passed."
 
         # First Party
         from lmcache.v1.token_database import ChunkedTokenDatabase
 
-        assert not config.enable_blending, (
-            "LMCache v1 blending is not supported in MooncakeLookupClient yet."
-        )
+        assert (
+            not config.enable_blending
+        ), "LMCache v1 blending is not supported in MooncakeLookupClient yet."
         self.token_database = ChunkedTokenDatabase(config, metadata)
+
+        # Cache lookup results per request to avoid repeated lookups.
+        # Maps lookup_id (req_id) -> number of hit tokens.
+        self.reqs_status: dict[str, int] = {}
+
+    def lookup_cache(self, lookup_id: str) -> Optional[int]:
+        """
+        Return cached lookup result for the given lookup ID.
+
+        Returns:
+            -1 means not found (first time lookup needed);
+            int >= 0 means cached number of hit tokens.
+        """
+        return self.reqs_status.get(lookup_id, -1)
+
+    def clear_lookup_status(self, lookup_id: str) -> None:
+        """Clear cached lookup status for a given lookup ID."""
+        self.reqs_status.pop(lookup_id, None)
 
     def lookup(
         self,
@@ -69,14 +87,20 @@ class MooncakeLookupClient(LookupClientInterface):
 
         # Find the first key that doesn't exist (ret != 1)
         # This follows the same logic as cache engine's lookup method
+        num_hit_tokens = 0
         for i, ret in enumerate(rets):
             if ret != 1:  # Not found or error
-                # Return the end position of the previous chunk
-                # If i == 0, no chunks were found, return 0
-                return ends[i - 1] if i > 0 else 0
+                num_hit_tokens = ends[i - 1] if i > 0 else 0
+                break
+        else:
+            # All keys were found, return the last end position
+            num_hit_tokens = ends[-1] if ends else 0
 
-        # All keys were found, return the last end position
-        return ends[-1] if ends else 0
+        # Cache the result so subsequent calls via lookup_cache() return it
+        if lookup_id is not None:
+            self.reqs_status[lookup_id] = num_hit_tokens
+
+        return num_hit_tokens
 
     def supports_producer_reuse(self) -> bool:
         """Return True as MooncakeLookupClient supports producer kvcache reuse"""
