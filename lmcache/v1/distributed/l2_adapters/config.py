@@ -228,7 +228,9 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
             f"{_VALID_NIXL_BACKENDS} (required)\n"
             "- backend_params (dict): backend-specific string key-value pairs "
             "(optional, default {}). File-based backends require file_path. "
-            "Optional keys include 'use_direct_io' (default 'false').\n"
+            "Optional keys include 'use_direct_io' (default 'false') and "
+            "'file_size' (int, size in bytes of each storage file slot; "
+            "defaults to the L1 page size if not set).\n"
             "- pool_size (int): number of storage descriptors to pre-allocate "
             "(required, >0)"
         )
