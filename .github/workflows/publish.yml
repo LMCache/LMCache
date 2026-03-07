@@ -9,10 +9,16 @@ on:
             - "release-**"
         tags:
             - "v*"
+        paths-ignore:
+            - 'operator/**'
+            - '.github/workflows/operator_*.yml'
     pull_request:
         branches:
             - dev
             - "release-**"
+        paths-ignore:
+            - 'operator/**'
+            - '.github/workflows/operator_*.yml'
     # Trigger the workflow for when a release is created
     release:
         types:

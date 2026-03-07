@@ -192,6 +192,11 @@ class MPCacheEngine:
         self._prefetch_jobs: dict[int, _PrefetchJob] = {}
         self._next_prefetch_job_id: int = 0
         self._prefetch_job_lock = threading.Lock()
+        
+        # FIX: fix the problem of telemetry logging in cupy stream
+        # Need to log a retrieve operation before logging any store
+        # operation in the cupy stream
+        self._can_log_store = False
 
     def register_kv_cache(
         self,
@@ -284,17 +289,15 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
-            # NOTE (ApostaC): this will hang the whole process in some special
-            # environments, need to investigate more. Temporarily disable telemetry
-            # for store operation.
-            # if get_telemetry_controller().is_enabled():
-            #    gpu_context.cupy_stream.launch_host_func(
-            #        log_telemetry,
-            #        make_start_event(
-            #            "store", key.request_id,
-            #            device=str(gpu_context.device),
-            #        ),
-            #    )
+            if get_telemetry_controller().is_enabled() and self._can_log_store:
+                gpu_context.cupy_stream.launch_host_func(
+                    log_telemetry,
+                    make_start_event(
+                        "store",
+                        key.request_id,
+                        device=str(gpu_context.device),
+                    ),
+                )
 
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
             reserved_dict = self.storage_manager.reserve_write(
@@ -335,18 +338,16 @@ class MPCacheEngine:
             list(reserved_dict.keys()),
         )
 
-        # NOTE (ApostaC): As stated above, the telemetry for store operation is
-        # temporarily disabled due to hanging issue in some special environments.
-        # Need to investigate more before enabling it again.
-        # if get_telemetry_controller().is_enabled():
-        #    self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
-        #        log_telemetry,
-        #        make_end_event(
-        #            "store", key.request_id,
-        #            stored_count=len(reserved_dict),
-        #            device=str(gpu_context.device),
-        #        ),
-        #    )
+        if get_telemetry_controller().is_enabled() and self._can_log_store:
+            self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
+                log_telemetry,
+                make_end_event(
+                    "store",
+                    key.request_id,
+                    stored_count=len(reserved_dict),
+                    device=str(gpu_context.device),
+                ),
+            )
 
         ed = time.perf_counter()
         if length := len(reserved_dict):
@@ -494,6 +495,7 @@ class MPCacheEngine:
             ed - st,
         )
 
+        self._can_log_store = True
         return event.ipc_handle(), True
 
     def lookup(
