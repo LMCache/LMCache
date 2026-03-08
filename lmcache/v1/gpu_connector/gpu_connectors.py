@@ -1854,7 +1854,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                             lmc_ops.TransferDirection.D2H,
                             token_major=True,
                         )
-                # Set metadata format
+
+                # MLA metadata format is set inside from_gpu function call.
                 if self.use_mla:
                     memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
             yield
