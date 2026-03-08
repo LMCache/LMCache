@@ -133,3 +133,10 @@ GEMINI.md
 COPILOT.md
 CURSOR.md
 AIDER.md
+
+# Operator build artifacts
+operator/bin/
+operator/dist/
+operator/cover.out
+operator/coverage.html
+operator/Dockerfile.cross

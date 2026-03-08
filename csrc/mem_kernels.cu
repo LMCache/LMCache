@@ -305,14 +305,16 @@ __global__ void load_and_reshape_multi_layer_kernel(
                                                 // scalars_per_token]
     const int64_t* __restrict__ slot_mapping,   // [num_tokens]
     const int scalars_per_token, const int num_tokens, const int num_layers,
-    const int page_buffer_size, const int block_size) {
+    const int page_buffer_size, const int block_size,
+    const int skip_prefix_n_tokens) {
   const int token_id = blockIdx.x;
   const int layer_id = blockIdx.y;
   const int k_or_v = blockIdx.z;
   const int tid = threadIdx.x;
   const int num_threads = blockDim.x;
 
-  const int64_t slot_idx = slot_mapping[token_id];
+  const int kv_token_id = token_id + skip_prefix_n_tokens;
+  const int64_t slot_idx = slot_mapping[kv_token_id];
   scalar_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
 
   if (slot_idx < 0) {
@@ -322,7 +324,7 @@ __global__ void load_and_reshape_multi_layer_kernel(
   /** Copy the data from page buffer to key_value **/
   for (int i = tid; i < scalars_per_token; i += num_threads) {
     const int64_t lmcache_offset =
-        key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
+        key_value_offset(k_or_v, layer_id, kv_token_id, i, scalars_per_token,
                          num_tokens, num_layers);
 
     const int64_t vllm_offset = page_buffer_offset<format>(
@@ -433,11 +435,12 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
  *  - direction: H2D  means LMCache to PagedBuffer, D2H  means PagedBuffer to
  * LMCache
  */
-#define LAUNCH_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)                       \
-  lmc::load_and_reshape_multi_layer_kernel<T, DIRECTION, FORMAT>              \
-      <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,           \
-                                   slot_mapping_ptr, num_xwords, num_tokens,  \
-                                   num_layers, page_buffer_size, block_size); \
+#define LAUNCH_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)                      \
+  lmc::load_and_reshape_multi_layer_kernel<T, DIRECTION, FORMAT>             \
+      <<<grid, block, 0, stream>>>(key_value_ptr, page_buffer_ptrs,          \
+                                   slot_mapping_ptr, num_xwords, num_tokens, \
+                                   num_layers, page_buffer_size, block_size, \
+                                   skip_prefix_n_tokens);                    \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 template <typename T>
@@ -452,7 +455,7 @@ void multi_layer_kv_transfer_templated(
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const TransferDirection direction, const GPUKVFormat gpu_kv_format,
-    const int block_size) {
+    const int block_size, const int skip_prefix_n_tokens) {
   T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
   T** page_buffer_ptrs =
       get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
@@ -460,14 +463,15 @@ void multi_layer_kv_transfer_templated(
       get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
 
   int num_layers = key_value.size(1);
-  int num_tokens = slot_mapping.size(0);
+  int num_tokens = key_value.size(2);
+  int num_transfer_tokens = num_tokens - skip_prefix_n_tokens;
   int num_origin_elements = key_value.size(3);
   int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
 
   int k_or_v_size = lmc::is_mla(gpu_kv_format) ? 1 : 2;
 
-  dim3 grid(key_value.size(2), num_layers, k_or_v_size);
+  dim3 grid(num_transfer_tokens, num_layers, k_or_v_size);
   dim3 block(std::min(num_xwords, 128));
 
   const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
@@ -525,7 +529,8 @@ void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format, const int block_size) {
+    const GPUKVFormat gpu_kv_format, const int block_size,
+    const int skip_prefix_n_tokens) {
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
@@ -533,7 +538,8 @@ void multi_layer_kv_transfer(
     do {                                                                \
       multi_layer_kv_transfer_templated<type>(                          \
           key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
-          page_buffer_size, direction, gpu_kv_format, block_size);      \
+          page_buffer_size, direction, gpu_kv_format, block_size,       \
+          skip_prefix_n_tokens);                                        \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
