@@ -384,7 +384,8 @@ class LMCacheMPWorkerAdapter:
                 self.world_size,
             ],
         )
-        future.result()
+        timeout = float(os.getenv("LMCACHE_REGISTER_TIMEOUT", "5.0"))
+        future.result(timeout=timeout)
         self.registered = True
 
     @_lmcache_nvtx_annotate
@@ -538,7 +539,13 @@ class LMCacheMPWorkerAdapter:
         # Auto re-register after server restart
         if need_reregister and self.kv_caches:
             logger.warning("Detected unregistered instance, re-registering kv caches")
-            self._do_register()
+            try:
+                self._do_register()
+            except Exception as e:
+                logger.error(
+                    "Failed to re-register kv caches: %s. Will retry on next failure.",
+                    e,
+                )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:

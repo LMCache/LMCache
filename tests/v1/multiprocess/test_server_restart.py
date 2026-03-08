@@ -180,7 +180,7 @@ def _server_with_store_handler(
     server.close()
 
 
-def test_store_returns_failure_on_unregistered_instance():
+def test_mq_store_path_with_unregistered_instance():
     """Verify that the MQ STORE path does not crash when the
     instance_id is unknown; the mock handler always succeeds,
     confirming the plumbing is intact."""
