@@ -491,7 +491,7 @@ def test_mq_lookup():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[key],
+        payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
     )
@@ -515,7 +515,7 @@ def test_mq_lookup_with_different_key():
     # Run test with LOOKUP request
     helper.run_test(
         request_type=RequestType.LOOKUP,
-        payloads=[key],
+        payloads=[key, 1],
         expected_response=expected_response,
         num_requests=1,
     )

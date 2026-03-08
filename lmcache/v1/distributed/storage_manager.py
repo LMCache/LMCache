@@ -253,16 +253,16 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
-        extra_readers: int = 0,
+        extra_count: int = 0,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
         Args:
             keys: Object keys to prefetch.
             layout_desc: Memory layout description.
-            extra_readers: Extra workers (on top of the default
+            extra_count: Extra workers (on top of the default
                 1) that will independently retrieve the same
-                key.  Total locks = 1 + extra_readers.
+                key.  Total locks = 1 + extra_count.
 
         Returns:
             PrefetchHandle to track the task.
@@ -270,7 +270,7 @@ class StorageManager:
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
-        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_readers)
+        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
         hit_count = 0
         for key in keys:
             entry = l1_read_result.get(key, None)
@@ -293,7 +293,7 @@ class StorageManager:
                 skipped_keys.append(key)
 
         if skipped_keys:
-            self._l1_manager.finish_read(skipped_keys, extra_count=extra_readers)
+            self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
 
         for listener in self._registered_listeners:
             listener.on_sm_read_prefetched(keys[:hit_count], keys[hit_count:])

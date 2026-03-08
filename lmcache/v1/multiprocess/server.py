@@ -132,29 +132,29 @@ def resolve_key(
     ]
 
 
-def compute_extra_readers(
+def compute_extra_count(
     tp_size: int,
     world_size: int,
 ) -> int:
-    """Compute extra reader count for MLA multi-reader locking.
+    """Compute extra count for MLA multi-reader locking.
 
     Non-MLA: each TP worker owns a distinct KV shard,
       so each ObjectKey is retrieved by exactly 1
-      worker -> extra_readers = 0.
+      worker -> extra_count = 0.
     MLA: TP does not split KV caches, all TP workers
       share the same object. vLLM passes world_size
       already divided by tp_size (e.g. world_size=1
       for TP=4 PP=1), so ipc_keys_to_object_keys
       only produces 1 ObjectKey per chunk.  All TP
       workers retrieve that same ObjectKey, hence
-      extra_readers = tp_size - 1.
+      extra_count = tp_size - 1.
 
     Detection: tp > world_size means MLA (world_size
     was divided by tp on the vLLM side).
 
     Fallback: old vLLM (<= 0.8.5) does not send
     tp_size (defaults to 1); we fall back to
-    world_size which gives extra_readers = 0
+    world_size which gives extra_count = 0
     (safe but may under-lock for MLA).
 
     TODO: world_size currently carries an overloaded
@@ -166,7 +166,7 @@ def compute_extra_readers(
         world_size: World size from the cache key.
 
     Returns:
-        Number of extra readers (0 for non-MLA).
+        Number of extra count (0 for non-MLA).
     """
     tp = tp_size if tp_size > 1 else world_size
     return tp - 1 if tp > world_size else 0
@@ -597,7 +597,7 @@ class MPCacheEngine:
                 )
             )
 
-        extra_readers = compute_extra_readers(tp_size, world_size)
+        extra_count = compute_extra_count(tp_size, world_size)
 
         # Prepare for the obj keys
         ipc_keys.extend(key.to_hash_keys(self.token_hasher))
@@ -618,7 +618,7 @@ class MPCacheEngine:
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
         handle = self.storage_manager.submit_prefetch_task(
-            obj_keys, layout_desc, extra_readers=extra_readers
+            obj_keys, layout_desc, extra_count=extra_count
         )
         return self._register_prefetch_job(
             _PrefetchJob(
@@ -711,9 +711,9 @@ class MPCacheEngine:
             return
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        extra_readers = compute_extra_readers(tp_size, key.world_size)
+        extra_count = compute_extra_count(tp_size, key.world_size)
 
-        self.storage_manager.finish_read_prefetched(obj_keys, extra_count=extra_readers)
+        self.storage_manager.finish_read_prefetched(obj_keys, extra_count=extra_count)
 
     # =========================================================================
     # Utility methods

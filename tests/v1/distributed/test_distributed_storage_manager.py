@@ -368,10 +368,10 @@ class TestStorageManagerMultiReader:
     prefetched object.
     """
 
-    def test_prefetch_with_extra_readers(
+    def test_prefetch_with_extra_count(
         self, basic_storage_manager_config, basic_layout
     ):
-        """submit_prefetch_task(extra_readers=N-1) acquires N locks."""
+        """submit_prefetch_task(extra_count=N-1) acquires N locks."""
         sm = StorageManager(basic_storage_manager_config)
         keys = [make_object_key(i) for i in range(3)]
 
@@ -380,15 +380,13 @@ class TestStorageManagerMultiReader:
         assert len(ret) == len(keys)
         sm.finish_write(list(ret.keys()))
 
-        extra_readers = 2  # total = 1 + 2 = 3 locks
-        handle = sm.submit_prefetch_task(
-            keys, basic_layout, extra_readers=extra_readers
-        )
+        extra_count = 2  # total = 1 + 2 = 3 locks
+        handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
         hit = sm.query_prefetch_status(handle)
         assert hit == len(keys)
 
         # Release with matching extra_count
-        sm.finish_read_prefetched(keys, extra_count=extra_readers)
+        sm.finish_read_prefetched(keys, extra_count=extra_count)
 
         # All locks released -> objects writable again
         ret = sm.reserve_write(keys, basic_layout, mode="update")
@@ -406,10 +404,8 @@ class TestStorageManagerMultiReader:
         ret = sm.reserve_write(keys, basic_layout, mode="new")
         sm.finish_write(list(ret.keys()))
 
-        extra_readers = 3  # total = 1 + 3 = 4 locks
-        handle = sm.submit_prefetch_task(
-            keys, basic_layout, extra_readers=extra_readers
-        )
+        extra_count = 3  # total = 1 + 3 = 4 locks
+        handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
         hit = sm.query_prefetch_status(handle)
         assert hit == len(keys)
 
@@ -445,9 +441,9 @@ class TestStorageManagerMultiReader:
         ret = sm.reserve_write(existing, basic_layout, mode="new")
         sm.finish_write(list(ret.keys()))
 
-        extra_readers = 1  # total = 1 + 1 = 2 locks
+        extra_count = 1  # total = 1 + 1 = 2 locks
         handle = sm.submit_prefetch_task(
-            all_keys, basic_layout, extra_readers=extra_readers
+            all_keys, basic_layout, extra_count=extra_count
         )
         hit = sm.query_prefetch_status(handle)
         # Only prefix {0,1} count as hits
@@ -455,7 +451,7 @@ class TestStorageManagerMultiReader:
         assert hit == 2
 
         # Finish the prefix hits
-        sm.finish_read_prefetched(all_keys[:2], extra_count=extra_readers)
+        sm.finish_read_prefetched(all_keys[:2], extra_count=extra_count)
 
         # Keys {3,4} should be writable (skipped locks released)
         ret = sm.reserve_write(
@@ -467,10 +463,10 @@ class TestStorageManagerMultiReader:
 
         sm.close()
 
-    def test_extra_readers_default_is_zero(
+    def test_extra_count_default_is_zero(
         self, basic_storage_manager_config, basic_layout
     ):
-        """Default extra_readers=0 behaves same as before."""
+        """Default extra_count=0 behaves same as before."""
         sm = StorageManager(basic_storage_manager_config)
         keys = [make_object_key(i) for i in range(3)]
 
