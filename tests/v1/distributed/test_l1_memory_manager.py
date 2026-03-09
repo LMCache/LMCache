@@ -12,7 +12,8 @@ interface docstrings. The tests focus on:
 2. free() - Thread-safe deallocation returning error_code
    - Returns SUCCESS when operation succeeds
 
-3. get_vm_space() - Returns underlying virtual memory as torch.Tensor
+3. get_l1_memory_desc() - Returns L1MemoryDesc with pointer, size, and
+   alignment of the L1 buffer
 """
 
 # Standard
@@ -30,6 +31,7 @@ from lmcache.v1.distributed.error import L1Error
 
 try:
     # First Party
+    from lmcache.v1.distributed.internal_api import L1MemoryDesc
     from lmcache.v1.distributed.memory_manager import (
         L1MemoryManager,
     )
@@ -367,50 +369,61 @@ class TestFree:
 
 
 # =============================================================================
-# Tests for L1MemoryManager.get_vm_space()
+# Tests for L1MemoryManager.get_l1_memory_desc()
 # =============================================================================
 
 
-class TestGetVmSpace:
+class TestGetL1MemoryDesc:
     """
-    Tests for L1MemoryManager.get_vm_space() method.
+    Tests for L1MemoryManager.get_l1_memory_desc() method.
 
     Per the docstring:
-    - Returns the underlying virtual memory space as a torch.Tensor
-    - Will be used for RDMA communication
+    - Returns an L1MemoryDesc with ptr, size, and align_bytes
+    - Used by RDMA communication to register the underlying virtual memory space
     """
 
-    def test_get_vm_space_returns_tensor(self, basic_config):
-        """Test that get_vm_space returns a torch.Tensor."""
+    def test_get_l1_memory_desc_returns_desc(self, basic_config):
+        """Test that get_l1_memory_desc returns an L1MemoryDesc."""
         manager = L1MemoryManager(basic_config)
 
-        vm_space = manager.get_vm_space()
+        desc = manager.get_l1_memory_desc()
 
-        assert isinstance(vm_space, torch.Tensor)
+        assert isinstance(desc, L1MemoryDesc)
 
         manager.close()
 
-    def test_get_vm_space_returns_consistent_tensor(self, basic_config):
-        """Test that get_vm_space returns the same tensor on multiple calls."""
+    def test_get_l1_memory_desc_returns_consistent_ptr(self, basic_config):
+        """Test that get_l1_memory_desc returns the same pointer on multiple calls."""
         manager = L1MemoryManager(basic_config)
 
-        vm_space1 = manager.get_vm_space()
-        vm_space2 = manager.get_vm_space()
+        desc1 = manager.get_l1_memory_desc()
+        desc2 = manager.get_l1_memory_desc()
 
-        # Should return the same underlying tensor
-        assert vm_space1.data_ptr() == vm_space2.data_ptr()
+        assert desc1.ptr == desc2.ptr
 
         manager.close()
 
-    def test_get_vm_space_size_matches_config(self, basic_config):
-        """Test that the vm_space size is consistent with the configuration."""
+    def test_get_l1_memory_desc_size_matches_config(self, basic_config):
+        """Test that the desc size matches the configured size."""
         manager = L1MemoryManager(basic_config)
 
-        vm_space = manager.get_vm_space()
+        desc = manager.get_l1_memory_desc()
 
-        # The vm_space should have at least the configured size
-        # (may be larger due to alignment)
-        assert vm_space.numel() >= basic_config.size_in_bytes
+        assert desc.size == basic_config.size_in_bytes
+        assert desc.align_bytes == basic_config.align_bytes
+
+        manager.close()
+
+    def test_get_l1_memory_desc_with_non_lazy_config(self, non_lazy_config):
+        """Test get_l1_memory_desc with non-lazy (MixedMemoryAllocator)
+        configuration."""
+        manager = L1MemoryManager(non_lazy_config)
+
+        desc = manager.get_l1_memory_desc()
+
+        assert isinstance(desc, L1MemoryDesc)
+        assert desc.ptr != 0
+        assert desc.size == non_lazy_config.size_in_bytes
 
         manager.close()
 

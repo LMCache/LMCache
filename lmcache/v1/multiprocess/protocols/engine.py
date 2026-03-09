@@ -7,7 +7,8 @@ This module defines the protocol for:
 - UNREGISTER_KV_CACHE: Unregister a KV cache instance
 - STORE: Store KV cache blocks to the server
 - RETRIEVE: Retrieve KV cache blocks from the server
-- LOOKUP: Check if keys exist in the cache
+- LOOKUP: Submit a prefix lookup and return a prefetch job ID
+- QUERY_PREFETCH_STATUS: Poll a prefetch job for its result
 - END_SESSION: End a session and clean up associated resources
 """
 
@@ -22,6 +23,7 @@ REQUEST_NAMES = [
     "STORE",
     "RETRIEVE",
     "LOOKUP",
+    "QUERY_PREFETCH_STATUS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
 ]
@@ -77,20 +79,31 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[int] - GPU block IDs to store retrieved data
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
+        #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
+        #     start of the retrieve range (to avoid overwriting APC-shared blocks)
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[int], bytes],
+            payload_classes=[KeyType, int, list[int], bytes, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
-        # Lookup keys in cache
+        # Submit a prefix lookup and return a prefetch job ID
         # Payload:
         #   - key: KeyType - Cache key to look up
-        # Returns: int - Number of keys found in cache
+        # Returns: int - Prefetch job ID for polling via QUERY_PREFETCH_STATUS
         "LOOKUP": ProtocolDefinition(
             payload_classes=[KeyType],
             response_class=int,
             handler_type=HandlerType.BLOCKING,
+        ),
+        # Query the status of a prefetch job
+        # Payload:
+        #   - prefetch_job_id: int - Job ID returned by LOOKUP
+        # Returns: int | None - Chunk count when done, None if still in progress
+        "QUERY_PREFETCH_STATUS": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=int | None,
+            handler_type=HandlerType.SYNC,
         ),
         # Free locks (release read locks without a full RETRIEVE)
         # Payload:

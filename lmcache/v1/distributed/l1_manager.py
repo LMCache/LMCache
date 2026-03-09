@@ -611,6 +611,10 @@ class L1Manager:
         """
         return self._memory_manager.get_memory_usage()
 
+    def get_l1_memory_desc(self):
+        """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
+        return self._memory_manager.get_l1_memory_desc()
+
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
         with self._lock:

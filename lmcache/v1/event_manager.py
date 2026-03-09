@@ -124,3 +124,22 @@ class EventManager:
             if status_dict is None:
                 return 0
             return len(status_dict[status])
+
+    def get_event_future(
+        self,
+        event_type: EventType,
+        event_id: str,
+    ) -> asyncio.Future:
+        """
+        Pop and return the event with the given type and id.
+        """
+        with self.lock:
+            status_dict = self.events.get(event_type, None)
+            assert status_dict is not None, (
+                f"Invalid event type {event_type} in EventManager."
+            )
+            done_events = status_dict[EventStatus.DONE]
+            assert event_id in done_events, (
+                f"Event {event_id} of type {event_type} is not done or not found."
+            )
+            return done_events[event_id]
