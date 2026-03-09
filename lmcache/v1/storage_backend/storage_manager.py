@@ -652,7 +652,6 @@ class StorageManager:
         """
         if location is None:
             location = "LocalGPUBackend"
-            location = "LocalGPUBackend"
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
@@ -685,8 +684,7 @@ class StorageManager:
         """
         if location is None:
             location = "LocalGPUBackend"
-            location = "LocalGPUBackend"
-
+            
         for keys_multi_chunk in keys:
             # Retrieve all chunks for one layer
             backend = self.storage_backends[location]
