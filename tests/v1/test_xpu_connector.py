@@ -71,7 +71,11 @@ def test_xpu_connector_roundtrip_non_layerwise(use_gpu: bool):
         kv_dtype=torch.bfloat16,
         kv_shape=(num_layers, 2, num_tokens, num_heads_actual, head_size_actual),
     )
-    conn = VLLMPagedMemXPUConnectorV2.from_metadata(meta, use_gpu=False, device=device)
+    conn = VLLMPagedMemXPUConnectorV2.from_metadata(
+        meta,
+        use_gpu=use_gpu,
+        device=device,
+    )
 
     try:
         # XPU -> CPU (KV_2LTD in memobj)
@@ -152,7 +156,9 @@ def test_xpu_connector_roundtrip_layerwise(use_gpu: bool):
     )
 
     conn = VLLMPagedMemLayerwiseXPUConnector.from_metadata(
-        meta, use_gpu=False, device=device
+        meta,
+        use_gpu=use_gpu,
+        device=device,
     )
 
     pin_alloc = PinMemoryAllocator(size=1024 * 1024 * 256)
