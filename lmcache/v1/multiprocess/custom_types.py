@@ -299,3 +299,22 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
+
+
+@dataclass
+class CBMatchResult:
+    """Result of a sub-sequence match from BlendTokenRangeMatcher.
+
+    Attributes:
+        old_st: Start position in the originally registered (stored) sequence.
+        old_ed: End position in the originally registered (stored) sequence.
+        cur_st: Start position in the query sequence where the match was found.
+        cur_ed: End position in the query sequence where the match was found.
+        hash: Token hash bytes (from registration) used as the storage key.
+    """
+
+    old_st: int
+    old_ed: int
+    cur_st: int
+    cur_ed: int
+    hash: bytes

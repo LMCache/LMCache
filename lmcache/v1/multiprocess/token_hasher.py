@@ -15,6 +15,10 @@ vLLM compatibility notes:
 from typing import Any, Callable
 import os
 
+# Third Party
+from numba import njit
+import numpy as np
+
 # First Party
 from lmcache.logging import init_logger
 
@@ -215,3 +219,213 @@ class TokenHasher:
         if isinstance(hash_val, bytes):
             return hash_val  # sha256_cbor already returns bytes
         return hash_val.to_bytes(8, byteorder="big", signed=True)
+
+
+### Functions for fast rolling/chunk hash and dict lookup
+
+
+@njit(cache=True)
+def rolling_hash_windows_numba(
+    arr_u64: np.ndarray, k: int, base: np.uint64
+) -> np.ndarray:
+    """
+    Compute rolling polynomial hashes over a uint64 array.
+
+    This function computes a polynomial rolling hash over a sliding window
+    of size `k` across the input array `arr_u64`. Arithmetic is performed
+    in uint64 with natural overflow, which is equivalent to computing
+    modulo 2^64.
+
+    Hash definition for a window [x0, x1, ..., x_{k-1}]:
+
+        H = x0 * base^(k-1) + x1 * base^(k-2) + ... + x_{k-1}
+
+    For each subsequent window the hash is updated in O(1):
+
+        H_new = (H - x_old * base^(k-1)) * base + x_new
+
+    Parameters
+    ----------
+    arr_u64 : np.ndarray[np.uint64]
+        Input array of integers encoded as uint64 values.
+
+    k : int
+        Sliding window size.
+
+    base : np.uint64
+        Base of the polynomial hash. Typically a random odd 64-bit number.
+
+    Returns
+    -------
+    np.ndarray[np.uint64]
+        Array of rolling hash values of length:
+
+            len(arr_u64) - k + 1
+
+        Each element corresponds to the hash of one window.
+    """
+    n = arr_u64.shape[0]
+    out = np.empty(n - k + 1, dtype=np.uint64)
+
+    power = np.uint64(1)
+    for _ in range(k - 1):
+        power = power * base  # uint64 overflow = mod 2^64
+
+    h = np.uint64(0)
+    for i in range(k):
+        h = h * base + arr_u64[i]
+    out[0] = h
+
+    j = 1
+    for i in range(k, n):
+        old = arr_u64[i - k]
+        new = arr_u64[i]
+        h = h - old * power
+        h = h * base + new
+        out[j] = h
+        j += 1
+
+    return out
+
+
+@njit(cache=True)
+def chunk_hash_windows_numba(arr_u64, k, base):
+    """Compute polynomial hashes over non-overlapping (chunked) windows.
+
+    Unlike the rolling-hash variant, each window's hash is computed
+    independently from scratch, which is efficient when stride equals the
+    window size (i.e., windows do not overlap).
+
+    The hash for a window starting at position ``s`` is:
+
+        h = arr[s]*base^(k-1) + arr[s+1]*base^(k-2) + ... + arr[s+k-1]
+
+    computed with natural ``uint64`` overflow (mod 2^64).
+
+    Parameters
+    ----------
+    arr_u64 : np.ndarray[np.uint64]
+        1-D array of token values cast to ``uint64``.
+    k : int
+        Window (chunk) size.
+    base : np.uint64
+        Base of the polynomial hash.
+
+    Returns
+    -------
+    np.ndarray[np.uint64]
+        Array of length ``len(arr_u64) // k`` containing one hash per
+        non-overlapping chunk. Trailing tokens that do not fill a
+        complete chunk are ignored.
+    """
+    n = arr_u64.shape[0]
+    num_windows = n // k
+    out = np.empty(num_windows, dtype=np.uint64)
+
+    for w in range(num_windows):
+        h = np.uint64(0)
+        start = w * k
+        # Compute fresh hash for this block
+        for i in range(start, start + k):
+            h = h * base + arr_u64[i]
+        out[w] = h
+    return out
+
+
+@njit(cache=True)
+def update_table_id_numba(
+    hashes_u64: np.ndarray,
+    table_id_i64: np.ndarray,
+    vals_to_update: np.ndarray,
+):
+    """
+    Update the direct-address table with new ID values for given hashes.
+
+    For each hash in `hashes_u64`, compute the index as:
+
+        idx = hash & (table_id_i64.size - 1)
+
+    and update `table_id_i64[idx]` with the corresponding value from
+    `vals_to_update`.
+
+    Parameters
+    ----------
+    hashes_u64 : np.ndarray[np.uint64]
+        Array of hash values to update.
+
+    table_id_i64 : np.ndarray[np.int64]
+        Direct-address lookup table mapping index → ID. This array is
+        modified in-place.
+
+    vals_to_update : np.ndarray[np.int64]
+        Array of new ID values to write into the table. Must have the same
+        length as `hashes_u64`.
+    """
+    n = hashes_u64.shape[0]
+    m = table_id_i64.shape[0]
+
+    for i in range(n):
+        idx = hashes_u64[i] & (m - 1)  # Assuming m is a power of 2
+        table_id_i64[idx] = vals_to_update[i]
+
+
+@njit(cache=True)
+def unique_hits_direct_id_numba(
+    hashes_u64: np.ndarray, table_id_i64: np.ndarray, mask_u64: np.uint64, num_ids: int
+) -> np.ndarray:
+    """
+    Perform direct-address lookup with deduplication of results.
+
+    This function looks up each hash in a direct-address table using
+    the lower bits of the hash:
+
+        idx = hash & mask
+
+    The lookup table maps each index to an integer ID.
+
+    The function returns **unique IDs only**, meaning that if the same
+    ID appears multiple times across the hash stream it will be returned
+    only once.
+
+    Parameters
+    ----------
+    hashes_u64 : np.ndarray[np.uint64]
+        Array of rolling hash values.
+
+    table_id_i64 : np.ndarray[np.int64]
+        Direct-address lookup table mapping index → ID.
+        Values of -1 represent "no entry".
+
+    mask_u64 : np.uint64
+        Bitmask used to compute the index:
+
+            idx = hash & mask_u64
+
+        Typically mask = (2^bits - 1).
+
+    num_ids : int
+        Maximum possible ID value + 1. This determines the size of the
+        internal `seen` array used for deduplication.
+
+    Returns
+    -------
+    np.ndarray[np.int64]
+        Array containing the unique IDs encountered in the lookup stream.
+        Length ≤ len(hashes_u64).
+    """
+
+    # TODO(Jiayi): These allocations can be avoided by pre-allocations
+    seen = np.zeros(num_ids, dtype=np.uint8)  # 1 byte per possible id
+    out = np.empty(hashes_u64.shape[0], dtype=np.int64)
+
+    m = 0
+    for i in range(hashes_u64.shape[0]):
+        idx = hashes_u64[i] & mask_u64
+        hit = table_id_i64[idx]
+
+        if hit != -1 and seen[hit] == 0:
+            seen[hit] = 1
+            out[m] = hit
+            m += 1
+
+    return out[:m]
