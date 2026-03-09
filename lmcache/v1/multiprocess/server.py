@@ -132,6 +132,46 @@ def resolve_key(
     ]
 
 
+def compute_extra_count(
+    tp_size: int,
+    world_size: int,
+) -> int:
+    """Compute extra count for MLA multi-reader locking.
+
+    Non-MLA: each TP worker owns a distinct KV shard,
+      so each ObjectKey is retrieved by exactly 1
+      worker -> extra_count = 0.
+    MLA: TP does not split KV caches, all TP workers
+      share the same object. vLLM passes world_size
+      already divided by tp_size (e.g. world_size=1
+      for TP=4 PP=1), so ipc_keys_to_object_keys
+      only produces 1 ObjectKey per chunk.  All TP
+      workers retrieve that same ObjectKey, hence
+      extra_count = tp_size - 1.
+
+    Detection: tp > world_size means MLA (world_size
+    was divided by tp on the vLLM side).
+
+    Fallback: old vLLM (<= 0.8.5) does not send
+    tp_size (defaults to 1); we fall back to
+    world_size which gives extra_count = 0
+    (safe but may under-lock for MLA).
+
+    TODO: world_size currently carries an overloaded
+    meaning (total ranks for non-MLA vs total/tp for
+    MLA). Consider a dedicated field in the future.
+
+    Args:
+        tp_size: Tensor-parallel size from the client.
+        world_size: World size from the cache key.
+
+    Returns:
+        Number of extra count (0 for non-MLA).
+    """
+    tp = tp_size if tp_size > 1 else world_size
+    return tp - 1 if tp > world_size else 0
+
+
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
     """Get the memory layout description for a given GPU context and number of tokens.
 
@@ -498,9 +538,29 @@ class MPCacheEngine:
         self._can_log_store = True
         return event.ipc_handle(), True
 
+    def _find_layout_desc(
+        self,
+        model_name: str,
+        world_size: int,
+    ) -> MemoryLayoutDesc | None:
+        """Find layout desc from a matching GPU context.
+
+        Returns:
+            The layout descriptor, or None if no context
+            matches (model_name, world_size).
+        """
+        for gpu_id, (m, w) in self.gpu_context_meta.items():
+            if m == model_name and w == world_size:
+                return get_layout_desc(
+                    self.gpu_contexts[gpu_id],
+                    self.chunk_size,
+                )
+        return None
+
     def lookup(
         self,
         key: IPCCacheEngineKey,
+        tp_size: int,
     ) -> int:
         """Submit a prefix lookup and return a prefetch job ID.
 
@@ -517,15 +577,7 @@ class MPCacheEngine:
         model_name, world_size = key.model_name, key.world_size
         log_telemetry(make_start_event("lookup_and_prefetch", key.request_id))
 
-        # Find the gpu context and calculate the layout desc
-        layout_desc: MemoryLayoutDesc | None = None
-        for gpu_id, (m_name, w_size) in self.gpu_context_meta.items():
-            if m_name == model_name and w_size == world_size:
-                layout_desc = get_layout_desc(
-                    self.gpu_contexts[gpu_id], self.chunk_size
-                )
-                break
-
+        layout_desc = self._find_layout_desc(model_name, world_size)
         if layout_desc is None:
             logger.error(
                 "No GPU context found for model %s with world size %d during lookup!",
@@ -545,6 +597,8 @@ class MPCacheEngine:
                 )
             )
 
+        extra_count = compute_extra_count(tp_size, world_size)
+
         # Prepare for the obj keys
         ipc_keys.extend(key.to_hash_keys(self.token_hasher))
         if not ipc_keys:
@@ -563,7 +617,9 @@ class MPCacheEngine:
 
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
-        handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
+        handle = self.storage_manager.submit_prefetch_task(
+            obj_keys, layout_desc, extra_count=extra_count
+        )
         return self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
@@ -632,21 +688,18 @@ class MPCacheEngine:
     def free_lookup_locks(
         self,
         key: IPCCacheEngineKey,
+        tp_size: int,
     ) -> None:
-        """Release read locks acquired during lookup without performing a
-        full retrieve.  This is used when a request is cancelled or aborted
-        after LOOKUP but before RETRIEVE.
+        """Release read locks acquired during lookup.
 
-        ``to_hash_keys`` always expands over the entire ``token_ids``
-        sequence, so we slice the result to only include the chunks that
-        overlap with the key's ``[start, end)`` range.
-        This means when ``start`` or ``end`` is not aligned to ``chunk_size``, the
-        entire chunk containing ``start`` boundary is freed but the one containing
-        ``end`` boundary will not be freed.  It caller's responsibility to align
-        the boundaries as desired.
+        Computes the extra reader count from ``tp_size`` and
+        ``world_size`` the same way :meth:`lookup` does, so
+        the correct number of locks is released.
 
         Args:
-            keys: List of cache keys whose read locks should be released.
+            key: Cache key whose read locks should be released.
+            tp_size: Tensor-parallel size for MLA
+                multi-reader locking.
         """
         ipc_keys: list[IPCCacheEngineKey] = []
         all_hash_keys = key.to_hash_keys(self.token_hasher)
@@ -657,7 +710,10 @@ class MPCacheEngine:
         if not ipc_keys:
             return
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
-        self.storage_manager.finish_read_prefetched(obj_keys)
+
+        extra_count = compute_extra_count(tp_size, key.world_size)
+
+        self.storage_manager.finish_read_prefetched(obj_keys, extra_count=extra_count)
 
     # =========================================================================
     # Utility methods
