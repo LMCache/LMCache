@@ -275,11 +275,14 @@ class L2AdapterInterface(ABC):
     # Status Interface
     #####################
 
-    @abstractmethod
     def report_status(self) -> dict:
         """
         Return a status dict for this adapter.
 
         Must include at least ``is_healthy: bool``.
+        Subclasses should override this with adapter-specific metrics.
         """
-        pass
+        return {
+            "is_healthy": True,
+            "extra_warning": "report_status is not implemented and runs default impl",
+        }
