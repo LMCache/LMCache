@@ -134,12 +134,13 @@ def scenario_calculate_cdf(ops: Any, device: str) -> dict[str, torch.Tensor]:
         raw_output = ops.calculate_cdf(input_tensor, num_bins)
         out_cpu = raw_output.flatten().cpu()
 
-        if device == "cuda":
+        if torch.is_floating_point(out_cpu):
+            # non-cuda equivalents return normalized floats; use directly
+            final_result = out_cpu.float()
+        else:
             out_int32 = out_cpu.to(torch.int32)
             out_uint16 = torch.where(out_int32 < 0, out_int32 + 65536, out_int32)
             final_result = out_uint16.float() / 65536.0
-        else:
-            final_result = out_cpu.float()
 
         results[f"calculate_cdf_bins{num_bins}"] = final_result
 
