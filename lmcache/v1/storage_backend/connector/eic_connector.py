@@ -387,16 +387,22 @@ class EICConnector(RemoteConnector):
                 data_keys, get_option, data_vals
             )
             err_code = get_outcome.status_codes[0]
-            if status_code != eic.StatusCode.SUCCESS or err_code != eic.StatusCode.SUCCESS:
+            if (
+                status_code != eic.StatusCode.SUCCESS
+                or err_code != eic.StatusCode.SUCCESS
+            ):
                 logger.error(
-                    f"eic mget data {key_str} failed, status_code {status_code} err_code {err_code}"
+                    f"eic mget data {key_str} failed, status_code {status_code} "
+                    f"err_code {err_code}"
                 )
                 memory_obj.ref_count_down()
                 return None
             else:
                 logger.debug(f"eic mget data {key_str} success")
         except Exception as e:
-            logger.error(f"eic mget data {key_str} raised exception: {e}", exc_info=True)
+            logger.error(
+                f"eic mget data {key_str} raised exception: {e}", exc_info=True
+            )
             memory_obj.ref_count_down()
             return None
 

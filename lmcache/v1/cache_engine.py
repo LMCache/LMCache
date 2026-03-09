@@ -1649,7 +1649,11 @@ class LMCacheEngine:
 
             for (key, _, _), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is not None and key not in used_keys:
-                    logger.debug("ref_count_down for %s of %s as the previous key failed", key, location)
+                    logger.debug(
+                        "ref_count_down for %s of %s as the previous key failed",
+                        key,
+                        location,
+                    )
                     memory_obj.ref_count_down()
 
         if last_failed_block_start is not None:
@@ -1657,7 +1661,12 @@ class LMCacheEngine:
 
             for key, memory_obj, _, end in reordered_chunks:
                 if end >= last_failed_block_start:
-                    logger.debug("ref_count_down for %s as it is truncated by last_failed_block_start %d", key, last_failed_block_start)
+                    logger.debug(
+                        "ref_count_down for %s as it is truncated by "
+                        "last_failed_block_start %d",
+                        key,
+                        last_failed_block_start,
+                    )
                     memory_obj.ref_count_down()
 
             reordered_chunks = [
