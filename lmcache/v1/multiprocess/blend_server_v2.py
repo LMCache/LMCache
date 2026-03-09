@@ -376,8 +376,8 @@ class BlendEngineV2(MPCacheEngine):
                 group[0].cur_st,
             )
 
-        # TODO(Jiayi): We need avoid busy waiting once we have support
-        # for L2 storage.
+        # TODO(Jiayi): We need to follow how lookup is handled in server.py
+        # to optimize performance.
         # Collect only the CBMatchResults for chunks actually found in storage
         for handle, group in zip(prefetch_handles, groups, strict=False):
             found_count = None
@@ -385,6 +385,11 @@ class BlendEngineV2(MPCacheEngine):
                 found_count = self.storage_manager.query_prefetch_status(handle)
                 if found_count is not None:
                     break
+
+                # Standard
+                import time
+
+                time.sleep(0.001)
 
             # Real found count after dedup the TP
             found_count = found_count // world_size
@@ -772,6 +777,10 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(
+        server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
+    )
+    add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
