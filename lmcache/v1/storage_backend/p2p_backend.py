@@ -644,6 +644,8 @@ class P2PBackend(StorageBackendInterface):
             num_hit_chunks = ret_msg.num_hit_chunks
 
         hit_mem_objs = mem_objs[:num_hit_chunks]
+        for hit_mem_obj in hit_mem_objs:
+            hit_mem_obj.pin()
         for missed_mem_obj in mem_objs[num_hit_chunks:]:
             missed_mem_obj.ref_count_down()
         return hit_mem_objs

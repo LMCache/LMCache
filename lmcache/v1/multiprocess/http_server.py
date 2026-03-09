@@ -1,59 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 import argparse
 
 # Third Party
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+import torch
 import uvicorn
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import (
-    EvictionConfig,
-    L1ManagerConfig,
-    L1MemoryManagerConfig,
     StorageManagerConfig,
+    add_storage_manager_args,
+    parse_args_to_config,
 )
-from lmcache.v1.mp_observability.config import DEFAULT_PROMETHEUS_CONFIG
+from lmcache.v1.mp_observability.config import (
+    PrometheusConfig,
+    add_prometheus_args,
+    parse_args_to_prometheus_config,
+)
 from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
+)
+from lmcache.v1.multiprocess.config import (
+    HTTPFrontendConfig,
+    MPServerConfig,
+    add_http_frontend_args,
+    add_mp_server_args,
+    parse_args_to_http_frontend_config,
+    parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.server import run_cache_server
 
 logger = init_logger(__name__)
 
 
-# ----------------------------
-# Server configuration
-# ----------------------------
-@dataclass
-class ServerConfig:
-    """Configuration for the HTTP server and ZMQ backend."""
-
-    zmq_host: str = "localhost"
-    zmq_port: int = 5555
-    chunk_size: int = 256
-    cpu_buffer_size: float = 5.0
-    max_workers: int = 1
-
-    def to_storage_manager_config(self) -> StorageManagerConfig:
-        return StorageManagerConfig(
-            l1_manager_config=L1ManagerConfig(
-                memory_config=L1MemoryManagerConfig(
-                    size_in_bytes=int(self.cpu_buffer_size * 1024**3),
-                    use_lazy=True,
-                ),
-            ),
-            eviction_config=EvictionConfig(
-                eviction_policy="LRU",
-            ),
-        )
-
-
-_server_config = ServerConfig()
+# Module-level config holders, set by run_http_server() before FastAPI startup.
+# Stored in a dict so the lifespan closure captures the mutable container.
+_configs: dict = {}
 
 
 # ----------------------------
@@ -68,14 +54,14 @@ async def lifespan(app: FastAPI):
     On shutdown: Clean up ZMQ server resources.
     """
     # Startup
-    logger.info("Starting LMCache HTTP server...")
+    logger.info(
+        "Starting LMCache HTTP server... (CUDA available: %s)",
+        torch.cuda.is_available(),
+    )
     zmq_server, engine = run_cache_server(
-        storage_manager_config=_server_config.to_storage_manager_config(),
-        prometheus_config=DEFAULT_PROMETHEUS_CONFIG,
-        host=_server_config.zmq_host,
-        port=_server_config.zmq_port,
-        chunk_size=_server_config.chunk_size,
-        max_workers=_server_config.max_workers,
+        mp_config=_configs["mp"],
+        storage_manager_config=_configs["storage_manager"],
+        prometheus_config=_configs["prometheus"],
         return_engine=True,
     )
     app.state.zmq_server = zmq_server
@@ -126,44 +112,38 @@ async def healthcheck(request: Request):
 
 
 def run_http_server(
-    host: str = "0.0.0.0",
-    port: int = 8000,
-    zmq_host: str = "localhost",
-    zmq_port: int = 5555,
-    chunk_size: int = 256,
-    cpu_buffer_size: float = 5.0,
-    max_workers: int = 1,
-):
+    http_config: HTTPFrontendConfig,
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+    prometheus_config: PrometheusConfig,
+) -> None:
     """
     Run the LMCache HTTP server with integrated MP (ZMQ) server.
 
     Args:
-        host: HTTP server host
-        port: HTTP server port
-        zmq_host: ZMQ server host
-        zmq_port: ZMQ server port
-        chunk_size: Chunk size for KV cache operations
-        cpu_buffer_size: CPU buffer size in GB
-        max_workers: Maximum number of worker threads for ZMQ server
+        http_config: Configuration for the HTTP frontend
+        mp_config: Configuration for the ZMQ multiprocess server
+        storage_manager_config: Configuration for the storage manager
+        prometheus_config: Configuration for the Prometheus observability stack
     """
-    global _server_config
-
-    _server_config.zmq_host = zmq_host
-    _server_config.zmq_port = zmq_port
-    _server_config.chunk_size = chunk_size
-    _server_config.cpu_buffer_size = cpu_buffer_size
-    _server_config.max_workers = max_workers
+    _configs["mp"] = mp_config
+    _configs["storage_manager"] = storage_manager_config
+    _configs["prometheus"] = prometheus_config
 
     config = uvicorn.Config(
         app=app,
-        host=host,
-        port=port,
+        host=http_config.http_host,
+        port=http_config.http_port,
         log_level="info",
         access_log=True,
     )
     server = uvicorn.Server(config)
 
-    logger.info("Starting LMCache HTTP server on http://%s:%d", host, port)
+    logger.info(
+        "Starting LMCache HTTP server on http://%s:%d",
+        http_config.http_host,
+        http_config.http_port,
+    )
     server.run()
 
 
@@ -171,38 +151,22 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="LMCache HTTP Server with integrated MP Cache Server"
     )
-    parser.add_argument(
-        "--host", type=str, default="0.0.0.0", help="Host to bind the HTTP server"
-    )
-    parser.add_argument(
-        "--port", type=int, default=8000, help="Port to bind the HTTP server"
-    )
-    parser.add_argument(
-        "--zmq-host", type=str, default="localhost", help="Host to bind the ZMQ server"
-    )
-    parser.add_argument(
-        "--zmq-port", type=int, default=5555, help="Port to bind the ZMQ server"
-    )
-    parser.add_argument(
-        "--chunk-size", type=int, default=256, help="Chunk size for KV cache operations"
-    )
-    parser.add_argument(
-        "--cpu-buffer-size", type=float, default=5.0, help="CPU buffer size in GB"
-    )
-    parser.add_argument(
-        "--max-workers", type=int, default=1, help="Maximum number of worker threads"
-    )
+    add_http_frontend_args(parser)
+    add_mp_server_args(parser)
+    add_storage_manager_args(parser)
+    add_prometheus_args(parser)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    http_config = parse_args_to_http_frontend_config(args)
+    mp_config = parse_args_to_mp_server_config(args)
+    storage_manager_config = parse_args_to_config(args)
+    prometheus_config = parse_args_to_prometheus_config(args)
     run_http_server(
-        host=args.host,
-        port=args.port,
-        zmq_host=args.zmq_host,
-        zmq_port=args.zmq_port,
-        chunk_size=args.chunk_size,
-        cpu_buffer_size=args.cpu_buffer_size,
-        max_workers=args.max_workers,
+        http_config=http_config,
+        mp_config=mp_config,
+        storage_manager_config=storage_manager_config,
+        prometheus_config=prometheus_config,
     )

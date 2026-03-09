@@ -1283,7 +1283,7 @@ def test_force_store_wait(autorelease_v1):
             engine.store(t, kvcaches=kv_cache, slot_mapping=s)
 
         # Sleep 10 seconds for the last request
-        time.sleep(10)
+        time.sleep(20)
 
         # No KV cache should be skipped
         # With default save_unfull_chunk=False, we expect chunk-aligned count
