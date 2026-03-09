@@ -39,6 +39,17 @@ class EvictionController(StorageControllerInterface):
             daemon=True,
         )
 
+    def report_status(self) -> dict:
+        """Return a status dict for the eviction controller."""
+        is_healthy = self._thread.is_alive()
+        return {
+            "is_healthy": is_healthy,
+            "thread_alive": is_healthy,
+            "eviction_policy": self._eviction_config.eviction_policy,
+            "trigger_watermark": self._eviction_config.trigger_watermark,
+            "eviction_ratio": self._eviction_config.eviction_ratio,
+        }
+
     def start(self):
         logger.info("Starting EvictionController...")
         self._thread.start()

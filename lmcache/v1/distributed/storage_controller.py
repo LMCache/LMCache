@@ -47,3 +47,12 @@ class StorageControllerInterface(ABC):
         any running threads or processes.
         """
         pass
+
+    @abstractmethod
+    def report_status(self) -> dict:
+        """
+        Return a status dict for this controller.
+
+        Must include at least ``is_healthy: bool``.
+        """
+        pass

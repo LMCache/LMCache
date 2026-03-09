@@ -688,6 +688,34 @@ class L1Manager:
 
         self._memory_manager.close()
 
+    # Status reporting
+    @l1_mgr_synchronized
+    def report_status(self) -> dict:
+        """Return a status dict describing L1 cache state."""
+        write_locked = 0
+        read_locked = 0
+        temporary = 0
+        for entry in self._objects.values():
+            if entry.write_lock.is_locked():
+                write_locked += 1
+            if entry.read_lock.is_locked():
+                read_locked += 1
+            if entry.is_temporary:
+                temporary += 1
+        used, total = self._memory_manager.get_memory_usage()
+        return {
+            "is_healthy": self._memory_manager.memcheck(),
+            "total_object_count": len(self._objects),
+            "write_locked_count": write_locked,
+            "read_locked_count": read_locked,
+            "temporary_count": temporary,
+            "memory_used_bytes": used,
+            "memory_total_bytes": total,
+            "memory_usage_ratio": used / total if total > 0 else 0.0,
+            "write_ttl_seconds": self._write_ttl_seconds,
+            "read_ttl_seconds": self._read_ttl_seconds,
+        }
+
     # Debugging APIs
     @l1_mgr_synchronized
     def get_object_state(self, key: ObjectKey) -> L1ObjectState | None:

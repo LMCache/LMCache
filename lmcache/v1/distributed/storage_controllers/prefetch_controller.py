@@ -205,6 +205,12 @@ class PrefetchController(StorageControllerInterface):
             tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc]
         ] = []
 
+        # Shadow counters for status reporting (updated in background loop)
+        self._status_in_flight_count: int = 0
+        self._status_pending_count: int = 0
+        self._status_lookup_phase_count: int = 0
+        self._status_load_phase_count: int = 0
+
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
         self._submission_queue: list[
@@ -286,6 +292,26 @@ class PrefetchController(StorageControllerInterface):
         with self._results_lock:
             return self._completed_results.pop(request_id, None)
 
+    def report_status(self) -> dict:
+        """Return a status dict for the prefetch controller."""
+        is_healthy = self._thread.is_alive()
+        with self._submission_lock:
+            submission_queue_size = len(self._submission_queue)
+        with self._results_lock:
+            completed_results_count = len(self._completed_results)
+        return {
+            "is_healthy": is_healthy,
+            "thread_alive": is_healthy,
+            "max_in_flight": self._max_in_flight,
+            "submission_queue_size": submission_queue_size,
+            "pending_queue_size": self._status_pending_count,
+            "in_flight_request_count": self._status_in_flight_count,
+            "lookup_phase_count": self._status_lookup_phase_count,
+            "load_phase_count": self._status_load_phase_count,
+            "completed_results_count": completed_results_count,
+            "num_l2_adapters": len(self._l2_adapters),
+        }
+
     # =========================================================================
     # Lifecycle
     # =========================================================================
@@ -356,6 +382,7 @@ class PrefetchController(StorageControllerInterface):
             items = self._submission_queue
             self._submission_queue = []
         self._pending_queue.extend(items)
+        self._status_pending_count += len(items)
 
     def _start_pending_requests(self) -> None:
         """Start pending requests up to the max in-flight limit."""
@@ -363,6 +390,7 @@ class PrefetchController(StorageControllerInterface):
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
             request_id, keys, layout_desc = self._pending_queue.pop(0)
+            self._status_pending_count -= 1
             self._start_lookup_phase(request_id, keys, layout_desc)
 
     # =========================================================================
@@ -393,6 +421,8 @@ class PrefetchController(StorageControllerInterface):
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
+        self._status_in_flight_count += 1
+        self._status_lookup_phase_count += 1
 
     def _process_lookup_completions(self, adapter_index: int) -> None:
         """Check all LOOKUP-phase requests for completed lookups from
@@ -427,6 +457,8 @@ class PrefetchController(StorageControllerInterface):
     def _transition_to_load_phase(self, request: InFlightPrefetchRequest) -> None:
         """Compute load plan, reserve L1 buffers, and submit load tasks."""
         request.phase = PrefetchPhase.PLAN_AND_LOAD
+        self._status_lookup_phase_count -= 1
+        self._status_load_phase_count += 1
 
         # Step 1: get load plan from policy
         load_plan = self._policy.select_load_plan(
@@ -626,7 +658,13 @@ class PrefetchController(StorageControllerInterface):
         """Store the result and remove from in-flight tracking."""
         with self._results_lock:
             self._completed_results[request_id] = prefix_hits
-        self._in_flight_requests.pop(request_id, None)
+        removed = self._in_flight_requests.pop(request_id, None)
+        if removed is not None:
+            self._status_in_flight_count -= 1
+            if removed.phase == PrefetchPhase.LOOKUP:
+                self._status_lookup_phase_count -= 1
+            elif removed.phase == PrefetchPhase.PLAN_AND_LOAD:
+                self._status_load_phase_count -= 1
         logger.debug(
             "Prefetch request %d completed: %d prefix hits",
             request_id,

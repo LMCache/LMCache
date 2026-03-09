@@ -147,3 +147,12 @@ class SessionManager:
         if expired:
             logger.info("Cleaned up %d expired sessions", len(expired))
         return len(expired)
+
+    def active_count(self) -> int:
+        """Return the number of active sessions.
+
+        Returns:
+            Number of currently tracked sessions.
+        """
+        with self._lock:
+            return len(self._sessions)

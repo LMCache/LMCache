@@ -76,6 +76,11 @@ class StoreListener(L1ManagerListener):
             self._pending_keys = []
         return keys
 
+    def pending_count(self) -> int:
+        """Return the number of pending keys waiting to be processed."""
+        with self._lock:
+            return len(self._pending_keys)
+
     # L1ManagerListener implementation
 
     def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
@@ -173,6 +178,9 @@ class StoreController(StorageControllerInterface):
         # within a single adapter, not across adapters.
         self._in_flight_tasks: dict[tuple[int, L2TaskId], InFlightStoreTask] = {}
 
+        # Shadow counter for status reporting (updated in background loop)
+        self._status_in_flight_count: int = 0
+
         # Map eventfd -> adapter index for quick lookup in poll results
         self._efd_to_adapter_index: dict[int, int] = {}
         for i, adapter in enumerate(self._l2_adapters):
@@ -203,6 +211,17 @@ class StoreController(StorageControllerInterface):
         self._thread.join()
         self._cleanup_in_flight_tasks()
         self._listener.close()
+
+    def report_status(self) -> dict:
+        """Return a status dict for the store controller."""
+        is_healthy = self._thread.is_alive()
+        return {
+            "is_healthy": is_healthy,
+            "thread_alive": is_healthy,
+            "pending_keys_count": self._listener.pending_count(),
+            "in_flight_task_count": self._status_in_flight_count,
+            "num_l2_adapters": len(self._l2_adapters),
+        }
 
     # Private methods
 
@@ -307,6 +326,7 @@ class StoreController(StorageControllerInterface):
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
             )
+            self._status_in_flight_count += 1
 
             logger.debug(
                 "Submitted store task %d to adapter %d with %d keys.",
@@ -337,6 +357,8 @@ class StoreController(StorageControllerInterface):
         for task_id, success in completed.items():
             composite_key = (adapter_index, task_id)
             task = self._in_flight_tasks.pop(composite_key, None)
+            if task is not None:
+                self._status_in_flight_count -= 1
             if task is None:
                 logger.warning(
                     "Completed store task %d (adapter %d) not found in tracking.",

@@ -270,3 +270,16 @@ class L2AdapterInterface(ABC):
         the L2 adapter should not be used anymore.
         """
         pass
+
+    #####################
+    # Status Interface
+    #####################
+
+    @abstractmethod
+    def report_status(self) -> dict:
+        """
+        Return a status dict for this adapter.
+
+        Must include at least ``is_healthy: bool``.
+        """
+        pass
