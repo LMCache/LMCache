@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 import argparse
 import threading
 import time
@@ -22,7 +23,7 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import PrefetchHandle, StorageManager
 from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
@@ -36,6 +37,19 @@ from lmcache.v1.mp_observability.config import (
 from lmcache.v1.mp_observability.prometheus_controller import (
     get_prometheus_controller,
     init_prometheus_controller,
+)
+from lmcache.v1.mp_observability.telemetry import (
+    TelemetryConfig,
+    add_telemetry_args,
+    get_telemetry_controller,
+    init_telemetry_controller,
+    log_telemetry,
+    make_end_event,
+    make_start_event,
+    parse_args_to_telemetry_config,
+)
+from lmcache.v1.mp_observability.telemetry.config import (
+    DEFAULT_TELEMETRY_CONFIG,
 )
 from lmcache.v1.multiprocess.config import (
     MPServerConfig,
@@ -133,6 +147,13 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
 
+@dataclass
+class _PrefetchJob:
+    handle: PrefetchHandle
+    world_size: int
+    request_id: str
+
+
 # Main class for the mp cache engine
 class MPCacheEngine:
     def __init__(
@@ -164,6 +185,18 @@ class MPCacheEngine:
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
         self.session_manager = SessionManager(self.token_hasher)
+
+        # Prefetch job tracking for two-phase lookup
+        # TODO: implement periodic cleanup of stale _prefetch_jobs entries
+        # for crash resilience (e.g., client calls lookup but never queries)
+        self._prefetch_jobs: dict[int, _PrefetchJob] = {}
+        self._next_prefetch_job_id: int = 0
+        self._prefetch_job_lock = threading.Lock()
+
+        # FIX: fix the problem of telemetry logging in cupy stream
+        # Need to log a retrieve operation before logging any store
+        # operation in the cupy stream
+        self._can_log_store = False
 
     def register_kv_cache(
         self,
@@ -256,6 +289,16 @@ class MPCacheEngine:
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            if get_telemetry_controller().is_enabled() and self._can_log_store:
+                gpu_context.cupy_stream.launch_host_func(
+                    log_telemetry,
+                    make_start_event(
+                        "store",
+                        key.request_id,
+                        device=str(gpu_context.device),
+                    ),
+                )
+
             layout_desc = get_layout_desc(gpu_context, self.chunk_size)
             reserved_dict = self.storage_manager.reserve_write(
                 obj_keys, layout_desc, "new"
@@ -294,6 +337,18 @@ class MPCacheEngine:
             self.storage_manager.finish_write,
             list(reserved_dict.keys()),
         )
+
+        if get_telemetry_controller().is_enabled() and self._can_log_store:
+            self.gpu_contexts[instance_id].cupy_stream.launch_host_func(
+                log_telemetry,
+                make_end_event(
+                    "store",
+                    key.request_id,
+                    stored_count=len(reserved_dict),
+                    device=str(gpu_context.device),
+                ),
+            )
+
         ed = time.perf_counter()
         if length := len(reserved_dict):
             logger.info(
@@ -345,6 +400,16 @@ class MPCacheEngine:
             f"KV cache not registered for GPU ID {instance_id}"
         )
         gpu_context = self.gpu_contexts[instance_id]
+
+        if get_telemetry_controller().is_enabled():
+            gpu_context.cupy_stream.launch_host_func(
+                log_telemetry,
+                make_start_event(
+                    "retrieve",
+                    key.request_id,
+                    device=str(gpu_context.device),
+                ),
+            )
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             for idx, (key, memory_obj) in enumerate(
@@ -411,6 +476,16 @@ class MPCacheEngine:
                     self.storage_manager.finish_read_prefetched,
                     prefetched_keys,
                 )
+                if get_telemetry_controller().is_enabled():
+                    gpu_context.cupy_stream.launch_host_func(
+                        log_telemetry,
+                        make_end_event(
+                            "retrieve",
+                            key.request_id,
+                            retrieved_count=len(prefetched_keys),
+                            device=str(gpu_context.device),
+                        ),
+                    )
 
         tokens_retrieved = len(obj_keys) * self.chunk_size
         ed = time.perf_counter()
@@ -420,23 +495,27 @@ class MPCacheEngine:
             ed - st,
         )
 
+        self._can_log_store = True
         return event.ipc_handle(), True
 
     def lookup(
         self,
         key: IPCCacheEngineKey,
     ) -> int:
-        """Lookup prefix cache hits for the given keys.
+        """Submit a prefix lookup and return a prefetch job ID.
+
+        Hashes the key, submits a prefetch task to the storage manager,
+        and returns a job ID that can be polled via query_prefetch_status.
 
         Args:
-            keys: List of cache keys.
-                  request_id is embedded in each key.
+            key: Cache key with request_id embedded.
 
         Returns:
-            Number of matched chunks (prefix match count).
+            Prefetch job ID for polling via query_prefetch_status.
         """
         ipc_keys: list[IPCCacheEngineKey] = []
         model_name, world_size = key.model_name, key.world_size
+        log_telemetry(make_start_event("lookup_and_prefetch", key.request_id))
 
         # Find the gpu context and calculate the layout desc
         layout_desc: MemoryLayoutDesc | None = None
@@ -453,23 +532,101 @@ class MPCacheEngine:
                 model_name,
                 world_size,
             )
-            return 0
+            return self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        request_id=-1,
+                        l1_prefix_hit_count=0,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    world_size=1,
+                    request_id=key.request_id,
+                )
+            )
 
         # Prepare for the obj keys
         ipc_keys.extend(key.to_hash_keys(self.token_hasher))
         if not ipc_keys:
-            return 0
+            return self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        request_id=-1,
+                        l1_prefix_hit_count=0,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    world_size=1,
+                    request_id=key.request_id,
+                )
+            )
+
         obj_keys = ipc_keys_to_object_keys(ipc_keys)
 
         handle = self.storage_manager.submit_prefetch_task(obj_keys, layout_desc)
-        while True:
-            found_count = self.storage_manager.query_prefetch_status(handle)
-            if found_count is not None:
-                break
+        return self._register_prefetch_job(
+            _PrefetchJob(
+                handle=handle,
+                world_size=ipc_keys[0].world_size,
+                request_id=key.request_id,
+            )
+        )
+
+    def _register_prefetch_job(self, job: _PrefetchJob) -> int:
+        with self._prefetch_job_lock:
+            job_id = self._next_prefetch_job_id
+            self._next_prefetch_job_id += 1
+            self._prefetch_jobs[job_id] = job
+        return job_id
+
+    def query_prefetch_status(
+        self,
+        prefetch_job_id: int,
+    ) -> int | None:
+        """Poll the status of a prefetch job.
+
+        Returns the chunk count when the prefetch is complete, or None
+        if it is still in progress.  The job entry is automatically
+        removed once a non-None result is returned (exactly-once
+        semantics).
+
+        Args:
+            prefetch_job_id: Job ID returned by lookup().
+
+        Returns:
+            Chunk count (int) when done, None if still in progress,
+            or 0 if the job ID is unknown.
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(prefetch_job_id)
+        if job is None:
+            logger.warning(
+                "Prefetch job %d not found (already completed or invalid)",
+                prefetch_job_id,
+            )
+            return 0
+
+        found_count = self.storage_manager.query_prefetch_status(job.handle)
+        if found_count is None:
+            return None
+
         # NOTE(Kuntai): this assumes two things:
         # 1. the world size is the same between keys
-        # 2. the lookup sort the keys in prefix order and breaks at the first failure
-        found_count = found_count // ipc_keys[0].world_size
+        # 2. the lookup sort the keys in prefix order and breaks at the
+        #    first failure
+        found_count = found_count // job.world_size
+
+        log_telemetry(
+            make_end_event(
+                "lookup_and_prefetch",
+                job.request_id,
+                found_count=found_count,
+            )
+        )
+
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(prefetch_job_id, None)
+
         return found_count
 
     def free_lookup_locks(
@@ -564,6 +721,7 @@ def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     prometheus_config: PrometheusConfig,
+    telemetry_config: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG,
     return_engine: bool = False,
 ):
     """
@@ -573,6 +731,7 @@ def run_cache_server(
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         prometheus_config: Configuration for the Prometheus observability stack
+        telemetry_config: Configuration for the telemetry event system
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive
 
@@ -582,6 +741,9 @@ def run_cache_server(
     """
     # Initialize global prometheus controller
     init_prometheus_controller(prometheus_config)
+
+    # Initialize global telemetry controller
+    init_telemetry_controller(telemetry_config)
 
     # Start Prometheus metrics HTTP server if enabled
     if prometheus_config.enabled:
@@ -613,6 +775,9 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
+    add_handler_helper(
+        server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
+    )
     add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
@@ -631,6 +796,9 @@ def run_cache_server(
 
     # Start prometheus controller after engine creation (loggers are registered)
     get_prometheus_controller().start()
+
+    # Start telemetry controller
+    get_telemetry_controller().start()
     logger.info("LMCache cache server is running...")
 
     # Return server and engine if requested (for HTTP server integration)
@@ -643,6 +811,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
+        get_telemetry_controller().stop()
         get_prometheus_controller().stop()
         server.close()
         engine.close()
@@ -655,6 +824,7 @@ def parse_args():
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
     add_prometheus_args(parser)
+    add_telemetry_args(parser)
     return parser.parse_args()
 
 
@@ -663,8 +833,10 @@ if __name__ == "__main__":
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     prometheus_config = parse_args_to_prometheus_config(args)
+    telemetry_config = parse_args_to_telemetry_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         prometheus_config=prometheus_config,
+        telemetry_config=telemetry_config,
     )

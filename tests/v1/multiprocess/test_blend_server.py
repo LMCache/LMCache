@@ -1313,12 +1313,23 @@ def test_cb_store_final_then_normal_lookup_retrieve(
         token_ids, request_id="final-lookup-test", worker_id=None
     )
 
-    lookup_future = client.submit_request(
+    # Phase 1: Get prefetch job ID
+    job_id = client.submit_request(
         RequestType.LOOKUP,
         [lookup_key],
         get_response_class(RequestType.LOOKUP),
-    )
-    lookup_result = lookup_future.result(timeout=DEFAULT_TIMEOUT)
+    ).result(timeout=DEFAULT_TIMEOUT)
+
+    # Phase 2: Poll until done
+    lookup_result = None
+    while True:
+        lookup_result = client.submit_request(
+            RequestType.QUERY_PREFETCH_STATUS,
+            [job_id],
+            get_response_class(RequestType.QUERY_PREFETCH_STATUS),
+        ).result(timeout=DEFAULT_TIMEOUT)
+        if lookup_result is not None:
+            break
 
     # Expected: lookup_result should be > 0 (chunks found)
     assert isinstance(lookup_result, int), "Lookup should return an int"
