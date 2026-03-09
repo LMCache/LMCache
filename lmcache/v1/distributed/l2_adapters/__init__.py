@@ -57,3 +57,10 @@ def create_l2_adapter(
         config,
         l1_memory_desc=l1_memory_desc,
     )
+
+
+__all__ = [
+    "L2AdapterInterface",
+    "L2AdapterConfigBase",
+    "create_l2_adapter",
+]
