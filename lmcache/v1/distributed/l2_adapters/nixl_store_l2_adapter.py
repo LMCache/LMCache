@@ -23,7 +23,9 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
-from lmcache.v1.distributed.l2_adapters.config import NixlStoreL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.config import (
+    NixlStoreL2AdapterConfig,
+)
 from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)

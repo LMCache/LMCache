@@ -14,9 +14,15 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 import argparse
 import json
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.base import (
+        L2AdapterInterface,
+    )
 
 # First Party
 from lmcache.logging import init_logger
@@ -51,6 +57,72 @@ def register_l2_adapter_type(name: str, config_cls: type[L2AdapterConfigBase]) -
 def get_registered_l2_adapter_types() -> list[str]:
     """Return the list of registered adapter type names."""
     return list(_L2_ADAPTER_CONFIG_REGISTRY)
+
+
+# -----------------------------------------------------------------------------
+# Registry: adapter type name -> factory callable
+# -----------------------------------------------------------------------------
+
+# Factory signature: (config, **kwargs) -> L2AdapterInterface
+L2AdapterFactory = Callable[..., "L2AdapterInterface"]
+
+_L2_ADAPTER_FACTORY_REGISTRY: dict[str, L2AdapterFactory] = {}
+
+
+def register_l2_adapter_factory(
+    name: str,
+    factory: L2AdapterFactory,
+) -> None:
+    """
+    Register a factory callable for an L2 adapter type.
+
+    The factory is called by
+    ``create_l2_adapter_from_registry(config, **kwargs)``
+    when the config's registered type name matches *name*.
+
+    Args:
+        name: Adapter type name (must already have a
+            config class registered via
+            ``register_l2_adapter_type``).
+        factory: Callable ``(config, **kwargs) ->
+            L2AdapterInterface``.
+    """
+    if name in _L2_ADAPTER_FACTORY_REGISTRY:
+        raise ValueError(f"L2 adapter factory already registered: {name!r}")
+    _L2_ADAPTER_FACTORY_REGISTRY[name] = factory
+
+
+def create_l2_adapter_from_registry(
+    config: L2AdapterConfigBase,
+    **kwargs: Any,
+) -> "L2AdapterInterface":
+    """
+    Create an L2 adapter using the factory registry.
+
+    Looks up the type name for *config* via the config
+    registry, then calls the matching factory.
+
+    Args:
+        config: An adapter config instance.
+        **kwargs: Extra arguments forwarded to the factory
+            (e.g. ``l1_memory_desc`` for Nixl adapters).
+
+    Returns:
+        A new ``L2AdapterInterface`` instance.
+
+    Raises:
+        ValueError: If no factory is registered for this
+            config type.
+    """
+    name = get_type_name_for_config(config)
+    factory = _L2_ADAPTER_FACTORY_REGISTRY.get(name)
+    if factory is None:
+        raise ValueError(
+            f"No adapter factory registered for type "
+            f"{name!r}. Make sure the adapter module is "
+            f"imported."
+        )
+    return factory(config, **kwargs)
 
 
 def get_type_name_for_config(config: L2AdapterConfigBase) -> str:
@@ -117,130 +189,14 @@ class L2AdapterConfigBase(ABC):
         each adapter type.
 
         Returns:
-            A help string describing the config fields for this adapter type.
+        A help string describing the config fields for this adapter type.
         """
         ...
 
 
-### Detailed config classes for each L2 adapter
-class MockL2AdapterConfig(L2AdapterConfigBase):
-    """
-    Config for a mock L2 adapter (for testing).
-
-    Fields:
-    - max_size_gb: maximum size of the adapter in GB.
-    - mock_bandwidth_gb: simulated bandwidth in GB/sec (for testing load times).
-    """
-
-    def __init__(self, max_size_gb: float, mock_bandwidth_gb: float):
-        self.max_size_gb = max_size_gb
-        self.mock_bandwidth_gb = mock_bandwidth_gb
-
-    @classmethod
-    def from_dict(cls, d: dict) -> MockL2AdapterConfig:
-        max_size_gb = d.get("max_size_gb")
-        if not isinstance(max_size_gb, (int, float)) or max_size_gb <= 0:
-            raise ValueError("max_size_gb must be a positive number")
-
-        mock_bandwidth_gb = d.get("mock_bandwidth_gb")
-        if not isinstance(mock_bandwidth_gb, (int, float)) or mock_bandwidth_gb <= 0:
-            raise ValueError("mock_bandwidth_gb must be a positive number")
-
-        return cls(max_size_gb=max_size_gb, mock_bandwidth_gb=mock_bandwidth_gb)
-
-    @classmethod
-    def help(cls) -> str:
-        return (
-            "Mock L2 adapter config fields:\n"
-            "- max_size_gb (float): maximum size of the adapter in GB (required, >0)\n"
-            "- mock_bandwidth_gb (float): simulated bandwidth in GB/sec (required, >0)"
-        )
-
-
-register_l2_adapter_type("mock", MockL2AdapterConfig)
-
-
-_VALID_NIXL_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ")
-_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
-
-
-class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
-    """
-    Config for a Nixl-store-based L2 adapter.
-
-    Fields:
-    - backend: Nixl storage backend (GDS, GDS_MT, POSIX, HF3FS, OBJ).
-    - backend_params: Backend-specific parameters as a dict of string key-value
-      pairs. For file-based backends (GDS, GDS_MT, POSIX, HF3FS), must include
-      "file_path". May also include "use_direct_io" (default "false") and other
-      backend-specific keys.
-    - pool_size: Number of storage descriptors to pre-allocate (must be > 0).
-    """
-
-    def __init__(
-        self,
-        backend: str,
-        backend_params: dict[str, str],
-        pool_size: int,
-    ):
-        if backend in _FILE_BACKENDS:
-            if "file_path" not in backend_params:
-                raise ValueError(
-                    f"backend_params must include 'file_path' "
-                    f"for file-based backend {backend!r}"
-                )
-            if "use_direct_io" not in backend_params:
-                raise ValueError(
-                    f"backend_params must include 'use_direct_io' "
-                    f"for file-based backend {backend!r}"
-                )
-        self.backend = backend
-        self.backend_params = backend_params
-        self.pool_size = pool_size
-
-    @classmethod
-    def from_dict(cls, d: dict) -> NixlStoreL2AdapterConfig:
-        backend = d.get("backend")
-        if backend not in _VALID_NIXL_BACKENDS:
-            raise ValueError(
-                f"backend must be one of {_VALID_NIXL_BACKENDS}, got {backend!r}"
-            )
-
-        backend_params = d.get("backend_params", {})
-        if not isinstance(backend_params, dict):
-            raise ValueError("backend_params must be a dict of string key-value pairs")
-
-        pool_size = d.get("pool_size")
-        if not isinstance(pool_size, int) or pool_size <= 0:
-            raise ValueError("pool_size must be a positive integer")
-
-        return cls(
-            backend=backend,
-            backend_params=backend_params,
-            pool_size=pool_size,
-        )
-
-    @classmethod
-    def help(cls) -> str:
-        return (
-            "Nixl store L2 adapter config fields:\n"
-            "- backend (str): Nixl storage backend, one of "
-            f"{_VALID_NIXL_BACKENDS} (required)\n"
-            "- backend_params (dict): backend-specific string key-value pairs "
-            "(optional, default {}). File-based backends require file_path. "
-            "Optional keys include 'use_direct_io' (default 'false') and "
-            "'file_size' (int, size in bytes of each storage file slot; "
-            "defaults to the L1 page size if not set).\n"
-            "- pool_size (int): number of storage descriptors to pre-allocate "
-            "(required, >0)"
-        )
-
-
-register_l2_adapter_type("nixl_store", NixlStoreL2AdapterConfig)
-
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------
 # Main config: list of adapter configs (order = adapter order)
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------
 
 
 @dataclass
@@ -371,3 +327,98 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
             raise ValueError(f"--l2-adapter #{i + 1} ({type_name!r}): {e}") from e
 
     return L2AdaptersConfig(adapters=adapter_configs)
+
+
+_VALID_NIXL_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ")
+_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+
+
+class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
+    """
+    Config for a Nixl-store-based L2 adapter.
+
+    Fields:
+    - backend: Nixl storage backend (GDS, GDS_MT, POSIX, HF3FS, OBJ).
+    - backend_params: Backend-specific parameters as a dict of string key-value
+      pairs. For file-based backends (GDS, GDS_MT, POSIX, HF3FS), must include
+      "file_path". May also include "use_direct_io" (default "false") and other
+      backend-specific keys.
+    - pool_size: Number of storage descriptors to pre-allocate (must be > 0).
+    """
+
+    def __init__(
+        self,
+        backend: str,
+        backend_params: dict[str, str],
+        pool_size: int,
+    ):
+        if backend in _FILE_BACKENDS:
+            if "file_path" not in backend_params:
+                raise ValueError(
+                    f"backend_params must include 'file_path' "
+                    f"for file-based backend {backend!r}"
+                )
+            if "use_direct_io" not in backend_params:
+                raise ValueError(
+                    f"backend_params must include 'use_direct_io' "
+                    f"for file-based backend {backend!r}"
+                )
+        self.backend = backend
+        self.backend_params = backend_params
+        self.pool_size = pool_size
+
+    @classmethod
+    def from_dict(cls, d: dict) -> NixlStoreL2AdapterConfig:
+        backend = d.get("backend")
+        if backend not in _VALID_NIXL_BACKENDS:
+            raise ValueError(
+                f"backend must be one of {_VALID_NIXL_BACKENDS}, got {backend!r}"
+            )
+
+        backend_params = d.get("backend_params", {})
+        if not isinstance(backend_params, dict):
+            raise ValueError("backend_params must be a dict of string key-value pairs")
+
+        pool_size = d.get("pool_size")
+        if not isinstance(pool_size, int) or pool_size <= 0:
+            raise ValueError("pool_size must be a positive integer")
+
+        return cls(
+            backend=backend,
+            backend_params=backend_params,
+            pool_size=pool_size,
+        )
+
+    @classmethod
+    def help(cls) -> str:
+        return (
+            "Nixl store L2 adapter config fields:\n"
+            "- backend (str): Nixl storage backend, one of "
+            f"{_VALID_NIXL_BACKENDS} (required)\n"
+            "- backend_params (dict): backend-specific string key-value pairs "
+            "(optional, default {}). File-based backends require file_path. "
+            "Optional keys include 'use_direct_io' (default 'false') and "
+            "'file_size' (int, size in bytes of each storage file slot; "
+            "defaults to the L1 page size if not set).\n"
+            "- pool_size (int): number of storage descriptors to pre-allocate "
+            "(required, >0)"
+        )
+
+
+register_l2_adapter_type("nixl_store", NixlStoreL2AdapterConfig)
+
+
+def _create_nixl_store_adapter(config: NixlStoreL2AdapterConfig, **kwargs: Any) -> Any:
+    """Lazy-import and create a NixlStoreL2Adapter."""
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (
+        NixlStoreL2Adapter,
+    )
+
+    l1_memory_desc = kwargs.get("l1_memory_desc")
+    if l1_memory_desc is None:
+        raise ValueError("l1_memory_desc is required to create a NixlStoreL2Adapter.")
+    return NixlStoreL2Adapter(config, l1_memory_desc)
+
+
+register_l2_adapter_factory("nixl_store", _create_nixl_store_adapter)
