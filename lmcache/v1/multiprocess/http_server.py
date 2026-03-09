@@ -102,13 +102,27 @@ async def healthcheck(request: Request):
             content={"status": "unhealthy", "reason": "engine not initialized"},
         )
 
-    if not engine.storage_manager.memcheck():
+    return {"status": "healthy"}
+
+
+@app.post("/api/clear-cache")
+async def clear_cache(request: Request):
+    """
+    Force-clear all KV cache data stored in L1 (CPU) memory.
+
+    This clears all objects including those with active read/write locks.
+    In-flight store or prefetch operations may be corrupted.
+    """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "reason": "memory check failed"},
+            content={"status": "error", "reason": "engine not initialized"},
         )
 
-    return {"status": "healthy"}
+    engine.clear()
+    logger.info("Cache cleared via HTTP API")
+    return {"status": "ok"}
 
 
 @app.get("/api/status")
