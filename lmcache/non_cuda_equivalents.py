@@ -7,7 +7,7 @@
 from enum import Enum, IntEnum
 from multiprocessing import shared_memory
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 import ctypes
 import ctypes.util
 import subprocess
@@ -32,7 +32,11 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
     global _copy_lib
     if _copy_lib is _copy_lib_NOT_LOADED:
         try:
-            _copy_lib = ctypes.CDLL("libcudart.so")
+            libcudart_path = ctypes.util.find_library("cudart")
+            if libcudart_path:
+                _copy_lib = ctypes.CDLL(libcudart_path)
+            else:
+                _copy_lib = ctypes.CDLL("libcudart.so")
         except OSError:
             _copy_lib = None
     return _copy_lib
@@ -125,7 +129,6 @@ def _tensor_from_cpu_ptr(
     """
     Zero-copy CPU tensor from a raw host pointer via ctypes + torch.frombuffer.
 
-    Works for both regular heap memory and CUDA-pinned host memory.
     """
     buffer_type = ctypes.c_uint8 * total_bytes
     buf = buffer_type.from_address(ptr)
@@ -176,7 +179,6 @@ def _tensor_from_cuda_ptr(
     # ------------------------------------------------------------------ #
     try:
         # Third Party
-        import numpy as np
 
         _DTYPE_TO_NUMPY: dict[torch.dtype, str] = {
             torch.float16: "float16",
@@ -190,19 +192,11 @@ def _tensor_from_cuda_ptr(
             torch.bool: "bool",
         }
         is_bf16 = dtype == torch.bfloat16
-        np_typestr = np.dtype("int16" if is_bf16 else _DTYPE_TO_NUMPY[dtype]).str
 
         class _CudaArrayWrapper:
             """Minimal __cuda_array_interface__ carrier."""
 
-            __cuda_array_interface__ = {
-                "data": (ptr, False),  # (pointer, read_only)
-                "shape": (numel,),
-                "strides": None,  # C-contiguous
-                "typestr": np_typestr,
-                "version": 3,
-                "stream": 1,  # legacy default stream (safe sentinel)
-            }
+            __cuda_array_interface__: Dict[str, Any] = {}
 
         t = torch.as_tensor(_CudaArrayWrapper(), device=device)
         if is_bf16:
@@ -216,17 +210,8 @@ def _tensor_from_cuda_ptr(
     # Used when neither internal API nor the array interface is available. #
     # ------------------------------------------------------------------ #
 
-    # Safely load libcudart with fallback mechanisms
-    libcudart_path = ctypes.util.find_library("cudart")
-    libcudart = None
-
-    try:
-        if libcudart_path:
-            libcudart = ctypes.CDLL(libcudart_path)
-        else:
-            libcudart = ctypes.CDLL("libcudart.so")
-    except OSError:
-        pass
+    # load libcudart with fallback mechanisms
+    libcudart = _get_copy_lib()
 
     if libcudart is None:
         raise RuntimeError(
@@ -304,25 +289,24 @@ class GPUKVFormat(IntEnum):
     NL_X_NBBS_ONE_HS = 5
 
 
-def _alloc_cpu_ptr(size: int) -> int:
-    """Allocate a zeroed CPU tensor and register it; return its data pointer."""
-    # Create a zeroed 1D uint8 CPU tensor (uint8 == 1 byte)
-    tensor = torch.zeros(size, dtype=torch.uint8, pin_memory=False)
+def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
+    """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
+    Note: NUMA and pinned memory are not supported on non-CUDA."""
+
+    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+
+    # First-touch initialization (forces physical allocation)
+    tensor.fill_(0)
 
     # Get a pointer to the start of the tensor object as this is what is
     # returned by the CUDA equivalent function
     ptr = tensor.data_ptr()
 
-    # Store the tensor so it can be accessed outside this function scope
+    # Store the tensor so it can be accessed outide this function scope
     _tensor_registry[ptr] = tensor
 
     return ptr
-
-
-def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
-    """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
-    Note: NUMA and pinned memory are not supported on non-CUDA."""
-    return _alloc_cpu_ptr(size)
 
 
 def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
@@ -334,13 +318,22 @@ def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
 
 def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory and returning pointer
-    to it. Note: Pinned memory is not supported on non-CUDA.
+    to it. Note: Pinned memory is not supported on non-CUDA."""
 
-    Args:
-        size: Number of bytes to allocate.
-        flags: Allocation flags (ignored in non-CUDA implementation).
-    """
-    return _alloc_cpu_ptr(size)
+    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+
+    # First-touch initialization (forces physical allocation)
+    tensor.fill_(0)
+
+    # Get a pointer to the start of the tensor object as this is what is
+    # returned by the CUDA equivalent function
+    ptr = tensor.data_ptr()
+
+    # Store the tensor so it can be accessed outide this function scope
+    _tensor_registry[ptr] = tensor
+
+    return ptr
 
 
 def free_pinned_ptr(ptr: int) -> None:
@@ -363,7 +356,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
             stale = shared_memory.SharedMemory(name=name, create=False)
             stale.close()
             stale.unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
 
     shm = shared_memory.SharedMemory(name=name, create=True, size=size)
@@ -415,10 +408,7 @@ def multi_layer_kv_transfer(
     block_size: int,
 ):
     """
-    Python fallback for multi_layer_kv_transfer (csrc/mem_kernels.cu L524-L548).
-
-    Mirrors the CUDA kernel `load_and_reshape_multi_layer_kernel` which uses
-    `page_buffer_offset<format>()` and `key_value_offset()` for addressing.
+    Python fallback for multi_layer_kv_transfer.
 
     key_value layout:
         - Standard: [2, num_layers, num_tokens, hidden_size]
@@ -552,7 +542,7 @@ def multi_layer_kv_transfer_unilateral(
     gpu_kv_format: GPUKVFormat,
 ):
     """
-    Python fallback for multi_layer_kv_transfer_unilateral (mem_kernels.cu L576-L628).
+    Python fallback for multi_layer_kv_transfer_unilateral
 
     Handles SGLang MHA format where K and V paged buffers are stored separately:
         ptrs = [K_layer0, K_layer1, ..., V_layer0, V_layer1, ...]
@@ -645,7 +635,7 @@ def single_layer_kv_transfer(
     token_major: bool,
 ):
     """
-    Python fallback for single_layer_kv_transfer (mem_kernels.cu L630-L749).
+    Python fallback for single_layer_kv_transfer
 
     Transfers KV data between LMCache buffer
     and a single vLLM paged KV cache layer.
