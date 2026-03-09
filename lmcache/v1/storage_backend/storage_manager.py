@@ -313,6 +313,8 @@ class StorageManager:
     ) -> AllocatorBackendInterface:
         if self.enable_pd:
             allocator_backend = self.storage_backends["PDBackend"]
+        elif "dax" in self.storage_backends and config.extra_config.get("dax.mode") == "primary":
+            allocator_backend = self.storage_backends["dax"]
         else:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
         assert isinstance(allocator_backend, AllocatorBackendInterface)

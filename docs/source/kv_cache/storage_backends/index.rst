@@ -11,6 +11,7 @@ Supported Backends
 
    cpu_ram
    custom_backend
+   dax
    eic
    gds
    infinistore
