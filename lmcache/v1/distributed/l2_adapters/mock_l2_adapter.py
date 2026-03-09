@@ -212,6 +212,18 @@ class MockL2Adapter(L2AdapterInterface):
     # Debug / test-only functions
     ##################
 
+    def report_status(self) -> dict:
+        """Return a status dict for the mock L2 adapter."""
+        with self._lock:
+            return {
+                "is_healthy": True,
+                "type": "MockL2Adapter",
+                "stored_object_count": len(self._memory_objects),
+                "locked_key_count": len(self._locked_keys),
+                "current_size_bytes": self._current_size_bytes,
+                "max_capacity_bytes": self._max_capacity_bytes,
+            }
+
     def debug_get_stored_object_count(self) -> int:
         """
         Return the number of objects currently stored in the mock adapter.
