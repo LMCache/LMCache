@@ -90,9 +90,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Submit a prefix lookup and return a prefetch job ID
         # Payload:
         #   - key: KeyType - Cache key to look up
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
         # Returns: int - Prefetch job ID for polling via QUERY_PREFETCH_STATUS
         "LOOKUP": ProtocolDefinition(
-            payload_classes=[KeyType],
+            payload_classes=[KeyType, int],
             response_class=int,
             handler_type=HandlerType.BLOCKING,
         ),
@@ -107,10 +109,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         # Free locks (release read locks without a full RETRIEVE)
         # Payload:
-        #   - keys: list[KeyType] - Cache keys whose read locks to release
+        #   - key: KeyType - Cache key whose read locks
+        #       to release
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
         # Returns: None
         "FREE_LOOKUP_LOCKS": ProtocolDefinition(
-            payload_classes=[KeyType],
+            payload_classes=[KeyType, int],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),

@@ -1316,7 +1316,7 @@ def test_cb_store_final_then_normal_lookup_retrieve(
     # Phase 1: Get prefetch job ID
     job_id = client.submit_request(
         RequestType.LOOKUP,
-        [lookup_key],
+        [lookup_key, 1],
         get_response_class(RequestType.LOOKUP),
     ).result(timeout=DEFAULT_TIMEOUT)
 

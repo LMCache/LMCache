@@ -104,6 +104,7 @@ class LMCacheMPSchedulerAdapter:
         world_size: int,
         kv_rank: int,
         vllm_block_size: int,
+        tp_size: int = 1,
     ):
         """
         Args:
@@ -114,6 +115,8 @@ class LMCacheMPSchedulerAdapter:
             world_size: The world size used for LMCache keys
             kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
+            tp_size: Tensor-parallel size for MLA
+                multi-reader locking (default 1).
         """
         self.mq_client = MessageQueueClient(server_url, context)
 
@@ -122,6 +125,7 @@ class LMCacheMPSchedulerAdapter:
 
         self.model_name = model_name
         self.world_size = world_size
+        self.tp_size = tp_size
 
         # Read chunk size from lmcache
         self.chunk_size = get_lmcache_chunk_size(self.mq_client)
@@ -174,7 +178,7 @@ class LMCacheMPSchedulerAdapter:
         future = send_lmcache_request(
             self.mq_client,
             RequestType.LOOKUP,
-            [key],
+            [key, self.tp_size],
         )
         job_id = future.result()
         self._lookup_job_ids[request_id] = job_id
@@ -260,7 +264,7 @@ class LMCacheMPSchedulerAdapter:
         send_lmcache_request(
             self.mq_client,
             RequestType.FREE_LOOKUP_LOCKS,
-            [key],
+            [key, self.tp_size],
         )
 
     def end_session(self, request_id: str) -> None:

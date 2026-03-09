@@ -234,14 +234,16 @@ class StorageManager:
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
+        extra_count: int = 0,
     ) -> None:
-        """
-        Finish reading of the prefetched objects, releasing their read locks.
+        """Finish reading prefetched objects.
 
         Args:
-            keys (list[ObjectKey]): List of object keys that have been read.
+            keys: Object keys that have been read.
+            extra_count: Extra read locks to release per key
+                (on top of the default 1).
         """
-        finish_result = self._l1_manager.finish_read(keys)
+        finish_result = self._l1_manager.finish_read(keys, extra_count=extra_count)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         for listener in self._registered_listeners:
@@ -251,21 +253,24 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
+        extra_count: int = 0,
     ) -> PrefetchHandle:
-        """
-        Prefetch the objects into L1 memory asynchronously. The prefetched object
-        will be added with read locks.
+        """Prefetch objects into L1 asynchronously.
 
         Args:
-            keys (list[ObjectKey]): List of object keys to prefetch.
+            keys: Object keys to prefetch.
+            layout_desc: Memory layout description.
+            extra_count: Extra workers (on top of the default
+                1) that will independently retrieve the same
+                key.  Total locks = 1 + extra_count.
 
         Returns:
-            PrefetchHandle: A handle to track the prefetch task.
+            PrefetchHandle to track the task.
         """
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
-        l1_read_result = self._l1_manager.reserve_read(keys)
+        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
         hit_count = 0
         for key in keys:
             entry = l1_read_result.get(key, None)
@@ -288,7 +293,7 @@ class StorageManager:
                 skipped_keys.append(key)
 
         if skipped_keys:
-            self._l1_manager.finish_read(skipped_keys)
+            self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
 
         for listener in self._registered_listeners:
             listener.on_sm_read_prefetched(keys[:hit_count], keys[hit_count:])

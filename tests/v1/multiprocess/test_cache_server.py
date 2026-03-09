@@ -164,7 +164,7 @@ def lookup_all(
         # Phase 1: Get prefetch job ID
         job_id = client.submit_request(
             RequestType.LOOKUP,
-            [lookup_key],
+            [lookup_key, 1],
             get_response_class(RequestType.LOOKUP),
         ).result(timeout=timeout)
         # Phase 2: Poll until done
