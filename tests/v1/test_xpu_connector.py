@@ -27,6 +27,15 @@ def _make_unique_slot_mapping(
     # Unique indices avoids overwriting the same slot multiple times.
     return torch.randperm(total_slots, device=device, dtype=torch.int64)[:num_tokens]
 
+
+def _pack_slot_mapping(
+    slot_mapping: torch.Tensor, starts: list[int], ends: list[int]
+) -> torch.Tensor:
+    return torch.cat(
+        [slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)],
+        dim=0,
+    )
+
 @pytest.mark.parametrize("use_gpu", [False, True])
 def test_xpu_connector_roundtrip_non_layerwise(use_gpu: bool):
     _skip_if_no_xpu()
@@ -227,4 +236,214 @@ def test_xpu_connector_roundtrip_layerwise(use_gpu: bool):
         for layer in memobjs_by_layer:
             for m in layer:
                 m.ref_count_down()
+        pin_alloc.close()
+
+
+@pytest.mark.parametrize("use_gpu", [False, True])
+def test_xpu_connector_roundtrip_non_layerwise_multi_chunk(
+    use_gpu: bool,
+) -> None:
+    _skip_if_no_xpu()
+    device = torch.device("xpu:0")
+
+    num_layers = 2
+    num_blocks = 6
+    block_size = 8
+    head_size = 64
+    total_tokens = 32
+
+    starts = [0, 7, 19]
+    ends = [4, 13, 25]
+
+    kvcaches = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_layers=num_layers,
+        head_size=head_size,
+        device=device,
+    )
+    _, _, num_heads_actual, head_size_actual = kvcaches[0][0].shape
+    hidden_dim_actual = num_heads_actual * head_size_actual
+
+    slot_mapping = _make_unique_slot_mapping(
+        total_slots=num_blocks * block_size,
+        num_tokens=total_tokens,
+        device=device,
+    )
+    packed_slot_mapping = _pack_slot_mapping(slot_mapping, starts, ends)
+
+    meta = LMCacheMetadata(
+        model_name="xpu_test_non_layerwise_multi_chunk",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(num_layers, 2, total_tokens, num_heads_actual, head_size_actual),
+    )
+    conn = VLLMPagedMemXPUConnectorV2.from_metadata(
+        meta,
+        use_gpu=use_gpu,
+        device=device,
+    )
+
+    pin_alloc = PinMemoryAllocator(size=1024 * 1024 * 64)
+    memobjs = []
+    try:
+        for s, e in zip(starts, ends, strict=False):
+            n = e - s
+            memobj = pin_alloc.allocate(
+                torch.Size([2, num_layers, n, hidden_dim_actual]),
+                torch.bfloat16,
+                MemoryFormat.KV_2LTD,
+            )
+            conn.from_gpu(
+                memobj,
+                start=s,
+                end=e,
+                slot_mapping=slot_mapping,
+                kvcaches=kvcaches,
+            )
+            memobjs.append((s, e, memobj))
+
+        kvcaches_dst = generate_kv_cache_paged_list_tensors(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_layers=num_layers,
+            head_size=head_size_actual,
+            device=device,
+        )
+        for layer in kvcaches_dst:
+            layer.zero_()
+
+        for s, e, memobj in memobjs:
+            conn.to_gpu(
+                memobj,
+                start=s,
+                end=e,
+                slot_mapping=slot_mapping,
+                kvcaches=kvcaches_dst,
+            )
+
+        check_paged_kv_cache_equal(
+            kvcaches,
+            kvcaches_dst,
+            packed_slot_mapping,
+            num_heads=num_heads_actual,
+            head_size=head_size_actual,
+        )
+    finally:
+        for _, _, memobj in memobjs:
+            memobj.ref_count_down()
+        pin_alloc.close()
+
+
+def test_xpu_connector_roundtrip_layerwise_multi_chunk_use_gpu_true() -> None:
+    _skip_if_no_xpu()
+    device = torch.device("xpu:0")
+
+    num_layers = 4
+    num_blocks = 8
+    block_size = 8
+    head_size = 64
+    total_tokens = 40
+
+    starts = [0, 9, 21]
+    ends = [5, 15, 30]
+
+    kvcaches = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_layers=num_layers,
+        head_size=head_size,
+        device=device,
+    )
+
+    _, _, num_heads_actual, head_size_actual = kvcaches[0][0].shape
+    hidden_dim_actual = num_heads_actual * head_size_actual
+
+    slot_mapping = _make_unique_slot_mapping(
+        total_slots=num_blocks * block_size,
+        num_tokens=total_tokens,
+        device=device,
+    )
+    packed_slot_mapping = _pack_slot_mapping(slot_mapping, starts, ends)
+
+    meta = LMCacheMetadata(
+        model_name="xpu_test_layerwise_multi_chunk_gpu",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(num_layers, 2, total_tokens, num_heads_actual, head_size_actual),
+    )
+    conn = VLLMPagedMemLayerwiseXPUConnector.from_metadata(
+        meta,
+        use_gpu=True,
+        device=device,
+    )
+
+    pin_alloc = PinMemoryAllocator(size=1024 * 1024 * 128)
+    memobjs_by_layer = []
+    for _ in range(num_layers):
+        per_layer = []
+        for s, e in zip(starts, ends, strict=False):
+            n = e - s
+            per_layer.append(
+                pin_alloc.allocate(
+                    torch.Size([n, 2, hidden_dim_actual]),
+                    torch.bfloat16,
+                    MemoryFormat.KV_T2D,
+                )
+            )
+        memobjs_by_layer.append(per_layer)
+
+    try:
+        producer = conn.batched_from_gpu(
+            memobjs_by_layer,
+            starts=starts,
+            ends=ends,
+            slot_mapping=slot_mapping,
+            sync=True,
+            kvcaches=kvcaches,
+        )
+        for _ in range(num_layers + 1):
+            next(producer)
+
+        assert conn.gpu_buffer_allocator is not None
+
+        kvcaches_dst = generate_kv_cache_paged_list_tensors(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_layers=num_layers,
+            head_size=head_size_actual,
+            device=device,
+        )
+        for layer in kvcaches_dst:
+            layer.zero_()
+
+        consumer = conn.batched_to_gpu(
+            starts=starts,
+            ends=ends,
+            slot_mapping=slot_mapping,
+            sync=True,
+            kvcaches=kvcaches_dst,
+        )
+        next(consumer)
+        for layer_id in range(num_layers):
+            consumer.send(memobjs_by_layer[layer_id])
+        next(consumer)
+
+        check_paged_kv_cache_equal(
+            kvcaches,
+            kvcaches_dst,
+            packed_slot_mapping,
+            num_heads=num_heads_actual,
+            head_size=head_size_actual,
+        )
+    finally:
+        for layer in memobjs_by_layer:
+            for memobj in layer:
+                memobj.ref_count_down()
         pin_alloc.close()
