@@ -861,8 +861,6 @@ class LMCacheEngine:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
                 self.storage_manager.remove(key, self.retrieve_locations)
-            memory_obj.ref_count_down()
-                self.storage_manager.remove(key)
             if not self.async_loading:
                 memory_obj.ref_count_down()
 
