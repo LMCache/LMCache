@@ -30,7 +30,7 @@ def device_sync(device: str) -> None:
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             torch.xpu.synchronize()
     else:
-        # Todo: add more GPU devices
+        # TODO: add more device here
         pass
     # CPU requires no synchronization
 
@@ -195,108 +195,114 @@ def scenario_rotary_embedding_k_fused(ops: Any, device: str) -> dict[str, torch.
 
 
 def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tensor]:
-    """Test lmcache_memcpy_async for H2D and D2H memory transfers."""
+    """Test lmcache_memcpy_async for H2D and D2H memory transfers.
+
+    Tests both pointer mode (int pointers) and tensor mode (torch.Tensor objects).
+    Uses pointer mode for CPU/CUDA devices and tensor mode for other devices.
+
+    Exercises multiple boundary conditions to verify correct behaviour for
+    both the CUDA c_ops backend (which chunks at alignment boundaries via
+    cudaMemcpyAsync) and the Python fallback backend (which issues a single
+    synchronous copy):
+      - copy spanning exactly one aligned block
+      - copy entirely within one aligned block (no boundary crossing)
+      - copy crossing a single alignment boundary
+      - copy crossing multiple alignment boundaries
+      - copy starting exactly at an alignment boundary
+      - copy with an unaligned start offset crossing many boundaries
+    Both H2D and D2H directions are verified for each boundary condition.
+    """
     torch.manual_seed(42)
 
-    # 1. Setup dimensions and mock data (4KB)
-    nbytes = 1024 * 4
-    src_host = torch.randint(1, 255, (nbytes,), dtype=torch.uint8)
-    gpu_buffer = torch.zeros(nbytes, dtype=torch.uint8, device=device)
+    # Buffer large enough for all boundary test cases (max offset+nbytes = 16+200 = 216)
+    buf_size = 256
+    alignment = 64  # boundary interval in bytes (must be a power of two)
+
+    src_host = torch.randint(0, 256, (buf_size,), dtype=torch.uint8)
+    gpu_buffer = torch.zeros(buf_size, dtype=torch.uint8, device=device)
 
     if torch.cuda.is_available():
-        dst_host = torch.empty(nbytes, dtype=torch.uint8).pin_memory()
+        dst_host = torch.zeros(buf_size, dtype=torch.uint8).pin_memory()
     else:
-        dst_host = torch.zeros(nbytes, dtype=torch.uint8)
+        dst_host = torch.zeros(buf_size, dtype=torch.uint8)
 
     h2d_dir = ops.TransferDirection.H2D
     d2h_dir = ops.TransferDirection.D2H
 
-    # --- PART A: H2D (Host to Device) ---
-    ops.lmcache_memcpy_async(
-        gpu_buffer.data_ptr(),
-        src_host.data_ptr(),
-        nbytes,
-        h2d_dir,
-        0,
-        16,
-    )
+    # Tensor mode for non-CUDA/CPU devices (e.g., XPU, HPU)
+    use_tensor_mode = device not in ("cpu", "cuda")
 
-    device_sync(device)
+    # (host_buffer_offset, nbytes) boundary test cases:
+    #   (0,  64): exactly one aligned block from the start
+    #   (32, 32): entirely within one block, no boundary crossing
+    #   (32, 64): crosses one boundary — [32..64) then [64..96)
+    #   (0, 192): three full aligned blocks (boundaries at 64 and 128)
+    #   (64, 128): starts at alignment boundary, spans two full blocks
+    #   (16, 200): unaligned start, crosses multiple boundaries
+    test_cases = [
+        (0, 64),
+        (32, 32),
+        (32, 64),
+        (0, 192),
+        (64, 128),
+        (16, 200),
+    ]
 
-    # --- PART B: D2H (Device to Host) ---
-    ops.lmcache_memcpy_async(
-        dst_host.data_ptr(),
-        gpu_buffer.data_ptr(),
-        nbytes,
-        d2h_dir,
-        0,
-        16,
-    )
+    all_results: list[torch.Tensor] = []
 
-    device_sync(device)
+    for offset, nbytes in test_cases:
+        gpu_buffer.zero_()
+        dst_host.zero_()
+        expected = src_host[offset : offset + nbytes].clone()
 
-    # 3. Internal sanity check
-    final_result = dst_host.cpu()
-    assert torch.equal(final_result, src_host), (
-        f"Data corrupted during H2D→D2H loop, "
-        f"max diff = {(final_result.float() - src_host.float()).abs().max().item()}"
-    )
+        if use_tensor_mode:
+            ops.lmcache_memcpy_async(
+                gpu_buffer[offset : offset + nbytes],
+                src_host[offset : offset + nbytes],
+                nbytes,
+                h2d_dir,
+                offset,
+                alignment,
+            )
+            device_sync(device)
+            ops.lmcache_memcpy_async(
+                dst_host[offset : offset + nbytes],
+                gpu_buffer[offset : offset + nbytes],
+                nbytes,
+                d2h_dir,
+                offset,
+                alignment,
+            )
+        else:
+            ops.lmcache_memcpy_async(
+                gpu_buffer.data_ptr() + offset,
+                src_host.data_ptr() + offset,
+                nbytes,
+                h2d_dir,
+                offset,
+                alignment,
+            )
+            device_sync(device)
+            ops.lmcache_memcpy_async(
+                dst_host.data_ptr() + offset,
+                gpu_buffer.data_ptr() + offset,
+                nbytes,
+                d2h_dir,
+                offset,
+                alignment,
+            )
 
-    return {"lmcache_memcpy_async": final_result}
+        device_sync(device)
 
-
-def scenario_lmcache_memcpy_async_alignment(
-    ops: Any, device: str
-) -> dict[str, torch.Tensor] | None:
-    """Validate host-buffer alignment chunking mirrors C++ split logic."""
-    if not hasattr(ops, "_copy_bytes_with_tensor"):
-        pytest.skip("Chunk inspection only applies to Python fallback backend")
-
-    torch.manual_seed(0)
-
-    nbytes = 200
-    host_buffer_offset = 32
-    host_buffer_alignments = 64
-
-    src = torch.arange(nbytes, dtype=torch.uint8)
-    dst = torch.zeros_like(src)
-
-    chunk_sizes: list[int] = []
-    original_copy = ops._copy_bytes_with_tensor
-
-    def tracking_copy(dest_ptr: int, src_ptr: int, num_bytes: int) -> None:
-        chunk_sizes.append(int(num_bytes))
-        original_copy(dest_ptr, src_ptr, num_bytes)
-
-    with (
-        unittest.mock.patch.object(ops, "_get_copy_lib", return_value=None),
-        unittest.mock.patch.object(
-            ops, "_copy_bytes_with_tensor", side_effect=tracking_copy
-        ),
-    ):
-        ops.lmcache_memcpy_async(
-            dst.data_ptr(),
-            src.data_ptr(),
-            nbytes,
-            ops.TransferDirection.H2D,
-            host_buffer_offset,
-            host_buffer_alignments,
+        result = dst_host[offset : offset + nbytes].cpu()
+        assert torch.equal(result, expected), (
+            f"Boundary test (offset={offset}, nbytes={nbytes}, alignment={alignment}): "
+            f"data corrupted, max diff = "
+            f"{(result.float() - expected.float()).abs().max().item()}"
         )
+        all_results.append(result)
 
-    assert torch.equal(dst, src), (
-        "Data copy should preserve contents with alignment splitting"
-    )
-
-    expected_chunks = [32, 64, 64, 40]
-    assert chunk_sizes == expected_chunks, (
-        f"Chunk sizes {chunk_sizes} did not match expected {expected_chunks}"
-    )
-
-    return {
-        "lmcache_memcpy_async_alignment": torch.tensor(
-            expected_chunks, dtype=torch.int64
-        )
-    }
+    return {"lmcache_memcpy_async": torch.cat(all_results)}
 
 
 def scenario_load_and_reshape_flash(ops: Any, device: str) -> dict[str, torch.Tensor]:
@@ -1111,7 +1117,11 @@ def scenario_single_layer_kv_transfer_sgl(
 
 
 def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.Tensor]:
-    """Test multi_layer_kv_transfer for multiple paged KV formats and directions."""
+    """Test multi_layer_kv_transfer for multiple paged KV formats and directions.
+
+    Tests both pointer mode (torch.Tensor of int64 pointers) and tensor list mode
+    (list[torch.Tensor]) for key_value_ptrs.
+    """
     torch.manual_seed(42)
 
     num_layers = 2
@@ -1136,6 +1146,10 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
         (ops.GPUKVFormat.NL_X_NB_BS_HS, True, 1),  # vLLM MLA
         (ops.GPUKVFormat.NL_X_NBBS_ONE_HS, True, 1),  # SGLang MLA
     ]
+
+    # Decide mode based on device: use pointer mode for CPU/CUDA
+    # tensor list mode for others
+    use_tensor_list = device not in ("cpu", "cuda")
 
     for gpu_kv_format, is_mla, bs_arg in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1205,12 +1219,17 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
 
                 page_buffers.append(pb)
 
-            # ── 3. Pointer Tensor ──
-            key_value_ptrs = torch.tensor(
-                [pb.data_ptr() for pb in page_buffers],
-                dtype=torch.int64,
-                device=device,
-            )
+            # ── 3. Prepare key_value_ptrs (pointer mode or tensor list mode) ──
+            if use_tensor_list:
+                # Tensor list mode: pass the tensor objects directly
+                key_value_ptrs = page_buffers
+            else:
+                # Pointer mode: create tensor of int64 pointers
+                key_value_ptrs = torch.tensor(
+                    [pb.data_ptr() for pb in page_buffers],
+                    dtype=torch.int64,
+                    device=device,
+                )
 
             # ── 4. Execute ──
             xfer_dir = (
@@ -1249,7 +1268,8 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                             lmc_val,
                             paged_val,
                             msg=(
-                                f"Mismatch: {fmt_name} {dir_tag}, "
+                                f"Mismatch: {fmt_name} {dir_tag} "
+                                f"(tensor_list={use_tensor_list}), "
                                 f"kv={kv}, layer={ly}, token={t_id}"
                             ),
                         )
@@ -1288,11 +1308,14 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                     pb[1, s] = val + 700
             page_buffers.append(pb)
 
-        key_value_ptrs = torch.tensor(
-            [pb.data_ptr() for pb in page_buffers],
-            dtype=torch.int64,
-            device=device,
-        )
+        if use_tensor_list:
+            key_value_ptrs = page_buffers
+        else:
+            key_value_ptrs = torch.tensor(
+                [pb.data_ptr() for pb in page_buffers],
+                dtype=torch.int64,
+                device=device,
+            )
 
         xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
         ops.multi_layer_kv_transfer(
@@ -1315,7 +1338,11 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
 def scenario_multi_layer_kv_transfer_unilateral(
     ops: Any, device: str
 ) -> dict[str, torch.Tensor]:
-    """Test multi_layer_kv_transfer_unilateral for non-interleaved K/V pointers."""
+    """Test multi_layer_kv_transfer_unilateral for non-interleaved K/V pointers.
+
+    Tests both pointer mode (torch.Tensor of int64 pointers) and tensor list mode
+    (list[torch.Tensor]) for key_value_ptrs.
+    """
     torch.manual_seed(42)
 
     num_layers = 2
@@ -1342,6 +1369,10 @@ def scenario_multi_layer_kv_transfer_unilateral(
             True,
         ),  # SGLang MLA (delegates to multi_layer_kv_transfer)
     ]
+
+    # Decide mode based on device: use pointer mode for CPU/CUDA
+    # tensor list mode for others
+    use_tensor_list = device not in ("cpu", "cuda")
 
     for gpu_kv_format, is_mla in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1386,11 +1417,14 @@ def scenario_multi_layer_kv_transfer_unilateral(
                             pb[s] = val
                     page_buffers.append(pb)
 
-                key_value_ptrs = torch.tensor(
-                    [pb.data_ptr() for pb in page_buffers],
-                    dtype=torch.int64,
-                    device=device,
-                )
+                if use_tensor_list:
+                    key_value_ptrs = page_buffers
+                else:
+                    key_value_ptrs = torch.tensor(
+                        [pb.data_ptr() for pb in page_buffers],
+                        dtype=torch.int64,
+                        device=device,
+                    )
             else:
                 # Non-MLA unilateral: separate K/V buffers
                 # ptrs: [K_l0, K_l1, ..., V_l0, V_l1, ...]
@@ -1414,17 +1448,27 @@ def scenario_multi_layer_kv_transfer_unilateral(
                                 pb[s] = val
                         buffers[(kv, ly)] = pb
 
-                ptr_list = []
-                for ly in range(num_layers):
-                    ptr_list.append(buffers[(0, ly)].data_ptr())
-                for ly in range(num_layers):
-                    ptr_list.append(buffers[(1, ly)].data_ptr())
+                if use_tensor_list:
+                    # Tensor list mode: [K_l0, K_l1, ..., V_l0, V_l1, ...]
+                    tensor_list = []
+                    for ly in range(num_layers):
+                        tensor_list.append(buffers[(0, ly)])
+                    for ly in range(num_layers):
+                        tensor_list.append(buffers[(1, ly)])
+                    key_value_ptrs = tensor_list
+                else:
+                    # Pointer mode
+                    ptr_list = []
+                    for ly in range(num_layers):
+                        ptr_list.append(buffers[(0, ly)].data_ptr())
+                    for ly in range(num_layers):
+                        ptr_list.append(buffers[(1, ly)].data_ptr())
 
-                key_value_ptrs = torch.tensor(
-                    ptr_list,
-                    dtype=torch.int64,
-                    device=device,
-                ).contiguous()
+                    key_value_ptrs = torch.tensor(
+                        ptr_list,
+                        dtype=torch.int64,
+                        device=device,
+                    ).contiguous()
 
             # ── 3. Execute ──
             xfer_dir = (
@@ -1457,7 +1501,8 @@ def scenario_multi_layer_kv_transfer_unilateral(
                             lmc_val,
                             paged_val,
                             msg=(
-                                f"Mismatch: {gpu_kv_format} {dir_tag}, "
+                                f"Mismatch: {gpu_kv_format} {dir_tag} "
+                                f"(tensor_list={use_tensor_list}), "
                                 f"KV={kv}, layer={ly}, "
                                 f"token={t_id}, slot={s_idx}"
                             ),
@@ -1503,17 +1548,25 @@ def scenario_multi_layer_kv_transfer_unilateral(
                         pb[s] = val
                 buffers[(kv, ly)] = pb
 
-        ptr_list = []
-        for ly in range(num_layers):
-            ptr_list.append(buffers[(0, ly)].data_ptr())
-        for ly in range(num_layers):
-            ptr_list.append(buffers[(1, ly)].data_ptr())
-
-        key_value_ptrs = torch.tensor(
-            ptr_list,
-            dtype=torch.int64,
-            device=device,
-        ).contiguous()
+        if use_tensor_list:
+            # Tensor list mode: [K_l0, K_l1, ..., V_l0, V_l1, ...]
+            tensor_list = []
+            for ly in range(num_layers):
+                tensor_list.append(buffers[(0, ly)])
+            for ly in range(num_layers):
+                tensor_list.append(buffers[(1, ly)])
+            key_value_ptrs = tensor_list
+        else:
+            ptr_list = []
+            for ly in range(num_layers):
+                ptr_list.append(buffers[(0, ly)].data_ptr())
+            for ly in range(num_layers):
+                ptr_list.append(buffers[(1, ly)].data_ptr())
+            key_value_ptrs = torch.tensor(
+                ptr_list,
+                dtype=torch.int64,
+                device=device,
+            ).contiguous()
 
         xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
         ops.multi_layer_kv_transfer_unilateral(
@@ -1631,14 +1684,13 @@ def scenario_transfer_direction_enum(ops: Any, device: str) -> dict[str, torch.T
 # cover pybind list in csrc/pybind.cpp
 SCENARIO_REGISTRY = {
     "transfer_direction_enum": scenario_transfer_direction_enum,
-    #    "multi_layer_kv_transfer": scenario_multi_layer_kv_transfer,
-    # "multi_layer_kv_transfer_unilateral": scenario_multi_layer_kv_transfer_unilateral,
+    "multi_layer_kv_transfer": scenario_multi_layer_kv_transfer,
+    "multi_layer_kv_transfer_unilateral": scenario_multi_layer_kv_transfer_unilateral,
     "single_layer_kv_transfer": scenario_single_layer_kv_transfer,
     "single_layer_kv_transfer_sgl": scenario_single_layer_kv_transfer_sgl,
     "load_and_reshape_flash": scenario_load_and_reshape_flash,
     "reshape_and_cache_back_flash": scenario_reshape_and_cache_back_flash,
     "lmcache_memcpy_async": scenario_lmcache_memcpy_async,
-    "lmcache_memcpy_async_alignment": scenario_lmcache_memcpy_async_alignment,
     "encode_fast_new": scenario_encode_fast_new,
     "decode_fast_new": scenario_decode_fast_new,
     "decode_fast_prefsum": scenario_decode_fast_prefsum,

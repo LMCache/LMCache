@@ -9,6 +9,7 @@ from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Optional
 import ctypes
+import ctypes.util
 import subprocess
 
 # Third Party
@@ -38,23 +39,237 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
 
 
 def _tensor_from_ptr(
-    ptr: int, shape: tuple[int, ...], dtype: torch.dtype
+    ptr: int,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Create a CPU tensor view over a raw pointer."""
+    """
+    Create a tensor view over a raw pointer (zero-copy where possible).
+
+    Supports both CPU (pinned or regular) and CUDA device pointers.
+
+    Args:
+        ptr:    Raw memory pointer as int (must be non-zero).
+        shape:  Desired tensor shape.
+        dtype:  Desired tensor dtype, must match the memory layout.
+        device: Where the pointer lives.
+                - None / "cpu" / torch.device("cpu")  → CPU pointer
+                - "cuda" / "cuda:N" / torch.device("cuda", N) → CUDA pointer
+                  If None and ptr looks like a CUDA ptr, pass device explicitly.
+
+    Returns:
+        A tensor that shares memory with the original pointer.
+        For CPU: always zero-copy via ctypes + torch.frombuffer.
+        For CUDA: zero-copy via torch._C._construct_storage_from_data_pointer
+                  (PyTorch >= 2.0) or __cuda_array_interface__, with a
+                  cudaMemcpy D2D fallback.
+
+    Raises:
+        ValueError: if ptr is 0.
+
+    Warning:
+        The caller is responsible for keeping the underlying memory alive
+        for the entire lifetime of the returned tensor.
+    """
     if ptr == 0:
         raise ValueError("Pointer must be non-zero")
+
+    # ------------------------------------------------------------------ #
+    # Normalise device                                                   #
+    # ------------------------------------------------------------------ #
+    if device is None:
+        device = torch.device("cpu")
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    assert isinstance(device, torch.device)
+    # ------------------------------------------------------------------ #
+    # Compute size                                                       #
+    # ------------------------------------------------------------------ #
     numel = 1
     for dim in shape:
         numel *= int(dim)
     element_size = torch.empty((), dtype=dtype).element_size()
     total_bytes = numel * element_size
+
+    # ------------------------------------------------------------------ #
+    # CPU path                                                           #
+    # ------------------------------------------------------------------ #
+    if device.type == "cpu":
+        return _tensor_from_cpu_ptr(ptr, shape, dtype, numel, total_bytes)
+
+    # ------------------------------------------------------------------ #
+    # CUDA path                                                          #
+    # ------------------------------------------------------------------ #
+    if device.type == "cuda":
+        return _tensor_from_cuda_ptr(ptr, shape, dtype, device, numel, total_bytes)
+
+    raise ValueError(
+        f"Unsupported device type: {device.type!r}. Expected 'cpu' or 'cuda'."
+    )
+
+
+# ====================================================================== #
+#  CPU implementation                                                    #
+# ====================================================================== #
+
+
+def _tensor_from_cpu_ptr(
+    ptr: int,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    numel: int,
+    total_bytes: int,
+) -> torch.Tensor:
+    """
+    Zero-copy CPU tensor from a raw host pointer via ctypes + torch.frombuffer.
+
+    Works for both regular heap memory and CUDA-pinned host memory.
+    """
     buffer_type = ctypes.c_uint8 * total_bytes
     buf = buffer_type.from_address(ptr)
+    # torch.frombuffer is zero-copy for contiguous byte buffers on CPU.
     return torch.frombuffer(buf, dtype=dtype).view(*shape)
 
 
+# ====================================================================== #
+#  CUDA implementation                                                   #
+# ====================================================================== #
+
+
+def _tensor_from_cuda_ptr(
+    ptr: int,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    numel: int,
+    total_bytes: int,
+) -> torch.Tensor:
+    """
+    Zero-copy CUDA tensor from a raw device pointer.
+
+    Tries three strategies in order of preference:
+      1. torch._C._construct_storage_from_data_pointer  (PyTorch >= 2.0)
+      2. __cuda_array_interface__ protocol               (any modern PyTorch)
+      3. cudaMemcpy D2D fallback                         (always correct, copies)
+    """
+    # ------------------------------------------------------------------ #
+    # Strategy 1: torch._C._construct_storage_from_data_pointer          #
+    # Used internally by PyTorch's cudagraph_trees. Zero-copy.           #
+    # ------------------------------------------------------------------ #
+    try:
+        storage = torch._C._construct_storage_from_data_pointer(
+            ptr, device, total_bytes
+        )
+        t = torch.empty(0, dtype=dtype, device=device)
+        t.set_(storage, storage_offset=0, size=(numel,), stride=(1,))
+        return t.view(*shape)
+    except (AttributeError, RuntimeError, TypeError):
+        pass
+
+    # ------------------------------------------------------------------ #
+    # Strategy 2: __cuda_array_interface__                               #
+    # Standard CUDA array interchange protocol. Zero-copy.               #
+    # bfloat16 is not a valid numpy dtype, so we smuggle it as int16 and #
+    # view back.                                                         #
+    # ------------------------------------------------------------------ #
+    try:
+        # Third Party
+        import numpy as np
+
+        _DTYPE_TO_NUMPY: dict[torch.dtype, str] = {
+            torch.float16: "float16",
+            torch.float32: "float32",
+            torch.float64: "float64",
+            torch.int8: "int8",
+            torch.int16: "int16",
+            torch.int32: "int32",
+            torch.int64: "int64",
+            torch.uint8: "uint8",
+            torch.bool: "bool",
+        }
+        is_bf16 = dtype == torch.bfloat16
+        np_typestr = np.dtype("int16" if is_bf16 else _DTYPE_TO_NUMPY[dtype]).str
+
+        class _CudaArrayWrapper:
+            """Minimal __cuda_array_interface__ carrier."""
+
+            __cuda_array_interface__ = {
+                "data": (ptr, False),  # (pointer, read_only)
+                "shape": (numel,),
+                "strides": None,  # C-contiguous
+                "typestr": np_typestr,
+                "version": 3,
+                "stream": 1,  # legacy default stream (safe sentinel)
+            }
+
+        t = torch.as_tensor(_CudaArrayWrapper(), device=device)
+        if is_bf16:
+            t = t.view(torch.bfloat16)
+        return t.view(*shape)
+    except Exception:
+        pass
+
+    # ------------------------------------------------------------------ #
+    # Strategy 3: cudaMemcpy Device-to-Device (fallback, copies data)    #
+    # Used when neither internal API nor the array interface is available. #
+    # ------------------------------------------------------------------ #
+
+    # Safely load libcudart with fallback mechanisms
+    libcudart_path = ctypes.util.find_library("cudart")
+    libcudart = None
+
+    try:
+        if libcudart_path:
+            libcudart = ctypes.CDLL(libcudart_path)
+        else:
+            libcudart = ctypes.CDLL("libcudart.so")
+    except OSError:
+        pass
+
+    if libcudart is None:
+        raise RuntimeError(
+            "Failed to load libcudart. All three strategies for "
+            "wrapping a CUDA pointer failed."
+        )
+
+    cudaMemcpy = libcudart.cudaMemcpy
+    cudaMemcpy.restype = ctypes.c_int
+    cudaMemcpy.argtypes = [
+        ctypes.c_void_p,  # dst
+        ctypes.c_void_p,  # src
+        ctypes.c_size_t,  # count
+        ctypes.c_int,  # kind
+    ]
+    _MEMCPY_D2D = 3
+
+    dst = torch.empty(numel, dtype=dtype, device=device)
+
+    # Synchronize the stream to prevent race conditions during raw memcpy
+    torch.cuda.synchronize(device)
+
+    err = cudaMemcpy(
+        ctypes.c_void_p(dst.data_ptr()),
+        ctypes.c_void_p(ptr),
+        ctypes.c_size_t(total_bytes),
+        ctypes.c_int(_MEMCPY_D2D),
+    )
+    if err != 0:
+        raise RuntimeError(
+            f"cudaMemcpy D2D failed with error code {err}. "
+            "All three strategies for wrapping a CUDA pointer failed."
+        )
+    return dst.view(*shape)
+
+
 def _copy_bytes_with_tensor(dst: int, src: int, num_bytes: int) -> None:
-    """Copy raw bytes between pointers using torch tensor semantics."""
+    """Copy raw bytes between pointers using torch tensor semantics.
+
+    Note: This function only works for CPU-accessible memory. For device
+    memory (CUDA/XPU), use lmcache_memcpy_async with the appropriate runtime
+    library or PyTorch's tensor copy operations.
+    """
     if num_bytes <= 0:
         return
 
@@ -191,7 +406,7 @@ def free_numa_ptr(ptr: int, size: int | None = None) -> None:
 
 def multi_layer_kv_transfer(
     key_value: torch.Tensor,
-    key_value_ptrs: torch.Tensor,
+    key_value_ptrs: torch.Tensor | list[torch.Tensor],
     slot_mapping: torch.Tensor,
     paged_memory_device: torch.device,
     page_buffer_size: int,
@@ -208,6 +423,12 @@ def multi_layer_kv_transfer(
     key_value layout:
         - Standard: [2, num_layers, num_tokens, hidden_size]
         - MLA:      [1, num_layers, num_tokens, hidden_size]
+
+    key_value_ptrs:
+        - If torch.Tensor: int64 tensor containing raw memory pointers (one per layer).
+          Used for CUDA/CPU devices where we create tensor views from pointers.
+        - If list[torch.Tensor]: list of tensor objects (one per layer).
+          Used for non-CUDA/CPU devices where we operate on tensor objects directly.
 
     Each paged buffer (one per layer) layout depends on gpu_kv_format:
         - NB_NL_TWO_BS_NH_HS / NL_X_TWO_NB_BS_NH_HS:
@@ -229,29 +450,67 @@ def multi_layer_kv_transfer(
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
     k_or_v_size = 1 if is_mla else 2
+    device = key_value.device
 
-    slots = slot_mapping.to(dtype=torch.long, device="cpu")
+    slots = slot_mapping.to(dtype=torch.long)
     valid_mask = slots >= 0
     if not torch.any(valid_mask):
         return
     valid_tokens = torch.nonzero(valid_mask, as_tuple=True)[0]
     valid_slots = slots[valid_tokens]
 
-    ptr_list = key_value_ptrs.cpu().tolist()
+    # Handle both tensor (pointer) mode and list (tensor) mode
+    use_tensor_mode = isinstance(key_value_ptrs, list)
+    if not use_tensor_mode:
+        assert isinstance(key_value_ptrs, torch.Tensor)
+        ptr_list = key_value_ptrs.tolist()
 
     for layer_id in range(num_layers):
-        paged_ptr = int(ptr_list[layer_id])
+        # Get the paged buffer for this layer
+        if use_tensor_mode:
+            # Direct tensor mode: use the tensor object directly
+            paged = key_value_ptrs[layer_id]
+        else:
+            # Pointer mode: create tensor view from pointer
+            paged_ptr = int(ptr_list[layer_id])
 
+            if gpu_kv_format in (
+                GPUKVFormat.NB_NL_TWO_BS_NH_HS,
+                GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+                GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS,
+            ):
+                paged = _tensor_from_ptr(
+                    paged_ptr,
+                    (k_or_v_size, page_buffer_size, hidden_size),
+                    key_value.dtype,
+                    device,
+                )
+            elif gpu_kv_format == GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+                num_blocks = max(
+                    int(torch.max(valid_slots).item() // block_size + 1), 1
+                )
+                paged = _tensor_from_ptr(
+                    paged_ptr,
+                    (num_blocks, 2, block_size, hidden_size),
+                    key_value.dtype,
+                    device,
+                )
+            elif gpu_kv_format in (
+                GPUKVFormat.NL_X_NB_BS_HS,
+                GPUKVFormat.NL_X_NBBS_ONE_HS,
+            ):
+                paged = _tensor_from_ptr(
+                    paged_ptr, (page_buffer_size, hidden_size), key_value.dtype, device
+                )
+            else:
+                raise ValueError(f"Unsupported GPUKVFormat: {gpu_kv_format}")
+
+        # Perform the transfer based on format
         if gpu_kv_format in (
             GPUKVFormat.NB_NL_TWO_BS_NH_HS,
             GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
             GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS,
         ):
-            paged = _tensor_from_ptr(
-                paged_ptr,
-                (k_or_v_size, page_buffer_size, hidden_size),
-                key_value.dtype,
-            )
             src = key_value[:, layer_id, valid_tokens]
             if direction == TransferDirection.H2D:
                 paged.index_copy_(1, valid_slots, src)
@@ -260,13 +519,6 @@ def multi_layer_kv_transfer(
                 key_value[:, layer_id, valid_tokens] = gathered
 
         elif gpu_kv_format == GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
-            num_blocks = max(int(torch.max(valid_slots).item() // block_size + 1), 1)
-            paged = _tensor_from_ptr(
-                paged_ptr,
-                (num_blocks, 2, block_size, hidden_size),
-                key_value.dtype,
-            )
-
             blk_idx = torch.div(valid_slots, block_size, rounding_mode="floor")
             blk_off = valid_slots % block_size
 
@@ -281,9 +533,6 @@ def multi_layer_kv_transfer(
             GPUKVFormat.NL_X_NB_BS_HS,
             GPUKVFormat.NL_X_NBBS_ONE_HS,
         ):
-            paged = _tensor_from_ptr(
-                paged_ptr, (page_buffer_size, hidden_size), key_value.dtype
-            )
             if direction == TransferDirection.H2D:
                 paged[valid_slots] = key_value[0, layer_id, valid_tokens]
             else:
@@ -295,7 +544,7 @@ def multi_layer_kv_transfer(
 
 def multi_layer_kv_transfer_unilateral(
     key_value: torch.Tensor,
-    key_value_ptrs: torch.Tensor,
+    key_value_ptrs: torch.Tensor | list[torch.Tensor],
     slot_mapping: torch.Tensor,
     paged_memory_device: torch.device,
     page_buffer_size: int,
@@ -311,6 +560,10 @@ def multi_layer_kv_transfer_unilateral(
 
     For MLA, delegates to multi_layer_kv_transfer (same as C++ implementation).
 
+    key_value_ptrs:
+        - If torch.Tensor: int64 tensor containing raw memory pointers.
+        - If list[torch.Tensor]: list of tensor objects.
+
     key_value layout:
         - Standard: [2, num_layers, num_tokens, hidden_size]
         - MLA:      [1, num_layers, num_tokens, hidden_size]
@@ -319,6 +572,8 @@ def multi_layer_kv_transfer_unilateral(
         H2D = LMCache  -> PagedBuffer
         D2H = PagedBuffer -> LMCache
     """
+    device = key_value.device
+
     is_mla = gpu_kv_format in (
         GPUKVFormat.NL_X_NB_BS_HS,
         GPUKVFormat.NL_X_NBBS_ONE_HS,
@@ -342,25 +597,36 @@ def multi_layer_kv_transfer_unilateral(
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
 
-    slots = slot_mapping.to(dtype=torch.long, device="cpu")
+    slots = slot_mapping.to(dtype=torch.long)
     valid_mask = slots >= 0
     if not torch.any(valid_mask):
         return
     valid_tokens = torch.nonzero(valid_mask, as_tuple=True)[0]
     valid_slots = slots[valid_tokens]
 
-    ptr_list = key_value_ptrs.cpu().tolist()
+    # Handle both tensor (pointer) mode and list (tensor) mode
+    use_tensor_mode = isinstance(key_value_ptrs, list)
+    if not use_tensor_mode:
+        assert isinstance(key_value_ptrs, torch.Tensor)
+        ptr_list = key_value_ptrs.tolist()
 
     for layer_id in range(num_layers):
-        k_ptr = int(ptr_list[layer_id])
-        v_ptr = int(ptr_list[layer_id + num_layers])
+        # Get K and V buffers for this layer
+        if use_tensor_mode:
+            # Direct tensor mode: use the tensor objects directly
+            k_buf = key_value_ptrs[layer_id]
+            v_buf = key_value_ptrs[layer_id + num_layers]
+        else:
+            # Pointer mode: create tensor views from pointers
+            k_ptr = int(ptr_list[layer_id])
+            v_ptr = int(ptr_list[layer_id + num_layers])
 
-        k_buf = _tensor_from_ptr(
-            k_ptr, (page_buffer_size, hidden_size), key_value.dtype
-        )
-        v_buf = _tensor_from_ptr(
-            v_ptr, (page_buffer_size, hidden_size), key_value.dtype
-        )
+            k_buf = _tensor_from_ptr(
+                k_ptr, (page_buffer_size, hidden_size), key_value.dtype, device
+            )
+            v_buf = _tensor_from_ptr(
+                v_ptr, (page_buffer_size, hidden_size), key_value.dtype, device
+            )
 
         if direction == TransferDirection.H2D:
             k_buf[valid_slots] = key_value[0, layer_id, valid_tokens]
@@ -407,7 +673,7 @@ def single_layer_kv_transfer(
     )
 
     num_tokens = slot_mapping.size(0)
-    slots = slot_mapping.cpu().tolist()
+    slots = slot_mapping.tolist()
 
     if is_mla:
         # ── MLA format ──
@@ -655,72 +921,82 @@ def reshape_and_cache_back_flash(
 
 
 def lmcache_memcpy_async(
-    dest: int,
-    src: int,
+    dest: int | torch.Tensor,
+    src: int | torch.Tensor,
     nbytes: int,
     direction: TransferDirection,
     host_buffer_offset: int,
     host_buffer_alignments: int,
 ):
     """
-    Python fallback implementation.
-    When libcudart is available, uses cudaMemcpy with cudaMemcpyDefault
-    (lets CUDA runtime auto-detect pointer types).
-    When libcudart is unavailable, falls back to CPU-only tensor copy.
+    Python fallback for lmcache_memcpy_async.
+
+    - Tensor mode (non-CUDA devices like HPU): uses .to(device) + copy_()
+    - Pointer mode with libcudart: uses synchronous cudaMemcpy (cudaMemcpyDefault)
+    - Pointer mode without libcudart: uses CPU tensor copy
+
+    Unlike the C++ version (which uses cudaMemcpyAsync and must split copies
+    at cudaHostRegister boundaries), this Python fallback does NOT need
+    alignment-based chunking because:
+    - cudaMemcpy (synchronous) handles cross-cudaHostRegister boundaries
+      internally via staging buffers
+    - CPU tensor copy has no alignment constraints
+    - Tensor mode bypasses raw pointers entirely
+
+    dest:
+        - If int: raw memory pointer (used for CUDA/CPU devices where we
+          work with pointers).
+        - If torch.Tensor: tensor object (used for non-CUDA/CPU devices
+          where we operate on tensor objects directly).
+
+    src:
+        - If int: raw memory pointer (used for CUDA/CPU devices where we
+          work with pointers).
+        - If torch.Tensor: tensor object (used for non-CUDA/CPU devices
+          where we operate on tensor objects directly).
     """
-    # 1. Power of two check
+    # 1. Power of two check (kept for API compatibility)
     if host_buffer_alignments <= 0 or (
         host_buffer_alignments & (host_buffer_alignments - 1) != 0
     ):
         raise ValueError("host_buffer_alignments must be power of two")
 
-    # 2. Validate direction (for API compatibility, even though we use Default)
+    # 2. Validate direction
     if direction not in (TransferDirection.H2D, TransferDirection.D2H):
         raise ValueError(f"Unsupported direction: {direction}")
 
-    # 3. Determine copy strategy
+    # 3. Tensor mode for non-CUDA devices (HPU, XPU, etc.)
+    if isinstance(dest, torch.Tensor) and isinstance(src, torch.Tensor):
+        # .to(device) creates a new tensor on dest's device — always works
+        # even across device boundaries without raw-pointer constraints.
+        num_elements = nbytes // src.element_size()
+        src_slice = src.flatten()[:num_elements]
+        copied = src_slice.to(dest.device)
+        dest.flatten()[:num_elements].copy_(copied)
+        return
+
+    # 4. Pointer mode
+    if not isinstance(dest, int) or not isinstance(src, int):
+        raise TypeError(
+            "dest and src must be both int (pointer mode) "
+            "or both torch.Tensor (tensor mode)"
+        )
+
     libcudart = _get_copy_lib()
-    use_cuda = libcudart is not None and hasattr(libcudart, "cudaMemcpy")
-
-    # 4. Aligned copy loop
-    offset = 0
-    mask = host_buffer_alignments - 1
-
-    while offset < nbytes:
-        # Calculate chunks based on alignment; mirrors
-        # csrc/mem_kernels.cu::lmcache_memcpy_async split loop that honors
-        # cudaHostRegister granularity.
-        aligned_area_end = (
-            (offset + host_buffer_offset) & ~mask
-        ) + host_buffer_alignments
-        real_end = min(host_buffer_offset + nbytes, aligned_area_end)
-        max_nbytes = real_end - offset - host_buffer_offset
-
-        if max_nbytes <= 0:
-            break
-
-        current_dest = dest + offset
-        current_src = src + offset
-
-        if use_cuda:
-            # cudaMemcpyDefault (4) lets CUDA runtime auto-detect
-            # whether pointers are host or device memory.
-            # This works for all combinations: H2H, H2D, D2H, D2D.
-
-            assert libcudart is not None  # mypy: guarded by use_cuda
-            ret = libcudart.cudaMemcpy(
-                ctypes.c_void_p(current_dest),
-                ctypes.c_void_p(current_src),
-                ctypes.c_size_t(max_nbytes),
-                ctypes.c_int(4),  # cudaMemcpyDefault
-            )
-            if ret != 0:
-                raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
-        else:
-            # No CUDA runtime: both pointers must be CPU
-            _copy_bytes_with_tensor(current_dest, current_src, int(max_nbytes))
-
-        offset += max_nbytes
+    if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
+        # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
+        # internally — no manual alignment splitting needed.
+        ret = libcudart.cudaMemcpy(
+            ctypes.c_void_p(dest),
+            ctypes.c_void_p(src),
+            ctypes.c_size_t(nbytes),
+            ctypes.c_int(4),  # cudaMemcpyDefault
+        )
+        if ret != 0:
+            raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
+    else:
+        # Pure CPU copy — no alignment constraints.
+        _copy_bytes_with_tensor(dest, src, nbytes)
 
 
 def encode_fast_new(cdf, input_sym, output_buffer, output_lengths):
