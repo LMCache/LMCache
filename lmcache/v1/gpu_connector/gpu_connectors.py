@@ -287,7 +287,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         # this will only be potentially non-zero for the first
         # block lmcache is transferring back
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
-        skip_prefix_n_tokens = max(0, vllm_cached - start)
+        skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
@@ -480,7 +480,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         # this will only be potentially non-zero for the first
         # block lmcache is transferring back
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
-        skip_prefix_n_tokens = max(0, vllm_cached - start)
+        skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
