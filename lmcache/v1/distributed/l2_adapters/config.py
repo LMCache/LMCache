@@ -404,9 +404,7 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
 register_l2_adapter_type("nixl_store", NixlStoreL2AdapterConfig)
 
 
-def _create_nixl_store_adapter(
-    config: NixlStoreL2AdapterConfig, **kwargs: Any
-) -> Any:
+def _create_nixl_store_adapter(config: NixlStoreL2AdapterConfig, **kwargs: Any) -> Any:
     """Lazy-import and create a NixlStoreL2Adapter."""
     # First Party
     from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (
@@ -415,13 +413,8 @@ def _create_nixl_store_adapter(
 
     l1_memory_desc = kwargs.get("l1_memory_desc")
     if l1_memory_desc is None:
-        raise ValueError(
-            "l1_memory_desc is required to create a "
-            "NixlStoreL2Adapter."
-        )
+        raise ValueError("l1_memory_desc is required to create a NixlStoreL2Adapter.")
     return NixlStoreL2Adapter(config, l1_memory_desc)
 
 
-register_l2_adapter_factory(
-    "nixl_store", _create_nixl_store_adapter
-)
+register_l2_adapter_factory("nixl_store", _create_nixl_store_adapter)

@@ -697,6 +697,4 @@ class FSL2Adapter(L2AdapterInterface):
 
 # Self-register config type and adapter factory
 register_l2_adapter_type("fs", FSL2AdapterConfig)
-register_l2_adapter_factory(
-    "fs", lambda config, **kwargs: FSL2Adapter(config)
-)
+register_l2_adapter_factory("fs", lambda config, **kwargs: FSL2Adapter(config))
