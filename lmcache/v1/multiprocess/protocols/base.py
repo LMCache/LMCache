@@ -63,6 +63,10 @@ class RequestType(enum.Enum):
     CB_RETRIEVE_PRE_COMPUTED = enum.auto()
     CB_STORE_FINAL = enum.auto()
 
+    # Blend V2 operations (use CBMatchResult instead of list[tuple[int, int]])
+    CB_LOOKUP_PRE_COMPUTED_V2 = enum.auto()
+    CB_RETRIEVE_PRE_COMPUTED_V2 = enum.auto()
+
 
 @dataclass
 class ProtocolDefinition:
