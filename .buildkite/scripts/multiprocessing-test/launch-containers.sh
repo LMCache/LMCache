@@ -93,7 +93,6 @@ docker run -d \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT}}" \
     --attention-backend FLASH_ATTN \
     --port "$VLLM_PORT" \
-    --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
 
 echo "vLLM container started"
@@ -116,7 +115,6 @@ docker run -d \
     "$MODEL" \
     --port "$VLLM_BASELINE_PORT" \
     --attention-backend FLASH_ATTN \
-    --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG
 
 echo "vLLM baseline container started"

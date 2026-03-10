@@ -726,3 +726,82 @@ class TestCloseInterface:
         # Should not raise
         adpt.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# =============================================================================
+# Report Status Tests
+# =============================================================================
+
+
+class TestReportStatus:
+    """Tests for NixlStoreL2Adapter.report_status()."""
+
+    def test_report_status_shape(self, adapter):
+        """report_status() should return all expected keys with correct types."""
+        adpt, _ = adapter
+        status = adpt.report_status()
+
+        assert status["is_healthy"] is True
+        assert status["type"] == "NixlStoreL2Adapter"
+        assert status["backend"] == "POSIX"
+        assert isinstance(status["stored_object_count"], int)
+        assert isinstance(status["pinned_object_count"], int)
+        assert isinstance(status["pool_size"], int)
+        assert isinstance(status["pool_free_slots"], int)
+        assert isinstance(status["event_loop_alive"], bool)
+
+    def test_report_status_initial_state(self, adapter):
+        """Fresh adapter should report zero stored objects and full pool."""
+        adpt, _ = adapter
+        status = adpt.report_status()
+
+        assert status["stored_object_count"] == 0
+        assert status["pinned_object_count"] == 0
+        assert status["pool_size"] == POOL_SIZE
+        assert status["pool_free_slots"] > 0
+        assert status["event_loop_alive"] is True
+
+    def test_report_status_after_store(self, adapter):
+        """stored_object_count should increase after a store completes."""
+        adpt, buffer = adapter
+        store_fd = adpt.get_store_event_fd()
+
+        key = create_object_key(42)
+        obj = create_memory_obj(buffer, page_index=0)
+        adpt.submit_store_task([key], [obj])
+        wait_for_event_fd(store_fd, timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        status = adpt.report_status()
+        assert status["stored_object_count"] == 1
+        assert status["pool_free_slots"] < status["pool_size"]
+
+    def test_report_status_after_close(self):
+        """is_healthy should become False after close()."""
+        tmp_dir = tempfile.mkdtemp(prefix="nixl_l2_status_test_")
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
+        config = NixlStoreL2AdapterConfig(
+            backend="POSIX",
+            backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
+            pool_size=POOL_SIZE,
+        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
+
+        # Healthy before close
+        assert adpt.report_status()["is_healthy"] is True
+
+        adpt.close()
+
+        # Unhealthy after close
+        status = adpt.report_status()
+        assert status["is_healthy"] is False
+        assert status["event_loop_alive"] is False
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
